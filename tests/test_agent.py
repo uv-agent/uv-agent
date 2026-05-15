@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from uv_agent.agent import AgentEngine, PYTHON_TOOL
+from uv_agent.agent import AgentEngine, PYTHON_TOOL, usage_token_count
 from uv_agent.config import (
     AppConfig,
     CompressionConfig,
@@ -204,3 +204,55 @@ def test_agent_system_prompt_mentions_runtime_and_skills(tmp_path: Path, monkeyp
     assert "demo (project)" in prompt
     assert "MCP servers" in prompt
     assert str(project_root) in prompt
+
+
+def test_usage_token_count_supports_provider_shapes() -> None:
+    assert usage_token_count({"total_tokens": 42}) == 42
+    assert usage_token_count({"input_tokens": 10, "output_tokens": 3}) == 13
+    assert usage_token_count({"prompt_tokens": 9, "completion_tokens": 2}) == 11
+    assert usage_token_count({}) is None
+
+
+def test_context_percent_prefers_latest_usage(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(default_level="medium", auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(
+            project_root=project_root,
+            data_dir=tmp_path / "state",
+            config=config.runner,
+        ),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="turn_1",
+        response_id="resp_1",
+        output=[],
+        usage={"input_tokens": 23, "output_tokens": 7},
+    )
+
+    assert engine.context_percent(thread_id) == 30

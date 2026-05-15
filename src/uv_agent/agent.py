@@ -309,12 +309,22 @@ class AgentEngine:
         return input_items
 
     def context_percent(self, thread_id: str | None, level: str | None = None) -> int:
-        """Return an approximate context-window usage percentage for a thread."""
+        """Return a context-window usage percentage for a thread."""
         if not thread_id:
             return 0
         model = self.config.model_for_level(level)
-        used = estimate_tokens(self._reconstruct_input(thread_id))
+        used = self._latest_usage_tokens(thread_id) or estimate_tokens(self._reconstruct_input(thread_id))
         return min(100, max(0, round(used * 100 / model.context_window_tokens)))
+
+    def _latest_usage_tokens(self, thread_id: str) -> int | None:
+        """Return the latest provider-reported token usage when available."""
+        for event in reversed(self.thread_store.read(thread_id)):
+            if event.get("type") not in {"item.model_response", "item.compaction"}:
+                continue
+            used = usage_token_count(event.get("usage") or {})
+            if used is not None:
+                return used
+        return None
 
     def system_instructions(self) -> str:
         """Build concise environment-aware system instructions."""
@@ -348,3 +358,26 @@ def estimate_tokens(items: list[dict[str, Any]]) -> int:
     # A rough local estimate is enough to decide when to ask the model to compress.
     text = json.dumps(items, ensure_ascii=False)
     return max(1, len(text) // 4)
+
+
+def usage_token_count(usage: dict[str, Any]) -> int | None:
+    """Extract a comparable token count from Responses, Chat, or Anthropic usage."""
+    direct_keys = ("total_tokens", "total_token_count")
+    for key in direct_keys:
+        value = usage.get(key)
+        if isinstance(value, int):
+            return value
+    pairs = [
+        ("input_tokens", "output_tokens"),
+        ("prompt_tokens", "completion_tokens"),
+        ("cache_creation_input_tokens", "cache_read_input_tokens"),
+    ]
+    total = 0
+    found = False
+    for left, right in pairs:
+        for key in (left, right):
+            value = usage.get(key)
+            if isinstance(value, int):
+                total += value
+                found = True
+    return total if found else None

@@ -1,19 +1,52 @@
 from __future__ import annotations
 
+import ctypes
+import signal
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
+from typing import Any
 
 from rich.markdown import Markdown
 from rich.markup import escape
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
-from textual.widgets import Input, Static
+from textual.widgets import Static, TextArea
 
 from uv_agent.app_factory import create_engine
 from uv_agent.config import config_sources
 from uv_agent.mcp_config import discover_mcp_servers
+from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.skills import discover_skills
 from uv_agent.tui.formatting import parse_tool_payload, short_thread, tool_result_markup
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    name: str
+    usage: str
+    description: str
+
+
+COMMANDS = [
+    CommandSpec("/new", "/new [title]", "start a named thread"),
+    CommandSpec("/threads", "/threads", "show recent threads"),
+    CommandSpec("/status", "/status", "open runtime status"),
+    CommandSpec("/config", "/config", "show config sources"),
+    CommandSpec("/models", "/models", "show levels and models"),
+    CommandSpec("/level", "/level [name]", "switch model level"),
+    CommandSpec("/mcp", "/mcp", "show MCP declarations"),
+    CommandSpec("/skills", "/skills", "show discovered skills"),
+    CommandSpec("/skill", "/skill [name]", "preview a skill file"),
+    CommandSpec("/runs", "/runs", "show latest Python run"),
+    CommandSpec("/panel", "/panel", "close the open panel"),
+    CommandSpec("/clear", "/clear", "clear transcript and queue"),
+    CommandSpec("/quit", "/quit", "quit with confirmation"),
+    CommandSpec("/help", "/help", "show all commands"),
+]
 
 
 class TranscriptCell(Static):
@@ -23,22 +56,27 @@ class TranscriptCell(Static):
     TranscriptCell {
         width: 100%;
         margin: 0 0 1 0;
+        padding: 0 1;
     }
 
     TranscriptCell.user {
-        color: $text;
+        background: #111926;
+        color: #dce7f3;
     }
 
     TranscriptCell.assistant {
-        color: $text;
+        background: #10151e;
+        color: #e5e7eb;
     }
 
     TranscriptCell.event {
-        color: $text-muted;
+        background: #0f141c;
+        color: #aeb7c4;
     }
 
     TranscriptCell.error {
-        color: $error;
+        background: #241316;
+        color: #ffb4b4;
     }
     """
 
@@ -47,70 +85,106 @@ class UvAgentApp(App[None]):
     CSS = """
     Screen {
         layout: vertical;
-        background: $surface;
+        background: #0b0f14;
+        color: #d8dee9;
     }
 
     #transcript {
         height: 1fr;
         min-height: 6;
         padding: 1 2 0 2;
-        background: $surface;
+        background: #0b0f14;
     }
 
     #bottom-pane {
         height: auto;
-        max-height: 16;
+        max-height: 18;
         padding: 0 2 1 2;
-        background: $surface;
+        background: #0b0f14;
     }
 
     #drawer {
         height: auto;
-        max-height: 10;
-        border-top: tall $secondary;
-        padding: 1 0 0 0;
-        color: $text;
+        max-height: 9;
+        border: round #263241;
+        padding: 1 1;
+        margin: 0 0 1 0;
+        background: #101821;
+        color: #d8dee9;
     }
 
     #drawer.hidden {
         display: none;
     }
 
+    #command-suggestions {
+        height: auto;
+        max-height: 7;
+        border: round #314055;
+        padding: 1 1;
+        margin: 0 0 1 0;
+        background: #121b26;
+        color: #cdd6e3;
+    }
+
+    #command-suggestions.hidden {
+        display: none;
+    }
+
+    #composer-shell {
+        height: auto;
+        border: round #2a3646;
+        background: #101721;
+        padding: 0 1;
+    }
+
+    #composer-shell.busy {
+        border: round #3d516b;
+    }
+
     #run-status {
         height: 1;
-        color: $text-muted;
+        color: #9fb0c3;
     }
 
     #composer-row {
-        height: 1;
+        height: auto;
     }
 
     #prompt-marker {
-        width: 2;
-        color: $primary;
+        width: 3;
+        color: #7dd3fc;
         text-style: bold;
     }
 
-    #input {
-        height: 1;
+    #composer {
+        height: 3;
+        min-height: 3;
+        max-height: 8;
         border: none;
         padding: 0;
-        background: $surface;
+        background: #101721;
+        color: #edf2f7;
     }
 
-    #input:focus {
+    #composer:focus {
         border: none;
     }
 
     #hint-line {
         height: 1;
-        color: $text-muted;
+        color: #7b8796;
     }
     """
 
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
-        ("escape", "clear_input", "Clear"),
+        Binding("ctrl+enter", "submit_composer", "Send", priority=True),
+        Binding("ctrl+j", "submit_composer", "Send", priority=True),
+        Binding("tab", "complete_command", "Complete", priority=True),
+        Binding("ctrl+s", "toggle_status_panel", "Status", priority=True),
+        Binding("ctrl+q", "request_quit", "Quit", priority=True),
+        Binding("ctrl+c", "request_quit", "Quit", priority=True),
+        Binding("escape", "clear_input", "Clear"),
     ]
 
     busy = reactive(False)
@@ -128,53 +202,81 @@ class UvAgentApp(App[None]):
         self._last_status = "Idle"
         self._spinner_index = 0
         self._last_tool_payload: dict[str, object] | None = None
+        self._quit_armed = False
+        self._last_quit_request_at = 0.0
+        self._panel_name: str | None = None
+        self._previous_sigint_handler: Any = None
+        self._windows_ctrl_handler: Any = None
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="transcript")
         with Vertical(id="bottom-pane"):
             yield Static(id="drawer", classes="hidden")
-            yield Static(id="run-status")
-            with Horizontal(id="composer-row"):
-                yield Static("›", id="prompt-marker")
-                yield Input(
-                    placeholder="Ask uv-agent to do anything",
-                    id="input",
-                    compact=True,
-                )
-            yield Static(id="hint-line")
+            yield Static(id="command-suggestions", classes="hidden")
+            with Vertical(id="composer-shell"):
+                yield Static(id="run-status")
+                with Horizontal(id="composer-row"):
+                    yield Static("›", id="prompt-marker")
+                    yield TextArea(
+                        "",
+                        placeholder="Ask, edit, or type / for commands",
+                        id="composer",
+                        compact=True,
+                        soft_wrap=True,
+                        show_line_numbers=False,
+                    )
+                yield Static(id="hint-line")
 
     def on_mount(self) -> None:
         self._append_cell(
-            "[bold magenta]uv-agent[/bold magenta] [dim]ready · python runner only[/dim]",
+            "[bold #7dd3fc]uv-agent[/bold #7dd3fc] [dim]ready · Python runner only[/dim]",
             "event",
         )
         self._refresh_status("Idle")
         self.set_interval(0.12, self._tick, name="spinner")
-        self.query_one("#input", Input).focus()
+        self.query_one("#composer", TextArea).focus()
+        self._install_sigint_guard()
+
+    def on_unmount(self) -> None:
+        if self._previous_sigint_handler is not None:
+            signal.signal(signal.SIGINT, self._previous_sigint_handler)
+        self._uninstall_windows_ctrl_guard()
 
     def on_resize(self) -> None:
+        self._refresh_status()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id != "composer":
+            return
+        self._resize_composer(event.text_area.text)
+        self._update_command_suggestions(event.text_area.text)
         self._refresh_status()
 
     def _tick(self) -> None:
         if self.busy:
             self._refresh_status()
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        prompt = event.value.strip()
-        event.input.value = ""
+    def action_submit_composer(self) -> None:
+        composer = self.query_one("#composer", TextArea)
+        prompt = composer.text.strip()
         if not prompt:
+            self._flash("Write something first")
             return
-        if self._handle_command(prompt):
+        composer.load_text("")
+        self._hide_command_suggestions()
+        self._resize_composer("")
+        if "\n" not in prompt and self._handle_command(prompt):
             return
         if self.busy:
             self._queue.append(prompt)
-            self._append_cell(f"[dim]queued[/dim] {escape(prompt)}", "event")
+            self._append_cell(f"[dim]queued[/dim]\n{escape(prompt)}", "event")
             self._refresh_status()
             return
         self._start_turn(prompt)
 
     def _start_turn(self, prompt: str) -> None:
         self.busy = True
+        self.query_one("#composer-shell", Vertical).add_class("busy")
         self._assistant_buffer = ""
         self._assistant_cell = None
         self._append_user(prompt)
@@ -193,7 +295,7 @@ class UvAgentApp(App[None]):
                 if event_type == "assistant.delta":
                     await self._append_assistant_delta(item["text"])
                 elif event_type == "model.response":
-                    self._refresh_status("Reading model response")
+                    self._refresh_status("Reading")
                 elif event_type == "tool.started":
                     self._append_tool_started(item)
                 elif event_type == "tool.output":
@@ -208,16 +310,88 @@ class UvAgentApp(App[None]):
             self._refresh_status("Error")
         finally:
             self.busy = False
+            self.query_one("#composer-shell", Vertical).remove_class("busy")
             if self._last_status != "Error":
                 self._refresh_status("Idle")
-            self.query_one("#input", Input).focus()
+            self.query_one("#composer", TextArea).focus()
             if self._queue:
                 next_prompt = self._queue.pop(0)
                 self._start_turn(next_prompt)
 
     def action_clear_input(self) -> None:
-        if not self.busy:
-            self.query_one("#input", Input).value = ""
+        if self._command_panel_visible():
+            self._hide_command_suggestions()
+            return
+        composer = self.query_one("#composer", TextArea)
+        if composer.text:
+            composer.load_text("")
+            self._resize_composer("")
+            return
+        if self._panel_name:
+            self._close_panel()
+
+    def action_request_quit(self) -> None:
+        now = monotonic()
+        if now - self._last_quit_request_at < 0.35:
+            return
+        self._last_quit_request_at = now
+        if self._quit_armed:
+            self.exit()
+            return
+        draft = self.query_one("#composer", TextArea).text.strip()
+        suffix = " · draft will be lost" if draft else ""
+        self._quit_armed = True
+        self._flash(f"Press Ctrl+Q or Ctrl+C again to quit{suffix}", severity="warning")
+        self.set_timer(2.0, self._clear_quit_arm)
+
+    def action_toggle_status_panel(self) -> None:
+        if self._panel_name == "status":
+            self._close_panel()
+            return
+        self._open_status_panel()
+
+    def action_complete_command(self) -> None:
+        composer = self.query_one("#composer", TextArea)
+        replacement = self._command_completion(composer.text)
+        if replacement is None:
+            return
+        composer.load_text(replacement)
+        self._resize_composer(replacement)
+        self._update_command_suggestions(replacement)
+
+    def _clear_quit_arm(self) -> None:
+        self._quit_armed = False
+        self._refresh_status()
+
+    def _install_sigint_guard(self) -> None:
+        self._previous_sigint_handler = signal.getsignal(signal.SIGINT)
+
+        def handle_sigint(signum: int, frame: object) -> None:
+            self.call_from_thread(self.action_request_quit)
+
+        signal.signal(signal.SIGINT, handle_sigint)
+        self._install_windows_ctrl_guard()
+
+    def _install_windows_ctrl_guard(self) -> None:
+        if sys.platform != "win32":
+            return
+        ctrl_c_event = 0
+        handler_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+
+        def handle_ctrl(control_type: int) -> bool:
+            if control_type != ctrl_c_event:
+                return False
+            self.call_from_thread(self.action_request_quit)
+            return True
+
+        self._windows_ctrl_handler = handler_type(handle_ctrl)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(self._windows_ctrl_handler, True)
+
+    def _uninstall_windows_ctrl_guard(self) -> None:
+        if sys.platform != "win32" or self._windows_ctrl_handler is None:
+            return
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(self._windows_ctrl_handler, False)
+        self._windows_ctrl_handler = None
 
     def _handle_command(self, prompt: str) -> bool:
         command, _, rest = prompt.partition(" ")
@@ -229,22 +403,28 @@ class UvAgentApp(App[None]):
             self._queue.clear()
             self.query_one("#transcript", VerticalScroll).remove_children()
             self._append_cell(
-                "[bold magenta]uv-agent[/bold magenta] [dim]ready · python runner only[/dim]",
+                "[bold #7dd3fc]uv-agent[/bold #7dd3fc] [dim]ready · Python runner only[/dim]",
                 "event",
             )
             self._refresh_status("Idle")
+            return True
+        if command == "/quit":
+            self.action_request_quit()
             return True
         if command == "/new":
             title = rest.strip() or "New thread"
             self.thread_id = self.engine.thread_store.create_thread(title)
             self._append_cell(
-                f"[dim]new thread[/dim] {escape(short_thread(self.thread_id))}",
+                f"[dim]new thread[/dim] [cyan]{escape(short_thread(self.thread_id))}[/cyan]",
                 "event",
             )
             self._refresh_status("Idle")
             return True
         if command == "/threads":
             self._open_threads_panel()
+            return True
+        if command == "/status":
+            self._open_status_panel()
             return True
         if command == "/config":
             self._open_config_panel()
@@ -273,28 +453,25 @@ class UvAgentApp(App[None]):
         if command in {"/help", "?"}:
             self._append_help()
             return True
+        if command.startswith("/"):
+            self._flash(f"Unknown command: {command}", severity="error")
+            self._append_help()
+            return True
         return False
 
+    async def action_quit(self) -> None:
+        self.action_request_quit()
+
     def _append_help(self) -> None:
-        self._append_cell(
-            "[bold]commands[/bold]\n"
-            "/new \\[title]\n"
-            "/threads\n"
-            "/config\n"
-            "/models\n"
-            "/mcp\n"
-            "/skills\n"
-            "/skill \\[name]\n"
-            "/level \\[name]\n"
-            "/runs\n"
-            "/panel\n"
-            "/clear\n"
-            "/help",
-            "event",
-        )
+        lines = ["[bold]commands[/bold] [dim](Ctrl+S opens status, Esc closes panels)[/dim]"]
+        for spec in COMMANDS:
+            lines.append(
+                f"[cyan]{escape(spec.usage):<18}[/cyan] [dim]{escape(spec.description)}[/dim]"
+            )
+        self._append_cell("\n".join(lines), "event")
 
     def _append_user(self, text: str) -> None:
-        self._append_cell(f"[bold cyan]>[/bold cyan] {escape(text)}", "user")
+        self._append_cell(f"[bold #7dd3fc]you[/bold #7dd3fc]\n{escape(text)}", "user")
 
     async def _append_assistant_delta(self, text: str) -> None:
         self._assistant_buffer += text
@@ -324,32 +501,36 @@ class UvAgentApp(App[None]):
         call = item.get("call") or {}
         call_id = str(call.get("call_id") or "")
         name = str(call.get("name") or "python")
+        detail = self._tool_call_preview(call)
         cell = self._append_cell(
-            f"[cyan]{escape(name)}[/cyan] [dim]running[/dim]",
+            f"[cyan]{escape(name)}[/cyan] [dim]running[/dim]{detail}",
             "event",
         )
         if call_id:
             self._tool_cells[call_id] = cell
         self._refresh_status("Running python")
 
+    def _tool_call_preview(self, call: dict[str, Any]) -> str:
+        raw_args = call.get("arguments") or ""
+        try:
+            import json
+
+            args = json.loads(raw_args)
+        except Exception:
+            return ""
+        code = str(args.get("code") or "").strip()
+        if not code:
+            return ""
+        first = next((line.strip() for line in code.splitlines() if line.strip()), "")
+        if len(first) > 72:
+            first = first[:69].rstrip() + "..."
+        return f"\n[dim]{escape(first)}[/dim]"
+
     def _append_cell(self, content: str, classes: str) -> TranscriptCell:
         cell = TranscriptCell(content, classes=classes, markup=True)
         self.query_one("#transcript", VerticalScroll).mount(cell)
         self._scroll_end()
         return cell
-
-    def _append_threads(self) -> None:
-        threads = self.engine.thread_store.list_threads()[-8:]
-        if not threads:
-            self._append_cell("[dim]no saved threads[/dim]", "event")
-            return
-        lines = ["[bold]threads[/bold]"]
-        for thread in threads:
-            marker = "*" if thread.get("thread_id") == self.thread_id else "-"
-            title = str(thread.get("title") or "New thread")
-            thread_id = short_thread(str(thread.get("thread_id") or ""))
-            lines.append(f"{marker} {escape(thread_id)} [dim]{escape(title)}[/dim]")
-        self._append_cell("\n".join(lines), "event")
 
     def _open_threads_panel(self) -> None:
         threads = self.engine.thread_store.list_threads()[-10:]
@@ -363,7 +544,28 @@ class UvAgentApp(App[None]):
                 thread_id = short_thread(str(thread.get("thread_id") or ""))
                 lines.append(f"{marker} [cyan]{escape(thread_id)}[/cyan] [dim]{escape(title)}[/dim]")
             body = "\n".join(lines)
-        self._open_panel(body)
+        self._open_panel(body, "threads")
+
+    def _open_status_panel(self) -> None:
+        self._open_panel(self._status_panel_markup(), "status")
+
+    def _status_panel_markup(self) -> str:
+        model = self.engine.config.model_for_level(self.level)
+        provider = self.engine.config.provider_for_model(model)
+        level_name = self.level or self.engine.config.runtime.default_level
+        lines = [
+            "[bold]status[/bold] [dim](Ctrl+S toggles, /panel closes)[/dim]",
+            f"- state: [cyan]{escape(self._last_status)}[/cyan]",
+            f"- level: [cyan]{escape(level_name)}[/cyan]",
+            f"- model: {escape(model.name)} -> {escape(model.model)}",
+            f"- provider/api: {escape(provider.name)} / {escape(model.api)}",
+            f"- context: {self.engine.context_percent(self.thread_id, self.level)}%",
+            f"- thread: {escape(short_thread(self.thread_id))}",
+            f"- queued: {len(self._queue)}",
+            f"- user state: {escape(str(uv_agent_home()))}",
+            f"- project state: {escape(str(project_state_dir(self.project_root)))}",
+        ]
+        return "\n".join(lines)
 
     def _open_config_panel(self) -> None:
         sources = config_sources(self.project_root)
@@ -383,10 +585,10 @@ class UvAgentApp(App[None]):
                 f"- model: {escape(model.name)} -> {escape(model.model)}",
                 f"- provider: {escape(provider.name)}",
                 f"- api: {escape(model.api)}",
-                f"- context: {model.context_window_tokens}",
+                f"- context window: {model.context_window_tokens}",
             ]
         )
-        self._open_panel("\n".join(lines))
+        self._open_panel("\n".join(lines), "config")
 
     def _open_models_panel(self) -> None:
         lines = ["[bold]models[/bold] [dim](/level name selects, /panel closes)[/dim]"]
@@ -399,7 +601,7 @@ class UvAgentApp(App[None]):
             lines.append(
                 f"- {escape(name)}: {escape(model.model)} [dim]{escape(model.api)}[/dim]"
             )
-        self._open_panel("\n".join(lines))
+        self._open_panel("\n".join(lines), "models")
 
     def _handle_level_command(self, name: str) -> None:
         if not name:
@@ -414,17 +616,18 @@ class UvAgentApp(App[None]):
 
     def _open_runs_panel(self) -> None:
         if not self._last_tool_payload:
-            self._open_panel("[bold]runs[/bold]\n[dim]no Python runs in this TUI session[/dim]")
+            self._open_panel("[bold]runs[/bold]\n[dim]no Python runs in this TUI session[/dim]", "runs")
             return
         self._open_panel(
             "[bold]last run[/bold] [dim](/panel closes)[/dim]\n"
-            + tool_result_markup(self._last_tool_payload)
+            + tool_result_markup(self._last_tool_payload),
+            "runs",
         )
 
     def _open_mcp_panel(self) -> None:
         servers = discover_mcp_servers(self.project_root)
         if not servers:
-            self._open_panel("[bold]mcp[/bold]\n[dim]no .agents/mcp.json servers declared[/dim]")
+            self._open_panel("[bold]mcp[/bold]\n[dim]no .agents/mcp.json servers declared[/dim]", "mcp")
             return
         lines = ["[bold]mcp[/bold] [dim](declarations only, /panel closes)[/dim]"]
         for server in servers:
@@ -432,19 +635,19 @@ class UvAgentApp(App[None]):
             lines.append(
                 f"- [cyan]{escape(server.name)}[/cyan] ({escape(server.scope)}) {escape(server.description)}{command}"
             )
-        self._open_panel("\n".join(lines))
+        self._open_panel("\n".join(lines), "mcp")
 
     def _open_skills_panel(self) -> None:
         skills = discover_skills(self.project_root)
         if not skills:
-            self._open_panel("[bold]skills[/bold]\n[dim]no .agents/skills entries discovered[/dim]")
+            self._open_panel("[bold]skills[/bold]\n[dim]no .agents/skills entries discovered[/dim]", "skills")
             return
         lines = ["[bold]skills[/bold] [dim](/skill name previews, /panel closes)[/dim]"]
         for skill in skills:
             lines.append(
                 f"- [cyan]{escape(skill.name)}[/cyan] ({escape(skill.scope)}) {escape(skill.description)}"
             )
-        self._open_panel("\n".join(lines))
+        self._open_panel("\n".join(lines), "skills")
 
     def _append_skill(self, name: str) -> None:
         if not name:
@@ -465,50 +668,100 @@ class UvAgentApp(App[None]):
             "event",
         )
 
-    def _open_panel(self, markup: str) -> None:
+    def _open_panel(self, markup: str, name: str | None = None) -> None:
         drawer = self.query_one("#drawer", Static)
         drawer.update(markup)
         drawer.remove_class("hidden")
+        self._panel_name = name
         self._refresh_status()
 
     def _close_panel(self) -> None:
         drawer = self.query_one("#drawer", Static)
         drawer.update("")
         drawer.add_class("hidden")
+        self._panel_name = None
         self._refresh_status()
+
+    def _update_command_suggestions(self, text: str) -> None:
+        stripped = text.strip()
+        if not stripped.startswith("/") or "\n" in stripped:
+            self._hide_command_suggestions()
+            return
+        token = stripped.split(" ", 1)[0]
+        matches = [
+            spec
+            for spec in COMMANDS
+            if spec.name.startswith(token) or token.removeprefix("/") in spec.description
+        ][:6]
+        if not matches:
+            matches = [CommandSpec(token, token, "unknown command")]
+        lines = ["[bold]commands[/bold] [dim]Ctrl+Enter sends[/dim]"]
+        for spec in matches:
+            style = "cyan" if spec.name in {match.name for match in COMMANDS} else "red"
+            lines.append(
+                f"[{style}]{escape(spec.usage)}[/{style}] [dim]- {escape(spec.description)}[/dim]"
+            )
+        panel = self.query_one("#command-suggestions", Static)
+        panel.update("\n".join(lines))
+        panel.remove_class("hidden")
+
+    def _command_completion(self, text: str) -> str | None:
+        stripped = text.strip()
+        if not stripped.startswith("/") or "\n" in stripped or " " in stripped:
+            return None
+        matches = [spec for spec in COMMANDS if spec.name.startswith(stripped)]
+        if not matches:
+            return None
+        command = matches[0].name
+        needs_arg = "[" in matches[0].usage
+        return command + (" " if needs_arg else "")
+
+    def _hide_command_suggestions(self) -> None:
+        panel = self.query_one("#command-suggestions", Static)
+        panel.update("")
+        panel.add_class("hidden")
+
+    def _command_panel_visible(self) -> bool:
+        return not self.query_one("#command-suggestions", Static).has_class("hidden")
+
+    def _resize_composer(self, text: str) -> None:
+        line_count = max(1, text.count("\n") + 1)
+        height = min(8, max(3, line_count + 1))
+        self.query_one("#composer", TextArea).styles.height = height
+
+    def _flash(self, message: str, *, severity: str = "information") -> None:
+        self.notify(message, severity=severity, timeout=2.0)
+        color = "red" if severity == "error" else "yellow" if severity == "warning" else "cyan"
+        self._last_status = message
+        self.query_one("#run-status", Static).update(f"[{color}]{escape(message)}[/{color}]")
 
     def _refresh_status(self, state: str | None = None) -> None:
         if state is not None:
             self._last_status = state
         level_name = self.level or self.engine.config.runtime.default_level
-        model = self.engine.config.model_for_level(self.level)
-        model_name = model.model
-        api = model.api.replace("_", "-")
-        thread = short_thread(self.thread_id)
         context = self.engine.context_percent(self.thread_id, self.level)
         state_text = self._last_status
         if self.busy and state_text == "Idle":
             state_text = "Working"
-        queued = f" · queued {len(self._queue)}" if self._queue else ""
+        queued = f" · q {len(self._queue)}" if self._queue else ""
         spinner = ""
         if self.busy:
             frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
             spinner = frames[self._spinner_index % len(frames)] + " "
             self._spinner_index += 1
-        if self.size.width < 72:
-            status = (
-                f"[cyan]{spinner}{escape(state_text)}[/cyan] "
-                f"[dim]· {escape(level_name)} · {escape(model_name)} · {context}% · {escape(thread)}{queued}[/dim]"
-            )
-            hint = "[dim]/help · /config · /models · /skills · /mcp · Ctrl+C quit[/dim]"
+
+        status = (
+            f"[cyan]{spinner}{escape(state_text)}[/cyan] "
+            f"[dim]· {escape(level_name)} · ctx {context}%{queued}[/dim]"
+        )
+        if self.size.width < 58:
+            hint = "[dim]Ctrl+Enter · /[/dim]"
         else:
-            status = (
-                f"[cyan]{spinner}{escape(state_text)}[/cyan] "
-                f"[dim]· {escape(level_name)} · {escape(model_name)} · {api} · context {context}% · thread {escape(thread)}{queued}[/dim]"
-            )
-            hint = "[dim]/help[/dim] [dim]·[/dim] [dim]/config[/dim] [dim]·[/dim] [dim]/models[/dim] [dim]·[/dim] [dim]/skills[/dim] [dim]·[/dim] [dim]/mcp[/dim] [dim]·[/dim] [dim]/threads[/dim] [dim]·[/dim] [dim]/runs[/dim] [dim]·[/dim] [dim]Ctrl+C quit[/dim]"
+            hint = "[dim]Enter newline · Ctrl+Enter send · / commands · Ctrl+S details · Ctrl+Q quit[/dim]"
         self.query_one("#run-status", Static).update(status)
         self.query_one("#hint-line", Static).update(hint)
+        if self._panel_name == "status":
+            self.query_one("#drawer", Static).update(self._status_panel_markup())
 
     def _scroll_end(self) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)

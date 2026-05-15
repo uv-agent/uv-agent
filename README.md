@@ -71,9 +71,12 @@ Agent scripts declare dependencies with PEP 723 inline metadata. The runner reco
 
 The default TUI follows a Codex-style shape: a single transcript, inline Python runner events, and a bottom composer/status line.
 
-- `Esc`: clear the current input when idle
-- `Ctrl+C`: quit
-- `?` + Enter or `/help`: show local commands
+- `Enter`: insert a newline in the composer
+- `Ctrl+Enter` or `Ctrl+J`: send the composer text
+- `Esc`: close command suggestions, clear the composer, or close the open panel
+- `Ctrl+S` or `/status`: toggle detailed runtime status
+- `Ctrl+Q`, `Ctrl+C`, or `/quit`: quit after a second confirmation
+- `?` + `Ctrl+Enter` or `/help`: show local commands
 - `/new [title]`, `/threads`, and `/clear`: light thread controls
 - `/config`: show config sources and redacted merged config
 - `/models` and `/level [name]`: inspect and switch configured model levels
@@ -82,3 +85,4 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `/runs`: show the latest Python run summary from this TUI session
 - `/panel`: close the temporary panel
 - Python runs appear inline with script/run ids, exit status, stdout/stderr summaries, and truncation markers
+- Typing `/` opens live command suggestions; `Tab` completes the first match.
