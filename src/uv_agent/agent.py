@@ -8,8 +8,10 @@ from typing import Any
 from uv_agent.config import AppConfig
 from uv_agent.ids import new_id
 from uv_agent.model_client import ModelClient, ModelResponse
+from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.runner import PythonRunRequest, PythonRunner
 from uv_agent.session.store import ThreadStore
+from uv_agent.skills import discover_skills, render_skill_summary
 
 
 PYTHON_TOOL = {
@@ -52,11 +54,30 @@ PYTHON_TOOL = {
 }
 
 
-SYSTEM_INSTRUCTIONS = """You are uv-agent, an experimental coding agent.
+SYSTEM_INSTRUCTIONS_TEMPLATE = """You are uv-agent, an experimental coding agent.
 
-You have exactly one external action tool: run_python. Use Python scripts to inspect files, run subprocesses, access the network, or perform changes. Do not assume shell, filesystem, browser, or network tools exist outside Python.
+Environment:
+- Workspace: {workspace}
+- User state: {user_state}
+- Project state: {project_state}
+- Persisted scripts/runs/threads live under the project state directory.
 
-For third-party dependencies, write PEP 723 inline metadata in the script. The runner will ensure uv_agent_runtime is available. If a script needs to be rerun later, make it self-contained and deterministic where practical.
+Rules:
+- You have exactly one external action tool: run_python.
+- Use Python for file inspection, edits, subprocesses, network access, and verification.
+- Do not assume shell/filesystem/browser/network tools exist outside Python.
+- Put third-party dependencies in PEP 723 inline metadata. uv_agent_runtime is injected automatically.
+- Prefer small inspect-then-change steps, keep scripts deterministic, and run focused verification when behavior changes.
+- Never print secrets; summarize sensitive config after redaction.
+
+Runtime helpers available in scripts:
+- uv_agent_runtime: read_text, write_text, read_json, write_json, list_files
+- run_command/check_command for subprocesses
+- emit_event/emit_progress/emit_result for structured output
+- ask for a nested uv-agent subagent via subprocess when useful
+
+Skills discovered under .agents/skills:
+{skills}
 """
 
 
@@ -98,7 +119,7 @@ class AgentEngine:
                 input_items=input_items,
                 level=level,
                 tools=[PYTHON_TOOL],
-                instructions=SYSTEM_INSTRUCTIONS,
+                instructions=self.system_instructions(),
             ):
                 if stream_event.type == "text_delta" and stream_event.text:
                     self.thread_store.append(
@@ -289,6 +310,16 @@ class AgentEngine:
         model = self.config.model_for_level(level)
         used = estimate_tokens(self._reconstruct_input(thread_id))
         return min(100, max(0, round(used * 100 / model.context_window_tokens)))
+
+    def system_instructions(self) -> str:
+        """Build concise environment-aware system instructions."""
+        skills = discover_skills(self.project_root)
+        return SYSTEM_INSTRUCTIONS_TEMPLATE.format(
+            workspace=self.project_root,
+            user_state=uv_agent_home(),
+            project_state=project_state_dir(self.project_root),
+            skills=render_skill_summary(skills),
+        )
 
 def message_item(role: str, text: str) -> dict[str, Any]:
     return {

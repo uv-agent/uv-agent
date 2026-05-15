@@ -168,3 +168,34 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     thread_id = events[-1]["thread_id"]
     stored_events = engine.thread_store.read(thread_id)
     assert any(event["type"] == "item.tool_output" for event in stored_events)
+
+
+def test_agent_system_prompt_mentions_runtime_and_skills(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    project_root = tmp_path / "project"
+    skill_dir = project_root / ".agents" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
+    config = load_config(project_root, [])
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / "state",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=runner,
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    prompt = engine.system_instructions()
+
+    assert "run_python" in prompt
+    assert "uv_agent_runtime" in prompt
+    assert "demo (project)" in prompt
+    assert str(project_root) in prompt
