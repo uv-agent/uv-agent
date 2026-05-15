@@ -7,6 +7,7 @@ import pytest
 from uv_agent.config import RunnerConfig
 from uv_agent.jsonl import read_jsonl
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
+from uv_agent.runner.runner import parse_structured_event
 
 
 @pytest.mark.asyncio
@@ -76,3 +77,11 @@ async def test_runner_truncates_large_output(tmp_path: Path) -> None:
     assert result.truncated is True
     assert "[uv-agent runner output truncated]" in result.stdout + result.stderr
     assert any(event["type"] == "run.output_truncated" for event in read_jsonl(result.run_log_path))
+
+
+def test_parse_structured_event_reads_runtime_json_line() -> None:
+    assert parse_structured_event('{"kind":"look_at","path":"image.png"}\n') == {
+        "kind": "look_at",
+        "path": "image.png",
+    }
+    assert parse_structured_event("plain text\n") is None

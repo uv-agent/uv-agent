@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from uv_agent.agent import AgentEngine, PYTHON_TOOL, usage_token_count
+from uv_agent.attachments import image_message_item
 from uv_agent.config import (
     AppConfig,
     CompressionConfig,
@@ -17,12 +19,14 @@ from uv_agent.config import (
 )
 from uv_agent.model_client import FakeModelClient
 from uv_agent.runner import PythonRunner
+from uv_agent.runner.models import PythonRunRequest
 from uv_agent.session import ThreadStore
 
 
 def test_agent_exposes_only_python_runner_tool() -> None:
     assert PYTHON_TOOL["name"] == "run_python"
     assert PYTHON_TOOL["type"] == "function"
+    assert "script_id" in PYTHON_TOOL["parameters"]["properties"]
 
 
 @pytest.mark.asyncio
@@ -170,7 +174,71 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     assert any(event["type"] == "item.tool_output" for event in stored_events)
 
 
-def test_agent_system_prompt_mentions_runtime_and_skills(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_agent_can_rerun_saved_script_by_id(tmp_path: Path) -> None:
+    project_root = Path.cwd()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+        ),
+    )
+    runner = PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner)
+    first = await runner.run(PythonRunRequest(code="print('saved')\n", cwd=project_root))
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "run_python",
+                        "arguments": json.dumps({"script_id": first.script_id}),
+                    }
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="rerun")]
+
+    assert events[-1]["final_text"] == "done"
+    assert "saved" in client.requests[1]["input"][-1]["output"]
+
+
+def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
     project_root = tmp_path / "project"
     skill_dir = project_root / ".agents" / "skills" / "demo"
@@ -201,10 +269,14 @@ def test_agent_system_prompt_mentions_runtime_and_skills(tmp_path: Path, monkeyp
 
     assert "run_python" in prompt
     assert "uv_agent_runtime" in prompt
-    assert "demo (project)" in prompt
-    assert "MCP servers" in prompt
     assert str(project_root) in prompt
-    assert "Project-specific AGENTS.md files are appended" in prompt
+    assert "Workspace rules, skills, and MCP declarations are appended" in prompt
+    assert "demo (project)" not in prompt
+
+    turn_context = engine._turn_context_text()
+
+    assert "demo (project)" in turn_context
+    assert "available_mcp_servers" in turn_context
 
 
 def test_usage_token_count_supports_provider_shapes() -> None:
@@ -423,3 +495,55 @@ def test_reconstruct_input_starts_after_latest_compaction(tmp_path: Path) -> Non
     assert "summary" in text
     assert "new" in text
     assert "old" not in text
+
+
+def test_image_attachment_reconstructs_after_compaction(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    image = tmp_path / "image.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    attachment = engine.attachments.register_image(image, cwd=project_root, thread_id=thread_id)
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    engine.thread_store.append(
+        thread_id,
+        "item.image_attachment",
+        turn_id="t1",
+        attachment=attachment.to_event_payload(),
+    )
+
+    reconstructed = engine._reconstruct_input(thread_id)
+
+    assert any(
+        content.get("type") == "input_image"
+        for item in reconstructed
+        for content in item.get("content", [])
+    )
+    assert image_message_item(attachment.to_event_payload())["content"][1]["image_url"].startswith(
+        "data:image/png;base64,"
+    )

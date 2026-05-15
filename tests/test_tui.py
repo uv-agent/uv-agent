@@ -17,7 +17,7 @@ from uv_agent.config import (
 from uv_agent.model_client import FakeModelClient
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
-from uv_agent.tui.app import CommandSuggestions, UvAgentApp
+from uv_agent.tui.app import CommandSuggestions, FullscreenPanel, UvAgentApp
 
 
 def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
@@ -76,7 +76,7 @@ async def test_tui_command_palette_completes_without_blocking_newlines(
 
 
 @pytest.mark.asyncio
-async def test_tui_status_panel_uses_side_drawer_on_wide_layout(
+async def test_tui_status_panel_opens_fullscreen_overlay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -90,6 +90,51 @@ async def test_tui_status_panel_uses_side_drawer_on_wide_layout(
 
     async with app.run_test(size=(140, 32)) as pilot:
         await pilot.press("ctrl+s")
-        assert app.query_one("#drawer").has_class("hidden")
-        assert not app.query_one("#side-drawer").has_class("hidden")
-        assert "258K" in str(app.query_one("#drawer-body").content)
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert "258K" in panel.body
+
+
+@pytest.mark.asyncio
+async def test_tui_thread_picker_resumes_and_renders_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    state = tmp_path / "state"
+    engine = fake_engine(project_root, state)
+    thread_id = engine.thread_store.create_thread("Saved work")
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id="turn_1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="turn_1",
+        response_id="resp_1",
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi there"}],
+            }
+        ],
+        usage={},
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        panel.dismiss(thread_id)
+        await pilot.pause()
+
+        assert app.thread_id == thread_id
+        assert app._transcript_has_content is True

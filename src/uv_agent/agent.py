@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from uv_agent.attachments import AttachmentStore, image_message_item
 from uv_agent.config import AppConfig
 from uv_agent.context import ContextStats, compact_target_tokens, estimate_tokens, usage_token_count
 from uv_agent.ids import new_id
@@ -12,7 +13,7 @@ from uv_agent.mcp_config import discover_mcp_servers, render_mcp_summary
 from uv_agent.model_client import ModelClient, ModelResponse
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.project_rules import ProjectRuleContext, load_project_rules
-from uv_agent.runner import PythonRunRequest, PythonRunner
+from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
 from uv_agent.session.store import ThreadStore
 from uv_agent.skills import discover_skills, render_skill_summary
 
@@ -23,14 +24,29 @@ PYTHON_TOOL = {
     "description": (
         "Run a Python script through the uv-agent Python runner. Use this as the only "
         "way to inspect files, call subprocesses, access the network, or perform external actions. "
-        "Declare third-party dependencies inside the script with PEP 723 inline metadata."
+        "Declare third-party dependencies inside the script with PEP 723 inline metadata, "
+        "or rerun a previously saved script by script_id/run_id."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "code": {
                 "type": "string",
-                "description": "Complete Python script source. Include PEP 723 inline metadata when dependencies are needed.",
+                "description": "Complete Python script source. Include PEP 723 inline metadata when dependencies are needed. Omit only when rerunning by script_id/run_id.",
+            },
+            "script_id": {
+                "type": "string",
+                "description": "Previously saved script id to rerun instead of creating new code.",
+            },
+            "run_id": {
+                "type": "string",
+                "description": "Previous run id to replay or rerun.",
+            },
+            "rerun_mode": {
+                "type": "string",
+                "enum": ["rerun", "replay"],
+                "description": "rerun uses fresh args; replay inherits the previous run context when run_id is given.",
+                "default": "rerun",
             },
             "uv_args": {
                 "type": "array",
@@ -50,7 +66,7 @@ PYTHON_TOOL = {
                 "default": 60,
             },
         },
-        "required": ["code"],
+        "required": [],
         "additionalProperties": False,
     },
     "strict": False,
@@ -69,24 +85,21 @@ Rules:
 - You have exactly one external action tool: run_python.
 - Use Python for file inspection, edits, subprocesses, network access, and verification.
 - Do not assume shell/filesystem/browser/network tools exist outside Python.
-- Put third-party dependencies in PEP 723 inline metadata. uv_agent_runtime is injected automatically.
-- Prefer small inspect-then-change steps, keep scripts deterministic, and run focused verification when behavior changes.
+- Put third-party dependencies in PEP 723 inline metadata. uv_agent_runtime is injected automatically even if metadata is omitted.
+- Use uv_args only for exceptional uv behavior such as refresh/reinstall/debug flags.
+- Prefer small inspect-then-change steps, then run focused verification when behavior changes.
 - Never print secrets; summarize sensitive config after redaction.
 
 Runtime helpers available in scripts:
 - uv_agent_runtime: read_text, write_text, read_json, write_json, list_files
 - run_command/check_command for subprocesses
 - emit_event/emit_progress/emit_result for structured output
-- ask for a nested uv-agent subagent via subprocess when useful
-- connect_stdio/connect_declared for MCP stdio servers declared in .agents/mcp.json
+- look_at(path, note="") attaches an image to future model context
+- rerun saved scripts by passing script_id or run_id to run_python
+- ask can invoke a nested uv-agent subprocess when useful
+- MCP helpers connect to declared stdio MCP servers; call MCP through Python, not as model tools
 
-Skills discovered under .agents/skills:
-{skills}
-
-MCP servers declared under .agents/mcp.json:
-{mcp_servers}
-
-Project-specific AGENTS.md files are appended as per-turn workspace context.
+Workspace rules, skills, and MCP declarations are appended as per-turn context.
 """
 
 
@@ -105,6 +118,7 @@ class AgentEngine:
         self.runner = runner
         self.thread_store = thread_store
         self.project_root = project_root
+        self.attachments = AttachmentStore(thread_store.data_dir)
 
     async def run_turn(
         self,
@@ -192,7 +206,7 @@ class AgentEngine:
                     "turn_id": turn_id,
                     "call": call,
                 }
-                tool_output = await self._handle_tool_call(call, thread_id, turn_id)
+                tool_output, attachments = await self._handle_tool_call(call, thread_id, turn_id)
                 self.thread_store.append(
                     thread_id,
                     "item.tool_output",
@@ -201,6 +215,10 @@ class AgentEngine:
                 )
                 input_items.append(tool_output)
                 conversation_items.append(tool_output)
+                for attachment in attachments:
+                    image_item = image_message_item(attachment)
+                    input_items.append(image_item)
+                    conversation_items.append(image_item)
                 yield {
                     "type": "tool.output",
                     "thread_id": thread_id,
@@ -276,27 +294,46 @@ class AgentEngine:
         call: dict[str, Any],
         thread_id: str,
         turn_id: str,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if call.get("name") != "run_python":
             output = {"error": f"Unsupported tool: {call.get('name')}"}
-            return function_output(call, output)
+            return function_output(call, output), []
         try:
             args = json.loads(call.get("arguments") or "{}")
         except json.JSONDecodeError as exc:
             output = {"error": f"Invalid tool arguments JSON: {exc}"}
-            return function_output(call, output)
+            return function_output(call, output), []
 
-        result = await self.runner.run(
-            PythonRunRequest(
-                code=args["code"],
-                uv_args=list(args.get("uv_args") or []),
-                script_args=list(args.get("script_args") or []),
-                timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
-                cwd=self.project_root,
-                thread_id=thread_id,
-                turn_id=turn_id,
+        if args.get("script_id") or args.get("run_id"):
+            result = await self.runner.rerun(
+                RerunRequest(
+                    script_id=args.get("script_id"),
+                    run_id=args.get("run_id"),
+                    mode="replay" if args.get("rerun_mode") == "replay" else "rerun",
+                    uv_args=list(args.get("uv_args") or []),
+                    script_args=list(args.get("script_args") or []),
+                    timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
+                    cwd=self.project_root,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                )
             )
-        )
+        else:
+            code = args.get("code")
+            if not isinstance(code, str) or not code.strip():
+                output = {"error": "run_python requires code, script_id, or run_id"}
+                return function_output(call, output), []
+            result = await self.runner.run(
+                PythonRunRequest(
+                    code=code,
+                    uv_args=list(args.get("uv_args") or []),
+                    script_args=list(args.get("script_args") or []),
+                    timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
+                    cwd=self.project_root,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                )
+            )
         payload = {
             "script_id": result.script_id,
             "run_id": result.run_id,
@@ -305,8 +342,17 @@ class AgentEngine:
             "truncated": result.truncated,
             "stdout": result.stdout,
             "stderr": result.stderr,
+            "events": result.events,
             "run_log_path": str(result.run_log_path),
         }
+        attachments = self._register_look_at_events(
+            result.events,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            cwd=self.project_root,
+        )
+        if attachments:
+            payload["attachments"] = attachments
         self.thread_store.append(
             thread_id,
             "item.runner_result",
@@ -314,7 +360,38 @@ class AgentEngine:
             call_id=call.get("call_id"),
             result=payload,
         )
-        return function_output(call, payload)
+        return function_output(call, payload), attachments
+
+    def _register_look_at_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        thread_id: str,
+        turn_id: str,
+        cwd: Path,
+    ) -> list[dict[str, Any]]:
+        attachments: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("kind") != "look_at":
+                continue
+            path = event.get("path")
+            if not isinstance(path, str) or not path:
+                continue
+            attachment = self.attachments.register_image(
+                path,
+                cwd=cwd,
+                thread_id=thread_id,
+                note=str(event.get("note") or ""),
+            )
+            payload = attachment.to_event_payload()
+            self.thread_store.append(
+                thread_id,
+                "item.image_attachment",
+                turn_id=turn_id,
+                attachment=payload,
+            )
+            attachments.append(payload)
+        return attachments
 
     def _reconstruct_input(self, thread_id: str) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
@@ -334,6 +411,9 @@ class AgentEngine:
                         + "\n</conversation_summary>\nContinue from this compacted context.",
                     )
                 )
+        for event in events[: last_compaction_index + 1]:
+            if event.get("type") == "item.image_attachment":
+                input_items.append(image_message_item(event["attachment"]))
         for event in events[last_compaction_index + 1 :]:
             if event.get("type") == "item.user":
                 input_items.append(event["item"])
@@ -341,14 +421,40 @@ class AgentEngine:
                 input_items.extend(event.get("output") or [])
             elif event.get("type") == "item.tool_output":
                 input_items.append(event["item"])
+            elif event.get("type") == "item.image_attachment":
+                input_items.append(image_message_item(event["attachment"]))
         return input_items
 
     def _workspace_context_items(self) -> list[dict[str, Any]]:
-        context = self.project_rule_context()
-        rendered = context.render()
+        rendered = self._turn_context_text()
         if not rendered:
             return []
         return [message_item("user", rendered)]
+
+    def _turn_context_text(self) -> str:
+        sections: list[str] = []
+        rendered_rules = self.project_rule_context().render()
+        if rendered_rules:
+            sections.append(rendered_rules)
+
+        skills = render_skill_summary(discover_skills(self.project_root))
+        if skills != "None discovered.":
+            sections.append(
+                "<available_skills>\n"
+                "Read the listed SKILL.md with Python only when relevant.\n"
+                f"{skills}\n"
+                "</available_skills>"
+            )
+
+        mcp_servers = render_mcp_summary(discover_mcp_servers(self.project_root))
+        if mcp_servers != "None declared.":
+            sections.append(
+                "<available_mcp_servers>\n"
+                "Use uv_agent_runtime MCP helpers from Python to inspect or call these servers.\n"
+                f"{mcp_servers}\n"
+                "</available_mcp_servers>"
+            )
+        return "\n\n".join(sections)
 
     def project_rule_context(self) -> ProjectRuleContext:
         """Load AGENTS.md context for the active workspace."""
@@ -406,14 +512,10 @@ class AgentEngine:
 
     def system_instructions(self) -> str:
         """Build concise environment-aware system instructions."""
-        skills = discover_skills(self.project_root)
-        mcp_servers = discover_mcp_servers(self.project_root)
         return SYSTEM_INSTRUCTIONS_TEMPLATE.format(
             workspace=self.project_root,
             user_state=uv_agent_home(),
             project_state=project_state_dir(self.project_root),
-            skills=render_skill_summary(skills),
-            mcp_servers=render_mcp_summary(mcp_servers),
         )
 
 def message_item(role: str, text: str) -> dict[str, Any]:

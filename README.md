@@ -14,6 +14,12 @@ Single prompt smoke test:
 uv run uv-agent ask "Reply with exactly: ok"
 ```
 
+Resume a thread without opening the TUI:
+
+```powershell
+uv run uv-agent ask --thread thr_xxx "Continue from here"
+```
+
 ## Local Config
 
 User-level provider config lives at `~/.uv-agent/config.json` by default. A project can override it with `.uv-agent/config.json`; that project-local directory is ignored by git.
@@ -69,7 +75,33 @@ and falls back to a local estimate for the context meter.
 
 Agent scripts declare dependencies with PEP 723 inline metadata. The runner records managed script artifacts, run JSONL, and thread JSONL under `~/.uv-agent/projects/<project-id>/`, injects the configured runtime dependency into inline metadata when needed, and supports rerunning saved scripts.
 
-`uv_agent_runtime` exposes convenience helpers for text/JSON files, subprocesses, structured events, nested `uv-agent ask` calls, and MCP stdio servers declared in `.agents/mcp.json`.
+`uv_agent_runtime` exposes convenience helpers for text/JSON files, subprocesses, structured events, nested `uv-agent ask` calls, image context, and MCP stdio servers declared in `.agents/mcp.json`.
+
+Image context is added from a script with `look_at`:
+
+```python
+from uv_agent_runtime import look_at
+
+look_at("screenshot.png", note="inspect the failed layout")
+```
+
+The host copies the image into the project state attachments directory and
+appends it to later model input. Large image bytes are not stored directly in
+thread JSONL.
+
+Saved scripts can be rerun by passing `script_id` or `run_id` to `run_python`;
+`rerun_mode="replay"` inherits a previous run's arguments when a `run_id` is
+available.
+
+MCP remains a Python-triggered runtime capability, not a direct model tool:
+
+```python
+from uv_agent_runtime import connect_named
+
+with connect_named("filesystem") as client:
+    client.initialize()
+    print(client.list_tools())
+```
 
 ## Workspace Rules
 
@@ -82,12 +114,14 @@ events, not the expanded rule text.
 
 ## TUI
 
-The default TUI follows a Codex-style shape: a single transcript, inline Python runner events, and a bottom composer/status line.
+The default TUI follows a Codex-style shape: a single transcript, inline Python runner events, full-screen focus panels, and a bottom three-zone composer.
 
 - `Enter`: insert a newline in the composer
 - `Ctrl+Enter` or `Ctrl+J`: send the composer text
 - `Esc`: close command suggestions, clear the composer, or close the open panel
-- `Ctrl+S` or `/status`: toggle detailed runtime status
+- `Ctrl+S` or `/status`: open detailed runtime status
+- `Ctrl+O` or `/threads`: open a searchable thread picker and resume history
+- `Ctrl+P`: open a full-screen command palette
 - `Ctrl+Q`, `Ctrl+C`, or `/quit`: quit after a second confirmation
 - `?` + `Ctrl+Enter` or `/help`: show local commands
 - `/context`: show context budget and loaded workspace rules
@@ -98,10 +132,10 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `/mcp`: show MCP declarations from `.agents/mcp.json`
 - `/skills` and `/skill [name]`: inspect `.agents/skills` entries
 - `/runs`: show the latest Python run summary from this TUI session
-- `/panel`: close the temporary panel
+- `/panel`: reminder that panels close with `Esc`
 - Python runs appear inline with script/run ids, exit status, stdout/stderr summaries, and truncation markers
 - Typing `/` opens live command suggestions; `Tab`, `Enter`, and arrow keys work inside the picker.
-- Wide terminals show temporary panels in a right drawer; narrow terminals collapse them above the composer.
+- Temporary panels open as full-screen overlays with search/scroll/select behavior.
 
 For manual UI checks, Textual's `App.export_screenshot()` works in headless
 tests and writes SVG snapshots. Local debug captures belong under `.uv-agent/`

@@ -71,6 +71,12 @@ PythonRunRequest(
 - runner：`uv_agent.runner.PythonRunner`
 - runtime：`uv_agent_runtime`
 
+`uv_agent_runtime.look_at(path, note="")` 用于把图片追加进后续模型上下文。
+宿主会复制图片到用户级 project state 的 attachments 目录，thread JSONL 只保存
+路径、hash、mime、备注等元数据，不直接保存大块 base64。MCP 也是 runtime 能力：
+提示词只列出可用声明，agent 必须在 Python 脚本中使用 runtime helper 连接和调用。
+`run_python` 也可以接收 `script_id` 或 `run_id` 来重跑受管理脚本。
+
 ## 受管理脚本与重跑
 
 临时脚本是受管理 artifact，不是运行完即删除的系统临时文件。
@@ -187,8 +193,8 @@ TUI 使用 Textual。
 
 - 默认界面参考 Codex：单一主时间线 + 底部 composer，不把屏幕切成固定三栏。
 - 主时间线显示用户输入、assistant 流式输出、Python runner 状态和 stdout/stderr 摘要。
-- 底部 composer 固定显示当前运行状态、模型/API、上下文估算和当前 thread 标识。
-- 临时面板只用于聚焦查看脚本内容、完整 runner 日志、thread 列表、配置状态等；它们不应抢占默认对话体验。
+- 底部 composer 拆成三块：左侧短状态，中间输入框，右侧模型/上下文摘要。
+- 临时面板用于聚焦查看脚本内容、完整 runner 日志、thread 列表、配置状态等，默认作为全屏 overlay 打开，必须支持滚动、过滤、选择和 Esc 关闭。
 - 窄终端下优先保留 transcript 和 composer，附属信息降级为短状态文本。
 
 TUI 只消费 core/session/runner 提供的状态和事件，不把业务规则写死在 UI 层。

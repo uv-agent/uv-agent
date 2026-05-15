@@ -51,5 +51,27 @@ class ThreadStore:
             events = read_jsonl(path)
             created = next((event for event in events if event.get("type") == "thread.created"), None)
             if created:
-                threads.append(created)
-        return threads
+                summary = dict(created)
+                summary["updated_at"] = events[-1].get("created_at", created.get("created_at"))
+                summary["turn_count"] = sum(1 for event in events if event.get("type") == "turn.completed")
+                summary["last_text"] = latest_thread_text(events)
+                threads.append(summary)
+        return sorted(threads, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+
+
+def latest_thread_text(events: list[dict[str, Any]]) -> str:
+    """Return the most recent human-readable message snippet."""
+    for event in reversed(events):
+        if event.get("type") == "item.assistant":
+            return str(event.get("text") or "")
+        if event.get("type") == "item.user":
+            return item_text(event.get("item") or {})
+    return ""
+
+
+def item_text(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for content in item.get("content") or []:
+        if content.get("type") in {"input_text", "output_text", "text"}:
+            parts.append(str(content.get("text") or ""))
+    return "\n".join(parts)

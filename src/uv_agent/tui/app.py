@@ -7,15 +7,18 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Callable
 
 from rich.markdown import Markdown
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
+from textual.screen import ModalScreen
 from textual.reactive import reactive
-from textual.widgets import Static, TextArea
+from textual.widgets import Input, OptionList, Static, TextArea
+from textual.widgets._option_list import Option
 
 from uv_agent.app_factory import create_engine
 from uv_agent.config import ConfigError, config_sources, load_raw_config, redact_config
@@ -23,6 +26,152 @@ from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.skills import discover_skills
 from uv_agent.tui.formatting import format_tokens, parse_tool_payload, short_thread, tool_result_markup
+
+
+@dataclass(frozen=True)
+class PickerItem:
+    id: str
+    title: str
+    description: str = ""
+    meta: str = ""
+
+
+class FullscreenPanel(ModalScreen[str | None]):
+    """Scrollable full-screen panel/picker."""
+
+    CSS = """
+    FullscreenPanel {
+        align: center middle;
+        background: #05070acc;
+    }
+
+    #panel-shell {
+        width: 92%;
+        height: 88%;
+        max-width: 120;
+        border: round #3a4a60;
+        background: #0c1118;
+        padding: 1 2;
+    }
+
+    #panel-header {
+        height: 1;
+        color: #dce7f3;
+        text-style: bold;
+    }
+
+    #panel-subtitle {
+        height: 1;
+        color: #8fa2b8;
+    }
+
+    #panel-filter {
+        height: 3;
+        margin: 1 0 0 0;
+        border: tall #263649;
+        background: #0f1721;
+        color: #e9eef5;
+    }
+
+    #panel-content {
+        height: 1fr;
+        margin: 1 0 0 0;
+        border: tall #1f2b3a;
+        background: #0a0f15;
+        padding: 0 1;
+    }
+
+    #panel-body {
+        height: 1fr;
+        margin: 1 0 0 0;
+        border: tall #1f2b3a;
+        background: #0a0f15;
+        padding: 1 1;
+    }
+
+    #panel-footer {
+        height: 1;
+        margin: 1 0 0 0;
+        color: #7b8796;
+    }
+
+    OptionList {
+        height: 1fr;
+        border: none;
+        background: #0a0f15;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss_panel", "Close", priority=True),
+        Binding("ctrl+c", "dismiss_panel", "Close", priority=True),
+    ]
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        body: str = "",
+        items: list[PickerItem] | None = None,
+        subtitle: str = "",
+    ) -> None:
+        super().__init__()
+        self.panel_title = title
+        self.body = body
+        self.items = items or []
+        self.subtitle = subtitle
+        self._filtered = list(self.items)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="panel-shell"):
+            yield Static(self.panel_title, id="panel-header")
+            yield Static(self.subtitle, id="panel-subtitle")
+            if self.items:
+                yield Input(placeholder="Filter...", id="panel-filter")
+                yield OptionList(id="panel-content")
+            else:
+                yield VerticalScroll(Static(self.body, markup=True), id="panel-body")
+            yield Static("Esc close · arrows scroll/select · Enter open", id="panel-footer")
+
+    def on_mount(self) -> None:
+        if self.items:
+            self._refresh_options()
+            self.query_one("#panel-filter", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "panel-filter":
+            return
+        query = event.value.casefold().strip()
+        if not query:
+            self._filtered = list(self.items)
+        else:
+            self._filtered = [
+                item
+                for item in self.items
+                if query in (item.title + " " + item.description + " " + item.meta).casefold()
+            ]
+        self._refresh_options()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id:
+            self.dismiss(event.option_id)
+
+    def action_dismiss_panel(self) -> None:
+        self.dismiss(None)
+
+    def _refresh_options(self) -> None:
+        options = [
+            Option(
+                f"[bold cyan]{escape(item.title)}[/bold cyan]"
+                + (f"\n[dim]{escape(item.description)}[/dim]" if item.description else "")
+                + (f"\n[dim]{escape(item.meta)}[/dim]" if item.meta else ""),
+                id=item.id,
+            )
+            for item in self._filtered
+        ]
+        if not options:
+            options = [Option("[dim]No matches[/dim]", id="")]
+        self.query_one("#panel-content", OptionList).set_options(options)
 
 
 @dataclass(frozen=True)
@@ -50,6 +199,38 @@ COMMANDS = [
     CommandSpec("/quit", "/quit", "quit with confirmation"),
     CommandSpec("/help", "/help", "show all commands"),
 ]
+
+
+class EmptyState(Static):
+    """Animated empty transcript state."""
+
+    FRAMES = ["·  ", "·· ", "···", " ··", "  ·", "   "]
+
+    DEFAULT_CSS = """
+    EmptyState {
+        width: 100%;
+        height: 100%;
+        content-align: center middle;
+        color: #7f91a8;
+    }
+
+    EmptyState.hidden {
+        display: none;
+    }
+    """
+
+    def __init__(self, *, id: str) -> None:
+        super().__init__("", id=id)
+        self.frame = 0
+
+    def tick(self) -> None:
+        frame = self.FRAMES[self.frame % len(self.FRAMES)]
+        self.frame += 1
+        self.update(
+            f"[bold #dce7f3]Ready[/bold #dce7f3]\n"
+            f"[dim]Python runner only {escape(frame)}[/dim]\n"
+            "[dim]Type / for commands or Ctrl+O for threads[/dim]"
+        )
 
 
 class CommandSuggestions(Static):
@@ -101,7 +282,12 @@ class CommandSuggestions(Static):
 
     def _refresh_options(self) -> None:
         lines = ["[bold]commands[/bold] [dim]Tab/Enter select · Esc close[/dim]"]
-        for index, spec in enumerate(self.matches[:8]):
+        visible_start = max(0, min(self.selected_index - 6, max(0, len(self.matches) - 8)))
+        visible = self.matches[visible_start : visible_start + 8]
+        if visible_start:
+            lines.append(f"[dim]... {visible_start} above[/dim]")
+        for offset, spec in enumerate(visible):
+            index = visible_start + offset
             active = index == self.selected_index
             prefix = "[reverse]›[/reverse]" if active else " "
             command_style = "bold cyan" if active else "cyan"
@@ -110,8 +296,9 @@ class CommandSuggestions(Static):
                 f"{prefix} [{command_style}]{escape(spec.usage):<18}[/{command_style}] "
                 f"[{desc_style}]{escape(spec.description)}[/{desc_style}]"
             )
-        if len(self.matches) > 8:
-            lines.append(f"[dim]... {len(self.matches) - 8} more[/dim]")
+        remaining = len(self.matches) - visible_start - len(visible)
+        if remaining > 0:
+            lines.append(f"[dim]... {remaining} below[/dim]")
         self.update("\n".join(lines))
 
 
@@ -173,53 +360,11 @@ class UvAgentApp(App[None]):
         background: #0b0f14;
     }
 
-    #side-drawer {
-        width: 38;
-        min-width: 28;
-        max-width: 46;
-        height: 100%;
-        border-left: tall #263241;
-        background: #0d141c;
-        padding: 1 1;
-        color: #d8dee9;
-    }
-
-    #side-drawer.hidden {
-        display: none;
-    }
-
-    #drawer-title {
-        height: 1;
-        color: #7dd3fc;
-        text-style: bold;
-    }
-
-    #drawer-body {
-        height: 1fr;
-        overflow-y: auto;
-        padding: 1 0 0 0;
-    }
-
     #bottom-pane {
         height: auto;
         max-height: 18;
         padding: 0 2 1 1;
         background: #0b0f14;
-    }
-
-    #drawer {
-        height: auto;
-        max-height: 13;
-        border: tall #263241;
-        padding: 1 1;
-        margin: 0 0 1 0;
-        background: #0d141c;
-        color: #d8dee9;
-        overflow-y: auto;
-    }
-
-    #drawer.hidden {
-        display: none;
     }
 
     #composer-shell {
@@ -237,27 +382,27 @@ class UvAgentApp(App[None]):
         border: tall #28708f;
     }
 
-    #run-status {
-        height: 1;
-        color: #9fb0c3;
-    }
-
     #composer-row {
         height: auto;
+        min-height: 3;
     }
 
-    #prompt-marker {
-        width: 3;
-        color: #7dd3fc;
-        text-style: bold;
+    #composer-left {
+        width: 10;
+        min-width: 7;
+        height: 3;
+        content-align: center middle;
+        color: #8fa2b8;
+        border-right: tall #263649;
     }
 
     #composer {
+        width: 1fr;
         height: 3;
         min-height: 3;
         max-height: 8;
         border: none;
-        padding: 0;
+        padding: 0 1;
         background: #0f1721;
         color: #edf2f7;
     }
@@ -266,9 +411,13 @@ class UvAgentApp(App[None]):
         border: none;
     }
 
-    #hint-line {
-        height: 1;
-        color: #7b8796;
+    #composer-right {
+        width: 14;
+        min-width: 10;
+        height: 3;
+        content-align: center middle;
+        color: #8fa2b8;
+        border-left: tall #263649;
     }
     """
 
@@ -280,6 +429,8 @@ class UvAgentApp(App[None]):
         Binding("down", "command_down", "Command down", priority=True),
         Binding("enter", "command_accept", "Command accept", priority=True),
         Binding("ctrl+s", "toggle_status_panel", "Status", priority=True),
+        Binding("ctrl+o", "open_threads", "Threads", priority=True),
+        Binding("ctrl+p", "open_command_palette", "Commands", priority=True),
         Binding("ctrl+q", "request_quit", "Quit", priority=True),
         Binding("ctrl+c", "request_quit", "Quit", priority=True),
         Binding("f1", "help", "Help", priority=True),
@@ -303,22 +454,19 @@ class UvAgentApp(App[None]):
         self._last_tool_payload: dict[str, object] | None = None
         self._quit_armed = False
         self._last_quit_request_at = 0.0
-        self._panel_name: str | None = None
-        self._panel_markup = ""
-        self._panel_title = ""
         self._previous_sigint_handler: Any = None
         self._windows_ctrl_handler: Any = None
+        self._transcript_has_content = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
-            yield VerticalScroll(id="transcript")
+            with VerticalScroll(id="transcript"):
+                yield EmptyState(id="empty-state")
             with Vertical(id="bottom-pane"):
-                yield Static(id="drawer", classes="hidden")
                 yield CommandSuggestions(id="command-suggestions")
                 with Vertical(id="composer-shell"):
-                    yield Static(id="run-status")
                     with Horizontal(id="composer-row"):
-                        yield Static("›", id="prompt-marker")
+                        yield Static("idle", id="composer-left")
                         yield TextArea(
                             "",
                             placeholder="Ask, edit, or type / for commands",
@@ -327,18 +475,12 @@ class UvAgentApp(App[None]):
                             soft_wrap=True,
                             show_line_numbers=False,
                         )
-                    yield Static(id="hint-line")
-        with Vertical(id="side-drawer", classes="hidden"):
-            yield Static(id="drawer-title")
-            yield Static(id="drawer-body")
+                        yield Static("ctx 0%", id="composer-right")
 
     def on_mount(self) -> None:
-        self._append_cell(
-            "[bold #7dd3fc]uv-agent[/bold #7dd3fc] [dim]ready · Python runner only[/dim]",
-            "event",
-        )
+        self.query_one("#empty-state", EmptyState).tick()
         self._refresh_status("Idle")
-        self.set_interval(0.12, self._tick, name="spinner")
+        self.set_interval(0.16, self._tick, name="spinner")
         self.query_one("#composer", TextArea).focus()
         self._install_sigint_guard()
 
@@ -348,8 +490,6 @@ class UvAgentApp(App[None]):
         self._uninstall_windows_ctrl_guard()
 
     def on_resize(self) -> None:
-        if self._panel_name:
-            self._render_panel()
         self._refresh_status()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
@@ -360,6 +500,11 @@ class UvAgentApp(App[None]):
         self._refresh_status()
 
     def _tick(self) -> None:
+        if not self._transcript_has_content:
+            try:
+                self.query_one("#empty-state", EmptyState).tick()
+            except NoMatches:
+                pass
         if self.busy:
             self._refresh_status()
 
@@ -434,8 +579,6 @@ class UvAgentApp(App[None]):
             composer.load_text("")
             self._resize_composer("")
             return
-        if self._panel_name:
-            self._close_panel()
 
     def action_request_quit(self) -> None:
         now = monotonic()
@@ -452,10 +595,13 @@ class UvAgentApp(App[None]):
         self.set_timer(2.0, self._clear_quit_arm)
 
     def action_toggle_status_panel(self) -> None:
-        if self._panel_name == "status":
-            self._close_panel()
-            return
         self._open_status_panel()
+
+    def action_open_threads(self) -> None:
+        self._open_threads_panel()
+
+    def action_open_command_palette(self) -> None:
+        self._open_command_palette()
 
     def action_complete_command(self) -> None:
         panel = self.query_one("#command-suggestions", CommandSuggestions)
@@ -537,11 +683,7 @@ class UvAgentApp(App[None]):
             self._assistant_cell = None
             self._tool_cells.clear()
             self._queue.clear()
-            self.query_one("#transcript", VerticalScroll).remove_children()
-            self._append_cell(
-                "[bold #7dd3fc]uv-agent[/bold #7dd3fc] [dim]ready · Python runner only[/dim]",
-                "event",
-            )
+            self._reset_transcript()
             self._refresh_status("Idle")
             return True
         if command == "/quit":
@@ -590,7 +732,7 @@ class UvAgentApp(App[None]):
             self._open_runs_panel()
             return True
         if command == "/panel":
-            self._close_panel()
+            self._flash("Panels now close with Esc")
             return True
         if command in {"/help", "?"}:
             self._open_help_panel()
@@ -676,25 +818,49 @@ class UvAgentApp(App[None]):
             first = first[:69].rstrip() + "..."
         return f"\n[dim]{escape(first)}[/dim]"
 
-    def _append_cell(self, content: str, classes: str) -> TranscriptCell:
+    def _append_cell(self, content: object, classes: str) -> TranscriptCell:
+        self._mark_transcript_content()
         cell = TranscriptCell(content, classes=classes, markup=True)
         self.query_one("#transcript", VerticalScroll).mount(cell)
         self._scroll_end()
         return cell
 
+    def _mark_transcript_content(self) -> None:
+        if self._transcript_has_content:
+            return
+        self._transcript_has_content = True
+        self.query_one("#empty-state", EmptyState).add_class("hidden")
+
+    def _reset_transcript(self) -> None:
+        transcript = self.query_one("#transcript", VerticalScroll)
+        transcript.query("*").remove()
+        self.call_after_refresh(transcript.mount, EmptyState(id="empty-state"))
+        self._transcript_has_content = False
+        self.call_after_refresh(lambda: self.query_one("#empty-state", EmptyState).tick())
+
     def _open_threads_panel(self) -> None:
-        threads = self.engine.thread_store.list_threads()[-10:]
+        threads = self.engine.thread_store.list_threads()
         if not threads:
-            body = "[dim]no saved threads[/dim]"
-        else:
-            lines = []
-            for thread in threads:
-                marker = "*" if thread.get("thread_id") == self.thread_id else "-"
-                title = str(thread.get("title") or "New thread")
-                thread_id = short_thread(str(thread.get("thread_id") or ""))
-                lines.append(f"{marker} [cyan]{escape(thread_id)}[/cyan] [dim]{escape(title)}[/dim]")
-            body = "\n".join(lines)
-        self._open_panel(body, "threads", "Threads")
+            self._open_fullscreen_panel("Threads", "[dim]No saved threads[/dim]")
+            return
+        items = []
+        for thread in threads:
+            thread_id = str(thread.get("thread_id") or "")
+            title = str(thread.get("title") or "New thread")
+            updated = str(thread.get("updated_at") or "")
+            last_text = str(thread.get("last_text") or "").replace("\n", " ")
+            if len(last_text) > 120:
+                last_text = last_text[:117].rstrip() + "..."
+            marker = "current " if thread_id == self.thread_id else ""
+            items.append(
+                PickerItem(
+                    id=thread_id,
+                    title=f"{marker}{title}",
+                    description=last_text or "No messages yet",
+                    meta=f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} turns · {updated}",
+                )
+            )
+        self._open_picker("Threads", items, self._resume_thread, subtitle="Search and Enter to resume")
 
     def _open_status_panel(self) -> None:
         self._open_panel(self._status_panel_markup(), "status", "Status")
@@ -895,48 +1061,104 @@ class UvAgentApp(App[None]):
             "event",
         )
 
-    def _open_panel(self, markup: str, name: str | None = None, title: str | None = None) -> None:
-        self._panel_name = name
-        self._panel_markup = markup
-        self._panel_title = title or (name.title() if name else "Panel")
-        self._render_panel()
-        self._refresh_status()
-
-    def _close_panel(self) -> None:
-        drawer = self.query_one("#drawer", Static)
-        drawer.update("")
-        drawer.add_class("hidden")
-        side = self.query_one("#side-drawer", Vertical)
-        side.add_class("hidden")
-        self.query_one("#drawer-title", Static).update("")
-        self.query_one("#drawer-body", Static).update("")
-        self._panel_name = None
-        self._panel_markup = ""
-        self._panel_title = ""
-        self._refresh_status()
-
-    def _render_panel(self) -> None:
-        if not self._panel_name:
-            return
-        title = escape(self._panel_title)
-        if self._use_side_drawer():
-            self.query_one("#drawer", Static).add_class("hidden")
-            self.query_one("#drawer", Static).update("")
-            self.query_one("#drawer-title", Static).update(
-                f"[bold]{title}[/bold] [dim]Esc closes[/dim]"
+    def _open_command_palette(self) -> None:
+        items = [
+            PickerItem(
+                id=spec.name,
+                title=spec.usage,
+                description=spec.description,
             )
-            self.query_one("#drawer-body", Static).update(self._panel_markup)
-            self.query_one("#side-drawer", Vertical).remove_class("hidden")
-            return
-        self.query_one("#side-drawer", Vertical).add_class("hidden")
-        self.query_one("#drawer-title", Static).update("")
-        self.query_one("#drawer-body", Static).update("")
-        drawer = self.query_one("#drawer", Static)
-        drawer.update(f"[bold]{title}[/bold] [dim]Esc closes[/dim]\n{self._panel_markup}")
-        drawer.remove_class("hidden")
+            for spec in COMMANDS
+        ]
+        self._open_picker("Commands", items, self._choose_command, subtitle="Type to filter commands")
 
-    def _use_side_drawer(self) -> bool:
-        return self.size.width >= 110 and self.size.height >= 20
+    def _choose_command(self, command: str) -> None:
+        spec = next((item for item in COMMANDS if item.name == command), None)
+        if spec is None:
+            return
+        if "[" in spec.usage:
+            self._apply_command_completion(command)
+            return
+        self._handle_command(command)
+
+    def _resume_thread(self, thread_id: str) -> None:
+        if not thread_id:
+            return
+        self.thread_id = thread_id
+        self._assistant_buffer = ""
+        self._assistant_cell = None
+        self._tool_cells.clear()
+        self._reset_transcript()
+        self._render_thread_history(thread_id)
+        self._refresh_status("Resumed")
+
+    def _render_thread_history(self, thread_id: str) -> None:
+        for event in self.engine.thread_store.read(thread_id):
+            event_type = event.get("type")
+            if event_type == "item.user":
+                self._append_user_from_history(event.get("item") or {})
+            elif event_type == "item.model_response":
+                text = self._model_response_text(event.get("output") or [])
+                if text:
+                    self._append_cell(Markdown(text), "assistant")
+            elif event_type == "item.tool_call":
+                item = event.get("item") or {}
+                name = str(item.get("name") or "python")
+                self._append_cell(f"[cyan]{escape(name)}[/cyan] [dim]called[/dim]", "event")
+            elif event_type == "item.runner_result":
+                result = event.get("result") or {}
+                self._last_tool_payload = result
+                self._append_cell(tool_result_markup(result), "event")
+            elif event_type == "item.image_attachment":
+                attachment = event.get("attachment") or {}
+                self._append_cell(
+                    f"[dim]image attached[/dim] [cyan]{escape(str(attachment.get('stored_path') or ''))}[/cyan]",
+                    "event",
+                )
+
+    def _append_user_from_history(self, item: dict[str, Any]) -> None:
+        parts = []
+        for content in item.get("content") or []:
+            if content.get("type") in {"input_text", "text"}:
+                parts.append(str(content.get("text") or ""))
+        if parts:
+            self._append_user("\n".join(parts))
+
+    def _model_response_text(self, output: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for item in output:
+            if item.get("type") != "message":
+                continue
+            for content in item.get("content") or []:
+                if content.get("type") in {"output_text", "text"}:
+                    parts.append(str(content.get("text") or ""))
+        return "".join(parts)
+
+    def _open_fullscreen_panel(self, title: str, markup: str, *, subtitle: str = "") -> None:
+        self.push_screen(FullscreenPanel(title=title, body=markup, subtitle=subtitle))
+
+    def _open_picker(
+        self,
+        title: str,
+        items: list[PickerItem],
+        callback: Callable[[str], None],
+        *,
+        subtitle: str = "",
+    ) -> None:
+        def handle(result: str | None) -> None:
+            if result:
+                callback(result)
+            self.query_one("#composer", TextArea).focus()
+
+        self.push_screen(
+            FullscreenPanel(title=title, items=items, subtitle=subtitle),
+            handle,
+        )
+
+    def _open_panel(self, markup: str, name: str | None = None, title: str | None = None) -> None:
+        panel_title = title or (name.title() if name else "Panel")
+        self._open_fullscreen_panel(panel_title, markup, subtitle="Esc closes")
+        self._refresh_status()
 
     def _update_command_suggestions(self, text: str) -> None:
         stripped = text.strip()
@@ -952,7 +1174,6 @@ class UvAgentApp(App[None]):
         if not matches and len(token) > 2:
             query = token.removeprefix("/").lower()
             matches = [spec for spec in COMMANDS if query in spec.description.lower()]
-        matches = matches[:8]
         if not matches:
             matches = [CommandSpec(token, token, "unknown command")]
         self.query_one("#command-suggestions", CommandSuggestions).set_matches(matches)
@@ -993,9 +1214,8 @@ class UvAgentApp(App[None]):
 
     def _flash(self, message: str, *, severity: str = "information") -> None:
         self.notify(message, severity=severity, timeout=2.0)
-        color = "red" if severity == "error" else "yellow" if severity == "warning" else "cyan"
         self._last_status = message
-        self.query_one("#run-status", Static).update(f"[{color}]{escape(message)}[/{color}]")
+        self._refresh_status()
 
     def _refresh_status(self, state: str | None = None) -> None:
         if state is not None:
@@ -1016,22 +1236,11 @@ class UvAgentApp(App[None]):
             spinner = frames[self._spinner_index % len(frames)] + " "
             self._spinner_index += 1
 
-        status = (
-            f"[cyan]{spinner}{escape(state_text)}[/cyan] "
-            f"[dim]· {escape(level_name)} · ctx {escape(context)}{queued}[/dim]"
-        )
-        if self.size.width < 58:
-            hint = "[dim]Ctrl+Enter · /[/dim]"
-        else:
-            hint = "[dim]Enter newline · Ctrl+Enter send · / commands · Ctrl+S details · Ctrl+Q quit[/dim]"
-        self.query_one("#run-status", Static).update(status)
-        self.query_one("#hint-line", Static).update(hint)
-        if self._panel_name == "status":
-            self._panel_markup = self._status_panel_markup()
-            self._render_panel()
-        elif self._panel_name == "context":
-            self._panel_markup = self._context_panel_markup()
-            self._render_panel()
+        left = f"[cyan]{spinner}{escape(state_text)}[/cyan]"
+        compact_context = context.split(" ", 1)[0]
+        right = f"[dim]{escape(level_name)}\nctx {escape(compact_context)}{queued}[/dim]"
+        self.query_one("#composer-left", Static).update(left)
+        self.query_one("#composer-right", Static).update(right)
 
     def _scroll_end(self) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)

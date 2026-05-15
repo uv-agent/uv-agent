@@ -7,8 +7,11 @@ from uv_agent_runtime import (
     ask,
     check_command,
     connect_declared,
+    connect_named,
     connect_stdio,
+    list_declared_servers,
     list_files,
+    look_at,
     read_json,
     read_text,
     run_command,
@@ -69,6 +72,24 @@ def test_runtime_mcp_connect_declared(tmp_path: Path) -> None:
     assert result.value["content"][0]["text"] == "declared"
 
 
+def test_runtime_mcp_lists_and_connects_named(tmp_path: Path) -> None:
+    server = Path(__file__).parent / "fixtures" / "mcp_echo_server.py"
+    agents = tmp_path / ".agents"
+    agents.mkdir()
+    write_json(
+        agents / "mcp.json",
+        {"servers": {"echo": {"command": sys.executable, "args": [str(server)]}}},
+    )
+
+    declared = list_declared_servers(cwd=tmp_path)
+    with connect_named("echo", cwd=tmp_path) as client:
+        client.initialize()
+        result = client.call_tool("echo", {"text": "named"})
+
+    assert declared[0]["name"] == "echo"
+    assert result.value["content"][0]["text"] == "named"
+
+
 def test_runtime_subagent_ask_with_custom_executable() -> None:
     result = ask(
         "ignored",
@@ -77,3 +98,15 @@ def test_runtime_subagent_ask_with_custom_executable() -> None:
     )
 
     assert result.text == "ignored"
+
+
+def test_runtime_look_at_emits_structured_event(tmp_path: Path, capsys) -> None:
+    image = tmp_path / "sample.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    resolved = look_at(image, note="inspect")
+    out = capsys.readouterr().out
+
+    assert resolved == image.resolve()
+    assert '"kind": "look_at"' in out
+    assert '"note": "inspect"' in out

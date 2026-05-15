@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -175,3 +176,64 @@ def connect_declared(
         env=env if isinstance(env, dict) else None,
         timeout_s=timeout_s,
     )
+
+
+def list_declared_servers(
+    *,
+    config_paths: list[str | Path] | None = None,
+    cwd: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """List MCP servers declared in user/project .agents/mcp.json files."""
+    servers: list[dict[str, Any]] = []
+    for scope, path in _candidate_config_paths(config_paths=config_paths, cwd=cwd):
+        if not path.exists():
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        raw_servers = data.get("servers") if isinstance(data, dict) else None
+        if not isinstance(raw_servers, dict):
+            continue
+        for name, value in raw_servers.items():
+            if isinstance(value, dict):
+                servers.append(
+                    {
+                        "name": str(name),
+                        "scope": scope,
+                        "path": str(path),
+                        "description": str(value.get("description") or ""),
+                        "command": value.get("command"),
+                    }
+                )
+    return servers
+
+
+def connect_named(
+    name: str,
+    *,
+    config_paths: list[str | Path] | None = None,
+    cwd: str | Path | None = None,
+    timeout_s: float | None = 30,
+) -> McpStdioClient:
+    """Connect to a named MCP server from project or user declarations."""
+    for _scope, path in _candidate_config_paths(config_paths=config_paths, cwd=cwd):
+        if not path.exists():
+            continue
+        try:
+            return connect_declared(name, config_path=path, cwd=str(cwd) if cwd else None, timeout_s=timeout_s)
+        except KeyError:
+            continue
+    raise KeyError(f"MCP server not declared: {name}")
+
+
+def _candidate_config_paths(
+    *,
+    config_paths: list[str | Path] | None,
+    cwd: str | Path | None,
+) -> list[tuple[str, Path]]:
+    if config_paths is not None:
+        return [(f"custom:{index}", Path(path)) for index, path in enumerate(config_paths)]
+    root = Path(cwd or Path.cwd()).resolve()
+    home = Path(os.path.expanduser("~")).resolve()
+    return [
+        ("project", root / ".agents" / "mcp.json"),
+        ("user", home / ".agents" / "mcp.json"),
+    ]

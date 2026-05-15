@@ -47,3 +47,4 @@ class PythonRunResult:
     run_log_path: Path
     script_path: Path
     final_script_path: Path
+    events: list[dict[str, Any]] = field(default_factory=list)

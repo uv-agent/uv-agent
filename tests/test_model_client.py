@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from uv_agent.config import EndpointConfig, ModelConfig, ProviderConfig
 from uv_agent.model_client import (
+    anthropic_image_source,
     anthropic_messages,
     anthropic_payload,
+    chat_message_content,
     chat_messages,
     chat_payload,
     parse_anthropic_response,
@@ -145,3 +147,23 @@ def test_parse_anthropic_response_maps_tool_use() -> None:
     assert response.output_text == "hello"
     assert response.output[1]["type"] == "function_call"
     assert response.output[1]["call_id"] == "toolu_1"
+
+
+def test_image_parts_convert_for_chat_and_anthropic() -> None:
+    item = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "look"},
+            {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+        ],
+    }
+
+    chat = chat_message_content(item)
+    anthropic = anthropic_messages([item])[0]["content"]
+
+    assert isinstance(chat, list)
+    assert chat[1]["type"] == "image_url"
+    assert isinstance(anthropic, list)
+    assert anthropic[1]["source"]["media_type"] == "image/png"
+    assert anthropic_image_source("https://example.com/image.png") is None

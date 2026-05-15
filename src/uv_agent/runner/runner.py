@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -154,6 +155,7 @@ class PythonRunner:
 
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
+        structured_events: list[dict[str, Any]] = []
         byte_count = {"value": 0}
         truncated = {"value": False}
         returncode: int | None = None
@@ -172,6 +174,7 @@ class PythonRunner:
                     process.stdout,
                     writer,
                     stdout_parts,
+                    structured_events,
                     run_id,
                     script_id,
                     byte_count,
@@ -184,6 +187,7 @@ class PythonRunner:
                     process.stderr,
                     writer,
                     stderr_parts,
+                    structured_events,
                     run_id,
                     script_id,
                     byte_count,
@@ -220,6 +224,7 @@ class PythonRunner:
             run_log_path=run_log_path,
             script_path=original_path,
             final_script_path=final_path,
+            events=structured_events,
         )
         completed = {
             "type": "run.completed",
@@ -239,6 +244,7 @@ class PythonRunner:
         stream: asyncio.StreamReader | None,
         writer: JsonlWriter,
         sink: list[str],
+        structured_events: list[dict[str, Any]],
         run_id: str,
         script_id: str,
         byte_count: dict[str, int],
@@ -268,6 +274,10 @@ class PythonRunner:
                     )
                 continue
             sink.append(text)
+            if stream_name == "stdout":
+                parsed = parse_structured_event(text)
+                if parsed is not None:
+                    structured_events.append(parsed)
             writer.write(
                 {
                     "type": f"run.{stream_name}",
@@ -284,3 +294,17 @@ class PythonRunner:
             if arg not in merged:
                 merged.append(arg)
         return merged
+
+
+def parse_structured_event(text: str) -> dict[str, Any] | None:
+    """Parse one uv_agent_runtime.emit_event JSON line if present."""
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        value = json.loads(stripped)
+    except Exception:
+        return None
+    if not isinstance(value, dict) or "kind" not in value:
+        return None
+    return value

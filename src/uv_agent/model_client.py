@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -552,7 +553,7 @@ def chat_messages(input_items: list[dict[str, Any]], instructions: str | None) -
         item_type = item.get("type")
         if item_type == "message":
             role = item.get("role", "user")
-            messages.append({"role": role, "content": message_text(item)})
+            messages.append({"role": role, "content": chat_message_content(item)})
         elif item_type == "function_call":
             messages.append(
                 {
@@ -586,7 +587,13 @@ def anthropic_messages(input_items: list[dict[str, Any]]) -> list[dict[str, Any]
         item_type = item.get("type")
         if item_type == "message":
             role = item.get("role", "user")
-            messages.append({"role": "assistant" if role == "assistant" else "user", "content": message_text(item)})
+            content = anthropic_message_content(item)
+            messages.append(
+                {
+                    "role": "assistant" if role == "assistant" else "user",
+                    "content": content,
+                }
+            )
         elif item_type == "function_call":
             messages.append(
                 {
@@ -623,6 +630,57 @@ def message_text(item: dict[str, Any]) -> str:
         if content.get("type") in {"input_text", "output_text", "text"}:
             parts.append(content.get("text", ""))
     return "\n".join(parts)
+
+
+def chat_message_content(item: dict[str, Any]) -> str | list[dict[str, Any]]:
+    """Return Chat Completions content, preserving image parts when present."""
+    parts: list[dict[str, Any]] = []
+    has_image = False
+    for content in item.get("content") or []:
+        content_type = content.get("type")
+        if content_type in {"input_text", "output_text", "text"}:
+            parts.append({"type": "text", "text": content.get("text", "")})
+        elif content_type == "input_image":
+            image_url = content.get("image_url") or content.get("url")
+            if image_url:
+                has_image = True
+                parts.append({"type": "image_url", "image_url": {"url": image_url}})
+    if has_image:
+        return parts
+    return "\n".join(part.get("text", "") for part in parts)
+
+
+def anthropic_message_content(item: dict[str, Any]) -> str | list[dict[str, Any]]:
+    """Return Anthropic content, preserving base64 data URL image parts."""
+    parts: list[dict[str, Any]] = []
+    has_image = False
+    for content in item.get("content") or []:
+        content_type = content.get("type")
+        if content_type in {"input_text", "output_text", "text"}:
+            parts.append({"type": "text", "text": content.get("text", "")})
+        elif content_type == "input_image":
+            image_url = content.get("image_url") or content.get("url")
+            source = anthropic_image_source(str(image_url or ""))
+            if source:
+                has_image = True
+                parts.append({"type": "image", "source": source})
+    if has_image:
+        return parts
+    return "\n".join(part.get("text", "") for part in parts)
+
+
+def anthropic_image_source(data_url: str) -> dict[str, str] | None:
+    prefix = "data:"
+    marker = ";base64,"
+    if not data_url.startswith(prefix) or marker not in data_url:
+        return None
+    media_type, data = data_url[len(prefix) :].split(marker, 1)
+    data = re.sub(r"\s+", "", data)
+    return {
+        "type": "base64",
+        "media_type": media_type,
+        "data": data,
+    }
 
 
 def chat_tool(tool: dict[str, Any]) -> dict[str, Any]:
