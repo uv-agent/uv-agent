@@ -141,7 +141,7 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 
 - `Enter`: insert a newline in the composer
 - `Ctrl+Enter` or `Ctrl+J`: send the composer text
-- `Esc`: close command suggestions, clear the composer, or close the open panel
+- `Esc`: clear the composer or close the open panel
 - `Ctrl+S` or `/status`: open detailed runtime status
 - `Ctrl+O` or `/threads`: open a searchable thread picker and resume history
 - `Ctrl+P`: open a full-screen command palette
@@ -159,7 +159,7 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `/panel`: reminder that panels close with `Esc`
 - Python runs appear inline with script/run ids, exit status, stdout/stderr summaries, and truncation markers
 - Reasoning/tool/runtime events appear as compact timeline entries; detailed run output remains available in `/runs`.
-- Typing `/` opens live command suggestions; `Tab`, `Enter`, and arrow keys work inside the picker.
+- Typing `/` opens the full-screen command picker; `Ctrl+P` opens the same picker. Type to filter, use arrows/PageUp/PageDown to move, and Enter to select.
 - Temporary panels open as full-screen overlays with search/scroll/select behavior.
 
 For manual UI checks, Textual's `App.export_screenshot()` works in headless

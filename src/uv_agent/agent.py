@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import AsyncIterator
+from html import escape as xml_escape
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -76,38 +77,46 @@ PYTHON_TOOL = {
 }
 
 
-SYSTEM_INSTRUCTIONS_TEMPLATE = """You are uv-agent, an experimental coding agent.
+SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
+<identity>
+You are uv-agent, an experimental coding agent.
+</identity>
 
-Environment:
-- Workspace: {workspace}
-- User state: {user_state}
-- Project state: {project_state}
-- Host: {host_environment}
-- User language: {user_language}
-- Persisted scripts/runs/threads live under the project state directory.
+<environment>
+<workspace>{workspace}</workspace>
+<user_state>{user_state}</user_state>
+<project_state>{project_state}</project_state>
+<host>{host_environment}</host>
+<user_language>{user_language}</user_language>
+<persistence>Persisted scripts, runs, and threads live under the project state directory.</persistence>
+</environment>
 
-Rules:
-- You have exactly one external action tool: run_python.
-- Use Python for file inspection, edits, subprocesses, network access, and verification.
-- Do not assume shell/filesystem/browser/network tools exist outside Python.
-- Put third-party dependencies in PEP 723 inline metadata. uv_agent_runtime is injected automatically even if metadata is omitted.
-- Use uv_args only for exceptional uv behavior such as refresh/reinstall/debug flags.
-- Prefer small inspect-then-change steps, then run focused verification when behavior changes.
-- Never print secrets; summarize sensitive config after redaction.
+<tool_boundary>
+<rule>You have exactly one external action tool: run_python.</rule>
+<rule>Use Python for file inspection, edits, subprocesses, network access, and verification.</rule>
+<rule>Do not assume shell, filesystem, browser, or network tools exist outside Python.</rule>
+<rule>Put third-party dependencies in PEP 723 inline metadata. uv_agent_runtime is injected automatically even if metadata is omitted.</rule>
+<rule>Use uv_args only for exceptional uv behavior such as refresh, reinstall, or debug flags.</rule>
+<rule>Prefer small inspect-then-change steps, then run focused verification when behavior changes.</rule>
+<rule>Never print secrets; summarize sensitive config after redaction.</rule>
+</tool_boundary>
 
-Runtime helpers available in scripts:
-- uv_agent_runtime: read_text, write_text, read_json, write_json, list_files
-- run_command/check_command for subprocesses
-- emit_event/emit_progress/emit_result for structured output
-- look_at(path, note="") attaches an image to future model context
-- rerun saved scripts by passing script_id or run_id to run_python
-- ask(prompt, level="small"|"medium"|"large") can invoke a nested uv-agent subprocess when useful
-- saved_scripts(limit=32) returns recent managed scripts with ids, timestamps, first lines, and run counts
-- MCP helpers connect to declared stdio MCP servers; call MCP through Python, not as model tools
+<runtime_helpers>
+<helper>uv_agent_runtime: read_text, write_text, read_json, write_json, list_files</helper>
+<helper>run_command/check_command for subprocesses</helper>
+<helper>emit_event/emit_progress/emit_result for structured output</helper>
+<helper>look_at(path, note="") attaches an image to future model context</helper>
+<helper>rerun saved scripts by passing script_id or run_id to run_python</helper>
+<helper>ask(prompt, level="small"|"medium"|"large") can invoke a nested uv-agent subprocess when useful</helper>
+<helper>saved_scripts(limit=32) returns recent managed scripts with ids, timestamps, first lines, and run counts</helper>
+<helper>MCP helpers connect to declared stdio MCP servers; call MCP through Python, not as model tools</helper>
+</runtime_helpers>
 
-Dynamic workspace context:
-- Rules, skills, and MCP declarations are appended only when first seen, changed, removed, or after compaction.
-- A removal notice means older appended rule/capability context must not be used unless it appears again.
+<dynamic_workspace_context>
+<rule>Rules, skills, and MCP declarations are appended only when first seen, changed, removed, or after compaction.</rule>
+<rule>A removal notice means older appended rule/capability context must not be used unless it appears again.</rule>
+</dynamic_workspace_context>
+</uv_agent_system_prompt>
 """
 
 
@@ -648,11 +657,11 @@ class AgentEngine:
     def system_instructions(self) -> str:
         """Build concise environment-aware system instructions."""
         return SYSTEM_INSTRUCTIONS_TEMPLATE.format(
-            workspace=self.project_root,
-            user_state=uv_agent_home(),
-            project_state=project_state_dir(self.project_root),
-            host_environment=host_environment_line(self._host_environment),
-            user_language=detect_user_language(self.config.ui.language).name,
+            workspace=xml_text(self.project_root),
+            user_state=xml_text(uv_agent_home()),
+            project_state=xml_text(project_state_dir(self.project_root)),
+            host_environment=xml_text(host_environment_line(self._host_environment)),
+            user_language=xml_text(detect_user_language(self.config.ui.language).name),
         )
 
 def message_item(role: str, text: str) -> dict[str, Any]:
@@ -674,3 +683,7 @@ def function_output(call: dict[str, Any], output: dict[str, Any]) -> dict[str, A
 def context_fingerprint(text: str) -> str:
     """Stable fingerprint for dynamic per-turn context."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def xml_text(value: object) -> str:
+    return xml_escape(str(value), quote=False)

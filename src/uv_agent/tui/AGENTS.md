@@ -12,7 +12,7 @@ Textual shell for the uv-agent conversation experience.
 
 - 默认界面保持 Codex-style：单一主时间线 + 底部 composer/status，不恢复固定三栏 dashboard。
 - 默认状态行保持低信息密度；模型、API、thread、state paths 等细节放入 `/status` 或临时面板。
-- Composer 是多行输入：Enter 换行，Ctrl+Enter/Ctrl+J 发送；斜杠命令需要即时提示，Tab 可补全首个匹配。
+- Composer 是多行输入：Enter 换行，Ctrl+Enter/Ctrl+J 发送；输入 `/` 打开全屏命令 picker，键盘和鼠标路径都必须可用。
 - 退出必须避免误触：Ctrl+Q、Ctrl+C 或 `/quit` 均需二次确认；Windows 下要拦截控制台 Ctrl+C 事件。
 - Python 工具调用必须作为 transcript 内联事件显示；长运行任务先显示 running，再更新为 exit/stdout/stderr 摘要。
 - 配置、threads、run 详情使用临时面板显示，默认不占据主界面。

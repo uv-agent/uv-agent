@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from rich.markdown import Markdown
 from rich.markup import escape
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -43,6 +44,10 @@ class PickerItem:
     title: str
     description: str = ""
     meta: str = ""
+
+
+class PickerOptionList(OptionList):
+    ALLOW_SELECT = True
 
 
 class FullscreenPanel(ModalScreen[str | None]):
@@ -114,6 +119,11 @@ class FullscreenPanel(ModalScreen[str | None]):
     BINDINGS = [
         Binding("escape", "dismiss_panel", "Close", priority=True, show=False),
         Binding("ctrl+c", "dismiss_panel", "Close", priority=True, show=False),
+        Binding("up", "cursor_up", "Up", priority=True, show=False),
+        Binding("down", "cursor_down", "Down", priority=True, show=False),
+        Binding("pageup", "page_up", "Page up", priority=True, show=False),
+        Binding("pagedown", "page_down", "Page down", priority=True, show=False),
+        Binding("enter", "select_or_close", "Select", priority=True, show=False),
     ]
 
     def __init__(
@@ -123,13 +133,16 @@ class FullscreenPanel(ModalScreen[str | None]):
         body: str = "",
         items: list[PickerItem] | None = None,
         subtitle: str = "",
+        initial_filter: str = "",
     ) -> None:
         super().__init__()
         self.panel_title = title
         self.body = body
         self.items = items or []
         self.subtitle = subtitle
+        self.initial_filter = initial_filter.strip()
         self._filtered = list(self.items)
+        self._option_ids: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="panel-shell"):
@@ -137,58 +150,147 @@ class FullscreenPanel(ModalScreen[str | None]):
             yield Static(self.subtitle, id="panel-subtitle")
             if self.items:
                 yield Input(placeholder=getattr(self.app, "_text", lambda key: key)("filter"), id="panel-filter")
-                yield OptionList(id="panel-content")
+                yield PickerOptionList(id="panel-content", compact=False)
             else:
                 yield VerticalScroll(Static(self.body, markup=True), id="panel-body")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def on_mount(self) -> None:
         if self.items:
-            self._refresh_options()
-            self.query_one("#panel-filter", Input).focus()
+            filter_input = self.query_one("#panel-filter", Input)
+            if self.initial_filter:
+                filter_input.value = self.initial_filter
+                self._apply_filter(self.initial_filter)
+            else:
+                self._refresh_options()
+            self.query_one("#panel-content", OptionList).focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "panel-filter":
             return
-        query = event.value.casefold().strip()
+        self._apply_filter(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "panel-filter":
+            return
+        event.stop()
+        self.action_select_or_close()
+
+    def on_key(self, event: events.Key) -> None:
+        actions = {
+            "up": self.action_cursor_up,
+            "down": self.action_cursor_down,
+            "pageup": self.action_page_up,
+            "page_up": self.action_page_up,
+            "pagedown": self.action_page_down,
+            "page_down": self.action_page_down,
+            "enter": self.action_select_or_close,
+        }
+        action = actions.get(event.key)
+        if action is not None:
+            event.stop()
+            action()
+            return
+        if not self.items:
+            return
+        filter_input = self.query_one("#panel-filter", Input)
+        if event.key == "backspace":
+            event.stop()
+            filter_input.value = filter_input.value[:-1]
+            self._apply_filter(filter_input.value)
+            return
+        if event.key in {"ctrl+u", "ctrl+w"}:
+            event.stop()
+            filter_input.value = ""
+            self._apply_filter("")
+            return
+        if event.character and not event.key.startswith("ctrl+"):
+            event.stop()
+            filter_input.value += event.character
+            self._apply_filter(filter_input.value)
+
+    def _apply_filter(self, value: str) -> None:
+        query = value.casefold().strip()
         if not query:
             self._filtered = list(self.items)
         else:
-            self._filtered = [
+            prefix_matches = [
+                item for item in self.items if item.title.casefold().lstrip("/").startswith(query.lstrip("/"))
+            ]
+            contains_matches = [
                 item
                 for item in self.items
-                if query in (item.title + " " + item.description + " " + item.meta).casefold()
+                if item not in prefix_matches
+                and query in (item.title + " " + item.description + " " + item.meta).casefold()
             ]
+            self._filtered = prefix_matches + contains_matches
         self._refresh_options()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_id:
-            self.dismiss(event.option_id)
+            self.dismiss(self._option_ids.get(event.option_id, event.option_id))
 
     def action_dismiss_panel(self) -> None:
         self.dismiss(None)
 
+    def action_cursor_up(self) -> None:
+        if self.items:
+            self.query_one("#panel-content", OptionList).action_cursor_up()
+            return
+        self.query_one("#panel-body", VerticalScroll).action_scroll_up()
+
+    def action_cursor_down(self) -> None:
+        if self.items:
+            self.query_one("#panel-content", OptionList).action_cursor_down()
+            return
+        self.query_one("#panel-body", VerticalScroll).action_scroll_down()
+
+    def action_page_up(self) -> None:
+        if self.items:
+            self.query_one("#panel-content", OptionList).action_page_up()
+            return
+        self.query_one("#panel-body", VerticalScroll).action_page_up()
+
+    def action_page_down(self) -> None:
+        if self.items:
+            self.query_one("#panel-content", OptionList).action_page_down()
+            return
+        self.query_one("#panel-body", VerticalScroll).action_page_down()
+
+    def action_select_or_close(self) -> None:
+        if not self.items:
+            self.dismiss(None)
+            return
+        option_list = self.query_one("#panel-content", OptionList)
+        highlighted = option_list.highlighted
+        if highlighted is None or highlighted < 0 or highlighted >= option_list.option_count:
+            return
+        option = option_list.get_option_at_index(highlighted)
+        if option.id:
+            self.dismiss(self._option_ids.get(option.id, option.id))
+
     def _refresh_options(self) -> None:
-        options = [
-            Option(
-                f"[bold cyan]{escape(item.title)}[/bold cyan]"
-                + (f"\n[dim]{escape(item.description)}[/dim]" if item.description else "")
-                + (f"\n[dim]{escape(item.meta)}[/dim]" if item.meta else ""),
-                id=item.id,
+        self._option_ids = {}
+        options = []
+        for index, item in enumerate(self._filtered):
+            option_id = f"item_{index}"
+            self._option_ids[option_id] = item.id
+            options.append(
+                Option(
+                    f"[bold cyan]{escape(item.title)}[/bold cyan]"
+                    + (f"\n[dim]{escape(item.description)}[/dim]" if item.description else "")
+                    + (f"\n[dim]{escape(item.meta)}[/dim]" if item.meta else ""),
+                    id=option_id,
+                )
             )
-            for item in self._filtered
-        ]
         if not options:
             label = getattr(self.app, "_text", lambda key: key)("no_matches")
             options = [Option(f"[dim]{escape(label)}[/dim]", id="")]
-        self.query_one("#panel-content", OptionList).set_options(options)
-
-
-@dataclass(frozen=True)
-class CommandSpec:
-    name: str
-    usage: str
-    description: str
+        option_list = self.query_one("#panel-content", OptionList)
+        previous = option_list.highlighted
+        option_list.set_options(options)
+        if options:
+            option_list.highlighted = min(previous if previous is not None else 0, len(options) - 1)
 
 
 COMMAND_SPECS = [
@@ -210,6 +312,13 @@ COMMAND_SPECS = [
     ("/quit", "/quit"),
     ("/help", "/help"),
 ]
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    name: str
+    usage: str
+    description: str
 
 
 class EmptyState(Static):
@@ -243,76 +352,6 @@ class EmptyState(Static):
             f"[dim]{escape(text('ready_subtitle'))} {escape(frame)}[/dim]\n"
             f"[dim]{escape(text('ready_hint'))}[/dim]"
         )
-
-
-class CommandSuggestions(Static):
-    """Command picker shown above the composer."""
-
-    DEFAULT_CSS = """
-    CommandSuggestions {
-        height: auto;
-        max-height: 9;
-        border: tall #34465d;
-        padding: 1 1;
-        margin: 0 0 1 0;
-        background: #101923;
-        color: #d6e2ef;
-    }
-
-    CommandSuggestions.hidden {
-        display: none;
-    }
-    """
-
-    def __init__(self, *, id: str) -> None:
-        super().__init__("", id=id, classes="hidden")
-        self.matches: list[CommandSpec] = []
-        self.selected_index = 0
-
-    def set_matches(self, matches: list[CommandSpec]) -> None:
-        self.matches = matches
-        self.selected_index = 0
-        self._refresh_options()
-        self.remove_class("hidden")
-
-    def clear(self) -> None:
-        self.matches = []
-        self.selected_index = 0
-        self.update("")
-        self.add_class("hidden")
-
-    def move(self, delta: int) -> None:
-        if not self.matches:
-            return
-        self.selected_index = (self.selected_index + delta) % len(self.matches)
-        self._refresh_options()
-
-    def choose(self) -> str | None:
-        if not self.matches:
-            return None
-        return self.matches[self.selected_index].name
-
-    def _refresh_options(self) -> None:
-        text = getattr(self.app, "_text", lambda key: key)
-        lines = [f"[bold]{escape(text('commands'))}[/bold] [dim]{escape(text('command_hint'))}[/dim]"]
-        visible_start = max(0, min(self.selected_index - 6, max(0, len(self.matches) - 8)))
-        visible = self.matches[visible_start : visible_start + 8]
-        if visible_start:
-            lines.append(f"[dim]... {visible_start} above[/dim]")
-        for offset, spec in enumerate(visible):
-            index = visible_start + offset
-            active = index == self.selected_index
-            prefix = "[reverse]›[/reverse]" if active else " "
-            command_style = "bold cyan" if active else "cyan"
-            desc_style = "white" if active else "dim"
-            lines.append(
-                f"{prefix} [{command_style}]{escape(spec.usage):<18}[/{command_style}] "
-                f"[{desc_style}]{escape(spec.description)}[/{desc_style}]"
-            )
-        remaining = len(self.matches) - visible_start - len(visible)
-        if remaining > 0:
-            lines.append(f"[dim]... {remaining} below[/dim]")
-        self.update("\n".join(lines))
 
 
 class TranscriptCell(Static):
@@ -390,10 +429,6 @@ class UvAgentApp(App[None]):
         background: #0b0f14;
     }
 
-    #composer-shell.command-mode {
-        background: #0b0f14;
-    }
-
     #composer-meta {
         height: 1;
         color: #8fa2b8;
@@ -428,9 +463,6 @@ class UvAgentApp(App[None]):
         Binding("ctrl+enter", "submit_composer", "Send", priority=True),
         Binding("ctrl+j", "submit_composer", "Send", priority=True),
         Binding("tab", "complete_command", "Complete", priority=True),
-        Binding("up", "command_up", "Command up", priority=True),
-        Binding("down", "command_down", "Command down", priority=True),
-        Binding("enter", "command_accept", "Command accept", priority=True),
         Binding("ctrl+s", "toggle_status_panel", "Status", priority=True),
         Binding("ctrl+o", "open_threads", "Threads", priority=True),
         Binding("ctrl+p", "open_command_palette", "Commands", priority=True),
@@ -469,7 +501,6 @@ class UvAgentApp(App[None]):
             with VerticalScroll(id="transcript"):
                 yield EmptyState(id="empty-state")
             with Vertical(id="bottom-pane"):
-                yield CommandSuggestions(id="command-suggestions")
                 with Vertical(id="composer-shell"):
                     yield Static("", id="composer-meta")
                     yield TextArea(
@@ -501,8 +532,12 @@ class UvAgentApp(App[None]):
         if event.text_area.id != "composer":
             return
         self._resize_composer(event.text_area.text)
-        self._update_command_suggestions(event.text_area.text)
         self._refresh_status()
+        stripped = event.text_area.text.strip()
+        if stripped == "/":
+            event.text_area.load_text("")
+            self._resize_composer("")
+            self._open_command_palette()
 
     def _tick(self) -> None:
         if not self._transcript_has_content:
@@ -529,7 +564,6 @@ class UvAgentApp(App[None]):
             self._flash(self._text("write_first"))
             return
         composer.load_text("")
-        self._hide_command_suggestions()
         self._resize_composer("")
         if "\n" not in prompt and self._handle_command(prompt):
             return
@@ -597,9 +631,6 @@ class UvAgentApp(App[None]):
                 self._start_turn(next_prompt)
 
     def action_clear_input(self) -> None:
-        if self._command_panel_visible():
-            self._hide_command_suggestions()
-            return
         composer = self.query_one("#composer", TextArea)
         if composer.text:
             composer.load_text("")
@@ -630,39 +661,10 @@ class UvAgentApp(App[None]):
         self._open_command_palette()
 
     def action_complete_command(self) -> None:
-        panel = self.query_one("#command-suggestions", CommandSuggestions)
-        if self._command_panel_visible():
-            command = panel.choose()
-            if command is not None:
-                self._apply_command_completion(command)
-            return
         composer = self.query_one("#composer", TextArea)
-        replacement = self._command_completion(composer.text)
-        if replacement is None:
+        if not composer.text.strip().startswith("/"):
             return
-        composer.load_text(replacement)
-        self._resize_composer(replacement)
-        self._update_command_suggestions(replacement)
-
-    def action_command_up(self) -> None:
-        if self._command_panel_visible():
-            self.query_one("#command-suggestions", CommandSuggestions).move(-1)
-            return
-        self.query_one("#composer", TextArea).action_cursor_up()
-
-    def action_command_down(self) -> None:
-        if self._command_panel_visible():
-            self.query_one("#command-suggestions", CommandSuggestions).move(1)
-            return
-        self.query_one("#composer", TextArea).action_cursor_down()
-
-    def action_command_accept(self) -> None:
-        if self._command_panel_visible():
-            command = self.query_one("#command-suggestions", CommandSuggestions).choose()
-            if command is not None:
-                self._apply_command_completion(command)
-            return
-        self.query_one("#composer", TextArea).insert("\n")
+        self._open_command_palette(query=composer.text.strip().removeprefix("/"))
 
     def action_help(self) -> None:
         self._open_help_panel()
@@ -1161,7 +1163,7 @@ class UvAgentApp(App[None]):
             "event",
         )
 
-    def _open_command_palette(self) -> None:
+    def _open_command_palette(self, *, query: str = "") -> None:
         items = [
             PickerItem(
                 id=spec.name,
@@ -1175,6 +1177,7 @@ class UvAgentApp(App[None]):
             items,
             self._choose_command,
             subtitle=self._text("command_filter_hint"),
+            initial_filter=query,
         )
 
     def _choose_command(self, command: str) -> None:
@@ -1182,7 +1185,11 @@ class UvAgentApp(App[None]):
         if spec is None:
             return
         if "[" in spec.usage:
-            self._apply_command_completion(command)
+            replacement = command + " "
+            composer = self.query_one("#composer", TextArea)
+            composer.load_text(replacement)
+            self._resize_composer(replacement)
+            composer.focus()
             return
         self._handle_command(command)
 
@@ -1258,6 +1265,7 @@ class UvAgentApp(App[None]):
         callback: Callable[[str], None],
         *,
         subtitle: str = "",
+        initial_filter: str = "",
     ) -> None:
         def handle(result: str | None) -> None:
             if result:
@@ -1265,7 +1273,7 @@ class UvAgentApp(App[None]):
             self.query_one("#composer", TextArea).focus()
 
         self.push_screen(
-            FullscreenPanel(title=title, items=items, subtitle=subtitle),
+            FullscreenPanel(title=title, items=items, subtitle=subtitle, initial_filter=initial_filter),
             handle,
         )
 
@@ -1273,54 +1281,6 @@ class UvAgentApp(App[None]):
         panel_title = title or (name.title() if name else self._text("panel"))
         self._open_fullscreen_panel(panel_title, markup, subtitle=self._text("panel_closes"))
         self._refresh_status()
-
-    def _update_command_suggestions(self, text: str) -> None:
-        stripped = text.strip()
-        if not stripped.startswith("/") or "\n" in stripped or " " in stripped:
-            self._hide_command_suggestions()
-            return
-        token = stripped.split(" ", 1)[0]
-        commands = self._commands()
-        exact = next((spec for spec in commands if spec.name == token), None)
-        if exact is not None and "[" not in exact.usage:
-            self._hide_command_suggestions()
-            return
-        matches = [spec for spec in commands if spec.name.startswith(token)]
-        if not matches and len(token) > 2:
-            query = token.removeprefix("/").lower()
-            matches = [spec for spec in commands if query in spec.description.lower()]
-        if not matches:
-            matches = [CommandSpec(token, token, self._text("unknown_command_description"))]
-        self.query_one("#command-suggestions", CommandSuggestions).set_matches(matches)
-        self.query_one("#composer-shell", Vertical).add_class("command-mode")
-
-    def _command_completion(self, text: str) -> str | None:
-        stripped = text.strip()
-        if not stripped.startswith("/") or "\n" in stripped or " " in stripped:
-            return None
-        matches = [spec for spec in self._commands() if spec.name.startswith(stripped)]
-        if not matches:
-            return None
-        command = matches[0].name
-        needs_arg = "[" in matches[0].usage
-        return command + (" " if needs_arg else "")
-
-    def _apply_command_completion(self, command: str) -> None:
-        spec = next((item for item in self._commands() if item.name == command), None)
-        needs_arg = spec is not None and "[" in spec.usage
-        replacement = command + (" " if needs_arg else "")
-        composer = self.query_one("#composer", TextArea)
-        composer.load_text(replacement)
-        self._resize_composer(replacement)
-        self._hide_command_suggestions()
-        composer.focus()
-
-    def _hide_command_suggestions(self) -> None:
-        self.query_one("#command-suggestions", CommandSuggestions).clear()
-        self.query_one("#composer-shell", Vertical).remove_class("command-mode")
-
-    def _command_panel_visible(self) -> bool:
-        return not self.query_one("#command-suggestions", CommandSuggestions).has_class("hidden")
 
     def _resize_composer(self, text: str) -> None:
         line_count = max(1, text.count("\n") + 1)

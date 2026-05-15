@@ -18,7 +18,7 @@ from uv_agent.config import (
 from uv_agent.model_client import FakeModelClient
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
-from uv_agent.tui.app import CommandSuggestions, FullscreenPanel, UvAgentApp
+from uv_agent.tui.app import FullscreenPanel, UvAgentApp
 
 
 def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
@@ -65,16 +65,15 @@ async def test_tui_command_palette_completes_without_blocking_newlines(
 
     async with app.run_test(size=(90, 24)) as pilot:
         await pilot.press("/")
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
         await pilot.press("s")
-        suggestions = app.query_one("#command-suggestions", CommandSuggestions)
-        assert not suggestions.has_class("hidden")
         await pilot.press("enter")
-        composer = app.query_one("#composer", TextArea)
-        assert composer.text == "/status"
-        assert suggestions.has_class("hidden")
-        await pilot.press("end")
-        await pilot.press("enter")
-        assert composer.text == "/status\n"
+        await pilot.pause()
+        status_panel = app.screen_stack[-1]
+        assert isinstance(status_panel, FullscreenPanel)
+        assert "258K" in status_panel.body
 
 
 @pytest.mark.asyncio
@@ -95,6 +94,56 @@ async def test_tui_status_panel_opens_fullscreen_overlay(
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
         assert "258K" in panel.body
+
+
+@pytest.mark.asyncio
+async def test_tui_command_picker_supports_keyboard_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert isinstance(app.screen_stack[-1], FullscreenPanel)
+
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        threads_panel = app.screen_stack[-1]
+        assert isinstance(threads_panel, FullscreenPanel)
+        assert threads_panel.panel_title == app._text("threads")
+
+
+@pytest.mark.asyncio
+async def test_tui_command_picker_prefills_argument_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.press("l")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        composer = app.query_one("#composer", TextArea)
+        assert composer.text == "/level "
 
 
 @pytest.mark.asyncio
@@ -141,7 +190,7 @@ async def test_tui_thread_picker_resumes_and_renders_history(
         await pilot.pause()
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
-        panel.dismiss(thread_id)
+        await pilot.press("enter")
         await pilot.pause()
 
         assert app.thread_id == thread_id
