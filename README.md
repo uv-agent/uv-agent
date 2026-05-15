@@ -37,13 +37,13 @@ Minimal shape:
       "provider": "local",
       "model": "gpt-5.5",
       "api": "responses",
-      "context_window_tokens": 200000
+      "context_window_tokens": 258000
     },
     "chat": {
       "provider": "local",
       "model": "gpt-5.4-mini",
       "api": "chat_completions",
-      "context_window_tokens": 200000
+      "context_window_tokens": 258000
     }
   },
   "levels": {
@@ -59,13 +59,26 @@ Supported model APIs:
 - `chat_completions`
 - `anthropic_messages`
 
-Both are streamed with SSE when the provider supports streaming.
+Streaming uses SSE when the provider supports it.
+
+Compression can be tuned under `runtime.compression` with `trigger_ratio`,
+`target_ratio`, and `min_tokens`. The TUI reads provider `usage` when available
+and falls back to a local estimate for the context meter.
 
 ## Runtime Scripts
 
 Agent scripts declare dependencies with PEP 723 inline metadata. The runner records managed script artifacts, run JSONL, and thread JSONL under `~/.uv-agent/projects/<project-id>/`, injects the configured runtime dependency into inline metadata when needed, and supports rerunning saved scripts.
 
 `uv_agent_runtime` exposes convenience helpers for text/JSON files, subprocesses, structured events, nested `uv-agent ask` calls, and MCP stdio servers declared in `.agents/mcp.json`.
+
+## Workspace Rules
+
+`AGENTS.md` context is loaded from `~/.agents/AGENTS.md` and from the current
+git root down to the startup directory, including `AGENTS.*.md` variants.
+These rules are appended to each model request as workspace context instead of
+being baked into the stable system prompt, so they can change without poisoning
+prompt-cache reuse. The thread JSONL stores only the user message and model/tool
+events, not the expanded rule text.
 
 ## TUI
 
@@ -77,6 +90,8 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `Ctrl+S` or `/status`: toggle detailed runtime status
 - `Ctrl+Q`, `Ctrl+C`, or `/quit`: quit after a second confirmation
 - `?` + `Ctrl+Enter` or `/help`: show local commands
+- `/context`: show context budget and loaded workspace rules
+- `/rules`: inspect loaded `AGENTS.md` files
 - `/new [title]`, `/threads`, and `/clear`: light thread controls
 - `/config`: show config sources and redacted merged config
 - `/models` and `/level [name]`: inspect and switch configured model levels
@@ -85,4 +100,9 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `/runs`: show the latest Python run summary from this TUI session
 - `/panel`: close the temporary panel
 - Python runs appear inline with script/run ids, exit status, stdout/stderr summaries, and truncation markers
-- Typing `/` opens live command suggestions; `Tab` completes the first match.
+- Typing `/` opens live command suggestions; `Tab`, `Enter`, and arrow keys work inside the picker.
+- Wide terminals show temporary panels in a right drawer; narrow terminals collapse them above the composer.
+
+For manual UI checks, Textual's `App.export_screenshot()` works in headless
+tests and writes SVG snapshots. Local debug captures belong under `.uv-agent/`
+so they stay out of git.

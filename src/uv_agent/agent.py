@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from uv_agent.config import AppConfig
+from uv_agent.context import ContextStats, compact_target_tokens, estimate_tokens, usage_token_count
 from uv_agent.ids import new_id
 from uv_agent.mcp_config import discover_mcp_servers, render_mcp_summary
 from uv_agent.model_client import ModelClient, ModelResponse
 from uv_agent.paths import project_state_dir, uv_agent_home
+from uv_agent.project_rules import ProjectRuleContext, load_project_rules
 from uv_agent.runner import PythonRunRequest, PythonRunner
 from uv_agent.session.store import ThreadStore
 from uv_agent.skills import discover_skills, render_skill_summary
@@ -83,6 +85,8 @@ Skills discovered under .agents/skills:
 
 MCP servers declared under .agents/mcp.json:
 {mcp_servers}
+
+Project-specific AGENTS.md files are appended as per-turn workspace context.
 """
 
 
@@ -111,11 +115,15 @@ class AgentEngine:
     ) -> AsyncIterator[dict[str, Any]]:
         thread_id = thread_id or self.thread_store.create_thread("New thread")
         turn_id = new_id("turn")
-        input_items = self._reconstruct_input(thread_id)
+        conversation_items = self._reconstruct_input(thread_id)
+        input_items = list(conversation_items)
+        context_items = self._workspace_context_items()
         self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
         user_item = message_item("user", user_text)
         self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
+        input_items.extend(context_items)
         input_items.append(user_item)
+        conversation_items.append(user_item)
 
         final_text = ""
         for round_index in range(self.config.runtime.max_agent_rounds):
@@ -158,6 +166,7 @@ class AgentEngine:
                 "response": response,
             }
             input_items.extend(response.output)
+            conversation_items.extend(response.output)
 
             tool_calls = [item for item in response.output if item.get("type") == "function_call"]
             if not tool_calls:
@@ -191,6 +200,7 @@ class AgentEngine:
                     item=tool_output,
                 )
                 input_items.append(tool_output)
+                conversation_items.append(tool_output)
                 yield {
                     "type": "tool.output",
                     "thread_id": thread_id,
@@ -207,7 +217,7 @@ class AgentEngine:
             turn_id=turn_id,
             final_text=final_text,
         )
-        await self._maybe_compact(thread_id, turn_id, input_items)
+        await self._maybe_compact(thread_id, turn_id, conversation_items)
         yield {
             "type": "turn.completed",
             "thread_id": thread_id,
@@ -225,17 +235,26 @@ class AgentEngine:
             return
         default_model = self.config.model_for_level(None)
         approx_tokens = estimate_tokens(input_items)
+        if approx_tokens < self.config.runtime.compression.min_tokens:
+            return
         trigger_tokens = int(
             default_model.context_window_tokens
             * self.config.runtime.compression.trigger_ratio
         )
         if approx_tokens < trigger_tokens:
             return
+        target_tokens = compact_target_tokens(
+            default_model.context_window_tokens,
+            target_ratio=self.config.runtime.compression.target_ratio,
+        )
         prompt = self.config.runtime.compression.prompt
         compact_input = [
             message_item(
                 "user",
-                prompt + "\n\nConversation items:\n" + json.dumps(input_items, ensure_ascii=False),
+                prompt
+                + f"\n\nTarget length: about {target_tokens} tokens."
+                + "\n\nConversation items:\n"
+                + json.dumps(input_items, ensure_ascii=False),
             )
         ]
         response = await self.model_client.create_response(
@@ -299,7 +318,23 @@ class AgentEngine:
 
     def _reconstruct_input(self, thread_id: str) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
-        for event in self.thread_store.read(thread_id):
+        events = self.thread_store.read(thread_id)
+        last_compaction_index = -1
+        for index, event in enumerate(events):
+            if event.get("type") == "item.compaction":
+                last_compaction_index = index
+        if last_compaction_index >= 0:
+            summary = str(events[last_compaction_index].get("text") or "").strip()
+            if summary:
+                input_items.append(
+                    message_item(
+                        "user",
+                        "<conversation_summary>\n"
+                        + summary
+                        + "\n</conversation_summary>\nContinue from this compacted context.",
+                    )
+                )
+        for event in events[last_compaction_index + 1 :]:
             if event.get("type") == "item.user":
                 input_items.append(event["item"])
             elif event.get("type") == "item.model_response":
@@ -308,13 +343,56 @@ class AgentEngine:
                 input_items.append(event["item"])
         return input_items
 
+    def _workspace_context_items(self) -> list[dict[str, Any]]:
+        context = self.project_rule_context()
+        rendered = context.render()
+        if not rendered:
+            return []
+        return [message_item("user", rendered)]
+
+    def project_rule_context(self) -> ProjectRuleContext:
+        """Load AGENTS.md context for the active workspace."""
+        return load_project_rules(self.project_root)
+
     def context_percent(self, thread_id: str | None, level: str | None = None) -> int:
         """Return a context-window usage percentage for a thread."""
-        if not thread_id:
-            return 0
+        return self.context_stats(thread_id, level).percent
+
+    def context_stats(self, thread_id: str | None, level: str | None = None) -> ContextStats:
+        """Return detailed context-window statistics for a thread."""
         model = self.config.model_for_level(level)
-        used = self._latest_usage_tokens(thread_id) or estimate_tokens(self._reconstruct_input(thread_id))
-        return min(100, max(0, round(used * 100 / model.context_window_tokens)))
+        trigger_tokens = int(
+            model.context_window_tokens * self.config.runtime.compression.trigger_ratio
+        )
+        target_tokens = compact_target_tokens(
+            model.context_window_tokens,
+            target_ratio=self.config.runtime.compression.target_ratio,
+        )
+        if not thread_id:
+            return ContextStats(
+                used_tokens=0,
+                context_window_tokens=model.context_window_tokens,
+                percent=0,
+                threshold_tokens=trigger_tokens,
+                target_tokens=target_tokens,
+                headroom_tokens=model.context_window_tokens,
+                source="empty",
+            )
+        used = self._latest_usage_tokens(thread_id)
+        source = "provider"
+        if used is None:
+            used = estimate_tokens(self._reconstruct_input(thread_id) + self._workspace_context_items())
+            source = "estimate"
+        percent = min(100, max(0, round(used * 100 / model.context_window_tokens)))
+        return ContextStats(
+            used_tokens=used,
+            context_window_tokens=model.context_window_tokens,
+            percent=percent,
+            threshold_tokens=trigger_tokens,
+            target_tokens=target_tokens,
+            headroom_tokens=max(0, model.context_window_tokens - used),
+            source=source,
+        )
 
     def _latest_usage_tokens(self, thread_id: str) -> int | None:
         """Return the latest provider-reported token usage when available."""
@@ -352,32 +430,3 @@ def function_output(call: dict[str, Any], output: dict[str, Any]) -> dict[str, A
         "call_id": call.get("call_id"),
         "output": json.dumps(output, ensure_ascii=False),
     }
-
-
-def estimate_tokens(items: list[dict[str, Any]]) -> int:
-    # A rough local estimate is enough to decide when to ask the model to compress.
-    text = json.dumps(items, ensure_ascii=False)
-    return max(1, len(text) // 4)
-
-
-def usage_token_count(usage: dict[str, Any]) -> int | None:
-    """Extract a comparable token count from Responses, Chat, or Anthropic usage."""
-    direct_keys = ("total_tokens", "total_token_count")
-    for key in direct_keys:
-        value = usage.get(key)
-        if isinstance(value, int):
-            return value
-    pairs = [
-        ("input_tokens", "output_tokens"),
-        ("prompt_tokens", "completion_tokens"),
-        ("cache_creation_input_tokens", "cache_read_input_tokens"),
-    ]
-    total = 0
-    found = False
-    for left, right in pairs:
-        for key in (left, right):
-            value = usage.get(key)
-            if isinstance(value, int):
-                total += value
-                found = True
-    return total if found else None

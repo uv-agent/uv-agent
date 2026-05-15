@@ -39,6 +39,19 @@ def short_thread(thread_id: str | None) -> str:
     return thread_id[-8:]
 
 
+def format_tokens(value: int | None) -> str:
+    """Format token counts for compact TUI status surfaces."""
+    if value is None:
+        return "-"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 10_000:
+        return f"{value / 1_000:.0f}K"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+
 def tool_result_markup(payload: dict[str, Any]) -> str:
     """Render a Python runner result as a compact transcript block."""
     returncode = payload.get("returncode")

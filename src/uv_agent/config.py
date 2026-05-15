@@ -81,6 +81,8 @@ class CompressionConfig:
         "decisions, file changes, tool results, and unresolved tasks. Be concise but complete."
     )
     trigger_ratio: float = 0.7
+    target_ratio: float = 0.3
+    min_tokens: int = 5_000
 
 
 @dataclass(frozen=True)
@@ -166,6 +168,8 @@ def default_config(project_root: Path) -> dict[str, Any]:
                 "model_level": "small",
                 "prompt": CompressionConfig().prompt,
                 "trigger_ratio": 0.7,
+                "target_ratio": 0.3,
+                "min_tokens": 5_000,
             },
         },
         "ui": {
