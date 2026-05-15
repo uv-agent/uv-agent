@@ -107,10 +107,13 @@ with connect_named("filesystem") as client:
 
 `AGENTS.md` context is loaded from `~/.agents/AGENTS.md` and from the current
 git root down to the startup directory, including `AGENTS.*.md` variants.
-These rules are appended to each model request as workspace context instead of
-being baked into the stable system prompt, so they can change without poisoning
-prompt-cache reuse. The thread JSONL stores only the user message and model/tool
-events, not the expanded rule text.
+Rules, discovered skills, and MCP declarations are kept out of the stable system
+prompt. The engine appends a compact workspace-context update only when that
+context is first seen, changed, removed, or when a thread continues after
+compaction. Removal updates explicitly tell the agent not to rely on older
+appended rule/capability context unless it appears again. Context update events
+are stored in thread JSONL for change tracking, but they are not reconstructed as
+ordinary conversation items or included in compression input.
 
 ## TUI
 

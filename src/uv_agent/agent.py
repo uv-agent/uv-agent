@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from time import monotonic
+from typing import Any, Callable
 
 from uv_agent.attachments import AttachmentStore, image_message_item
 from uv_agent.config import AppConfig
@@ -99,7 +101,9 @@ Runtime helpers available in scripts:
 - ask can invoke a nested uv-agent subprocess when useful
 - MCP helpers connect to declared stdio MCP servers; call MCP through Python, not as model tools
 
-Workspace rules, skills, and MCP declarations are appended as per-turn context.
+Dynamic workspace context:
+- Rules, skills, and MCP declarations are appended only when first seen, changed, removed, or after compaction.
+- A removal notice means older appended rule/capability context must not be used unless it appears again.
 """
 
 
@@ -112,6 +116,7 @@ class AgentEngine:
         runner: PythonRunner,
         thread_store: ThreadStore,
         project_root: Path,
+        config_loader: Callable[[], AppConfig] | None = None,
     ) -> None:
         self.config = config
         self.model_client = model_client
@@ -119,6 +124,21 @@ class AgentEngine:
         self.thread_store = thread_store
         self.project_root = project_root
         self.attachments = AttachmentStore(thread_store.data_dir)
+        self._last_config_refresh_at = 0.0
+        self._config_loader = config_loader
+
+    def refresh_config(self, *, force: bool = False) -> None:
+        """Reload user/project config for long-running sessions."""
+        if self._config_loader is None:
+            return
+        now = monotonic()
+        if not force and now - self._last_config_refresh_at < 1.0:
+            return
+        self.config = self._config_loader()
+        if hasattr(self.model_client, "reload_config"):
+            self.model_client.reload_config(self.config)  # type: ignore[attr-defined]
+        self.runner.config = self.config.runner
+        self._last_config_refresh_at = now
 
     async def run_turn(
         self,
@@ -127,11 +147,12 @@ class AgentEngine:
         thread_id: str | None = None,
         level: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        self.refresh_config(force=True)
         thread_id = thread_id or self.thread_store.create_thread("New thread")
         turn_id = new_id("turn")
         conversation_items = self._reconstruct_input(thread_id)
         input_items = list(conversation_items)
-        context_items = self._workspace_context_items()
+        context_items = self._workspace_context_items(thread_id)
         self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
         user_item = message_item("user", user_text)
         self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
@@ -425,21 +446,101 @@ class AgentEngine:
                 input_items.append(image_message_item(event["attachment"]))
         return input_items
 
-    def _workspace_context_items(self) -> list[dict[str, Any]]:
-        rendered = self._turn_context_text()
-        if not rendered:
+    def _workspace_context_items(self, thread_id: str | None = None) -> list[dict[str, Any]]:
+        update = self._turn_context_update(thread_id)
+        if update is None:
             return []
-        return [message_item("user", rendered)]
+        if thread_id:
+            self.thread_store.append(
+                thread_id,
+                "item.context_update",
+                context_fingerprint=update["fingerprint"],
+                context_state=update["state"],
+                context_kind="workspace",
+                removed=update["removed"],
+                text=update["text"],
+            )
+        return [message_item("user", update["text"])]
+
+    def _turn_context_update(self, thread_id: str | None) -> dict[str, Any] | None:
+        parts = self._turn_context_parts()
+        rendered = "\n\n".join(parts.values())
+        fingerprint = context_fingerprint(rendered)
+        state = {key: context_fingerprint(value) for key, value in parts.items()}
+        previous = self._latest_context_state(thread_id) if thread_id else None
+        previous_fingerprint = previous.get("fingerprint") if previous else None
+        if previous_fingerprint == fingerprint:
+            return None
+        previous_parts = previous.get("parts", {}) if previous else {}
+        removed = [key for key in previous_parts if key not in state]
+        changed = [key for key in state if previous_parts.get(key) != state[key]]
+        if not rendered:
+            if previous_fingerprint is None:
+                return None
+            return {
+                "fingerprint": fingerprint,
+                "state": {"fingerprint": fingerprint, "parts": state},
+                "removed": removed or sorted(previous_parts),
+                "text": (
+                    "<workspace_context_update>\n"
+                    "Previously available workspace rules, skills, or MCP declarations are no longer present. "
+                    "Do not rely on older appended capability/rule context unless it appears again.\n"
+                    "</workspace_context_update>"
+                ),
+            }
+        if removed:
+            removed_text = (
+                "\n\n<workspace_context_removed>\n"
+                f"Removed context kinds: {', '.join(removed)}. "
+                "Do not rely on older appended content for these kinds unless it appears again.\n"
+                "</workspace_context_removed>"
+            )
+        else:
+            removed_text = ""
+        prefix = (
+            "<workspace_context_update>\n"
+            "The following workspace rules/capabilities are current. This update replaces any older appended "
+            "workspace rules, skills, or MCP declarations in this thread.\n"
+            f"fingerprint: {fingerprint}\n"
+            + (f"removed: {', '.join(removed)}\n" if removed else "")
+            + (f"changed: {', '.join(changed)}\n" if changed else "")
+            + "</workspace_context_update>"
+        )
+        return {
+            "fingerprint": fingerprint,
+            "state": {"fingerprint": fingerprint, "parts": state},
+            "removed": removed,
+            "text": prefix + removed_text + "\n\n" + rendered,
+        }
+
+    def _latest_context_state(self, thread_id: str | None) -> dict[str, Any] | None:
+        if not thread_id:
+            return None
+        after_compaction = False
+        for event in reversed(self.thread_store.read(thread_id)):
+            if event.get("type") == "item.context_update":
+                if after_compaction:
+                    return None
+                state = event.get("context_state")
+                if isinstance(state, dict):
+                    return state
+                return {"fingerprint": str(event.get("context_fingerprint") or ""), "parts": {}}
+            if event.get("type") == "item.compaction":
+                after_compaction = True
+        return None
 
     def _turn_context_text(self) -> str:
-        sections: list[str] = []
+        return "\n\n".join(self._turn_context_parts().values())
+
+    def _turn_context_parts(self) -> dict[str, str]:
+        sections: dict[str, str] = {}
         rendered_rules = self.project_rule_context().render()
         if rendered_rules:
-            sections.append(rendered_rules)
+            sections["rules"] = rendered_rules
 
         skills = render_skill_summary(discover_skills(self.project_root))
         if skills != "None discovered.":
-            sections.append(
+            sections["skills"] = (
                 "<available_skills>\n"
                 "Read the listed SKILL.md with Python only when relevant.\n"
                 f"{skills}\n"
@@ -448,13 +549,13 @@ class AgentEngine:
 
         mcp_servers = render_mcp_summary(discover_mcp_servers(self.project_root))
         if mcp_servers != "None declared.":
-            sections.append(
+            sections["mcp"] = (
                 "<available_mcp_servers>\n"
                 "Use uv_agent_runtime MCP helpers from Python to inspect or call these servers.\n"
                 f"{mcp_servers}\n"
                 "</available_mcp_servers>"
             )
-        return "\n\n".join(sections)
+        return sections
 
     def project_rule_context(self) -> ProjectRuleContext:
         """Load AGENTS.md context for the active workspace."""
@@ -487,7 +588,9 @@ class AgentEngine:
         used = self._latest_usage_tokens(thread_id)
         source = "provider"
         if used is None:
-            used = estimate_tokens(self._reconstruct_input(thread_id) + self._workspace_context_items())
+            update = self._turn_context_update(thread_id)
+            context_items = [message_item("user", update["text"])] if update else []
+            used = estimate_tokens(self._reconstruct_input(thread_id) + context_items)
             source = "estimate"
         percent = min(100, max(0, round(used * 100 / model.context_window_tokens)))
         return ContextStats(
@@ -532,3 +635,8 @@ def function_output(call: dict[str, Any], output: dict[str, Any]) -> dict[str, A
         "call_id": call.get("call_id"),
         "output": json.dumps(output, ensure_ascii=False),
     }
+
+
+def context_fingerprint(text: str) -> str:
+    """Stable fingerprint for dynamic per-turn context."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]

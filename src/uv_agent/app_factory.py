@@ -23,4 +23,5 @@ def create_engine(project_root: Path | None = None) -> AgentEngine:
         runner=runner,
         thread_store=thread_store,
         project_root=root,
+        config_loader=lambda: load_config(root),
     )

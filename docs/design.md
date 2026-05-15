@@ -154,6 +154,7 @@ thread JSONL 至少记录：
 - 当上下文接近模型限制时触发
 - 用户可以手动触发
 - 压缩摘要必须作为 item 写入 thread JSONL
+- 压缩请求只包含真实对话、模型输出、runner 输出和图片引用；动态 workspace context 不作为普通对话内容参与压缩
 
 压缩摘要至少保留：
 
@@ -163,6 +164,21 @@ thread JSONL 至少记录：
 - 最近关键 runner 结果
 - 可重跑脚本引用
 - 用户明确偏好或决策
+
+压缩后继续对话时，系统提示词和配置必须按最新配置重新生成。AGENTS 规则、
+skills 摘要和 MCP 声明也会重新计算；即使内容与压缩前相同，也需要在压缩后的
+下一轮作为新的 workspace context update 追加，避免压缩摘要携带旧配置造成误导。
+
+## 动态 Workspace Context
+
+`AGENTS.md` / `AGENTS.*.md`、skills 摘要和 MCP 声明不写死进稳定 system
+prompt。它们按 thread 记录指纹，只在首次出现、内容变化、被移除或压缩后恢复时
+追加到模型输入。
+
+- 如果内容没变，不重复追加，保护 prompt cache 和上下文预算。
+- 如果某类上下文被移除，追加明确的移除提醒，要求 agent 不再依赖旧的追加内容。
+- `item.context_update` 会写入 thread JSONL 用于比较指纹，但不会作为普通历史消息重建，也不会进入压缩输入。
+- 长运行 TUI/CLI 每轮前刷新配置；压缩后的下一轮使用最新 system prompt、模型配置和 runner 配置。
 
 ## 配置读取
 

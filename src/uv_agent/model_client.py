@@ -63,6 +63,9 @@ class UnifiedModelClient:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
 
+    def reload_config(self, config: AppConfig) -> None:
+        self.config = config
+
     async def create_response(
         self,
         *,

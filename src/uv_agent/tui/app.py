@@ -866,6 +866,7 @@ class UvAgentApp(App[None]):
         self._open_panel(self._status_panel_markup(), "status", "Status")
 
     def _status_panel_markup(self) -> str:
+        self.engine.refresh_config()
         try:
             model = self.engine.config.model_for_level(self.level)
             provider = self.engine.config.provider_for_model(model)
@@ -906,6 +907,7 @@ class UvAgentApp(App[None]):
         self._open_panel(self._context_panel_markup(), "context", "Context")
 
     def _context_panel_markup(self) -> str:
+        self.engine.refresh_config()
         rules = self.engine.project_rule_context()
         try:
             stats = self.engine.context_stats(self.thread_id, self.level)
@@ -954,6 +956,7 @@ class UvAgentApp(App[None]):
         self._open_panel("\n\n".join(lines), "rules", "Rules")
 
     def _open_config_panel(self) -> None:
+        self.engine.refresh_config()
         sources = config_sources(self.project_root)
         lines = ["[bold]sources[/bold]"]
         for source in sources:
@@ -985,6 +988,7 @@ class UvAgentApp(App[None]):
         self._open_panel("\n".join(lines), "config", "Config")
 
     def _open_models_panel(self) -> None:
+        self.engine.refresh_config()
         lines = ["[bold]levels[/bold] [dim](/level name selects)[/dim]"]
         for name, level in self.engine.config.levels.items():
             marker = "*" if name == (self.level or self.engine.config.runtime.default_level) else "-"
@@ -1018,6 +1022,7 @@ class UvAgentApp(App[None]):
         )
 
     def _open_mcp_panel(self) -> None:
+        self.engine.refresh_config()
         servers = discover_mcp_servers(self.project_root)
         if not servers:
             self._open_panel("[dim]no .agents/mcp.json servers declared[/dim]", "mcp", "MCP")
@@ -1031,6 +1036,7 @@ class UvAgentApp(App[None]):
         self._open_panel("\n".join(lines), "mcp", "MCP")
 
     def _open_skills_panel(self) -> None:
+        self.engine.refresh_config()
         skills = discover_skills(self.project_root)
         if not skills:
             self._open_panel("[dim]no .agents/skills entries discovered[/dim]", "skills", "Skills")
@@ -1220,6 +1226,7 @@ class UvAgentApp(App[None]):
     def _refresh_status(self, state: str | None = None) -> None:
         if state is not None:
             self._last_status = state
+        self.engine.refresh_config()
         level_name = self.level or self.engine.config.runtime.default_level
         try:
             stats = self.engine.context_stats(self.thread_id, self.level)

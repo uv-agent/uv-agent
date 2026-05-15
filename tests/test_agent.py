@@ -270,7 +270,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "run_python" in prompt
     assert "uv_agent_runtime" in prompt
     assert str(project_root) in prompt
-    assert "Workspace rules, skills, and MCP declarations are appended" in prompt
+    assert "Rules, skills, and MCP declarations are appended only when first seen" in prompt
     assert "demo (project)" not in prompt
 
     turn_context = engine._turn_context_text()
@@ -332,7 +332,7 @@ def test_context_percent_prefers_latest_usage(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_appends_project_rules_without_persisting_context(tmp_path: Path) -> None:
+async def test_agent_records_project_rule_context_update(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "AGENTS.md").write_text("Use the local rule.", encoding="utf-8")
@@ -382,7 +382,8 @@ async def test_agent_appends_project_rules_without_persisting_context(tmp_path: 
     request_text = str(client.requests[0]["input"])
     assert "Use the local rule." in request_text
     stored_text = str(engine.thread_store.read(events[-1]["thread_id"]))
-    assert "Use the local rule." not in stored_text
+    assert "Use the local rule." in stored_text
+    assert any(event["type"] == "item.context_update" for event in engine.thread_store.read(events[-1]["thread_id"]))
 
 
 @pytest.mark.asyncio
@@ -454,6 +455,142 @@ async def test_compaction_does_not_include_project_rules(tmp_path: Path) -> None
     assert events[-1]["type"] == "turn.completed"
     assert "Never persist this rule." in str(client.requests[0]["input"])
     assert "Never persist this rule." not in str(client.requests[1]["input"])
+
+
+@pytest.mark.asyncio
+async def test_dynamic_context_only_appends_when_changed(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    rules = project_root / "AGENTS.md"
+    rules.write_text("Rule v1.", encoding="utf-8")
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(default_level="medium", auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "one",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "one"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "two",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "two"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_3",
+                "output_text": "three",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "three"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_4",
+                "output_text": "four",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "four"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    first = [event async for event in engine.run_turn(user_text="one")][-1]["thread_id"]
+    [event async for event in engine.run_turn(user_text="two", thread_id=first)]
+    requests_text = [str(request["input"]) for request in client.requests[:2]]
+
+    assert "Rule v1." in requests_text[0]
+    assert "Rule v1." not in requests_text[1]
+
+    rules.write_text("Rule v2.", encoding="utf-8")
+    [event async for event in engine.run_turn(user_text="three", thread_id=first)]
+    assert "Rule v2." in str(client.requests[2]["input"])
+
+    rules.unlink()
+    [event async for event in engine.run_turn(user_text="four", thread_id=first)]
+    assert "Do not rely on older appended" in str(client.requests[3]["input"])
+
+
+@pytest.mark.asyncio
+async def test_context_update_reappears_after_compaction(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "AGENTS.md").write_text("After compaction rule.", encoding="utf-8")
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(default_level="medium", auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    first = engine._workspace_context_items(thread_id)
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    second = engine._workspace_context_items(thread_id)
+
+    assert first
+    assert second
+    assert "After compaction rule." in str(second)
 
 
 def test_reconstruct_input_starts_after_latest_compaction(tmp_path: Path) -> None:
@@ -547,3 +684,47 @@ def test_image_attachment_reconstructs_after_compaction(tmp_path: Path) -> None:
     assert image_message_item(attachment.to_event_payload())["content"][1]["image_url"].startswith(
         "data:image/png;base64,"
     )
+
+
+def test_refresh_config_updates_engine_and_runner(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    user_config = tmp_path / "home" / "config.json"
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text(
+        json.dumps(
+            {
+                "providers": {"p": {"base_url": "https://example.com"}},
+                "models": {
+                    "m": {
+                        "provider": "p",
+                        "model": "fake",
+                        "context_window_tokens": 10,
+                    }
+                },
+                "levels": {"medium": {"model": "m"}},
+                "runner": {"default_timeout_s": 11},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(project_root)
+    client = FakeModelClient([])
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+        config_loader=lambda: load_config(project_root),
+    )
+    raw = json.loads(user_config.read_text(encoding="utf-8"))
+    raw["models"]["m"]["context_window_tokens"] = 20
+    raw["runner"]["default_timeout_s"] = 22
+    user_config.write_text(json.dumps(raw), encoding="utf-8")
+
+    engine.refresh_config(force=True)
+
+    assert engine.config.model_for_level("medium").context_window_tokens == 20
+    assert engine.runner.config.default_timeout_s == 22
