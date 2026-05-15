@@ -75,19 +75,24 @@ PythonRunRequest(
 
 临时脚本是受管理 artifact，不是运行完即删除的系统临时文件。
 
-建议结构：
+默认结构位于用户级目录，避免把历史和脚本 artifact 混入项目工作树：
 
 ```text
-.uv-agent/
-  scripts/
-    <script_id>/
-      script.py
-      metadata.json
-  runs/
-    <run_id>.jsonl
-  threads/
-    <thread_id>.jsonl
+~/.uv-agent/
+  config.json
+  projects/
+    <project-id>/
+      scripts/
+        <script_id>/
+          script.py
+          metadata.json
+      runs/
+        <run_id>.jsonl
+      threads/
+        <thread_id>.jsonl
 ```
+
+项目内 `.uv-agent/config.json` 只作为覆盖配置；`.uv-agent/` 被 git 忽略。
 
 每次新脚本执行：
 
@@ -162,7 +167,7 @@ thread JSONL 至少记录：
 
 具体文件名、schema、合并规则和敏感信息处理在实现配置 feature 时写入对应 feature `AGENTS.md`。OpenAI 凭据不得写入仓库、JSONL 或脚本 artifact。
 
-本地测试配置可以放在 `.uv-agent/config.json`，该路径被 git 忽略。配置需要支持 provider、model、level、runtime、runner 等块，并在日志和错误展示中对 `api_key` 这类敏感字段脱敏。
+默认配置放在用户级 `~/.uv-agent/config.json`。项目级覆盖配置可以放在 `.uv-agent/config.json`，该路径被 git 忽略。配置需要支持 provider、model、level、runtime、runner 等块，并在日志和错误展示中对 `api_key` 这类敏感字段脱敏。
 
 配置是本项目自己的 schema，不照搬外部工具配置。provider 只描述共享的 base URL、认证、headers 和 endpoint，model 决定使用 `responses` 还是 `chat_completions` API。
 

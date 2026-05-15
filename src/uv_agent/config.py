@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from uv_agent.paths import project_config_path, project_local_dir, user_config_path
+
 
 SENSITIVE_KEYS = {"api_key", "authorization", "token", "secret", "password"}
 
@@ -166,14 +168,29 @@ def default_config(project_root: Path) -> dict[str, Any]:
 
 def config_paths(project_root: Path) -> list[Path]:
     paths: list[Path] = []
-    user_config = Path.home() / ".uv-agent" / "config.json"
-    project_config = project_root / ".uv-agent" / "config.json"
     env_config = os.environ.get("UV_AGENT_CONFIG")
-    paths.append(user_config)
-    paths.append(project_config)
+    paths.append(user_config_path())
+    paths.append(project_config_path(project_root))
     if env_config:
         paths.append(Path(env_config))
     return paths
+
+
+def config_sources(project_root: Path) -> list[dict[str, Any]]:
+    """Return config layers with existence metadata for UI/debug views."""
+    return [
+        {"scope": "user", "path": str(user_config_path()), "exists": user_config_path().exists()},
+        {
+            "scope": "project",
+            "path": str(project_config_path(project_root)),
+            "exists": project_config_path(project_root).exists(),
+        },
+        {
+            "scope": "project_data",
+            "path": str(project_local_dir(project_root)),
+            "exists": project_local_dir(project_root).exists(),
+        },
+    ]
 
 
 def load_config(project_root: Path | None = None, paths: list[Path] | None = None) -> AppConfig:

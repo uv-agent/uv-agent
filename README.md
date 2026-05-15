@@ -16,7 +16,7 @@ uv run uv-agent ask "Reply with exactly: ok"
 
 ## Local Config
 
-Local provider config can live at `.uv-agent/config.json`. That directory is ignored by git.
+User-level provider config lives at `~/.uv-agent/config.json` by default. A project can override it with `.uv-agent/config.json`; that project-local directory is ignored by git.
 
 The config supports providers, models, levels, runtime options, and runner options. Secrets such as `api_key` must stay in ignored local config or environment variables.
 
@@ -62,7 +62,7 @@ Both are streamed with SSE when the provider supports streaming.
 
 ## Runtime Scripts
 
-Agent scripts declare dependencies with PEP 723 inline metadata. The runner records managed script artifacts and run JSONL under `.uv-agent/`, injects the configured runtime dependency into inline metadata when needed, and supports rerunning saved scripts.
+Agent scripts declare dependencies with PEP 723 inline metadata. The runner records managed script artifacts, run JSONL, and thread JSONL under `~/.uv-agent/projects/<project-id>/`, injects the configured runtime dependency into inline metadata when needed, and supports rerunning saved scripts.
 
 ## TUI
 

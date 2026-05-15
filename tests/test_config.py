@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from uv_agent.config import load_config, redact_config
+from uv_agent.config import config_paths, load_config, redact_config
+from uv_agent.paths import project_config_path, project_state_dir, user_config_path
 
 
 def test_load_config_merges_project_file(tmp_path: Path) -> None:
@@ -55,3 +56,15 @@ def test_redact_config_masks_sensitive_values() -> None:
     assert redacted["api_key"] == "***REDACTED***"
     assert redacted["nested"]["token"] == "***REDACTED***"
     assert redacted["nested"]["ok"] == 1
+
+
+def test_default_paths_are_user_level(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    project_root = tmp_path / "workspace"
+    project_root.mkdir()
+
+    paths = config_paths(project_root)
+
+    assert paths[0] == user_config_path()
+    assert paths[1] == project_config_path(project_root)
+    assert project_state_dir(project_root).is_relative_to(tmp_path / "home" / "projects")
