@@ -1,217 +1,57 @@
-# Coding Agent 执行规范
+# uv-agent Project Rules
 
-（以下"你"指任务执行方，即 Agent。通读本规范及相关扩展规范，全程遵守。）
+This repository builds `uv-agent`, an experimental coding agent with a Textual TUI. The product goal is documented in `docs/design.md`; this file records the repository rules an agent should follow while editing the project.
 
----
+## Project Shape
 
-## 核心原则
+- `src/uv_agent/`: host application, configuration, model clients, session store, Python runner, project rules, skills/MCP discovery, and TUI.
+- `src/uv_agent_runtime/`: helper package injected into managed Python scripts so scripts can access file helpers, subprocess helpers, structured events, image attachment, saved script summaries, subagent launch helpers, and MCP clients.
+- `tests/`: pytest coverage for runner, runtime, model clients, project rules, sessions, config, and Textual UI behavior.
+- `docs/design.md`: product semantics and longer design notes. Keep it aligned when changing architecture or user-visible behavior.
 
-1. 契约驱动：先明确契约再实现，或实现后补齐，但最终代码与契约必须一致
-2. 文档服务实现：只描述需要复用、协作和约束的内容，不重复代码可自解释的信息
-3. 目录承载语义：目录结构组织边界、契约和实现
-4. 规范可演进：根据项目技术栈和结构维护扩展规范
-5. 重要 Unit 必须留痕：被复用、依赖或作为稳定接口的函数/类/模块，必须在契约文档中体现
+## Hard Boundaries
 
----
+- The agent has exactly one external action surface: `run_python`.
+- `run_python` executes Python through the managed runner. Do not add direct shell, filesystem, browser, network, or MCP model tools.
+- Python scripts may call `subprocess`; that capability must stay inside the Python runner boundary.
+- Managed scripts declare third-party dependencies with PEP 723 inline metadata. Do not add a separate dependency argument to the tool API.
+- `uv_agent_runtime` must work as a package dependency for managed scripts; scripts must not rely on the repository checkout, current `.venv`, or implicit import paths.
+- MCP and skills are progressively disclosed context. MCP calls happen through Python runtime helpers, not direct model tool calls.
 
-## 目录结构
+## Prompt And Context
 
-```text
-<root>/
-├── AGENTS.md              # 核心规范
-├── AGENTS.*.md            # 扩展规范（按技术栈、框架生成）
-├── <source_dir>/          # Monorepo 可能会有多个
-│   └── <feature>/
-│       ├── AGENTS.md      # Feature 契约文档（稳定约定）
-│       ├── LOG.md          # Feature 踩坑与决策备忘（可选）
-│       └── <units>...
-└── <root_entries_and_configs>  # 所有入口文件或者配置必须保持在根目录
-```
+- Keep the stable system prompt concise and structured with explicit XML-style sections and closing tags.
+- Include stable host metadata and detected user language in the system prompt.
+- Keep AGENTS rules, skills summaries, and MCP declarations out of the stable prompt. Append them as dynamic workspace context only when first seen, changed, removed, or after compaction.
+- If dynamic context is removed, the next update must explicitly tell the agent not to rely on older appended context.
+- Compression must use the latest system prompt, model config, runner config, and dynamic workspace context after a thread resumes.
 
----
+## TUI Rules
 
-## 文档层级与优先级
+- TUI uses Textual and should remain a Codex-style single transcript with a bottom composer.
+- Composer is multi-line: Enter inserts a newline; Ctrl+Enter or Ctrl+J sends.
+- Typing `/` from an empty composer opens the full-screen command picker. Editing or deleting an existing slash command must not reopen it.
+- Full-screen pickers must support keyboard and mouse: type to filter, arrows/PageUp/PageDown to move, Enter to select, Esc to close.
+- TUI displays model reasoning, tool starts/results, compaction, image attachment, and errors as compact transcript events.
+- TUI should not implement model protocol, runner execution, JSONL persistence, compression, or configuration rules directly; consume events from `AgentEngine` and formatting helpers instead.
 
-| 文档 | 性质 | 说明 |
-|---|---|---|
-| `AGENTS.md`（根） | 契约 | 全局执行原则，最高优先级 |
-| `AGENTS.*.md` | 契约 | 技术栈扩展规范 |
-| Feature `AGENTS.md` | 契约 | 目标、边界、重要 Unit 的稳定约定 |
-| Feature `LOG.md` | 备忘 | 踩坑记录与决策背景，可丢弃 |
+## Config And State
 
-契约文档下级服从上级，不得冲突。`LOG.md` 不具备约束力，仅供参考。
+- User config lives at `~/.uv-agent/config.json`; project overrides may live in `.uv-agent/config.json`.
+- Project runtime state lives under user-level `~/.uv-agent/projects/<project-id>/` by default.
+- `.uv-agent/` in this repository is ignored local state. Do not commit debug screenshots, local config, scripts, runs, or thread state.
+- Never commit API keys, tokens, provider secrets, or redacted copies that still reveal secret material.
 
----
+## Development
 
-## 工作方式
+- Use `uv` for project commands, especially `uv run pytest`.
+- Follow normal Python `src/` layout conventions. Keep library code importable without starting the TUI.
+- Use typed dataclasses or structured dictionaries for persisted and cross-module data shapes when practical.
+- Prefer focused tests with each behavior change. Update existing tests when changing prompt structure, runner semantics, context management, or TUI keyboard behavior.
+- Keep comments sparse and useful. Use comments for non-obvious compatibility, caching, or protocol decisions; do not narrate ordinary control flow.
 
-1. 理解需求与影响范围
-2. 定位或创建对应 Feature 目录与 `AGENTS.md`
-3. 为重要 Unit 补充契约
-4. 根据契约编写、修改或重构代码
-5. 完成后同步更新受影响的各级 `AGENTS*.md`
+## Verification
 
-不要求先写完文档再写代码，不要求固定阶段，但最终交付时文档与代码必须一致。
-
----
-
-## Feature AGENTS.md
-
-每个 Feature 目录有且仅有一个 `AGENTS.md`，描述目标、边界和重要 Unit 契约。
-
-### 结构
-
-```markdown
-# <Feature 名称>
-一句话说明解决什么问题。
-
-## 边界
-- 负责：...
-- 不负责：...
-
-## 约束（可选）
-- 从踩坑中沉淀的、影响整个 Feature 的硬性规则
-
-## Units
-### `func(in): out`
-- 职责
-- 副作用
-- 注意（可选）
-
-### `ClassName`
-- 职责
-- 对外约定
-- 注意（可选）
-```
-
-### 什么该写入 Units
-
-- 被其他文件、模块、Feature 复用的函数或类
-- 对外暴露的接口
-- 承担关键职责的核心 Unit
-- 有明确输入输出、协作或副作用约定的 Unit
-
-### 什么不用写
-
-- 单文件内部的辅助函数
-- 无复用价值的局部逻辑
-- 代码已能直接表达的内容
-
----
-
-## Feature LOG.md
-
-可选文件，记录该 Feature 开发中改变了决策的坑或重要背景信息。
-
-### 定位
-
-- 备忘，不是契约——可随时丢弃，不影响项目正确性
-- 记录"为什么这样做"，`AGENTS.md` 记录"是什么、怎么做"
-
-### 写入标准
-
-只记满足以下任一条件的内容：
-
-- 下次遇到同样问题仍会踩的坑
-- 解释了代码中某个反直觉写法的背景
-- 影响了架构或方案选择的关键决策
-
-常规调试过程、一次性问题不记录。
-
-### 格式
-
-```markdown
-# <Feature> Log
-
-## YYYY-MM-DD — 简要标题
-现象 / 原因 / 结论（总计不超过 5 行）
-```
-
-### 克制规则
-
-- 每个 Feature 最多保留 10 条
-- 单条不超过 5 行
-- 已沉淀为 `AGENTS.md` 约定或代码 NOTE 注释的条目，从 LOG 中删除
-- LOG 是暂存区，`AGENTS.md` 是终态
-
----
-
-## 代码注释规范
-
-### 与文档的分工
-
-| 内容 | 放置位置 |
-|---|---|
-| 函数签名、参数、返回值 | 代码注释（JSDoc / docstring / 类型标注） |
-| 单函数的异常、边界条件 | 代码注释 |
-| Unit 的职责定位、协作关系 | Feature `AGENTS.md` |
-| 跨 Unit 的约定、设计取舍 | Feature `AGENTS.md` |
-| 技术栈、目录、测试约定 | `AGENTS.*.md` |
-| 全局执行原则 | 根目录 `AGENTS.md` |
-
-原则：代码能自解释的不在文档重复，文档只写协作中真正重要的约束。
-
-### 函数注释
-
-对外暴露或被其他模块调用的函数，必须写函数注释（JSDoc / docstring / XML doc 等），包含：
-
-- 一句话职责描述
-- 参数与返回值说明（类型系统已充分表达的可省略）
-- 副作用、异常、边界条件（如有）
-
-纯内部辅助函数，函数名已能说明意图的，不强制注释。
-
-### NOTE 注释
-
-用 `NOTE:` 标记不直观的设计决策或隐含假设：
-
-```
-// NOTE: 这里故意用同步写法，因为 X 场景下异步会导致竞态
-```
-
-适用场景：
-
-- 看起来"不对"但实际刻意为之的写法
-- 依赖外部行为或隐含前提条件
-- 性能、兼容性等非显而易见的取舍
-
-不要用 NOTE 解释正常逻辑。
-
-### TODO 注释
-
-用 `TODO:` 标记已知的待完成项：
-
-```
-// TODO: 支持批量操作，当前仅处理单条
-```
-
-要求：
-
-- 说明**要做什么**，不只写"待优化"
-- 临时绕过或已知缺陷用 `TODO(fixme):` 区分
-- 已完成的 TODO 必须删除，不留注释尸体
-
----
-
-## 扩展规范
-
-### 维护时机
-
-1. 首次在项目中执行任务
-2. 检测到新增框架、语言或重大依赖变化
-3. 用户明确要求
-4. 现有规范与项目实际不一致
-
-### 处理方式
-
-扫描配置文件、依赖声明、代码结构 → 识别语言/框架/测试/构建方式 → 生成或更新 `AGENTS.<scope>.md` → 保持与项目实际一致。
-
----
-
-## 文档质量要求
-
-1. 只写必要信息，避免空话和重复
-2. 重点描述边界、职责、协作关系和稳定接口
-3. 文档应能帮助后续 Agent 继续实现，而不是替代代码
-4. 文档与代码冲突时，以最终修正后的一致状态为准
-5. 完成实现后，检查受影响的 `AGENTS*.md` 是否需要同步修改
+- Run `uv run pytest` before committing meaningful behavior changes.
+- For TUI interaction changes, add or update Textual `run_test` coverage. Manual screenshots can be exported with `App.export_screenshot()` into `.uv-agent/screenshots/`.
+- Before committing, check `git status --short` and ensure no secrets or ignored local artifacts are staged.

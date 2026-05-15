@@ -198,7 +198,7 @@ prompt。它们按 thread 记录指纹，只在首次出现、内容变化、被
 3. 项目配置
 4. 会话覆盖
 
-具体文件名、schema、合并规则和敏感信息处理在实现配置 feature 时写入对应 feature `AGENTS.md`。OpenAI 凭据不得写入仓库、JSONL 或脚本 artifact。
+具体文件名、schema、合并规则和敏感信息处理在根目录 `AGENTS.md` 和相关实现文档中维护。OpenAI 凭据不得写入仓库、JSONL 或脚本 artifact。
 
 默认配置放在用户级 `~/.uv-agent/config.json`。项目级覆盖配置可以放在 `.uv-agent/config.json`，该路径被 git 忽略。配置需要支持 provider、model、level、runtime、runner 等块，并在日志和错误展示中对 `api_key` 这类敏感字段脱敏。
 
