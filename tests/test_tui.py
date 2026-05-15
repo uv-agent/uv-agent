@@ -77,6 +77,32 @@ async def test_tui_command_palette_completes_without_blocking_newlines(
 
 
 @pytest.mark.asyncio
+async def test_tui_slash_picker_does_not_open_when_deleting_existing_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("/new")
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.press("backspace")
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert not isinstance(app.screen_stack[-1], FullscreenPanel)
+        assert composer.text == "/"
+
+
+@pytest.mark.asyncio
 async def test_tui_status_panel_opens_fullscreen_overlay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

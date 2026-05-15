@@ -495,6 +495,7 @@ class UvAgentApp(App[None]):
         self._transcript_has_content = False
         self._reasoning_cell: TranscriptCell | None = None
         self._reasoning_buffer = ""
+        self._last_composer_text = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -531,11 +532,14 @@ class UvAgentApp(App[None]):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id != "composer":
             return
-        self._resize_composer(event.text_area.text)
+        previous = self._last_composer_text
+        current = event.text_area.text
+        self._last_composer_text = current
+        self._resize_composer(current)
         self._refresh_status()
-        stripped = event.text_area.text.strip()
-        if stripped == "/":
+        if current == "/" and previous == "":
             event.text_area.load_text("")
+            self._last_composer_text = ""
             self._resize_composer("")
             self._open_command_palette()
 
@@ -564,6 +568,7 @@ class UvAgentApp(App[None]):
             self._flash(self._text("write_first"))
             return
         composer.load_text("")
+        self._last_composer_text = ""
         self._resize_composer("")
         if "\n" not in prompt and self._handle_command(prompt):
             return
@@ -634,6 +639,7 @@ class UvAgentApp(App[None]):
         composer = self.query_one("#composer", TextArea)
         if composer.text:
             composer.load_text("")
+            self._last_composer_text = ""
             self._resize_composer("")
             return
 
@@ -1188,6 +1194,7 @@ class UvAgentApp(App[None]):
             replacement = command + " "
             composer = self.query_one("#composer", TextArea)
             composer.load_text(replacement)
+            self._last_composer_text = replacement
             self._resize_composer(replacement)
             composer.focus()
             return
