@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 
@@ -15,6 +16,7 @@ from uv_agent_runtime import (
     read_json,
     read_text,
     run_command,
+    saved_scripts,
     write_json,
     write_text,
 )
@@ -98,6 +100,39 @@ def test_runtime_subagent_ask_with_custom_executable() -> None:
     )
 
     assert result.text == "ignored"
+
+
+def test_runtime_subagent_accepts_model_level_alias() -> None:
+    result = ask(
+        "ignored",
+        model_level="small",
+        executable=[sys.executable, "-c", "import sys; print(' '.join(sys.argv[1:]))"],
+        check=True,
+    )
+
+    assert "--level small ask ignored" in result.text
+
+
+def test_runtime_saved_scripts_reads_state_dir(tmp_path: Path) -> None:
+    script = tmp_path / "scripts" / "scr_1"
+    script.mkdir(parents=True)
+    final = script / "script.py"
+    final.write_text("# /// script\n# dependencies=[]\n# ///\n\nprint('hello')\n", encoding="utf-8")
+    (script / "metadata.json").write_text(
+        json.dumps(
+            {
+                "script_id": "scr_1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "final_path": str(final),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summaries = saved_scripts(state_dir=tmp_path)
+
+    assert summaries[0]["script_id"] == "scr_1"
+    assert summaries[0]["summary"] == "print('hello')"
 
 
 def test_runtime_look_at_emits_structured_event(tmp_path: Path, capsys) -> None:

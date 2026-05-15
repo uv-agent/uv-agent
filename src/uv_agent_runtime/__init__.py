@@ -11,6 +11,7 @@ from .mcp import (
     list_declared_servers,
 )
 from .process import check_command, run_command
+from .scripts import saved_scripts
 from .subagent import SubagentResult, ask
 from .vision import look_at
 
@@ -33,6 +34,7 @@ __all__ = [
     "read_text",
     "resolve_workspace_path",
     "run_command",
+    "saved_scripts",
     "write_json",
     "write_text",
 ]

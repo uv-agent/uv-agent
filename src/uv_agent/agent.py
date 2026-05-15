@@ -10,6 +10,7 @@ from typing import Any, Callable
 from uv_agent.attachments import AttachmentStore, image_message_item
 from uv_agent.config import AppConfig
 from uv_agent.context import ContextStats, compact_target_tokens, estimate_tokens, usage_token_count
+from uv_agent.environment import detect_user_language, host_environment, host_environment_line
 from uv_agent.ids import new_id
 from uv_agent.mcp_config import discover_mcp_servers, render_mcp_summary
 from uv_agent.model_client import ModelClient, ModelResponse
@@ -81,6 +82,8 @@ Environment:
 - Workspace: {workspace}
 - User state: {user_state}
 - Project state: {project_state}
+- Host: {host_environment}
+- User language: {user_language}
 - Persisted scripts/runs/threads live under the project state directory.
 
 Rules:
@@ -98,7 +101,8 @@ Runtime helpers available in scripts:
 - emit_event/emit_progress/emit_result for structured output
 - look_at(path, note="") attaches an image to future model context
 - rerun saved scripts by passing script_id or run_id to run_python
-- ask can invoke a nested uv-agent subprocess when useful
+- ask(prompt, level="small"|"medium"|"large") can invoke a nested uv-agent subprocess when useful
+- saved_scripts(limit=32) returns recent managed scripts with ids, timestamps, first lines, and run counts
 - MCP helpers connect to declared stdio MCP servers; call MCP through Python, not as model tools
 
 Dynamic workspace context:
@@ -126,6 +130,7 @@ class AgentEngine:
         self.attachments = AttachmentStore(thread_store.data_dir)
         self._last_config_refresh_at = 0.0
         self._config_loader = config_loader
+        self._host_environment = host_environment()
 
     def refresh_config(self, *, force: bool = False) -> None:
         """Reload user/project config for long-running sessions."""
@@ -181,6 +186,26 @@ class AgentEngine:
                         "thread_id": thread_id,
                         "turn_id": turn_id,
                         "text": stream_event.text,
+                    }
+                elif stream_event.type == "reasoning_delta" and stream_event.text:
+                    self.thread_store.append(
+                        thread_id,
+                        "item.reasoning_delta",
+                        turn_id=turn_id,
+                        text=stream_event.text,
+                    )
+                    yield {
+                        "type": "assistant.reasoning_delta",
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "text": stream_event.text,
+                    }
+                elif stream_event.type == "tool_call_delta" and stream_event.tool_call:
+                    yield {
+                        "type": "tool.delta",
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "tool_call": stream_event.tool_call,
                     }
                 elif stream_event.type == "completed":
                     response = stream_event.response
@@ -256,7 +281,13 @@ class AgentEngine:
             turn_id=turn_id,
             final_text=final_text,
         )
-        await self._maybe_compact(thread_id, turn_id, conversation_items)
+        compacted = await self._maybe_compact(thread_id, turn_id, conversation_items)
+        if compacted:
+            yield {
+                "type": "compaction.completed",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+            }
         yield {
             "type": "turn.completed",
             "thread_id": thread_id,
@@ -269,19 +300,19 @@ class AgentEngine:
         thread_id: str,
         turn_id: str,
         input_items: list[dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         if not self.config.runtime.auto_compress:
-            return
+            return False
         default_model = self.config.model_for_level(None)
         approx_tokens = estimate_tokens(input_items)
         if approx_tokens < self.config.runtime.compression.min_tokens:
-            return
+            return False
         trigger_tokens = int(
             default_model.context_window_tokens
             * self.config.runtime.compression.trigger_ratio
         )
         if approx_tokens < trigger_tokens:
-            return
+            return False
         target_tokens = compact_target_tokens(
             default_model.context_window_tokens,
             target_ratio=self.config.runtime.compression.target_ratio,
@@ -309,6 +340,7 @@ class AgentEngine:
             text=response.output_text,
             usage=response.usage,
         )
+        return True
 
     async def _handle_tool_call(
         self,
@@ -619,6 +651,8 @@ class AgentEngine:
             workspace=self.project_root,
             user_state=uv_agent_home(),
             project_state=project_state_dir(self.project_root),
+            host_environment=host_environment_line(self._host_environment),
+            user_language=detect_user_language(self.config.ui.language).name,
         )
 
 def message_item(role: str, text: str) -> dict[str, Any]:

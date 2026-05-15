@@ -95,12 +95,18 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class UiConfig:
+    language: str = "auto"
+
+
+@dataclass(frozen=True)
 class RunnerConfig:
     runtime_dependency: str
     runtime_package_name: str = "uv-agent"
     default_uv_args: list[str] = field(default_factory=list)
     default_timeout_s: float = 60.0
     max_output_bytes: int = 1_000_000
+    max_saved_scripts: int = 32
 
     def __post_init__(self) -> None:
         if not self.default_uv_args:
@@ -118,6 +124,7 @@ class AppConfig:
     levels: dict[str, LevelConfig]
     runtime: RuntimeConfig
     runner: RunnerConfig
+    ui: UiConfig = field(default_factory=UiConfig)
 
     def level(self, name: str | None = None) -> LevelConfig:
         level_name = name or self.runtime.default_level
@@ -174,6 +181,7 @@ def default_config(project_root: Path) -> dict[str, Any]:
         },
         "ui": {
             "stream": True,
+            "language": "auto",
         },
         "runner": {
             "runtime_dependency": runtime_dependency,
@@ -181,6 +189,7 @@ def default_config(project_root: Path) -> dict[str, Any]:
             "default_uv_args": default_runtime_uv_args(runtime_dependency, "uv-agent"),
             "default_timeout_s": 60,
             "max_output_bytes": 1_000_000,
+            "max_saved_scripts": 32,
         },
     }
 
@@ -290,13 +299,16 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         ),
         default_timeout_s=float(runner_raw.get("default_timeout_s", 60)),
         max_output_bytes=int(runner_raw.get("max_output_bytes", 1_000_000)),
+        max_saved_scripts=int(runner_raw.get("max_saved_scripts", 32)),
     )
+    ui_raw = raw.get("ui", {})
     return AppConfig(
         providers=providers,
         models=models,
         levels=levels,
         runtime=runtime,
         runner=runner,
+        ui=UiConfig(language=str(ui_raw.get("language", "auto"))),
     )
 
 

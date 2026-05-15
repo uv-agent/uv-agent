@@ -112,6 +112,11 @@ runner 必须支持重跑：
 - 按 `script_id` 重跑某个已保存脚本
 - 按 `run_id` 尽量复现某次运行
 
+每个项目最多保留最近使用的 32 组 managed scripts，默认值可由
+`runner.max_saved_scripts` 调整。保留策略按最近 run 时间排序，删除旧 script
+artifact；run JSONL 仍保留，便于审计。runtime 提供 `saved_scripts(limit=32)` 给
+临时脚本读取近期脚本摘要，帮助 agent 用较少轮次选择重跑目标。
+
 重跑默认复用原脚本内容。是否复用原 `uv_args`、`script_args`、cwd 和 timeout，必须由 API 明确表达。若需要严格依赖复现，后续可引入 `uv lock --script` 生成脚本锁文件；未引入锁文件前，不承诺跨时间的依赖版本完全一致。
 
 ## 会话模型
@@ -125,6 +130,10 @@ runner 必须支持重跑：
 初版只实现单 agent 会话，不实现子 agent。未来子 agent 可以作为 runtime 快捷能力或 agent 编排能力加入，但不改变“唯一外部工具是 Python runner”的边界。
 
 当前 subagent 快捷入口位于 `uv_agent_runtime.ask`，通过 Python 脚本里的 subprocess 调用 `uv-agent ask`；MCP 快捷入口位于 `uv_agent_runtime.connect_stdio` / `connect_declared`，也必须从 Python runner 内部使用。
+
+subagent 启动参数应优先暴露模型等级而不是具体模型，例如
+`ask("review this failure", level="small")` 或 `model_level="large"`。等级到具体模型
+的映射由用户级配置决定，主 agent 不需要知道 provider/model 细节。
 
 ## JSONL 记录
 
@@ -195,6 +204,10 @@ prompt。它们按 thread 记录指纹，只在首次出现、内容变化、被
 
 配置是本项目自己的 schema，不照搬外部工具配置。provider 只描述共享的 base URL、认证、headers 和 endpoint，model 决定使用 `responses` 还是 `chat_completions` API。
 
+UI 语言通过 `ui.language` 配置，默认 `auto`，并从 `UV_AGENT_LANGUAGE`、locale 等
+环境推断。系统提示词必须包含当前用户语言和稳定 host 元数据，例如 OS、shell、
+Python 版本、路径分隔符，帮助 agent 生成跨平台但符合当前环境的 Python 脚本。
+
 模型客户端必须支持：
 
 - Responses API
@@ -209,8 +222,17 @@ TUI 使用 Textual。
 
 - 默认界面参考 Codex：单一主时间线 + 底部 composer，不把屏幕切成固定三栏。
 - 主时间线显示用户输入、assistant 流式输出、Python runner 状态和 stdout/stderr 摘要。
-- 底部 composer 拆成三块：左侧短状态，中间输入框，右侧模型/上下文摘要。
+- 底部 composer 是上下三段：上方短状态/上下文摘要，中间输入框，下方快捷提示；只有输入框有背景和边框，其余两段保持 Codex 风格的轻量文字。
 - 临时面板用于聚焦查看脚本内容、完整 runner 日志、thread 列表、配置状态等，默认作为全屏 overlay 打开，必须支持滚动、过滤、选择和 Esc 关闭。
 - 窄终端下优先保留 transcript 和 composer，附属信息降级为短状态文本。
 
 TUI 只消费 core/session/runner 提供的状态和事件，不把业务规则写死在 UI 层。
+
+## 错误与事件呈现
+
+参考 Codex、Gemini CLI、Qwen Code、opencode 的共同模式：
+
+- 错误在 core 层归一成可读标题、摘要、hint 和可选详情；TUI 显示短错误卡片，详细 provider/run 输出放面板或日志。
+- 事件作为 transcript timeline 的紧凑条目呈现，而不是塞满底部状态栏。
+- thinking/reasoning、tool started、tool result、compaction、image attachment 都应有轻量可扫读的历史项。
+- 非零退出、超时、截断输出需要在 tool cell 上直接显色；完整 stdout/stderr 仍可通过 `/runs` 查看。

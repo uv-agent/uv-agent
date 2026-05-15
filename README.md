@@ -55,6 +55,12 @@ Minimal shape:
   "levels": {
     "medium": { "model": "main" },
     "chat": { "model": "chat" }
+  },
+  "ui": {
+    "language": "auto"
+  },
+  "runner": {
+    "max_saved_scripts": 32
   }
 }
 ```
@@ -75,7 +81,11 @@ and falls back to a local estimate for the context meter.
 
 Agent scripts declare dependencies with PEP 723 inline metadata. The runner records managed script artifacts, run JSONL, and thread JSONL under `~/.uv-agent/projects/<project-id>/`, injects the configured runtime dependency into inline metadata when needed, and supports rerunning saved scripts.
 
-`uv_agent_runtime` exposes convenience helpers for text/JSON files, subprocesses, structured events, nested `uv-agent ask` calls, image context, and MCP stdio servers declared in `.agents/mcp.json`.
+Each project keeps the 32 most recently used managed scripts by default
+(`runner.max_saved_scripts`). Run logs are still kept separately. Scripts can
+inspect recent saved scripts with `uv_agent_runtime.saved_scripts()`.
+
+`uv_agent_runtime` exposes convenience helpers for text/JSON files, subprocesses, structured events, nested `uv-agent ask` calls by model level, image context, saved script summaries, and MCP stdio servers declared in `.agents/mcp.json`.
 
 Image context is added from a script with `look_at`:
 
@@ -92,6 +102,16 @@ thread JSONL.
 Saved scripts can be rerun by passing `script_id` or `run_id` to `run_python`;
 `rerun_mode="replay"` inherits a previous run's arguments when a `run_id` is
 available.
+
+Nested agents are launched from Python with level names rather than concrete
+models:
+
+```python
+from uv_agent_runtime import ask
+
+result = ask("inspect the test failure", level="small", check=True)
+print(result.text)
+```
 
 MCP remains a Python-triggered runtime capability, not a direct model tool:
 
@@ -117,7 +137,7 @@ ordinary conversation items or included in compression input.
 
 ## TUI
 
-The default TUI follows a Codex-style shape: a single transcript, inline Python runner events, full-screen focus panels, and a bottom three-zone composer.
+The default TUI follows a Codex-style shape: a single transcript, inline Python runner events, full-screen focus panels, and a bottom composer with a plain metadata line, bordered input box, and plain hint line.
 
 - `Enter`: insert a newline in the composer
 - `Ctrl+Enter` or `Ctrl+J`: send the composer text
@@ -135,8 +155,10 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `/mcp`: show MCP declarations from `.agents/mcp.json`
 - `/skills` and `/skill [name]`: inspect `.agents/skills` entries
 - `/runs`: show the latest Python run summary from this TUI session
+- `/scripts`: show recent managed script summaries
 - `/panel`: reminder that panels close with `Esc`
 - Python runs appear inline with script/run ids, exit status, stdout/stderr summaries, and truncation markers
+- Reasoning/tool/runtime events appear as compact timeline entries; detailed run output remains available in `/runs`.
 - Typing `/` opens live command suggestions; `Tab`, `Enter`, and arrow keys work inside the picker.
 - Temporary panels open as full-screen overlays with search/scroll/select behavior.
 

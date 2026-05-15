@@ -31,7 +31,7 @@ class ToolCallDelta:
 
 @dataclass(frozen=True)
 class ModelStreamEvent:
-    type: Literal["text_delta", "tool_call_delta", "completed"]
+    type: Literal["text_delta", "tool_call_delta", "reasoning_delta", "completed"]
     text: str = ""
     tool_call: ToolCallDelta | None = None
     response: ModelResponse | None = None
@@ -196,6 +196,12 @@ class UnifiedModelClient:
                 delta = data.get("delta", "")
                 text_parts.append(delta)
                 yield ModelStreamEvent(type="text_delta", text=delta)
+            elif event_type in {
+                "response.reasoning_text.delta",
+                "response.output_item.reasoning.delta",
+                "response.reasoning_summary_text.delta",
+            }:
+                yield ModelStreamEvent(type="reasoning_delta", text=str(data.get("delta") or ""))
             elif event_type == "response.output_item.done":
                 item = data.get("item")
                 if isinstance(item, dict):
@@ -240,6 +246,11 @@ class UnifiedModelClient:
                     text = delta["content"]
                     text_parts.append(text)
                     yield ModelStreamEvent(type="text_delta", text=text)
+                if delta.get("reasoning_content"):
+                    yield ModelStreamEvent(
+                        type="reasoning_delta",
+                        text=str(delta.get("reasoning_content") or ""),
+                    )
                 for tool_call in delta.get("tool_calls") or []:
                     index = int(tool_call.get("index", 0))
                     existing = tool_acc.setdefault(index, {"arguments": ""})
@@ -300,6 +311,8 @@ class UnifiedModelClient:
                     text = delta.get("text", "")
                     text_parts.append(text)
                     yield ModelStreamEvent(type="text_delta", text=text)
+                elif delta.get("type") in {"thinking_delta", "signature_delta"}:
+                    yield ModelStreamEvent(type="reasoning_delta", text=str(delta.get("thinking") or ""))
                 elif delta.get("type") == "input_json_delta":
                     existing = tool_acc.setdefault(index, {"arguments": ""})
                     existing["arguments"] += delta.get("partial_json", "")

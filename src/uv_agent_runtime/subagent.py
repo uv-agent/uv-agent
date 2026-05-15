@@ -32,6 +32,7 @@ def ask(
     prompt: str,
     *,
     level: str | None = None,
+    model_level: str | None = None,
     cwd: str | None = None,
     env: Mapping[str, str] | None = None,
     executable: list[str] | None = None,
@@ -43,14 +44,15 @@ def ask(
     This intentionally uses a subprocess from inside the Python runner, so the
     outer agent still has exactly one external action surface: run_python.
     """
+    selected_level = model_level or level
     args = list(executable or ["uv", "run", "uv-agent"])
-    if level:
-        args.extend(["--level", level])
+    if selected_level:
+        args.extend(["--level", selected_level])
     args.extend(["ask", prompt])
     result = run_command(args, cwd=cwd, env=env, timeout_s=timeout_s)
     subagent_result = SubagentResult(
         prompt=prompt,
-        level=level,
+        level=selected_level,
         returncode=result.returncode,
         stdout=result.stdout,
         stderr=result.stderr,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,18 @@ class PythonRunner:
     def __init__(self, *, project_root: Path, data_dir: Path, config: RunnerConfig) -> None:
         self.project_root = project_root.resolve()
         self.config = config
-        self.store = ScriptStore(data_dir)
+        self.store = ScriptStore(data_dir, max_saved_scripts=config.max_saved_scripts)
+
+    @property
+    def config(self) -> RunnerConfig:
+        return self._config
+
+    @config.setter
+    def config(self, value: RunnerConfig) -> None:
+        self._config = value
+        if hasattr(self, "store"):
+            self.store.max_saved_scripts = max(1, value.max_saved_scripts)
+            self.store.prune_scripts()
 
     async def run(self, request: PythonRunRequest) -> PythonRunResult:
         events: list[RunnerEvent] = []
@@ -134,6 +146,8 @@ class PythonRunner:
         writer = JsonlWriter(run_log_path)
         run_cwd = (cwd or self.project_root).resolve()
         argv = ["uv", "run", *uv_args, str(final_path), *script_args]
+        env = dict(os.environ)
+        env["UV_AGENT_STATE_DIR"] = str(self.store.data_dir)
         started = {
             "type": "run.started",
             "created_at": utc_now_iso(),
@@ -165,6 +179,7 @@ class PythonRunner:
             process = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=str(run_cwd),
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

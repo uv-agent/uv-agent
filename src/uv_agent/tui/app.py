@@ -13,7 +13,7 @@ from rich.markdown import Markdown
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.reactive import reactive
@@ -22,10 +22,19 @@ from textual.widgets._option_list import Option
 
 from uv_agent.app_factory import create_engine
 from uv_agent.config import ConfigError, config_sources, load_raw_config, redact_config
+from uv_agent.environment import detect_user_language, host_environment_line
+from uv_agent.errors import error_markup, format_error
+from uv_agent.i18n import command_description, tr
 from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.skills import discover_skills
-from uv_agent.tui.formatting import format_tokens, parse_tool_payload, short_thread, tool_result_markup
+from uv_agent.tui.formatting import (
+    format_tokens,
+    parse_tool_payload,
+    short_thread,
+    tool_result_markup,
+    tool_timeline_markup,
+)
 
 
 @dataclass(frozen=True)
@@ -103,8 +112,8 @@ class FullscreenPanel(ModalScreen[str | None]):
     """
 
     BINDINGS = [
-        Binding("escape", "dismiss_panel", "Close", priority=True),
-        Binding("ctrl+c", "dismiss_panel", "Close", priority=True),
+        Binding("escape", "dismiss_panel", "Close", priority=True, show=False),
+        Binding("ctrl+c", "dismiss_panel", "Close", priority=True, show=False),
     ]
 
     def __init__(
@@ -127,11 +136,11 @@ class FullscreenPanel(ModalScreen[str | None]):
             yield Static(self.panel_title, id="panel-header")
             yield Static(self.subtitle, id="panel-subtitle")
             if self.items:
-                yield Input(placeholder="Filter...", id="panel-filter")
+                yield Input(placeholder=getattr(self.app, "_text", lambda key: key)("filter"), id="panel-filter")
                 yield OptionList(id="panel-content")
             else:
                 yield VerticalScroll(Static(self.body, markup=True), id="panel-body")
-            yield Static("Esc close · arrows scroll/select · Enter open", id="panel-footer")
+            yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def on_mount(self) -> None:
         if self.items:
@@ -170,7 +179,8 @@ class FullscreenPanel(ModalScreen[str | None]):
             for item in self._filtered
         ]
         if not options:
-            options = [Option("[dim]No matches[/dim]", id="")]
+            label = getattr(self.app, "_text", lambda key: key)("no_matches")
+            options = [Option(f"[dim]{escape(label)}[/dim]", id="")]
         self.query_one("#panel-content", OptionList).set_options(options)
 
 
@@ -181,23 +191,24 @@ class CommandSpec:
     description: str
 
 
-COMMANDS = [
-    CommandSpec("/new", "/new [title]", "start a named thread"),
-    CommandSpec("/threads", "/threads", "show recent threads"),
-    CommandSpec("/status", "/status", "open runtime status"),
-    CommandSpec("/context", "/context", "show token budget and AGENTS rules"),
-    CommandSpec("/rules", "/rules", "show loaded AGENTS instructions"),
-    CommandSpec("/config", "/config", "show config sources"),
-    CommandSpec("/models", "/models", "show levels and models"),
-    CommandSpec("/level", "/level [name]", "switch model level"),
-    CommandSpec("/mcp", "/mcp", "show MCP declarations"),
-    CommandSpec("/skills", "/skills", "show discovered skills"),
-    CommandSpec("/skill", "/skill [name]", "preview a skill file"),
-    CommandSpec("/runs", "/runs", "show latest Python run"),
-    CommandSpec("/panel", "/panel", "close the open panel"),
-    CommandSpec("/clear", "/clear", "clear transcript and queue"),
-    CommandSpec("/quit", "/quit", "quit with confirmation"),
-    CommandSpec("/help", "/help", "show all commands"),
+COMMAND_SPECS = [
+    ("/new", "/new [title]"),
+    ("/threads", "/threads"),
+    ("/status", "/status"),
+    ("/context", "/context"),
+    ("/rules", "/rules"),
+    ("/config", "/config"),
+    ("/models", "/models"),
+    ("/level", "/level [name]"),
+    ("/mcp", "/mcp"),
+    ("/skills", "/skills"),
+    ("/skill", "/skill [name]"),
+    ("/scripts", "/scripts"),
+    ("/runs", "/runs"),
+    ("/panel", "/panel"),
+    ("/clear", "/clear"),
+    ("/quit", "/quit"),
+    ("/help", "/help"),
 ]
 
 
@@ -226,10 +237,11 @@ class EmptyState(Static):
     def tick(self) -> None:
         frame = self.FRAMES[self.frame % len(self.FRAMES)]
         self.frame += 1
+        text = getattr(self.app, "_text", lambda key: key)
         self.update(
-            f"[bold #dce7f3]Ready[/bold #dce7f3]\n"
-            f"[dim]Python runner only {escape(frame)}[/dim]\n"
-            "[dim]Type / for commands or Ctrl+O for threads[/dim]"
+            f"[bold #dce7f3]{escape(text('ready_title'))}[/bold #dce7f3]\n"
+            f"[dim]{escape(text('ready_subtitle'))} {escape(frame)}[/dim]\n"
+            f"[dim]{escape(text('ready_hint'))}[/dim]"
         )
 
 
@@ -281,7 +293,8 @@ class CommandSuggestions(Static):
         return self.matches[self.selected_index].name
 
     def _refresh_options(self) -> None:
-        lines = ["[bold]commands[/bold] [dim]Tab/Enter select · Esc close[/dim]"]
+        text = getattr(self.app, "_text", lambda key: key)
+        lines = [f"[bold]{escape(text('commands'))}[/bold] [dim]{escape(text('command_hint'))}[/dim]"]
         visible_start = max(0, min(self.selected_index - 6, max(0, len(self.matches) - 8)))
         visible = self.matches[visible_start : visible_start + 8]
         if visible_start:
@@ -369,31 +382,23 @@ class UvAgentApp(App[None]):
 
     #composer-shell {
         height: auto;
-        border: tall #2a3646;
-        background: #0f1721;
-        padding: 0 1;
+        padding: 0 0;
+        background: #0b0f14;
     }
 
     #composer-shell.busy {
-        border: round #3d516b;
+        background: #0b0f14;
     }
 
     #composer-shell.command-mode {
-        border: tall #28708f;
+        background: #0b0f14;
     }
 
-    #composer-row {
-        height: auto;
-        min-height: 3;
-    }
-
-    #composer-left {
-        width: 10;
-        min-width: 7;
-        height: 3;
-        content-align: center middle;
+    #composer-meta {
+        height: 1;
         color: #8fa2b8;
-        border-right: tall #263649;
+        padding: 0 1;
+        background: #0b0f14;
     }
 
     #composer {
@@ -401,23 +406,21 @@ class UvAgentApp(App[None]):
         height: 3;
         min-height: 3;
         max-height: 8;
-        border: none;
+        border: tall #2a3646;
         padding: 0 1;
         background: #0f1721;
         color: #edf2f7;
     }
 
     #composer:focus {
-        border: none;
+        border: tall #3f9bc9;
     }
 
-    #composer-right {
-        width: 14;
-        min-width: 10;
-        height: 3;
-        content-align: center middle;
+    #composer-footer {
+        height: auto;
         color: #8fa2b8;
-        border-left: tall #263649;
+        padding: 0 1;
+        background: #0b0f14;
     }
     """
 
@@ -443,13 +446,14 @@ class UvAgentApp(App[None]):
         super().__init__()
         self.project_root = project_root
         self.engine = create_engine(project_root)
+        self.language = detect_user_language(self.engine.config.ui.language)
         self.thread_id: str | None = None
         self.level: str | None = None
         self._assistant_buffer = ""
         self._assistant_cell: TranscriptCell | None = None
         self._tool_cells: dict[str, TranscriptCell] = {}
         self._queue: list[str] = []
-        self._last_status = "Idle"
+        self._last_status = tr(self.language, "idle")
         self._spinner_index = 0
         self._last_tool_payload: dict[str, object] | None = None
         self._quit_armed = False
@@ -457,6 +461,8 @@ class UvAgentApp(App[None]):
         self._previous_sigint_handler: Any = None
         self._windows_ctrl_handler: Any = None
         self._transcript_has_content = False
+        self._reasoning_cell: TranscriptCell | None = None
+        self._reasoning_buffer = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -465,21 +471,20 @@ class UvAgentApp(App[None]):
             with Vertical(id="bottom-pane"):
                 yield CommandSuggestions(id="command-suggestions")
                 with Vertical(id="composer-shell"):
-                    with Horizontal(id="composer-row"):
-                        yield Static("idle", id="composer-left")
-                        yield TextArea(
-                            "",
-                            placeholder="Ask, edit, or type / for commands",
-                            id="composer",
-                            compact=True,
-                            soft_wrap=True,
-                            show_line_numbers=False,
-                        )
-                        yield Static("ctx 0%", id="composer-right")
+                    yield Static("", id="composer-meta")
+                    yield TextArea(
+                        "",
+                        placeholder=tr(self.language, "placeholder"),
+                        id="composer",
+                        compact=True,
+                        soft_wrap=True,
+                        show_line_numbers=False,
+                    )
+                    yield Static("", id="composer-footer")
 
     def on_mount(self) -> None:
         self.query_one("#empty-state", EmptyState).tick()
-        self._refresh_status("Idle")
+        self._refresh_status(self._text("idle"))
         self.set_interval(0.16, self._tick, name="spinner")
         self.query_one("#composer", TextArea).focus()
         self._install_sigint_guard()
@@ -508,11 +513,20 @@ class UvAgentApp(App[None]):
         if self.busy:
             self._refresh_status()
 
+    def _text(self, key: str) -> str:
+        return tr(self.language, key)
+
+    def _commands(self) -> list[CommandSpec]:
+        return [
+            CommandSpec(name, usage, command_description(self.language, name))
+            for name, usage in COMMAND_SPECS
+        ]
+
     def action_submit_composer(self) -> None:
         composer = self.query_one("#composer", TextArea)
         prompt = composer.text.strip()
         if not prompt:
-            self._flash("Write something first")
+            self._flash(self._text("write_first"))
             return
         composer.load_text("")
         self._hide_command_suggestions()
@@ -521,7 +535,7 @@ class UvAgentApp(App[None]):
             return
         if self.busy:
             self._queue.append(prompt)
-            self._append_cell(f"[dim]queued[/dim]\n{escape(prompt)}", "event")
+            self._append_cell(f"[dim]{escape(self._text('queued'))}[/dim]\n{escape(prompt)}", "event")
             self._refresh_status()
             return
         self._start_turn(prompt)
@@ -531,8 +545,14 @@ class UvAgentApp(App[None]):
         self.query_one("#composer-shell", Vertical).add_class("busy")
         self._assistant_buffer = ""
         self._assistant_cell = None
+        self._reasoning_cell = None
+        self._reasoning_buffer = ""
         self._append_user(prompt)
-        self._refresh_status("Working")
+        self._reasoning_cell = self._append_cell(
+            f"[dim]{escape(self._text('thinking'))}...[/dim]",
+            "event",
+        )
+        self._refresh_status(self._text("working"))
         self.run_worker(self._run_turn(prompt), exclusive=True, thread=False)
 
     async def _run_turn(self, prompt: str) -> None:
@@ -546,25 +566,31 @@ class UvAgentApp(App[None]):
                 event_type = item["type"]
                 if event_type == "assistant.delta":
                     await self._append_assistant_delta(item["text"])
+                elif event_type == "assistant.reasoning_delta":
+                    self._append_reasoning_delta(item["text"])
+                elif event_type == "tool.delta":
+                    self._refresh_status(self._text("running_python"))
                 elif event_type == "model.response":
-                    self._refresh_status("Reading")
+                    self._refresh_status(self._text("reading"))
                 elif event_type == "tool.started":
                     self._append_tool_started(item)
                 elif event_type == "tool.output":
                     self._append_tool_output(item)
+                elif event_type == "compaction.completed":
+                    self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
                 elif event_type == "turn.completed":
                     text = item["final_text"] or self._assistant_buffer
                     if text and self._assistant_cell is None:
                         await self._append_assistant_delta(text)
-                    self._refresh_status("Idle")
+                    self._refresh_status(self._text("idle"))
         except Exception as exc:
-            self._append_cell(f"[bold red]Error[/bold red] {escape(repr(exc))}", "error")
-            self._refresh_status("Error")
+            self._append_cell(error_markup(format_error(exc)), "error")
+            self._refresh_status(self._text("error"))
         finally:
             self.busy = False
             self.query_one("#composer-shell", Vertical).remove_class("busy")
-            if self._last_status != "Error":
-                self._refresh_status("Idle")
+            if self._last_status != self._text("error"):
+                self._refresh_status(self._text("idle"))
             self.query_one("#composer", TextArea).focus()
             if self._queue:
                 next_prompt = self._queue.pop(0)
@@ -589,9 +615,9 @@ class UvAgentApp(App[None]):
             self.exit()
             return
         draft = self.query_one("#composer", TextArea).text.strip()
-        suffix = " · draft will be lost" if draft else ""
+        suffix = self._text("draft_lost") if draft else ""
         self._quit_armed = True
-        self._flash(f"Press Ctrl+Q or Ctrl+C again to quit{suffix}", severity="warning")
+        self._flash(f"{self._text('quit_again')}{suffix}", severity="warning")
         self.set_timer(2.0, self._clear_quit_arm)
 
     def action_toggle_status_panel(self) -> None:
@@ -684,19 +710,19 @@ class UvAgentApp(App[None]):
             self._tool_cells.clear()
             self._queue.clear()
             self._reset_transcript()
-            self._refresh_status("Idle")
+            self._refresh_status(self._text("idle"))
             return True
         if command == "/quit":
             self.action_request_quit()
             return True
         if command == "/new":
-            title = rest.strip() or "New thread"
+            title = rest.strip() or self._text("new_thread")
             self.thread_id = self.engine.thread_store.create_thread(title)
             self._append_cell(
-                f"[dim]new thread[/dim] [cyan]{escape(short_thread(self.thread_id))}[/cyan]",
+                f"[dim]{escape(self._text('new_thread'))}[/dim] [cyan]{escape(short_thread(self.thread_id))}[/cyan]",
                 "event",
             )
-            self._refresh_status("Idle")
+            self._refresh_status(self._text("idle"))
             return True
         if command == "/threads":
             self._open_threads_panel()
@@ -725,6 +751,9 @@ class UvAgentApp(App[None]):
         if command == "/skill":
             self._append_skill(rest.strip())
             return True
+        if command == "/scripts":
+            self._open_scripts_panel()
+            return True
         if command == "/level":
             self._handle_level_command(rest.strip())
             return True
@@ -732,13 +761,13 @@ class UvAgentApp(App[None]):
             self._open_runs_panel()
             return True
         if command == "/panel":
-            self._flash("Panels now close with Esc")
+            self._flash(self._text("panel_close_hint"))
             return True
         if command in {"/help", "?"}:
             self._open_help_panel()
             return True
         if command.startswith("/"):
-            self._flash(f"Unknown command: {command}", severity="error")
+            self._flash(f"{self._text('unknown_command')}: {command}", severity="error")
             self._open_help_panel()
             return True
         return False
@@ -747,23 +776,24 @@ class UvAgentApp(App[None]):
         self.action_request_quit()
 
     def _open_help_panel(self) -> None:
-        lines = ["[bold]commands[/bold] [dim](Tab/Enter selects suggestions, Esc closes)[/dim]"]
-        for spec in COMMANDS:
+        lines = [f"[bold]{escape(self._text('commands'))}[/bold] [dim](Tab/Enter, Esc)[/dim]"]
+        for spec in self._commands():
             lines.append(
                 f"[cyan]{escape(spec.usage):<18}[/cyan] [dim]{escape(spec.description)}[/dim]"
             )
-        self._open_panel("\n".join(lines), "help", "Help")
+        self._open_panel("\n".join(lines), "help", self._text("help"))
 
     def _append_help(self) -> None:
-        lines = ["[bold]commands[/bold] [dim](Ctrl+S opens status, Esc closes panels)[/dim]"]
-        for spec in COMMANDS:
+        lines = [f"[bold]{escape(self._text('commands'))}[/bold] [dim](Ctrl+S, Esc)[/dim]"]
+        for spec in self._commands():
             lines.append(
                 f"[cyan]{escape(spec.usage):<18}[/cyan] [dim]{escape(spec.description)}[/dim]"
             )
         self._append_cell("\n".join(lines), "event")
 
     def _append_user(self, text: str) -> None:
-        self._append_cell(f"[bold #7dd3fc]you[/bold #7dd3fc]\n{escape(text)}", "user")
+        label = "你" if self.language.is_chinese else "you"
+        self._append_cell(f"[bold #7dd3fc]{label}[/bold #7dd3fc]\n{escape(text)}", "user")
 
     async def _append_assistant_delta(self, text: str) -> None:
         self._assistant_buffer += text
@@ -773,21 +803,39 @@ class UvAgentApp(App[None]):
         self._assistant_cell.update(Markdown(self._assistant_buffer))
         self._scroll_end()
 
+    def _append_reasoning_delta(self, text: str) -> None:
+        stripped = text.strip()
+        if not stripped:
+            return
+        self._reasoning_buffer = (self._reasoning_buffer + " " + stripped).strip()
+        first = self._reasoning_buffer.splitlines()[0]
+        if len(first) > 120:
+            first = first[:117].rstrip() + "..."
+        markup = f"[dim]{escape(self._text('thinking'))}[/dim] [italic]{escape(first)}[/italic]"
+        if self._reasoning_cell is None:
+            self._reasoning_cell = self._append_cell(markup, "event")
+        else:
+            self._reasoning_cell.update(markup)
+            self._scroll_end()
+
     def _append_tool_output(self, item: dict[str, Any]) -> None:
         payload = parse_tool_payload(item.get("output", {}))
         if payload is None:
-            self._append_cell("[dim]python completed[/dim]", "event")
+            self._append_cell(
+                f"[dim]{escape(self._text('python'))} {escape(self._text('python_completed'))}[/dim]",
+                "event",
+            )
             return
 
         self._last_tool_payload = payload
-        markup = tool_result_markup(payload)
+        markup = tool_timeline_markup(payload)
         cell = self._tool_cells.pop(str(item.get("call", {}).get("call_id") or ""), None)
         if cell is None:
             self._append_cell(markup, "event")
         else:
             cell.update(markup)
             self._scroll_end()
-        self._refresh_status("Working")
+        self._refresh_status(self._text("working"))
 
     def _append_tool_started(self, item: dict[str, Any]) -> None:
         call = item.get("call") or {}
@@ -795,12 +843,12 @@ class UvAgentApp(App[None]):
         name = str(call.get("name") or "python")
         detail = self._tool_call_preview(call)
         cell = self._append_cell(
-            f"[cyan]{escape(name)}[/cyan] [dim]running[/dim]{detail}",
+            f"[cyan]{escape(name)}[/cyan] [dim]{escape(self._text('python_running'))}[/dim]{detail}",
             "event",
         )
         if call_id:
             self._tool_cells[call_id] = cell
-        self._refresh_status("Running python")
+        self._refresh_status(self._text("running_python"))
 
     def _tool_call_preview(self, call: dict[str, Any]) -> str:
         raw_args = call.get("arguments") or ""
@@ -841,29 +889,40 @@ class UvAgentApp(App[None]):
     def _open_threads_panel(self) -> None:
         threads = self.engine.thread_store.list_threads()
         if not threads:
-            self._open_fullscreen_panel("Threads", "[dim]No saved threads[/dim]")
+            self._open_fullscreen_panel(
+                self._text("threads"),
+                f"[dim]{escape(self._text('no_threads'))}[/dim]",
+            )
             return
         items = []
         for thread in threads:
             thread_id = str(thread.get("thread_id") or "")
-            title = str(thread.get("title") or "New thread")
+            title = str(thread.get("title") or self._text("new_thread"))
             updated = str(thread.get("updated_at") or "")
             last_text = str(thread.get("last_text") or "").replace("\n", " ")
             if len(last_text) > 120:
                 last_text = last_text[:117].rstrip() + "..."
-            marker = "current " if thread_id == self.thread_id else ""
+            marker = f"{self._text('current')} " if thread_id == self.thread_id else ""
             items.append(
                 PickerItem(
                     id=thread_id,
                     title=f"{marker}{title}",
-                    description=last_text or "No messages yet",
-                    meta=f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} turns · {updated}",
+                    description=last_text or self._text("no_messages"),
+                    meta=(
+                        f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} "
+                        f"{self._text('turns')} · {updated}"
+                    ),
                 )
             )
-        self._open_picker("Threads", items, self._resume_thread, subtitle="Search and Enter to resume")
+        self._open_picker(
+            self._text("threads"),
+            items,
+            self._resume_thread,
+            subtitle=self._text("thread_search_hint"),
+        )
 
     def _open_status_panel(self) -> None:
-        self._open_panel(self._status_panel_markup(), "status", "Status")
+        self._open_panel(self._status_panel_markup(), "status", self._text("status"))
 
     def _status_panel_markup(self) -> str:
         self.engine.refresh_config()
@@ -900,11 +959,13 @@ class UvAgentApp(App[None]):
             f"- queued: {len(self._queue)}",
             f"- user state: {escape(str(uv_agent_home()))}",
             f"- project state: {escape(str(project_state_dir(self.project_root)))}",
+            f"- host: {escape(host_environment_line())}",
+            f"- language: {escape(self.language.name)}",
         ]
         return "\n".join(lines)
 
     def _open_context_panel(self) -> None:
-        self._open_panel(self._context_panel_markup(), "context", "Context")
+        self._open_panel(self._context_panel_markup(), "context", self._text("context"))
 
     def _context_panel_markup(self) -> str:
         self.engine.refresh_config()
@@ -940,7 +1001,11 @@ class UvAgentApp(App[None]):
     def _open_rules_panel(self) -> None:
         rules = self.engine.project_rule_context()
         if not rules.rules:
-            self._open_panel("[dim]no AGENTS.md files discovered[/dim]", "rules", "Rules")
+            self._open_panel(
+                f"[dim]{escape(self._text('no_agents'))}[/dim]",
+                "rules",
+                self._text("rules"),
+            )
             return
         lines: list[str] = []
         for rule in rules.rules:
@@ -953,7 +1018,7 @@ class UvAgentApp(App[None]):
             lines.append(title + "\n" + escape(preview))
         if rules.truncated and rules.omitted_files:
             lines.append(f"[yellow]{rules.omitted_files} file(s) omitted by context cap[/yellow]")
-        self._open_panel("\n\n".join(lines), "rules", "Rules")
+        self._open_panel("\n\n".join(lines), "rules", self._text("rules"))
 
     def _open_config_panel(self) -> None:
         self.engine.refresh_config()
@@ -985,7 +1050,7 @@ class UvAgentApp(App[None]):
         if len(preview) > 2200:
             preview = preview[:2200].rstrip() + "\n..."
         lines.extend(["\n[bold]redacted merged config[/bold]", escape(preview)])
-        self._open_panel("\n".join(lines), "config", "Config")
+        self._open_panel("\n".join(lines), "config", self._text("config"))
 
     def _open_models_panel(self) -> None:
         self.engine.refresh_config()
@@ -998,55 +1063,84 @@ class UvAgentApp(App[None]):
             lines.append(
                 f"- {escape(name)}: {escape(model.model)} [dim]{escape(model.api)} · {format_tokens(model.context_window_tokens)}[/dim]"
             )
-        self._open_panel("\n".join(lines), "models", "Models")
+        self._open_panel("\n".join(lines), "models", self._text("models"))
 
     def _handle_level_command(self, name: str) -> None:
         if not name:
             self._open_models_panel()
             return
         if name not in self.engine.config.levels:
-            self._append_cell(f"[red]unknown level[/red] {escape(name)}", "error")
+            self._append_cell(f"[red]{escape(self._text('unknown_level'))}[/red] {escape(name)}", "error")
             return
         self.level = name
-        self._append_cell(f"[dim]level[/dim] [cyan]{escape(name)}[/cyan]", "event")
+        self._append_cell(f"[dim]{escape(self._text('level'))}[/dim] [cyan]{escape(name)}[/cyan]", "event")
         self._refresh_status()
 
     def _open_runs_panel(self) -> None:
         if not self._last_tool_payload:
-            self._open_panel("[dim]no Python runs in this TUI session[/dim]", "runs", "Runs")
+            self._open_panel(
+                f"[dim]{escape(self._text('no_runs'))}[/dim]",
+                "runs",
+                self._text("runs"),
+            )
             return
         self._open_panel(
             tool_result_markup(self._last_tool_payload),
             "runs",
-            "Last Run",
+            self._text("last_run"),
         )
+
+    def _open_scripts_panel(self) -> None:
+        scripts = self.engine.runner.store.list_scripts(limit=32)
+        if not scripts:
+            self._open_panel(f"[dim]{escape(self._text('no_scripts'))}[/dim]", "scripts", self._text("scripts"))
+            return
+        lines = [
+            f"[bold]{escape(self._text('scripts_header'))}[/bold] "
+            f"[dim]({escape(self._text('scripts_limit'))})[/dim]"
+        ]
+        for script in scripts:
+            lines.append(
+                f"- [cyan]{escape(str(script.get('script_id') or ''))}[/cyan] "
+                f"[dim]runs={script.get('run_count', 0)} · {escape(str(script.get('last_used_at') or ''))}[/dim]\n"
+                f"  {escape(str(script.get('summary') or ''))}"
+            )
+        self._open_panel("\n".join(lines), "scripts", self._text("scripts"))
 
     def _open_mcp_panel(self) -> None:
         self.engine.refresh_config()
         servers = discover_mcp_servers(self.project_root)
         if not servers:
-            self._open_panel("[dim]no .agents/mcp.json servers declared[/dim]", "mcp", "MCP")
+            self._open_panel(
+                f"[dim]{escape(self._text('no_mcp'))}[/dim]",
+                "mcp",
+                self._text("mcp"),
+            )
             return
-        lines = ["[dim]declarations only[/dim]"]
+        lines = [f"[dim]{escape(self._text('mcp_declarations'))}[/dim]"]
         for server in servers:
             command = f" [dim]{escape(server.command)}[/dim]" if server.command else ""
             lines.append(
                 f"- [cyan]{escape(server.name)}[/cyan] ({escape(server.scope)}) {escape(server.description)}{command}"
             )
-        self._open_panel("\n".join(lines), "mcp", "MCP")
+        self._open_panel("\n".join(lines), "mcp", self._text("mcp"))
 
     def _open_skills_panel(self) -> None:
         self.engine.refresh_config()
         skills = discover_skills(self.project_root)
         if not skills:
-            self._open_panel("[dim]no .agents/skills entries discovered[/dim]", "skills", "Skills")
+            self._open_panel(
+                f"[dim]{escape(self._text('no_skills'))}[/dim]",
+                "skills",
+                self._text("skills"),
+            )
             return
-        lines = ["[dim]/skill name previews a skill file[/dim]"]
+        lines = [f"[dim]{escape(self._text('skill_hint'))}[/dim]"]
         for skill in skills:
             lines.append(
                 f"- [cyan]{escape(skill.name)}[/cyan] ({escape(skill.scope)}) {escape(skill.description)}"
             )
-        self._open_panel("\n".join(lines), "skills", "Skills")
+        self._open_panel("\n".join(lines), "skills", self._text("skills"))
 
     def _append_skill(self, name: str) -> None:
         if not name:
@@ -1055,7 +1149,7 @@ class UvAgentApp(App[None]):
         skills = {skill.name: skill for skill in discover_skills(self.project_root)}
         skill = skills.get(name)
         if skill is None:
-            self._append_cell(f"[red]unknown skill[/red] {escape(name)}", "error")
+            self._append_cell(f"[red]{escape(self._text('unknown_skill'))}[/red] {escape(name)}", "error")
             return
         text = skill.path.read_text(encoding="utf-8")
         preview = "\n".join(text.splitlines()[:18])
@@ -1074,12 +1168,17 @@ class UvAgentApp(App[None]):
                 title=spec.usage,
                 description=spec.description,
             )
-            for spec in COMMANDS
+            for spec in self._commands()
         ]
-        self._open_picker("Commands", items, self._choose_command, subtitle="Type to filter commands")
+        self._open_picker(
+            self._text("command_palette"),
+            items,
+            self._choose_command,
+            subtitle=self._text("command_filter_hint"),
+        )
 
     def _choose_command(self, command: str) -> None:
-        spec = next((item for item in COMMANDS if item.name == command), None)
+        spec = next((item for item in self._commands() if item.name == command), None)
         if spec is None:
             return
         if "[" in spec.usage:
@@ -1093,10 +1192,12 @@ class UvAgentApp(App[None]):
         self.thread_id = thread_id
         self._assistant_buffer = ""
         self._assistant_cell = None
+        self._reasoning_cell = None
+        self._reasoning_buffer = ""
         self._tool_cells.clear()
         self._reset_transcript()
         self._render_thread_history(thread_id)
-        self._refresh_status("Resumed")
+        self._refresh_status(self._text("resumed"))
 
     def _render_thread_history(self, thread_id: str) -> None:
         for event in self.engine.thread_store.read(thread_id):
@@ -1110,19 +1211,26 @@ class UvAgentApp(App[None]):
             elif event_type == "item.tool_call":
                 item = event.get("item") or {}
                 name = str(item.get("name") or "python")
-                self._append_cell(f"[cyan]{escape(name)}[/cyan] [dim]called[/dim]", "event")
+                self._append_cell(f"[cyan]{escape(name)}[/cyan] [dim]{escape(self._text('python_called'))}[/dim]", "event")
             elif event_type == "item.runner_result":
                 result = event.get("result") or {}
                 self._last_tool_payload = result
-                self._append_cell(tool_result_markup(result), "event")
+                self._append_cell(tool_timeline_markup(result), "event")
             elif event_type == "item.image_attachment":
                 attachment = event.get("attachment") or {}
                 self._append_cell(
-                    f"[dim]image attached[/dim] [cyan]{escape(str(attachment.get('stored_path') or ''))}[/cyan]",
+                    f"[dim]{escape(self._text('image_attached'))}[/dim] "
+                    f"[cyan]{escape(str(attachment.get('stored_path') or ''))}[/cyan]",
                     "event",
                 )
+            elif event_type == "item.reasoning_delta":
+                self._append_reasoning_delta(str(event.get("text") or ""))
+            elif event_type == "item.compaction":
+                self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
 
     def _append_user_from_history(self, item: dict[str, Any]) -> None:
+        self._reasoning_cell = None
+        self._reasoning_buffer = ""
         parts = []
         for content in item.get("content") or []:
             if content.get("type") in {"input_text", "text"}:
@@ -1162,8 +1270,8 @@ class UvAgentApp(App[None]):
         )
 
     def _open_panel(self, markup: str, name: str | None = None, title: str | None = None) -> None:
-        panel_title = title or (name.title() if name else "Panel")
-        self._open_fullscreen_panel(panel_title, markup, subtitle="Esc closes")
+        panel_title = title or (name.title() if name else self._text("panel"))
+        self._open_fullscreen_panel(panel_title, markup, subtitle=self._text("panel_closes"))
         self._refresh_status()
 
     def _update_command_suggestions(self, text: str) -> None:
@@ -1172,16 +1280,17 @@ class UvAgentApp(App[None]):
             self._hide_command_suggestions()
             return
         token = stripped.split(" ", 1)[0]
-        exact = next((spec for spec in COMMANDS if spec.name == token), None)
+        commands = self._commands()
+        exact = next((spec for spec in commands if spec.name == token), None)
         if exact is not None and "[" not in exact.usage:
             self._hide_command_suggestions()
             return
-        matches = [spec for spec in COMMANDS if spec.name.startswith(token)]
+        matches = [spec for spec in commands if spec.name.startswith(token)]
         if not matches and len(token) > 2:
             query = token.removeprefix("/").lower()
-            matches = [spec for spec in COMMANDS if query in spec.description.lower()]
+            matches = [spec for spec in commands if query in spec.description.lower()]
         if not matches:
-            matches = [CommandSpec(token, token, "unknown command")]
+            matches = [CommandSpec(token, token, self._text("unknown_command_description"))]
         self.query_one("#command-suggestions", CommandSuggestions).set_matches(matches)
         self.query_one("#composer-shell", Vertical).add_class("command-mode")
 
@@ -1189,7 +1298,7 @@ class UvAgentApp(App[None]):
         stripped = text.strip()
         if not stripped.startswith("/") or "\n" in stripped or " " in stripped:
             return None
-        matches = [spec for spec in COMMANDS if spec.name.startswith(stripped)]
+        matches = [spec for spec in self._commands() if spec.name.startswith(stripped)]
         if not matches:
             return None
         command = matches[0].name
@@ -1197,7 +1306,7 @@ class UvAgentApp(App[None]):
         return command + (" " if needs_arg else "")
 
     def _apply_command_completion(self, command: str) -> None:
-        spec = next((item for item in COMMANDS if item.name == command), None)
+        spec = next((item for item in self._commands() if item.name == command), None)
         needs_arg = spec is not None and "[" in spec.usage
         replacement = command + (" " if needs_arg else "")
         composer = self.query_one("#composer", TextArea)
@@ -1227,6 +1336,11 @@ class UvAgentApp(App[None]):
         if state is not None:
             self._last_status = state
         self.engine.refresh_config()
+        self.language = detect_user_language(self.engine.config.ui.language)
+        try:
+            self.query_one("#composer", TextArea).placeholder = self._text("placeholder")
+        except NoMatches:
+            pass
         level_name = self.level or self.engine.config.runtime.default_level
         try:
             stats = self.engine.context_stats(self.thread_id, self.level)
@@ -1234,8 +1348,8 @@ class UvAgentApp(App[None]):
         except ConfigError:
             context = "config?"
         state_text = self._last_status
-        if self.busy and state_text == "Idle":
-            state_text = "Working"
+        if self.busy and state_text == self._text("idle"):
+            state_text = self._text("working")
         queued = f" · q {len(self._queue)}" if self._queue else ""
         spinner = ""
         if self.busy:
@@ -1243,11 +1357,16 @@ class UvAgentApp(App[None]):
             spinner = frames[self._spinner_index % len(frames)] + " "
             self._spinner_index += 1
 
-        left = f"[cyan]{spinner}{escape(state_text)}[/cyan]"
         compact_context = context.split(" ", 1)[0]
-        right = f"[dim]{escape(level_name)}\nctx {escape(compact_context)}{queued}[/dim]"
-        self.query_one("#composer-left", Static).update(left)
-        self.query_one("#composer-right", Static).update(right)
+        meta = (
+            f"[cyan]{spinner}{escape(state_text)}[/cyan] "
+            f"[dim]{escape(self._text('level'))} {escape(level_name)} · "
+            f"{escape(self._text('ctx'))} {escape(compact_context)} · "
+            f"{escape(self._text('thread'))} {escape(short_thread(self.thread_id))}{queued}[/dim]"
+        )
+        footer = self._text("footer_busy") if self.busy else self._text("footer_idle")
+        self.query_one("#composer-meta", Static).update(meta)
+        self.query_one("#composer-footer", Static).update(f"[dim]{escape(footer)}[/dim]")
 
     def _scroll_end(self) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)

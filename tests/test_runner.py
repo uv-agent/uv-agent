@@ -8,6 +8,7 @@ from uv_agent.config import RunnerConfig
 from uv_agent.jsonl import read_jsonl
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
 from uv_agent.runner.runner import parse_structured_event
+from uv_agent.runner.store import ScriptStore
 
 
 @pytest.mark.asyncio
@@ -85,3 +86,41 @@ def test_parse_structured_event_reads_runtime_json_line() -> None:
         "path": "image.png",
     }
     assert parse_structured_event("plain text\n") is None
+
+
+@pytest.mark.asyncio
+async def test_runner_prunes_old_scripts(tmp_path: Path) -> None:
+    project_root = Path.cwd()
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+            max_saved_scripts=2,
+        ),
+    )
+
+    for index in range(3):
+        await runner.run(PythonRunRequest(code=f"print({index})\n", cwd=project_root))
+
+    scripts = runner.store.list_scripts()
+
+    assert len(scripts) == 2
+    assert all(script["summary"].startswith("print(") for script in scripts)
+
+
+def test_script_store_summary_ignores_inline_metadata(tmp_path: Path) -> None:
+    store = ScriptStore(tmp_path, max_saved_scripts=32)
+    script_id, _, _ = store.create_script(
+        original_code="",
+        final_code="# /// script\n# dependencies=['x']\n# ///\n\nprint('real')\n",
+        thread_id=None,
+        turn_id=None,
+    )
+
+    summaries = store.list_scripts()
+
+    assert summaries[0]["script_id"] == script_id
+    assert summaries[0]["summary"] == "print('real')"

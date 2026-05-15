@@ -50,6 +50,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert model.params["reasoning"]["effort"] == "high"
     assert "uv-agent @ file:///" in config.runner.runtime_dependency
     assert config.runner.default_uv_args == ["--reinstall-package", "uv-agent"]
+    assert config.runner.max_saved_scripts == 32
 
 
 def test_redact_config_masks_sensitive_values() -> None:
@@ -69,3 +70,12 @@ def test_default_paths_are_user_level(monkeypatch, tmp_path: Path) -> None:
     assert paths[0] == user_config_path()
     assert paths[1] == project_config_path(project_root)
     assert project_state_dir(project_root).is_relative_to(tmp_path / "home" / "projects")
+
+
+def test_ui_language_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"ui": {"language": "zh-CN"}}), encoding="utf-8")
+
+    config = load_config(tmp_path, [config_path])
+
+    assert config.ui.language == "zh-CN"

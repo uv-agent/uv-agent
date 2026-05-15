@@ -270,6 +270,10 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "run_python" in prompt
     assert "uv_agent_runtime" in prompt
     assert str(project_root) in prompt
+    assert "Host:" in prompt
+    assert "User language:" in prompt
+    assert "ask(prompt, level=\"small\"|\"medium\"|\"large\")" in prompt
+    assert "saved_scripts(limit=32)" in prompt
     assert "Rules, skills, and MCP declarations are appended only when first seen" in prompt
     assert "demo (project)" not in prompt
 

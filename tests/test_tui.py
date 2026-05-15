@@ -13,6 +13,7 @@ from uv_agent.config import (
     ProviderConfig,
     RunnerConfig,
     RuntimeConfig,
+    UiConfig,
 )
 from uv_agent.model_client import FakeModelClient
 from uv_agent.runner import PythonRunner
@@ -38,6 +39,7 @@ def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
         ),
+        ui=UiConfig(language="en"),
     )
     return AgentEngine(
         config=config,
@@ -113,6 +115,12 @@ async def test_tui_thread_picker_resumes_and_renders_history(
     )
     engine.thread_store.append(
         thread_id,
+        "item.reasoning_delta",
+        turn_id="turn_1",
+        text="checking files",
+    )
+    engine.thread_store.append(
+        thread_id,
         "item.model_response",
         turn_id="turn_1",
         response_id="resp_1",
@@ -138,3 +146,58 @@ async def test_tui_thread_picker_resumes_and_renders_history(
 
         assert app.thread_id == thread_id
         assert app._transcript_has_content is True
+        assert app._reasoning_buffer == "checking files"
+
+
+@pytest.mark.asyncio
+async def test_tui_uses_chinese_when_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    engine.config = AppConfig(
+        providers=engine.config.providers,
+        models=engine.config.models,
+        levels=engine.config.levels,
+        runtime=engine.config.runtime,
+        runner=engine.config.runner,
+        ui=UiConfig(language="zh-CN"),
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)):
+        footer = app.query_one("#composer-footer")
+        placeholder = app.query_one("#composer", TextArea).placeholder
+        assert "Ctrl+Enter" in str(footer.content)
+        assert "输入" in placeholder
+
+
+@pytest.mark.asyncio
+async def test_tui_updates_placeholder_after_language_config_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)):
+        composer = app.query_one("#composer", TextArea)
+        assert "Ask" in composer.placeholder
+
+        engine.config = AppConfig(
+            providers=engine.config.providers,
+            models=engine.config.models,
+            levels=engine.config.levels,
+            runtime=engine.config.runtime,
+            runner=engine.config.runner,
+            ui=UiConfig(language="zh-CN"),
+        )
+        app._refresh_status()
+
+        assert "输入" in composer.placeholder
