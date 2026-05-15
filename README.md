@@ -72,4 +72,9 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `Ctrl+C`: quit
 - `?` + Enter or `/help`: show local commands
 - `/new [title]`, `/threads`, and `/clear`: light thread controls
+- `/config`: show config sources and redacted merged config
+- `/models` and `/level [name]`: inspect and switch configured model levels
+- `/mcp`: show MCP declarations from `.agents/mcp.json`
+- `/runs`: show the latest Python run summary from this TUI session
+- `/panel`: close the temporary panel
 - Python runs appear inline with script/run ids, exit status, stdout/stderr summaries, and truncation markers

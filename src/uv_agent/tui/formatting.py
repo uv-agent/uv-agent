@@ -62,3 +62,8 @@ def tool_result_markup(payload: dict[str, Any]) -> str:
     if truncated:
         lines.append("[dim]output truncated[/dim]")
     return "\n".join(lines)
+
+
+def json_markup(value: object) -> str:
+    """Render JSON with escaped markup for transcript display."""
+    return escape(json.dumps(value, ensure_ascii=False, indent=2))

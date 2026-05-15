@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from uv_agent.config import EndpointConfig, ModelConfig, ProviderConfig
 from uv_agent.model_client import (
+    anthropic_messages,
+    anthropic_payload,
     chat_messages,
     chat_payload,
+    parse_anthropic_response,
     parse_chat_response,
     parse_sse_event,
 )
@@ -84,3 +87,61 @@ def test_parse_sse_event_handles_done_and_json() -> None:
     assert parse_sse_event(None, ["[DONE]"]) is None
     parsed = parse_sse_event("response.completed", ['{"response":{"id":"x"}}'])
     assert parsed == {"type": "response.completed", "response": {"id": "x"}}
+
+
+def test_anthropic_payload_uses_messages_shape() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://example.com",
+        anthropic_messages=EndpointConfig(path="/v1/messages", params={"max_tokens": 99}),
+    )
+    model = ModelConfig(name="m", provider="p", model="claude", api="anthropic_messages")
+
+    payload = anthropic_payload(provider, model, [], [], "system", stream=True)
+
+    assert payload["model"] == "claude"
+    assert payload["system"] == "system"
+    assert payload["messages"] == []
+    assert payload["stream"] is True
+    assert payload["max_tokens"] == 99
+    assert "tools" not in payload
+
+
+def test_anthropic_messages_convert_tool_items() -> None:
+    messages = anthropic_messages(
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {
+                "type": "function_call",
+                "call_id": "toolu_1",
+                "name": "run_python",
+                "arguments": "{\"code\":\"print(1)\"}",
+            },
+            {"type": "function_call_output", "call_id": "toolu_1", "output": "{\"ok\":true}"},
+        ]
+    )
+
+    assert messages[0] == {"role": "user", "content": "hi"}
+    assert messages[1]["content"][0]["type"] == "tool_use"
+    assert messages[2]["content"][0]["type"] == "tool_result"
+
+
+def test_parse_anthropic_response_maps_tool_use() -> None:
+    response = parse_anthropic_response(
+        {
+            "id": "msg_1",
+            "content": [
+                {"type": "text", "text": "hello"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "run_python",
+                    "input": {"code": "print(1)"},
+                },
+            ],
+        }
+    )
+
+    assert response.output_text == "hello"
+    assert response.output[1]["type"] == "function_call"
+    assert response.output[1]["call_id"] == "toolu_1"

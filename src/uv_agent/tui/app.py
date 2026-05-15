@@ -10,6 +10,8 @@ from textual.reactive import reactive
 from textual.widgets import Input, Static
 
 from uv_agent.app_factory import create_engine
+from uv_agent.config import config_sources
+from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.tui.formatting import parse_tool_payload, short_thread, tool_result_markup
 
 
@@ -56,9 +58,21 @@ class UvAgentApp(App[None]):
 
     #bottom-pane {
         height: auto;
-        max-height: 5;
+        max-height: 16;
         padding: 0 2 1 2;
         background: $surface;
+    }
+
+    #drawer {
+        height: auto;
+        max-height: 10;
+        border-top: tall $secondary;
+        padding: 1 0 0 0;
+        color: $text;
+    }
+
+    #drawer.hidden {
+        display: none;
     }
 
     #run-status {
@@ -105,15 +119,19 @@ class UvAgentApp(App[None]):
         self.project_root = project_root
         self.engine = create_engine(project_root)
         self.thread_id: str | None = None
+        self.level: str | None = None
         self._assistant_buffer = ""
         self._assistant_cell: TranscriptCell | None = None
         self._tool_cells: dict[str, TranscriptCell] = {}
         self._queue: list[str] = []
         self._last_status = "Idle"
+        self._spinner_index = 0
+        self._last_tool_payload: dict[str, object] | None = None
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="transcript")
         with Vertical(id="bottom-pane"):
+            yield Static(id="drawer", classes="hidden")
             yield Static(id="run-status")
             with Horizontal(id="composer-row"):
                 yield Static("›", id="prompt-marker")
@@ -130,10 +148,15 @@ class UvAgentApp(App[None]):
             "event",
         )
         self._refresh_status("Idle")
+        self.set_interval(0.12, self._tick, name="spinner")
         self.query_one("#input", Input).focus()
 
     def on_resize(self) -> None:
         self._refresh_status()
+
+    def _tick(self) -> None:
+        if self.busy:
+            self._refresh_status()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         prompt = event.value.strip()
@@ -159,7 +182,11 @@ class UvAgentApp(App[None]):
 
     async def _run_turn(self, prompt: str) -> None:
         try:
-            async for item in self.engine.run_turn(user_text=prompt, thread_id=self.thread_id):
+            async for item in self.engine.run_turn(
+                user_text=prompt,
+                thread_id=self.thread_id,
+                level=self.level,
+            ):
                 self.thread_id = item.get("thread_id", self.thread_id)
                 event_type = item["type"]
                 if event_type == "assistant.delta":
@@ -216,7 +243,25 @@ class UvAgentApp(App[None]):
             self._refresh_status("Idle")
             return True
         if command == "/threads":
-            self._append_threads()
+            self._open_threads_panel()
+            return True
+        if command == "/config":
+            self._open_config_panel()
+            return True
+        if command == "/models":
+            self._open_models_panel()
+            return True
+        if command == "/mcp":
+            self._open_mcp_panel()
+            return True
+        if command == "/level":
+            self._handle_level_command(rest.strip())
+            return True
+        if command == "/runs":
+            self._open_runs_panel()
+            return True
+        if command == "/panel":
+            self._close_panel()
             return True
         if command in {"/help", "?"}:
             self._append_help()
@@ -228,6 +273,12 @@ class UvAgentApp(App[None]):
             "[bold]commands[/bold]\n"
             "/new \\[title]\n"
             "/threads\n"
+            "/config\n"
+            "/models\n"
+            "/mcp\n"
+            "/level \\[name]\n"
+            "/runs\n"
+            "/panel\n"
             "/clear\n"
             "/help",
             "event",
@@ -250,6 +301,7 @@ class UvAgentApp(App[None]):
             self._append_cell("[dim]python completed[/dim]", "event")
             return
 
+        self._last_tool_payload = payload
         markup = tool_result_markup(payload)
         cell = self._tool_cells.pop(str(item.get("call", {}).get("call_id") or ""), None)
         if cell is None:
@@ -290,30 +342,131 @@ class UvAgentApp(App[None]):
             lines.append(f"{marker} {escape(thread_id)} [dim]{escape(title)}[/dim]")
         self._append_cell("\n".join(lines), "event")
 
+    def _open_threads_panel(self) -> None:
+        threads = self.engine.thread_store.list_threads()[-10:]
+        if not threads:
+            body = "[bold]threads[/bold]\n[dim]no saved threads[/dim]"
+        else:
+            lines = ["[bold]threads[/bold] [dim](/panel closes)[/dim]"]
+            for thread in threads:
+                marker = "*" if thread.get("thread_id") == self.thread_id else "-"
+                title = str(thread.get("title") or "New thread")
+                thread_id = short_thread(str(thread.get("thread_id") or ""))
+                lines.append(f"{marker} [cyan]{escape(thread_id)}[/cyan] [dim]{escape(title)}[/dim]")
+            body = "\n".join(lines)
+        self._open_panel(body)
+
+    def _open_config_panel(self) -> None:
+        sources = config_sources(self.project_root)
+        lines = ["[bold]config[/bold] [dim](/panel closes)[/dim]", "[dim]sources[/dim]"]
+        for source in sources:
+            exists = "yes" if source["exists"] else "no"
+            lines.append(
+                f"- {escape(source['scope'])}: {escape(source['path'])} [dim]exists={exists}[/dim]"
+            )
+        model = self.engine.config.model_for_level(self.level)
+        provider = self.engine.config.provider_for_model(model)
+        level_name = self.level or self.engine.config.runtime.default_level
+        lines.extend(
+            [
+                "[dim]active[/dim]",
+                f"- level: [cyan]{escape(level_name)}[/cyan]",
+                f"- model: {escape(model.name)} -> {escape(model.model)}",
+                f"- provider: {escape(provider.name)}",
+                f"- api: {escape(model.api)}",
+                f"- context: {model.context_window_tokens}",
+            ]
+        )
+        self._open_panel("\n".join(lines))
+
+    def _open_models_panel(self) -> None:
+        lines = ["[bold]models[/bold] [dim](/level name selects, /panel closes)[/dim]"]
+        lines.append("[dim]levels[/dim]")
+        for name, level in self.engine.config.levels.items():
+            marker = "*" if name == (self.level or self.engine.config.runtime.default_level) else "-"
+            lines.append(f"{marker} [cyan]{escape(name)}[/cyan] -> {escape(level.model)}")
+        lines.append("[dim]models[/dim]")
+        for name, model in self.engine.config.models.items():
+            lines.append(
+                f"- {escape(name)}: {escape(model.model)} [dim]{escape(model.api)}[/dim]"
+            )
+        self._open_panel("\n".join(lines))
+
+    def _handle_level_command(self, name: str) -> None:
+        if not name:
+            self._open_models_panel()
+            return
+        if name not in self.engine.config.levels:
+            self._append_cell(f"[red]unknown level[/red] {escape(name)}", "error")
+            return
+        self.level = name
+        self._append_cell(f"[dim]level[/dim] [cyan]{escape(name)}[/cyan]", "event")
+        self._refresh_status()
+
+    def _open_runs_panel(self) -> None:
+        if not self._last_tool_payload:
+            self._open_panel("[bold]runs[/bold]\n[dim]no Python runs in this TUI session[/dim]")
+            return
+        self._open_panel(
+            "[bold]last run[/bold] [dim](/panel closes)[/dim]\n"
+            + tool_result_markup(self._last_tool_payload)
+        )
+
+    def _open_mcp_panel(self) -> None:
+        servers = discover_mcp_servers(self.project_root)
+        if not servers:
+            self._open_panel("[bold]mcp[/bold]\n[dim]no .agents/mcp.json servers declared[/dim]")
+            return
+        lines = ["[bold]mcp[/bold] [dim](declarations only, /panel closes)[/dim]"]
+        for server in servers:
+            command = f" [dim]{escape(server.command)}[/dim]" if server.command else ""
+            lines.append(
+                f"- [cyan]{escape(server.name)}[/cyan] ({escape(server.scope)}) {escape(server.description)}{command}"
+            )
+        self._open_panel("\n".join(lines))
+
+    def _open_panel(self, markup: str) -> None:
+        drawer = self.query_one("#drawer", Static)
+        drawer.update(markup)
+        drawer.remove_class("hidden")
+        self._refresh_status()
+
+    def _close_panel(self) -> None:
+        drawer = self.query_one("#drawer", Static)
+        drawer.update("")
+        drawer.add_class("hidden")
+        self._refresh_status()
+
     def _refresh_status(self, state: str | None = None) -> None:
         if state is not None:
             self._last_status = state
-        model = self.engine.config.model_for_level(None)
+        level_name = self.level or self.engine.config.runtime.default_level
+        model = self.engine.config.model_for_level(self.level)
         model_name = model.model
         api = model.api.replace("_", "-")
         thread = short_thread(self.thread_id)
-        context = self.engine.context_percent(self.thread_id)
+        context = self.engine.context_percent(self.thread_id, self.level)
         state_text = self._last_status
         if self.busy and state_text == "Idle":
             state_text = "Working"
         queued = f" · queued {len(self._queue)}" if self._queue else ""
+        spinner = ""
+        if self.busy:
+            frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            spinner = frames[self._spinner_index % len(frames)] + " "
+            self._spinner_index += 1
         if self.size.width < 72:
             status = (
-                f"[cyan]{escape(state_text)}[/cyan] "
-                f"[dim]· {escape(model_name)} · {context}% · {escape(thread)}{queued}[/dim]"
+                f"[cyan]{spinner}{escape(state_text)}[/cyan] "
+                f"[dim]· {escape(level_name)} · {escape(model_name)} · {context}% · {escape(thread)}{queued}[/dim]"
             )
-            hint = "[dim]/help · Ctrl+C quit[/dim]"
+            hint = "[dim]/help · /config · /models · /mcp · Ctrl+C quit[/dim]"
         else:
             status = (
-                f"[cyan]{escape(state_text)}[/cyan] "
-                f"[dim]· {escape(model_name)} · {api} · context {context}% · thread {escape(thread)}{queued}[/dim]"
+                f"[cyan]{spinner}{escape(state_text)}[/cyan] "
+                f"[dim]· {escape(level_name)} · {escape(model_name)} · {api} · context {context}% · thread {escape(thread)}{queued}[/dim]"
             )
-            hint = "[dim]/help[/dim] [dim]·[/dim] [dim]Ctrl+C quit[/dim] [dim]·[/dim] [dim]Esc clear[/dim]"
+            hint = "[dim]/help[/dim] [dim]·[/dim] [dim]/config[/dim] [dim]·[/dim] [dim]/models[/dim] [dim]·[/dim] [dim]/mcp[/dim] [dim]·[/dim] [dim]/threads[/dim] [dim]·[/dim] [dim]/runs[/dim] [dim]·[/dim] [dim]Ctrl+C quit[/dim]"
         self.query_one("#run-status", Static).update(status)
         self.query_one("#hint-line", Static).update(hint)
 

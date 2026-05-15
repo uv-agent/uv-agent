@@ -35,6 +35,9 @@ class ProviderConfig:
     chat_completions: EndpointConfig = field(
         default_factory=lambda: EndpointConfig(path="/chat/completions")
     )
+    anthropic_messages: EndpointConfig = field(
+        default_factory=lambda: EndpointConfig(path="/v1/messages")
+    )
 
     def resolved_api_key(self) -> str | None:
         if self.api_key:
@@ -48,6 +51,8 @@ class ProviderConfig:
             return self.responses
         if api == "chat_completions":
             return self.chat_completions
+        if api == "anthropic_messages":
+            return self.anthropic_messages
         raise ConfigError(f"Unsupported provider API: {api}")
 
 
@@ -195,11 +200,18 @@ def config_sources(project_root: Path) -> list[dict[str, Any]]:
 
 def load_config(project_root: Path | None = None, paths: list[Path] | None = None) -> AppConfig:
     root = (project_root or Path.cwd()).resolve()
+    raw = load_raw_config(root, paths)
+    return parse_config(raw, root)
+
+
+def load_raw_config(project_root: Path | None = None, paths: list[Path] | None = None) -> dict[str, Any]:
+    """Load merged config as raw dictionaries for redacted UI/debug display."""
+    root = (project_root or Path.cwd()).resolve()
     raw = default_config(root)
     for path in paths if paths is not None else config_paths(root):
         if path.exists():
             raw = deep_merge(raw, json.loads(path.read_text(encoding="utf-8")))
-    return parse_config(raw, root)
+    return raw
 
 
 def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
@@ -211,12 +223,16 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         legacy_api = provider_value.pop("api_format", None)
         responses_raw = provider_value.pop("responses", None)
         chat_raw = provider_value.pop("chat_completions", None)
+        anthropic_raw = provider_value.pop("anthropic_messages", None)
         if responses_raw is None:
             responses_raw = {"path": legacy_endpoint or "/responses"}
         if chat_raw is None:
             chat_raw = {"path": "/chat/completions"}
+        if anthropic_raw is None:
+            anthropic_raw = {"path": "/v1/messages"}
         provider_value["responses"] = EndpointConfig(**responses_raw)
         provider_value["chat_completions"] = EndpointConfig(**chat_raw)
+        provider_value["anthropic_messages"] = EndpointConfig(**anthropic_raw)
         if legacy_api and legacy_api != "responses":
             # Older experimental configs used provider-level api_format. Models now own API choice.
             provider_value.setdefault("params", {})

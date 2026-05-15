@@ -7,6 +7,7 @@ from typing import Any
 
 from uv_agent.config import AppConfig
 from uv_agent.ids import new_id
+from uv_agent.mcp_config import discover_mcp_servers, render_mcp_summary
 from uv_agent.model_client import ModelClient, ModelResponse
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.runner import PythonRunRequest, PythonRunner
@@ -78,6 +79,9 @@ Runtime helpers available in scripts:
 
 Skills discovered under .agents/skills:
 {skills}
+
+MCP servers declared under .agents/mcp.json:
+{mcp_servers}
 """
 
 
@@ -314,11 +318,13 @@ class AgentEngine:
     def system_instructions(self) -> str:
         """Build concise environment-aware system instructions."""
         skills = discover_skills(self.project_root)
+        mcp_servers = discover_mcp_servers(self.project_root)
         return SYSTEM_INSTRUCTIONS_TEMPLATE.format(
             workspace=self.project_root,
             user_state=uv_agent_home(),
             project_state=project_state_dir(self.project_root),
             skills=render_skill_summary(skills),
+            mcp_servers=render_mcp_summary(mcp_servers),
         )
 
 def message_item(role: str, text: str) -> dict[str, Any]:

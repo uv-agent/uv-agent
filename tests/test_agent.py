@@ -176,6 +176,10 @@ def test_agent_system_prompt_mentions_runtime_and_skills(tmp_path: Path, monkeyp
     skill_dir = project_root / ".agents" / "skills" / "demo"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
+    (project_root / ".agents" / "mcp.json").write_text(
+        "{\"servers\":{\"demo\":{\"command\":\"python\",\"description\":\"Demo MCP\"}}}",
+        encoding="utf-8",
+    )
     config = load_config(project_root, [])
     runner = PythonRunner(
         project_root=project_root,
@@ -198,4 +202,5 @@ def test_agent_system_prompt_mentions_runtime_and_skills(tmp_path: Path, monkeyp
     assert "run_python" in prompt
     assert "uv_agent_runtime" in prompt
     assert "demo (project)" in prompt
+    assert "MCP servers" in prompt
     assert str(project_root) in prompt
