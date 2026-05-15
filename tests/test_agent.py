@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,17 @@ from uv_agent.model_client import FakeModelClient
 from uv_agent.runner import PythonRunner
 from uv_agent.runner.models import PythonRunRequest
 from uv_agent.session import ThreadStore
+
+
+class BlockingModelClient(FakeModelClient):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.started = asyncio.Event()
+
+    async def stream_response(self, **kwargs):
+        self.started.set()
+        await asyncio.Event().wait()
+        yield
 
 
 def test_agent_exposes_only_python_runner_tool() -> None:
@@ -102,6 +114,72 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
 
     stored = engine.thread_store.read(events[-1]["thread_id"])
     assert any(event["type"] == "item.compaction" for event in stored)
+
+
+@pytest.mark.asyncio
+async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    blocking_client = BlockingModelClient()
+    engine = AgentEngine(
+        config=config,
+        model_client=blocking_client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    cancel_event = asyncio.Event()
+
+    async def collect() -> list[dict[str, object]]:
+        return [event async for event in engine.run_turn(user_text="stop me", cancel_event=cancel_event)]
+
+    task = asyncio.create_task(collect())
+    await blocking_client.started.wait()
+    cancel_event.set()
+    events = await asyncio.wait_for(task, timeout=5)
+    thread_id = str(events[-1]["thread_id"])
+
+    assert events[-1]["type"] == "turn.interrupted"
+    assert any(event["type"] == "turn.interrupted" for event in engine.thread_store.read(thread_id))
+
+    follow_client = FakeModelClient(
+        [
+            {
+                "id": "resp_follow",
+                "output_text": "after",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "after"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine.model_client = follow_client
+    follow_up = [event async for event in engine.run_turn(user_text="continue", thread_id=thread_id)]
+
+    assert follow_up[-1]["type"] == "turn.completed"
+    assert "interrupted" in str(follow_client.requests[0]["input"])
 
 
 @pytest.mark.asyncio

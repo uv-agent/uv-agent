@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import ctypes
+import asyncio
 import json
-import signal
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
 from rich.markdown import Markdown
-from rich.markup import escape
+from rich.markup import escape, render as render_markup
+from rich.segment import Segment
+from rich.style import Style
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -18,7 +18,10 @@ from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.reactive import reactive
+from textual.selection import Selection
+from textual.strip import Strip
 from textual.widgets import Input, OptionList, Static, TextArea
+from textual.worker import Worker
 from textual.widgets._option_list import Option
 
 from uv_agent.app_factory import create_engine
@@ -118,7 +121,6 @@ class FullscreenPanel(ModalScreen[str | None]):
 
     BINDINGS = [
         Binding("escape", "dismiss_panel", "Close", priority=True, show=False),
-        Binding("ctrl+c", "dismiss_panel", "Close", priority=True, show=False),
         Binding("up", "cursor_up", "Up", priority=True, show=False),
         Binding("down", "cursor_down", "Down", priority=True, show=False),
         Binding("pageup", "page_up", "Page up", priority=True, show=False),
@@ -348,10 +350,27 @@ class EmptyState(Static):
         self.frame += 1
         text = getattr(self.app, "_text", lambda key: key)
         self.update(
-            f"[bold #dce7f3]{escape(text('ready_title'))}[/bold #dce7f3]\n"
-            f"[dim]{escape(text('ready_subtitle'))} {escape(frame)}[/dim]\n"
+            f"[bold #dce7f3]{escape(text('ready_title'))}[/bold #dce7f3] [dim]{escape(frame)}[/dim]\n"
             f"[dim]{escape(text('ready_hint'))}[/dim]"
         )
+
+
+class ComposerTextArea(TextArea):
+    """Composer text area with Ctrl+C reserved for app-level interrupt/quit."""
+
+    def action_copy(self) -> None:
+        super().action_copy()
+        app = self.app
+        notify = getattr(app, "_text", lambda k: k)
+        app.notify(notify("copied"), timeout=1.5)
+
+    BINDINGS = [
+        binding
+        for binding in TextArea.BINDINGS
+        if not {"ctrl+c", "super+c"}.intersection(
+            key.strip() for key in binding.key.split(",")
+        )
+    ]
 
 
 class TranscriptCell(Static):
@@ -389,6 +408,58 @@ class TranscriptCell(Static):
     }
     """
 
+    def __init__(self, content: object = "", *, copy_text: str | None = None, **kwargs: Any) -> None:
+        super().__init__(content, **kwargs)
+        self.copy_text: str | None = copy_text if copy_text is not None else self._plain_copy_text(content)
+        self._rendered_copy_lines: dict[int, str] = {}
+
+    def update(self, content: object = "", *, layout: bool = True, copy_text: str | None = None) -> None:
+        self.copy_text = copy_text if copy_text is not None else self._plain_copy_text(content)
+        self._rendered_copy_lines.clear()
+        super().update(content, layout=layout)
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        text = self._current_copy_text()
+        if text is not None:
+            return selection.extract(text), "\n"
+        return super().get_selection(selection)
+
+    def render_line(self, y: int) -> Strip:
+        strip = super().render_line(y)
+        rendered_text = strip.text.rstrip()
+        if rendered_text:
+            self._rendered_copy_lines[y] = rendered_text
+
+        offset_x = 0
+        segments = []
+        for segment in strip:
+            if segment.control:
+                segments.append(segment)
+                continue
+            text = segment.text
+            style = segment.style
+            if text and (style is None or style._meta is None or "offset" not in style.meta):
+                style = (style or Style()) + Style(meta={"offset": (offset_x, y)})
+            segments.append(Segment(text, style, segment.control))
+            offset_x += len(text)
+        return Strip(segments, strip.cell_length)
+
+    def _current_copy_text(self) -> str | None:
+        if self._rendered_copy_lines:
+            return "\n".join(
+                self._rendered_copy_lines.get(y, "")
+                for y in range(max(self._rendered_copy_lines) + 1)
+            )
+        return self.copy_text
+
+    def _plain_copy_text(self, content: object) -> str | None:
+        if isinstance(content, str):
+            try:
+                return str(render_markup(content))
+            except Exception:
+                return content
+        return None
+
 
 class UvAgentApp(App[None]):
     CSS = """
@@ -396,6 +467,11 @@ class UvAgentApp(App[None]):
         layout: horizontal;
         background: #0b0f14;
         color: #d8dee9;
+    }
+
+    ToastRack {
+        dock: top;
+        align-horizontal: right;
     }
 
     #main-column {
@@ -415,13 +491,13 @@ class UvAgentApp(App[None]):
     #bottom-pane {
         height: auto;
         max-height: 18;
-        padding: 0 2 1 1;
+        padding: 0 1 1 1;
+        border-top: solid #1e2a38;
         background: #0b0f14;
     }
 
     #composer-shell {
         height: auto;
-        padding: 0 0;
         background: #0b0f14;
     }
 
@@ -430,10 +506,7 @@ class UvAgentApp(App[None]):
     }
 
     #composer-meta {
-        height: 1;
-        color: #8fa2b8;
-        padding: 0 1;
-        background: #0b0f14;
+        display: none;
     }
 
     #composer {
@@ -441,6 +514,7 @@ class UvAgentApp(App[None]):
         height: 3;
         min-height: 3;
         max-height: 8;
+        margin: 1 0 0 0;
         border: tall #2a3646;
         padding: 0 1;
         background: #0f1721;
@@ -452,8 +526,8 @@ class UvAgentApp(App[None]):
     }
 
     #composer-footer {
-        height: auto;
-        color: #8fa2b8;
+        height: 1;
+        color: #516071;
         padding: 0 1;
         background: #0b0f14;
     }
@@ -466,13 +540,24 @@ class UvAgentApp(App[None]):
         Binding("ctrl+s", "toggle_status_panel", "Status", priority=True),
         Binding("ctrl+o", "open_threads", "Threads", priority=True),
         Binding("ctrl+p", "open_command_palette", "Commands", priority=True),
-        Binding("ctrl+q", "request_quit", "Quit", priority=True),
-        Binding("ctrl+c", "request_quit", "Quit", priority=True),
+        Binding("ctrl+c", "interrupt_turn", "Interrupt", priority=True, show=False),
+        Binding("enter", "focus_composer", "Focus composer", priority=True, show=False),
         Binding("f1", "help", "Help", priority=True),
         Binding("escape", "clear_input", "Clear"),
     ]
 
     busy = reactive(False)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "focus_composer":
+            if not self.is_mounted or self.screen is not self.default_screen:
+                return False
+            try:
+                composer = self.query_one("#composer", TextArea)
+            except NoMatches:
+                return False
+            return self.screen.focused is not composer
+        return True
 
     def __init__(self, *, project_root: Path) -> None:
         super().__init__()
@@ -490,12 +575,17 @@ class UvAgentApp(App[None]):
         self._last_tool_payload: dict[str, object] | None = None
         self._quit_armed = False
         self._last_quit_request_at = 0.0
-        self._previous_sigint_handler: Any = None
-        self._windows_ctrl_handler: Any = None
         self._transcript_has_content = False
         self._reasoning_cell: TranscriptCell | None = None
         self._reasoning_buffer = ""
         self._last_composer_text = ""
+        self._interrupt_armed = False
+        self._last_interrupt_request_at = 0.0
+        self._current_worker: Worker[None] | None = None
+        self._current_cancel_event: asyncio.Event | None = None
+        self._selection_copy_timer: Any | None = None
+        self._pending_selection_copy = ""
+        self._last_auto_copied_selection = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -504,7 +594,7 @@ class UvAgentApp(App[None]):
             with Vertical(id="bottom-pane"):
                 with Vertical(id="composer-shell"):
                     yield Static("", id="composer-meta")
-                    yield TextArea(
+                    yield ComposerTextArea(
                         "",
                         placeholder=tr(self.language, "placeholder"),
                         id="composer",
@@ -519,12 +609,6 @@ class UvAgentApp(App[None]):
         self._refresh_status(self._text("idle"))
         self.set_interval(0.16, self._tick, name="spinner")
         self.query_one("#composer", TextArea).focus()
-        self._install_sigint_guard()
-
-    def on_unmount(self) -> None:
-        if self._previous_sigint_handler is not None:
-            signal.signal(signal.SIGINT, self._previous_sigint_handler)
-        self._uninstall_windows_ctrl_guard()
 
     def on_resize(self) -> None:
         self._refresh_status()
@@ -542,6 +626,29 @@ class UvAgentApp(App[None]):
             self._last_composer_text = ""
             self._resize_composer("")
             self._open_command_palette()
+        elif current in {"?", "？"} and previous == "":
+            event.text_area.load_text("")
+            self._last_composer_text = ""
+            self._resize_composer("")
+            self._open_help_panel()
+
+    def on_text_area_selection_changed(self, event: TextArea.SelectionChanged) -> None:
+        if event.text_area.id != "composer":
+            return
+        selected_text = event.text_area.selected_text
+        if not selected_text:
+            self._cancel_selection_copy()
+            self._last_auto_copied_selection = ""
+            return
+        self._schedule_selection_copy(selected_text)
+
+    def on_text_selected(self, event: events.TextSelected) -> None:
+        selected_text = self.screen.get_selected_text()
+        if not selected_text:
+            self._cancel_selection_copy()
+            self._last_auto_copied_selection = ""
+            return
+        self._schedule_selection_copy(selected_text, source="screen")
 
     def _tick(self) -> None:
         if not self._transcript_has_content:
@@ -586,13 +693,15 @@ class UvAgentApp(App[None]):
         self._assistant_cell = None
         self._reasoning_cell = None
         self._reasoning_buffer = ""
+        self._interrupt_armed = False
+        self._current_cancel_event = asyncio.Event()
         self._append_user(prompt)
         self._reasoning_cell = self._append_cell(
             f"[dim]{escape(self._text('thinking'))}...[/dim]",
             "event",
         )
         self._refresh_status(self._text("working"))
-        self.run_worker(self._run_turn(prompt), exclusive=True, thread=False)
+        self._current_worker = self.run_worker(self._run_turn(prompt), exclusive=True, thread=False)
 
     async def _run_turn(self, prompt: str) -> None:
         try:
@@ -600,6 +709,7 @@ class UvAgentApp(App[None]):
                 user_text=prompt,
                 thread_id=self.thread_id,
                 level=self.level,
+                cancel_event=self._current_cancel_event,
             ):
                 self.thread_id = item.get("thread_id", self.thread_id)
                 event_type = item["type"]
@@ -622,11 +732,19 @@ class UvAgentApp(App[None]):
                     if text and self._assistant_cell is None:
                         await self._append_assistant_delta(text)
                     self._refresh_status(self._text("idle"))
+                elif event_type == "turn.interrupted":
+                    self._append_cell(f"[dim]{escape(self._text('interrupted'))}[/dim]", "event")
+                    self._refresh_status(self._text("interrupted"))
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             self._append_cell(error_markup(format_error(exc)), "error")
             self._refresh_status(self._text("error"))
         finally:
             self.busy = False
+            self._current_worker = None
+            self._current_cancel_event = None
+            self._interrupt_armed = False
             self.query_one("#composer-shell", Vertical).remove_class("busy")
             if self._last_status != self._text("error"):
                 self._refresh_status(self._text("idle"))
@@ -657,6 +775,22 @@ class UvAgentApp(App[None]):
         self._flash(f"{self._text('quit_again')}{suffix}", severity="warning")
         self.set_timer(2.0, self._clear_quit_arm)
 
+    def action_interrupt_turn(self) -> None:
+        if not self.busy:
+            self.action_request_quit()
+            return
+        now = monotonic()
+        if self._interrupt_armed and now - self._last_interrupt_request_at <= 2.0:
+            self._interrupt_armed = False
+            if self._current_cancel_event is not None:
+                self._current_cancel_event.set()
+            self._flash(self._text("interrupted"), severity="warning")
+            return
+        self._interrupt_armed = True
+        self._last_interrupt_request_at = now
+        self._flash(self._text("interrupt_again"), severity="warning")
+        self.set_timer(2.0, self._clear_interrupt_arm)
+
     def action_toggle_status_panel(self) -> None:
         self._open_status_panel()
 
@@ -672,6 +806,12 @@ class UvAgentApp(App[None]):
             return
         self._open_command_palette(query=composer.text.strip().removeprefix("/"))
 
+    def action_focus_composer(self) -> None:
+        composer = self.query_one("#composer", TextArea)
+        if self.screen.focused is composer:
+            return
+        composer.focus()
+
     def action_help(self) -> None:
         self._open_help_panel()
 
@@ -679,35 +819,48 @@ class UvAgentApp(App[None]):
         self._quit_armed = False
         self._refresh_status()
 
-    def _install_sigint_guard(self) -> None:
-        self._previous_sigint_handler = signal.getsignal(signal.SIGINT)
+    def _clear_interrupt_arm(self) -> None:
+        self._interrupt_armed = False
+        self._refresh_status()
 
-        def handle_sigint(signum: int, frame: object) -> None:
-            self.call_from_thread(self.action_request_quit)
-
-        signal.signal(signal.SIGINT, handle_sigint)
-        self._install_windows_ctrl_guard()
-
-    def _install_windows_ctrl_guard(self) -> None:
-        if sys.platform != "win32":
+    def _schedule_selection_copy(self, text: str, *, source: str = "composer") -> None:
+        if text == self._last_auto_copied_selection:
             return
-        ctrl_c_event = 0
-        handler_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+        self._cancel_selection_copy()
+        self._pending_selection_copy = text
+        self._selection_copy_timer = self.set_timer(
+            1.0,
+            lambda: self._copy_pending_selection(source),
+            name="selection-copy",
+        )
 
-        def handle_ctrl(control_type: int) -> bool:
-            if control_type != ctrl_c_event:
-                return False
-            self.call_from_thread(self.action_request_quit)
-            return True
+    def _cancel_selection_copy(self) -> None:
+        if self._selection_copy_timer is not None:
+            self._selection_copy_timer.stop()
+            self._selection_copy_timer = None
+        self._pending_selection_copy = ""
 
-        self._windows_ctrl_handler = handler_type(handle_ctrl)
-        ctypes.windll.kernel32.SetConsoleCtrlHandler(self._windows_ctrl_handler, True)
-
-    def _uninstall_windows_ctrl_guard(self) -> None:
-        if sys.platform != "win32" or self._windows_ctrl_handler is None:
+    def _copy_pending_selection(self, source: str) -> None:
+        self._selection_copy_timer = None
+        text = self._pending_selection_copy
+        self._pending_selection_copy = ""
+        if not text:
             return
-        ctypes.windll.kernel32.SetConsoleCtrlHandler(self._windows_ctrl_handler, False)
-        self._windows_ctrl_handler = None
+        if source == "composer":
+            try:
+                composer = self.query_one("#composer", TextArea)
+            except NoMatches:
+                return
+            if composer.selected_text != text:
+                return
+        else:
+            selected_text = self.screen.get_selected_text()
+            if not selected_text:
+                return
+            text = selected_text
+        self.copy_to_clipboard(text)
+        self._last_auto_copied_selection = text
+        self.notify(self._text("copied"), timeout=1.5)
 
     def _handle_command(self, prompt: str) -> bool:
         command, _, rest = prompt.partition(" ")
@@ -781,7 +934,8 @@ class UvAgentApp(App[None]):
         return False
 
     async def action_quit(self) -> None:
-        self.action_request_quit()
+        # Textual ships Ctrl+Q -> quit by default; this app reserves key-based quit for Ctrl+C.
+        return
 
     def _open_help_panel(self) -> None:
         lines = [f"[bold]{escape(self._text('commands'))}[/bold] [dim](Tab/Enter, Esc)[/dim]"]
@@ -806,9 +960,10 @@ class UvAgentApp(App[None]):
     async def _append_assistant_delta(self, text: str) -> None:
         self._assistant_buffer += text
         if self._assistant_cell is None:
+            self._mark_transcript_content()
             self._assistant_cell = TranscriptCell(classes="assistant")
             self.query_one("#transcript", VerticalScroll).mount(self._assistant_cell)
-        self._assistant_cell.update(Markdown(self._assistant_buffer))
+        self._assistant_cell.update(Markdown(self._assistant_buffer), copy_text=self._assistant_buffer)
         self._scroll_end()
 
     def _append_reasoning_delta(self, text: str) -> None:
@@ -882,17 +1037,20 @@ class UvAgentApp(App[None]):
         return cell
 
     def _mark_transcript_content(self) -> None:
-        if self._transcript_has_content:
-            return
         self._transcript_has_content = True
-        self.query_one("#empty-state", EmptyState).add_class("hidden")
+        try:
+            self.query_one("#empty-state", EmptyState).add_class("hidden")
+        except NoMatches:
+            pass
 
-    def _reset_transcript(self) -> None:
+    def _reset_transcript(self, *, show_empty: bool = True) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)
         transcript.query("*").remove()
-        self.call_after_refresh(transcript.mount, EmptyState(id="empty-state"))
         self._transcript_has_content = False
-        self.call_after_refresh(lambda: self.query_one("#empty-state", EmptyState).tick())
+        if show_empty:
+            empty_state = EmptyState(id="empty-state")
+            transcript.mount(empty_state)
+            self.call_after_refresh(empty_state.tick)
 
     def _open_threads_panel(self) -> None:
         threads = self.engine.thread_store.list_threads()
@@ -1209,8 +1367,10 @@ class UvAgentApp(App[None]):
         self._reasoning_cell = None
         self._reasoning_buffer = ""
         self._tool_cells.clear()
-        self._reset_transcript()
+        self._reset_transcript(show_empty=False)
         self._render_thread_history(thread_id)
+        if not self._transcript_has_content:
+            self._reset_transcript()
         self._refresh_status(self._text("resumed"))
 
     def _render_thread_history(self, thread_id: str) -> None:
@@ -1311,29 +1471,32 @@ class UvAgentApp(App[None]):
         level_name = self.level or self.engine.config.runtime.default_level
         try:
             stats = self.engine.context_stats(self.thread_id, self.level)
-            context = f"{stats.percent}% {format_tokens(stats.used_tokens)}/{format_tokens(stats.context_window_tokens)}"
+            compact_context = f"{stats.percent}%"
         except ConfigError:
-            context = "config?"
+            compact_context = "?"
         state_text = self._last_status
         if self.busy and state_text == self._text("idle"):
             state_text = self._text("working")
-        queued = f" · q {len(self._queue)}" if self._queue else ""
+        queued = f" · q{len(self._queue)}" if self._queue else ""
         spinner = ""
         if self.busy:
             frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
             spinner = frames[self._spinner_index % len(frames)] + " "
             self._spinner_index += 1
 
-        compact_context = context.split(" ", 1)[0]
-        meta = (
-            f"[cyan]{spinner}{escape(state_text)}[/cyan] "
-            f"[dim]{escape(self._text('level'))} {escape(level_name)} · "
-            f"{escape(self._text('ctx'))} {escape(compact_context)} · "
-            f"{escape(self._text('thread'))} {escape(short_thread(self.thread_id))}{queued}[/dim]"
-        )
-        footer = self._text("footer_busy") if self.busy else self._text("footer_idle")
-        self.query_one("#composer-meta", Static).update(meta)
-        self.query_one("#composer-footer", Static).update(f"[dim]{escape(footer)}[/dim]")
+        if self.busy:
+            footer = (
+                f"[cyan]{spinner}{escape(state_text)}[/cyan] "
+                f"[dim]{escape(level_name)} · {escape(compact_context)} · "
+                f"{escape(short_thread(self.thread_id))}{queued}[/dim]"
+            )
+        else:
+            footer = (
+                f"[dim]{escape(level_name)} · {escape(compact_context)} · "
+                f"{escape(short_thread(self.thread_id))}{queued}[/dim]"
+            )
+        self.query_one("#composer-meta", Static).update("")
+        self.query_one("#composer-footer", Static).update(footer)
 
     def _scroll_end(self) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)

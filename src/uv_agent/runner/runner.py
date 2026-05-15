@@ -68,6 +68,7 @@ class PythonRunner:
             timeout_s=timeout_s,
             thread_id=request.thread_id,
             turn_id=request.turn_id,
+            cancel_event=request.cancel_event,
         ):
             yield event
 
@@ -123,6 +124,7 @@ class PythonRunner:
             timeout_s=float(timeout_s),
             thread_id=request.thread_id,
             turn_id=request.turn_id,
+            cancel_event=request.cancel_event,
             rerun_of=request.run_id,
         ):
             yield event
@@ -139,6 +141,7 @@ class PythonRunner:
         timeout_s: float,
         thread_id: str | None,
         turn_id: str | None,
+        cancel_event: asyncio.Event | None,
         rerun_of: str | None = None,
     ) -> AsyncIterator[RunnerEvent]:
         run_id = new_id("run")
@@ -174,6 +177,7 @@ class PythonRunner:
         truncated = {"value": False}
         returncode: int | None = None
         timed_out = False
+        interrupted = False
         process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
@@ -210,7 +214,34 @@ class PythonRunner:
                 )
             )
             try:
-                returncode = await asyncio.wait_for(process.wait(), timeout=timeout_s)
+                wait_task = asyncio.create_task(process.wait())
+                cancel_task = (
+                    asyncio.create_task(cancel_event.wait())
+                    if cancel_event is not None
+                    else None
+                )
+                tasks = {wait_task}
+                if cancel_task is not None:
+                    tasks.add(cancel_task)
+                done, pending = await asyncio.wait(
+                    tasks,
+                    timeout=timeout_s,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if wait_task in done:
+                    returncode = wait_task.result()
+                elif cancel_task is not None and cancel_task in done:
+                    interrupted = True
+                    process.kill()
+                    returncode = await process.wait()
+                else:
+                    timed_out = True
+                    process.kill()
+                    returncode = await process.wait()
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
             except TimeoutError:
                 timed_out = True
                 process.kill()
@@ -235,6 +266,7 @@ class PythonRunner:
             stdout="".join(stdout_parts),
             stderr="".join(stderr_parts),
             timed_out=timed_out,
+            interrupted=interrupted,
             truncated=truncated["value"],
             run_log_path=run_log_path,
             script_path=original_path,
@@ -248,6 +280,7 @@ class PythonRunner:
             "script_id": script_id,
             "returncode": returncode,
             "timed_out": timed_out,
+            "interrupted": interrupted,
             "truncated": truncated["value"],
         }
         writer.write(completed)

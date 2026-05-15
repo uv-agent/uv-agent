@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+import asyncio
+
 
 @dataclass(frozen=True)
 class PythonRunRequest:
@@ -14,6 +16,7 @@ class PythonRunRequest:
     timeout_s: float | None = None
     thread_id: str | None = None
     turn_id: str | None = None
+    cancel_event: asyncio.Event | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,7 @@ class RerunRequest:
     timeout_s: float | None = None
     thread_id: str | None = None
     turn_id: str | None = None
+    cancel_event: asyncio.Event | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,7 @@ class PythonRunResult:
     stdout: str
     stderr: str
     timed_out: bool
+    interrupted: bool
     truncated: bool
     run_log_path: Path
     script_path: Path

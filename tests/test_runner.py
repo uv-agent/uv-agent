@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 
 import pytest
 
@@ -78,6 +79,38 @@ async def test_runner_truncates_large_output(tmp_path: Path) -> None:
     assert result.truncated is True
     assert "[uv-agent runner output truncated]" in result.stdout + result.stderr
     assert any(event["type"] == "run.output_truncated" for event in read_jsonl(result.run_log_path))
+
+
+@pytest.mark.asyncio
+async def test_runner_interrupts_script_when_cancelled(tmp_path: Path) -> None:
+    project_root = Path.cwd()
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+        ),
+    )
+    cancel_event = asyncio.Event()
+    task = asyncio.create_task(
+        runner.run(
+            PythonRunRequest(
+                code="import time\nprint('start', flush=True)\ntime.sleep(30)\n",
+                cwd=project_root,
+                cancel_event=cancel_event,
+            )
+        )
+    )
+    await asyncio.sleep(0.5)
+    cancel_event.set()
+
+    result = await asyncio.wait_for(task, timeout=10)
+
+    assert result.interrupted is True
+    assert result.timed_out is False
+    assert any(event.get("interrupted") is True for event in read_jsonl(result.run_log_path))
 
 
 def test_parse_structured_event_reads_runtime_json_line() -> None:

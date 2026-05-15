@@ -10,15 +10,19 @@ from .mcp import (
     connect_stdio,
     list_declared_servers,
 )
+from .patch import PatchResult, apply_patch
 from .process import check_command, run_command
 from .scripts import saved_scripts
 from .subagent import SubagentResult, ask
+from .threads import list_thread_digests, thread_digest
 from .vision import look_at
 
 __all__ = [
     "McpResult",
+    "PatchResult",
     "McpStdioClient",
     "SubagentResult",
+    "apply_patch",
     "ask",
     "check_command",
     "connect_declared",
@@ -29,12 +33,14 @@ __all__ = [
     "emit_result",
     "list_declared_servers",
     "list_files",
+    "list_thread_digests",
     "look_at",
     "read_json",
     "read_text",
     "resolve_workspace_path",
     "run_command",
     "saved_scripts",
+    "thread_digest",
     "write_json",
     "write_text",
 ]

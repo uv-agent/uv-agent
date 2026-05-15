@@ -85,7 +85,7 @@ Each project keeps the 32 most recently used managed scripts by default
 (`runner.max_saved_scripts`). Run logs are still kept separately. Scripts can
 inspect recent saved scripts with `uv_agent_runtime.saved_scripts()`.
 
-`uv_agent_runtime` exposes convenience helpers for text/JSON files, subprocesses, structured events, nested `uv-agent ask` calls by model level, image context, saved script summaries, and MCP stdio servers declared in `.agents/mcp.json`.
+`uv_agent_runtime` exposes convenience helpers for text/JSON files, unified-diff patches, subprocesses, structured events, nested `uv-agent ask` calls by model level, image context, saved script summaries, compact thread digests, and MCP stdio servers declared in `.agents/mcp.json`.
 
 Image context is added from a script with `look_at`:
 
@@ -137,7 +137,7 @@ ordinary conversation items or included in compression input.
 
 ## TUI
 
-The default TUI follows a Codex-style shape: a single transcript, inline Python runner events, full-screen focus panels, and a bottom composer with a plain metadata line, bordered input box, and plain hint line.
+The default TUI follows a Codex-style shape: a single transcript, inline Python runner events, full-screen focus panels, and a bottom composer with a bordered input box plus a compact status line.
 
 - `Enter`: insert a newline in the composer
 - `Ctrl+Enter` or `Ctrl+J`: send the composer text
@@ -145,7 +145,9 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `Ctrl+S` or `/status`: open detailed runtime status
 - `Ctrl+O` or `/threads`: open a searchable thread picker and resume history
 - `Ctrl+P`: open a full-screen command palette
-- `Ctrl+Q`, `Ctrl+C`, or `/quit`: quit after a second confirmation
+- Selecting composer text copies it after a short delay and shows a notification
+- `Ctrl+C`: press twice to interrupt a running turn; when idle, press twice to quit
+- `/quit`: quit after a second confirmation
 - `?` + `Ctrl+Enter` or `/help`: show local commands
 - `/context`: show context budget and loaded workspace rules
 - `/rules`: inspect loaded `AGENTS.md` files
