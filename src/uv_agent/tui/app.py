@@ -12,6 +12,7 @@ from textual.widgets import Input, Static
 from uv_agent.app_factory import create_engine
 from uv_agent.config import config_sources
 from uv_agent.mcp_config import discover_mcp_servers
+from uv_agent.skills import discover_skills
 from uv_agent.tui.formatting import parse_tool_payload, short_thread, tool_result_markup
 
 
@@ -254,6 +255,12 @@ class UvAgentApp(App[None]):
         if command == "/mcp":
             self._open_mcp_panel()
             return True
+        if command == "/skills":
+            self._open_skills_panel()
+            return True
+        if command == "/skill":
+            self._append_skill(rest.strip())
+            return True
         if command == "/level":
             self._handle_level_command(rest.strip())
             return True
@@ -276,6 +283,8 @@ class UvAgentApp(App[None]):
             "/config\n"
             "/models\n"
             "/mcp\n"
+            "/skills\n"
+            "/skill \\[name]\n"
             "/level \\[name]\n"
             "/runs\n"
             "/panel\n"
@@ -425,6 +434,37 @@ class UvAgentApp(App[None]):
             )
         self._open_panel("\n".join(lines))
 
+    def _open_skills_panel(self) -> None:
+        skills = discover_skills(self.project_root)
+        if not skills:
+            self._open_panel("[bold]skills[/bold]\n[dim]no .agents/skills entries discovered[/dim]")
+            return
+        lines = ["[bold]skills[/bold] [dim](/skill name previews, /panel closes)[/dim]"]
+        for skill in skills:
+            lines.append(
+                f"- [cyan]{escape(skill.name)}[/cyan] ({escape(skill.scope)}) {escape(skill.description)}"
+            )
+        self._open_panel("\n".join(lines))
+
+    def _append_skill(self, name: str) -> None:
+        if not name:
+            self._open_skills_panel()
+            return
+        skills = {skill.name: skill for skill in discover_skills(self.project_root)}
+        skill = skills.get(name)
+        if skill is None:
+            self._append_cell(f"[red]unknown skill[/red] {escape(name)}", "error")
+            return
+        text = skill.path.read_text(encoding="utf-8")
+        preview = "\n".join(text.splitlines()[:18])
+        if len(text.splitlines()) > 18:
+            preview += "\n..."
+        self._append_cell(
+            f"[bold]skill {escape(skill.name)}[/bold] [dim]{escape(str(skill.path))}[/dim]\n"
+            + escape(preview),
+            "event",
+        )
+
     def _open_panel(self, markup: str) -> None:
         drawer = self.query_one("#drawer", Static)
         drawer.update(markup)
@@ -460,13 +500,13 @@ class UvAgentApp(App[None]):
                 f"[cyan]{spinner}{escape(state_text)}[/cyan] "
                 f"[dim]· {escape(level_name)} · {escape(model_name)} · {context}% · {escape(thread)}{queued}[/dim]"
             )
-            hint = "[dim]/help · /config · /models · /mcp · Ctrl+C quit[/dim]"
+            hint = "[dim]/help · /config · /models · /skills · /mcp · Ctrl+C quit[/dim]"
         else:
             status = (
                 f"[cyan]{spinner}{escape(state_text)}[/cyan] "
                 f"[dim]· {escape(level_name)} · {escape(model_name)} · {api} · context {context}% · thread {escape(thread)}{queued}[/dim]"
             )
-            hint = "[dim]/help[/dim] [dim]·[/dim] [dim]/config[/dim] [dim]·[/dim] [dim]/models[/dim] [dim]·[/dim] [dim]/mcp[/dim] [dim]·[/dim] [dim]/threads[/dim] [dim]·[/dim] [dim]/runs[/dim] [dim]·[/dim] [dim]Ctrl+C quit[/dim]"
+            hint = "[dim]/help[/dim] [dim]·[/dim] [dim]/config[/dim] [dim]·[/dim] [dim]/models[/dim] [dim]·[/dim] [dim]/skills[/dim] [dim]·[/dim] [dim]/mcp[/dim] [dim]·[/dim] [dim]/threads[/dim] [dim]·[/dim] [dim]/runs[/dim] [dim]·[/dim] [dim]Ctrl+C quit[/dim]"
         self.query_one("#run-status", Static).update(status)
         self.query_one("#hint-line", Static).update(hint)
 

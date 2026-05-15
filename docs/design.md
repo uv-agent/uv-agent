@@ -20,7 +20,7 @@
 - import 名：`uv_agent_runtime`
 - 本仓库源码位置：`src/uv_agent_runtime/`
 
-该包提供给 agent 使用的快捷 API，例如文件读写封装、结构化输出、JSONL 事件、路径处理、后续子 agent 快捷启动入口等。runner 必须确保最终执行脚本的 PEP 723 inline metadata 中包含 `uv-agent-runtime` 的版本约束。
+该包提供给 agent 使用的快捷 API，例如文件读写封装、JSON 读写、结构化输出、JSONL 事件、路径处理、subagent 快捷启动入口、MCP stdio client 等。runner 必须确保最终执行脚本的 PEP 723 inline metadata 中包含 `uv-agent-runtime` 的版本约束。
 
 开发期可以通过配置把 runtime 依赖 spec 指向本地源码，例如 `uv-agent-runtime @ file:///...`；发布后默认使用版本范围，例如 `uv-agent-runtime>=0.1,<0.2`。无论使用哪种 spec，临时脚本都必须通过 inline metadata 获得 runtime，不能依赖当前项目 `.venv` 或源码路径。
 
@@ -118,6 +118,8 @@ runner 必须支持重跑：
 
 初版只实现单 agent 会话，不实现子 agent。未来子 agent 可以作为 runtime 快捷能力或 agent 编排能力加入，但不改变“唯一外部工具是 Python runner”的边界。
 
+当前 subagent 快捷入口位于 `uv_agent_runtime.ask`，通过 Python 脚本里的 subprocess 调用 `uv-agent ask`；MCP 快捷入口位于 `uv_agent_runtime.connect_stdio` / `connect_declared`，也必须从 Python runner 内部使用。
+
 ## JSONL 记录
 
 会话与执行记录先使用 JSONL，不引入数据库。
@@ -175,6 +177,7 @@ thread JSONL 至少记录：
 
 - Responses API
 - Chat Completions API
+- Anthropic Messages API
 - SSE 流式输出
 - 非流式调用，用于压缩等后台任务
 

@@ -4,7 +4,7 @@ Textual shell for the uv-agent conversation experience.
 
 ## 边界
 
-- 负责：展示 transcript、composer、状态行、临时面板、轻量 thread 命令和 Python runner 事件。
+- 负责：展示 transcript、composer、状态行、临时面板、skills/MCP 摘要、轻量 thread 命令和 Python runner 事件。
 - 负责：把 `AgentEngine.run_turn` 事件转为 UI cell，不直接执行模型请求或 runner 操作。
 - 不负责：配置读取、模型协议、Python runner、JSONL 记录和自动压缩策略。
 

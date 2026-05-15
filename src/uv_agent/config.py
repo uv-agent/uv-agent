@@ -96,8 +96,17 @@ class RuntimeConfig:
 class RunnerConfig:
     runtime_dependency: str
     runtime_package_name: str = "uv-agent"
+    default_uv_args: list[str] = field(default_factory=list)
     default_timeout_s: float = 60.0
     max_output_bytes: int = 1_000_000
+
+    def __post_init__(self) -> None:
+        if not self.default_uv_args:
+            object.__setattr__(
+                self,
+                "default_uv_args",
+                default_runtime_uv_args(self.runtime_dependency, self.runtime_package_name),
+            )
 
 
 @dataclass(frozen=True)
@@ -165,6 +174,7 @@ def default_config(project_root: Path) -> dict[str, Any]:
         "runner": {
             "runtime_dependency": runtime_dependency,
             "runtime_package_name": "uv-agent",
+            "default_uv_args": default_runtime_uv_args(runtime_dependency, "uv-agent"),
             "default_timeout_s": 60,
             "max_output_bytes": 1_000_000,
         },
@@ -262,6 +272,18 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
             f"uv-agent @ {project_root.resolve().as_uri()}",
         ),
         runtime_package_name=runner_raw.get("runtime_package_name", "uv-agent"),
+        default_uv_args=list(
+            runner_raw.get(
+                "default_uv_args",
+                default_runtime_uv_args(
+                    runner_raw.get(
+                        "runtime_dependency",
+                        f"uv-agent @ {project_root.resolve().as_uri()}",
+                    ),
+                    runner_raw.get("runtime_package_name", "uv-agent"),
+                ),
+            )
+        ),
         default_timeout_s=float(runner_raw.get("default_timeout_s", 60)),
         max_output_bytes=int(runner_raw.get("max_output_bytes", 1_000_000)),
     )
@@ -293,3 +315,10 @@ def redact_config(value: Any) -> Any:
     if isinstance(value, list):
         return [redact_config(item) for item in value]
     return value
+
+
+def default_runtime_uv_args(runtime_dependency: str, package_name: str) -> list[str]:
+    """Return uv args that keep local file dependencies fresh during development."""
+    if " @ file:" not in runtime_dependency:
+        return []
+    return ["--reinstall-package", package_name]

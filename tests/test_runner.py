@@ -34,7 +34,7 @@ async def test_runner_executes_script_and_records_jsonl(tmp_path: Path) -> None:
     events = read_jsonl(result.run_log_path)
     assert events[0]["type"] == "run.started"
     assert events[-1]["type"] == "run.completed"
-    assert events[0]["argv"][0:2] == ["uv", "run"]
+    assert events[0]["argv"][0:4] == ["uv", "run", "--reinstall-package", "uv-agent"]
     assert "--with" not in events[0]["argv"]
 
 

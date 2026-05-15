@@ -57,12 +57,15 @@ Supported model APIs:
 
 - `responses`
 - `chat_completions`
+- `anthropic_messages`
 
 Both are streamed with SSE when the provider supports streaming.
 
 ## Runtime Scripts
 
 Agent scripts declare dependencies with PEP 723 inline metadata. The runner records managed script artifacts, run JSONL, and thread JSONL under `~/.uv-agent/projects/<project-id>/`, injects the configured runtime dependency into inline metadata when needed, and supports rerunning saved scripts.
+
+`uv_agent_runtime` exposes convenience helpers for text/JSON files, subprocesses, structured events, nested `uv-agent ask` calls, and MCP stdio servers declared in `.agents/mcp.json`.
 
 ## TUI
 
@@ -75,6 +78,7 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `/config`: show config sources and redacted merged config
 - `/models` and `/level [name]`: inspect and switch configured model levels
 - `/mcp`: show MCP declarations from `.agents/mcp.json`
+- `/skills` and `/skill [name]`: inspect `.agents/skills` entries
 - `/runs`: show the latest Python run summary from this TUI session
 - `/panel`: close the temporary panel
 - Python runs appear inline with script/run ids, exit status, stdout/stderr summaries, and truncation markers

@@ -49,7 +49,7 @@ class PythonRunner:
             script_id=script_id,
             original_path=original_path,
             final_path=final_path,
-            uv_args=request.uv_args,
+            uv_args=self._merged_uv_args(request.uv_args),
             script_args=request.script_args,
             cwd=request.cwd,
             timeout_s=timeout_s,
@@ -104,7 +104,7 @@ class PythonRunner:
             script_id=script_id,
             original_path=original_path,
             final_path=final_path,
-            uv_args=list(uv_args),
+            uv_args=self._merged_uv_args(list(uv_args)),
             script_args=list(script_args),
             cwd=cwd,
             timeout_s=float(timeout_s),
@@ -277,3 +277,10 @@ class PythonRunner:
                     "text": text,
                 }
             )
+
+    def _merged_uv_args(self, uv_args: list[str]) -> list[str]:
+        merged = list(self.config.default_uv_args)
+        for arg in uv_args:
+            if arg not in merged:
+                merged.append(arg)
+        return merged

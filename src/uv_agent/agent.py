@@ -76,6 +76,7 @@ Runtime helpers available in scripts:
 - run_command/check_command for subprocesses
 - emit_event/emit_progress/emit_result for structured output
 - ask for a nested uv-agent subagent via subprocess when useful
+- connect_stdio/connect_declared for MCP stdio servers declared in .agents/mcp.json
 
 Skills discovered under .agents/skills:
 {skills}

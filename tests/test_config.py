@@ -49,6 +49,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert model.api == "chat_completions"
     assert model.params["reasoning"]["effort"] == "high"
     assert "uv-agent @ file:///" in config.runner.runtime_dependency
+    assert config.runner.default_uv_args == ["--reinstall-package", "uv-agent"]
 
 
 def test_redact_config_masks_sensitive_values() -> None:
