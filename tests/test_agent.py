@@ -442,7 +442,14 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert '# dependencies = [' in prompt
     assert "plain Python source without a metadata block" in prompt
     assert "not a temporary-script wrapper" in prompt
+    assert "Do not rely on the system to truncate oversized output for you" in prompt
+    assert "custom patch envelope" in prompt
+    assert "*** Begin Patch" in prompt
+    assert "*** Update File: path.txt" in prompt
     assert "nested uv-agent subagent" in prompt
+    assert "connect_named(\"files\")" in prompt
+    assert "client.call_tool" in prompt
+    assert "result = ask(" in prompt
     assert "pathlib" in prompt
     assert "Mentions are plain-text hints only" in prompt
     assert "saved_scripts(limit=32)" in prompt
