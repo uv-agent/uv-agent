@@ -1159,6 +1159,28 @@ async def test_tui_ctrl_c_arms_quit_when_idle(
 
 
 @pytest.mark.asyncio
+async def test_tui_ctrl_c_fast_second_press_quits_when_idle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.12)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert app._exit is True
+
+
+@pytest.mark.asyncio
 async def test_tui_quit_command_exits_without_confirmation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

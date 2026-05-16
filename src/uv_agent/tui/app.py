@@ -52,6 +52,7 @@ from uv_agent.tui.formatting import (
 
 COMPOSER_COLLAPSED_HEIGHT = 5
 COMPOSER_BOTTOM_RESERVED_ROWS = 2
+QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 
 
 @dataclass(frozen=True)
@@ -1167,7 +1168,7 @@ class UvAgentApp(App[None]):
 
     def action_request_quit(self) -> None:
         now = monotonic()
-        if now - self._last_quit_request_at < 0.35:
+        if now - self._last_quit_request_at < QUIT_KEY_DEBOUNCE_SECONDS:
             return
         self._last_quit_request_at = now
         if self._quit_armed:
