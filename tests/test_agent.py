@@ -253,6 +253,90 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Path) -> None:
+    project_root = Path.cwd()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+        ),
+    )
+    runner = PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner)
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "run_python",
+                        "arguments": json.dumps(
+                            {
+                                "code": (
+                                    "from uv_agent_runtime import emit_progress\n"
+                                    "print('visible before')\n"
+                                    "emit_progress('internal progress')\n"
+                                    "print('visible after')\n"
+                                )
+                            }
+                        ),
+                    }
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="run event")]
+
+    model_payload = json.loads(client.requests[1]["input"][-1]["output"])
+    assert model_payload["stdout"].replace("\r\n", "\n") == "visible before\nvisible after\n"
+    assert "events" not in model_payload
+    assert "run_log_path" not in model_payload
+
+    display_payload = json.loads(
+        next(event for event in events if event["type"] == "tool.output")["output"]["output"]
+    )
+    assert display_payload["events"] == [{"kind": "progress", "message": "internal progress"}]
+    assert '"kind": "progress"' in display_payload["stdout"]
+
+    stored = engine.thread_store.read(events[-1]["thread_id"])
+    runner_result = next(event["result"] for event in stored if event["type"] == "item.runner_result")
+    assert runner_result["events"] == [{"kind": "progress", "message": "internal progress"}]
+
+
+@pytest.mark.asyncio
 async def test_agent_can_rerun_saved_script_by_id(tmp_path: Path) -> None:
     project_root = Path.cwd()
     config = AppConfig(
@@ -358,10 +442,14 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert '# dependencies = [' in prompt
     assert "plain Python source without a metadata block" in prompt
     assert "not a temporary-script wrapper" in prompt
-    assert "temporary nested uv-agent subprocess" in prompt
-    assert "summarizing a thread" in prompt
+    assert "nested uv-agent subagent" in prompt
+    assert "pathlib" in prompt
     assert "Mentions are plain-text hints only" in prompt
     assert "saved_scripts(limit=32)" in prompt
+    assert "read_text, write_text" not in prompt
+    assert "list_files" not in prompt
+    assert "run_command/check_command" not in prompt
+    assert "emit_event" not in prompt
     assert "Rules, skills, and MCP declarations are appended only when first seen" in prompt
     assert "demo (project)" not in prompt
 

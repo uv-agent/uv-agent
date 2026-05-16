@@ -115,22 +115,20 @@ You are uv-agent, an experimental coding agent.
 </tool_boundary>
 
 <runtime_helpers>
-<helper>uv_agent_runtime: read_text, write_text, read_json, write_json, list_files</helper>
 <helper>apply_patch(patch_text) applies unified diffs for focused file edits</helper>
-<helper>run_command/check_command for subprocesses</helper>
-<helper>emit_event/emit_progress/emit_result for structured output</helper>
 <helper>look_at(path, note="") attaches an image to future model context</helper>
 <helper>rerun saved scripts by passing script_id or run_id to run_python</helper>
-<helper>ask(prompt, level="small"|"medium"|"large") can invoke a temporary nested uv-agent subprocess when useful</helper>
-<helper>Use subagents for tedious or parallelizable work such as summarizing a thread, searching candidate files, auditing repetitive patterns, or gathering focused evidence.</helper>
+<helper>ask(prompt, level="small"|"medium"|"large") invokes a nested uv-agent subagent for isolated, tedious, or parallelizable work.</helper>
 <helper>saved_scripts(limit=32) returns recent managed scripts with ids, timestamps, first lines, and run counts</helper>
 <helper>thread_digest(thread_id) and list_thread_digests() return compact cross-thread summaries</helper>
 <helper>MCP helpers connect to declared stdio MCP servers; call MCP through Python, not as model tools</helper>
+<helper>Use Python standard library modules such as pathlib, os, json, and subprocess for ordinary files, JSON, traversal, and commands.</helper>
+<helper>Do not guess helper signatures; inspect uv_agent_runtime implementation when an exact signature matters.</helper>
 </runtime_helpers>
 
 <mentions>
 <rule>User text may include @file or @thread references. Mentions are plain-text hints only; they do not attach or load content automatically.</rule>
-<rule>When a mentioned file or thread matters, use run_python helpers such as read_text, list_files, thread_digest, or list_thread_digests to inspect it yourself.</rule>
+<rule>When a mentioned file matters, inspect it with Python standard library APIs. When a mentioned thread matters, use thread_digest or list_thread_digests.</rule>
 </mentions>
 
 <dynamic_workspace_context>
@@ -288,7 +286,7 @@ class AgentEngine:
                         "turn_id": turn_id,
                         "call": call,
                     }
-                    tool_output, attachments = await self._handle_tool_call(
+                    tool_output, attachments, display_output = await self._handle_tool_call(
                         call,
                         thread_id,
                         turn_id,
@@ -311,7 +309,7 @@ class AgentEngine:
                         "thread_id": thread_id,
                         "turn_id": turn_id,
                         "call": call,
-                        "output": tool_output,
+                        "output": display_output,
                     }
             else:
                 raise RuntimeError("Agent exceeded max_agent_rounds")
@@ -404,15 +402,17 @@ class AgentEngine:
         turn_id: str,
         *,
         cancel_event: asyncio.Event | None = None,
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
         if call.get("name") != "run_python":
             output = {"error": f"Unsupported tool: {call.get('name')}"}
-            return function_output(call, output), []
+            tool_output = function_output(call, output)
+            return tool_output, [], tool_output
         try:
             args = json.loads(call.get("arguments") or "{}")
         except json.JSONDecodeError as exc:
             output = {"error": f"Invalid tool arguments JSON: {exc}"}
-            return function_output(call, output), []
+            tool_output = function_output(call, output)
+            return tool_output, [], tool_output
 
         if args.get("script_id") or args.get("run_id"):
             result = await self.runner.rerun(
@@ -433,7 +433,8 @@ class AgentEngine:
             code = args.get("code")
             if not isinstance(code, str) or not code.strip():
                 output = {"error": "run_python requires code, script_id, or run_id"}
-                return function_output(call, output), []
+                tool_output = function_output(call, output)
+                return tool_output, [], tool_output
             result = await self.runner.run(
                 PythonRunRequest(
                     code=code,
@@ -475,7 +476,7 @@ class AgentEngine:
             call_id=call.get("call_id"),
             result=payload,
         )
-        return function_output(call, payload), attachments
+        return function_output(call, model_tool_payload(payload)), attachments, function_output(call, payload)
 
     @staticmethod
     def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:
@@ -807,6 +808,43 @@ def function_output(call: dict[str, Any], output: dict[str, Any]) -> dict[str, A
         "call_id": call.get("call_id"),
         "output": json.dumps(output, ensure_ascii=False),
     }
+
+
+def model_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the run payload that is safe and useful to feed back to the model."""
+    visible = {
+        "script_id": payload.get("script_id"),
+        "run_id": payload.get("run_id"),
+        "returncode": payload.get("returncode"),
+        "timed_out": payload.get("timed_out"),
+        "interrupted": payload.get("interrupted"),
+        "truncated": payload.get("truncated"),
+        "stdout": strip_structured_event_lines(str(payload.get("stdout") or "")),
+        "stderr": payload.get("stderr") or "",
+    }
+    if payload.get("attachments"):
+        visible["attachments"] = payload["attachments"]
+    return visible
+
+
+def strip_structured_event_lines(text: str) -> str:
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if _is_structured_event_line(line):
+            continue
+        lines.append(line)
+    return "".join(lines)
+
+
+def _is_structured_event_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(value, dict) and "kind" in value
 
 
 def context_fingerprint(text: str) -> str:
