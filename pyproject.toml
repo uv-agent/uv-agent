@@ -3,6 +3,7 @@ name = "uv-agent"
 version = "0.1.0"
 description = "Experimental Python-runner coding agent with a Textual TUI"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.14"
 dependencies = [
     "httpx>=0.28.1",

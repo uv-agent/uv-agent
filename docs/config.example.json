@@ -1,0 +1,93 @@
+{
+  "providers": {
+    "primary": {
+      "base_url": "https://api.example.com/v1",
+      "api_key_env": "UV_AGENT_PRIMARY_API_KEY",
+      "headers": {},
+      "params": {},
+      "responses": {
+        "path": "/responses",
+        "params": {}
+      },
+      "chat_completions": {
+        "path": "/chat/completions",
+        "params": {}
+      },
+      "anthropic_messages": {
+        "path": "/messages",
+        "params": {}
+      }
+    }
+  },
+  "models": {
+    "main": {
+      "provider": "primary",
+      "model": "your-main-model",
+      "api": "responses",
+      "context_window_tokens": 128000,
+      "supports_images": true,
+      "params": {
+        "reasoning": {
+          "effort": "medium"
+        }
+      }
+    },
+    "fast": {
+      "provider": "primary",
+      "model": "your-fast-model",
+      "api": "chat_completions",
+      "context_window_tokens": 64000,
+      "supports_images": false,
+      "params": {
+        "temperature": 0.2
+      }
+    }
+  },
+  "levels": {
+    "small": {
+      "model": "fast",
+      "params": {}
+    },
+    "medium": {
+      "model": "main",
+      "params": {}
+    },
+    "large": {
+      "model": "main",
+      "params": {
+        "reasoning": {
+          "effort": "high"
+        }
+      }
+    }
+  },
+  "runtime": {
+    "default_level": "medium",
+    "auto_compress": true,
+    "store_provider_response": false,
+    "max_agent_rounds": 100,
+    "compression": {
+      "model_level": "small",
+      "prompt": "Summarize the conversation context for future continuation. Keep user intent, decisions, file changes, tool results, and unresolved tasks. Be concise but complete.",
+      "trigger_ratio": 0.7,
+      "target_ratio": 0.3,
+      "min_tokens": 5000
+    },
+    "title_generation": {
+      "enabled": true,
+      "model_level": "small",
+      "prompt": "Create a concise title for this uv-agent thread from the user's first message. Return only the title, without quotes or punctuation. Prefer the user's language. Keep it under 8 words or 24 CJK characters."
+    }
+  },
+  "ui": {
+    "language": "auto"
+  },
+  "runner": {
+    "runtime_dependency": "uv-agent",
+    "runtime_package_name": "uv-agent",
+    "default_uv_args": [],
+    "default_timeout_s": 60,
+    "max_output_bytes": 1000000,
+    "max_saved_scripts": 32
+  }
+}

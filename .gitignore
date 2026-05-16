@@ -11,3 +11,6 @@ wheels/
 
 # uv-agent runtime data
 .uv-agent/
+
+# Private design notes
+docs/design.md

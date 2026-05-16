@@ -1,0 +1,112 @@
+# TUI And Slash Commands
+
+`uv-agent` opens a Textual TUI by default. The interface is a single transcript
+with a bottom composer, compact status footer, and full-screen panels for focused
+views such as threads, config, model levels, MCP declarations, and saved scripts.
+
+```powershell
+uvx uv-agent@latest
+```
+
+From a local checkout:
+
+```powershell
+uv run uv-agent
+```
+
+## Composer
+
+The composer is multi-line.
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Insert a newline. |
+| `Ctrl+Enter` or `Ctrl+J` | Send the current composer text. |
+| `Esc` | Clear the composer or close the active panel. |
+| `Tab` | Toggle composer height. |
+| `/` from an empty composer | Open the command picker. |
+| `@` | Open file mention search. |
+| `@@` | Open thread mention search. |
+
+Editing text that already starts with `/` does not reopen the command picker.
+Use `Ctrl+P` when you want to open the command picker explicitly.
+
+## Global Shortcuts
+
+| Key | Action |
+| --- | --- |
+| `F1` | Open help. |
+| `Ctrl+P` | Open command picker. |
+| `Ctrl+O` | Open recent threads. |
+| `Ctrl+S` | Open runtime status. |
+| `Ctrl+D` | Toggle Python/tool detail display. |
+| `F2` | Attach an image from the clipboard. |
+| `F3` | Preview pending images. |
+| `Ctrl+C` | Interrupt a running turn; press twice while idle to quit. |
+
+Full-screen panels support keyboard and mouse interaction. Type to filter when a
+filter box is focused, use arrows or PageUp/PageDown to move, Enter to select,
+and Esc to close.
+
+## Slash Commands
+
+| Command | Action |
+| --- | --- |
+| `/new [title]` | Start a new thread. |
+| `/threads` | Open recent threads and resume history. |
+| `/status` | Show runtime status, model level, context usage, config paths, rules, and saved scripts. |
+| `/config` | Edit user-facing settings and inspect redacted config. |
+| `/models` | Show configured models. This panel is read-only. |
+| `/level [name]` | Switch the active model level for this TUI session. |
+| `/mcp` | Show MCP declarations and insert MCP mentions. |
+| `/skills` | Show discovered skills and insert skill mentions. |
+| `/clear` | Clear the current transcript view and active thread selection. |
+| `/quit` | Quit after confirmation. |
+| `/help` or `?` | Show local commands and shortcuts. |
+
+## Config Panel
+
+`/config` can write only the settings that are safe to edit from the TUI:
+
+- `runtime.default_level`
+- `runtime.auto_compress`
+- `ui.language`
+
+Provider definitions, model definitions, and level-to-model mappings are edited
+in JSON config files. Use `/models` to inspect configured models and `/level` to
+switch the current session level.
+
+Language choices are:
+
+- `auto`
+- `en`
+- `zh-CN`
+
+See [configuration](configuration.md) for config file locations and schema.
+
+## Transcript Events
+
+The transcript renders model output and runtime activity as compact timeline
+items:
+
+- user and assistant messages
+- model reasoning summaries
+- Python run start/result events
+- stdout/stderr summaries and truncation markers
+- structured runtime events such as `progress`, `result`, `look_at`,
+  `subagent.started`, and `subagent.completed`
+- compaction and image attachment notices
+- readable error cards with hints when available
+
+Detailed Python run output remains available from run/tool details and status
+views instead of flooding the transcript by default.
+
+## Images
+
+`F2` attaches an image from the clipboard when image clipboard access is
+available. `F3` previews pending images before sending. Images attached from the
+TUI are sent with the next user turn, and models with `supports_images: false`
+reject image input.
+
+Managed Python scripts can also attach image context with
+`uv_agent_runtime.look_at`; see [runtime](runtime.md).
