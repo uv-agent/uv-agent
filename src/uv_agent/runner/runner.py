@@ -150,6 +150,13 @@ class PythonRunner:
         run_cwd = (cwd or self.project_root).resolve()
         argv = ["uv", "run", *uv_args, str(final_path), *script_args]
         env = dict(os.environ)
+        # Force UTF-8 for the child Python so non-ASCII stdout/stderr (e.g.
+        # Chinese on Windows where the default code page is cp936) round-trips
+        # cleanly through our `decode("utf-8")` pump. PYTHONUTF8 also flips the
+        # child's `open()` / locale default to UTF-8 so file I/O inside scripts
+        # stops depending on the host code page.
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         env["UV_AGENT_STATE_DIR"] = str(self.store.data_dir)
         if thread_id:
             env["UV_AGENT_THREAD_ID"] = thread_id
