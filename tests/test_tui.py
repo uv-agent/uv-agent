@@ -13,6 +13,7 @@ from uv_agent.config import (
     LevelConfig,
     ModelConfig,
     ProviderConfig,
+    ReasoningOption,
     RunnerConfig,
     RuntimeConfig,
     UiConfig,
@@ -78,7 +79,24 @@ class ReleasableEngine(AgentEngine):
 
 def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
     config = AppConfig(
-        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        providers={
+            "p": ProviderConfig(
+                name="p",
+                base_url="https://example.com",
+                reasoning_options=[
+                    ReasoningOption(
+                        name="low",
+                        label="Low",
+                        params={"reasoning": {"effort": "low"}},
+                    ),
+                    ReasoningOption(
+                        name="high",
+                        label="High",
+                        params={"reasoning": {"effort": "high"}},
+                    ),
+                ],
+            )
+        },
         models={
             "default": ModelConfig(
                 name="default",
@@ -88,7 +106,11 @@ def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
                 params={},
             )
         },
-        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        levels={
+            "small": LevelConfig(name="small", model="default", params={}),
+            "medium": LevelConfig(name="medium", model="default", params={}),
+            "large": LevelConfig(name="large", model="default", params={}),
+        },
         runtime=RuntimeConfig(default_level="medium", auto_compress=False),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
@@ -128,6 +150,8 @@ async def test_tui_command_palette_completes_without_blocking_newlines(
         await pilot.pause()
         status_panel = app.screen_stack[-1]
         assert isinstance(status_panel, FullscreenPanel)
+        assert status_panel.panel_title == app._text("status")
+        assert status_panel.picker_mode is False
         assert "258K" in status_panel.body
 
 
@@ -174,6 +198,8 @@ async def test_tui_status_panel_opens_fullscreen_overlay(
         await pilot.press("ctrl+s")
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("status")
+        assert panel.picker_mode is False
         assert "258K" in panel.body
 
 
@@ -229,7 +255,7 @@ async def test_tui_command_picker_supports_keyboard_selection(
 
 
 @pytest.mark.asyncio
-async def test_tui_command_picker_prefills_argument_commands(
+async def test_tui_command_picker_opens_level_panel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -248,7 +274,45 @@ async def test_tui_command_picker_prefills_argument_commands(
         await pilot.pause()
 
         composer = app.query_one("#composer", TextArea)
-        assert composer.text == "/level "
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("config_current_level")
+        assert composer.text == ""
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.level == "small"
+
+
+@pytest.mark.asyncio
+async def test_tui_command_palette_hides_run_and_skill_name_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        titles = [item.title for item in panel.items]
+        assert "/runs" not in titles
+        assert "/skill [name]" not in titles
+        assert "/context" not in titles
+        assert "/rules" not in titles
+        assert "/scripts" not in titles
+        assert "/panel" not in titles
+        assert "/level" in titles
+        assert "/skills" in titles
 
 
 @pytest.mark.asyncio
@@ -497,6 +561,90 @@ async def test_tui_mention_backspace_returns_from_threads_to_files(
 
 
 @pytest.mark.asyncio
+async def test_tui_mention_picker_does_not_reopen_when_backspacing_to_trigger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    source_dir = project_root / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "example.py").write_text("print('hi')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("@a")
+        await pilot.pause()
+
+        assert not isinstance(app.screen_stack[-1], FullscreenPanel)
+
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert composer.text == "@"
+        assert not isinstance(app.screen_stack[-1], FullscreenPanel)
+
+
+@pytest.mark.asyncio
+async def test_tui_mcp_and_skill_mentions_insert_plain_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    agents_dir = project_root / ".agents"
+    skill_dir = agents_dir / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
+    (agents_dir / "mcp.json").write_text(
+        __import__("json").dumps(
+            {
+                "servers": {
+                    "files": {
+                        "description": "File helpers",
+                        "command": "python",
+                        "args": ["server.py"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("@mcp:")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("mention_mcp")
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert composer.text == "@mcp:files "
+
+        composer.insert("@skill：")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("mention_skills")
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert composer.text == "@mcp:files @skill:demo "
+
+
+@pytest.mark.asyncio
 async def test_tui_uses_chinese_when_configured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -549,6 +697,127 @@ async def test_tui_updates_placeholder_after_language_config_refresh(
         app._refresh_status()
 
         assert "输入" in composer.placeholder
+
+
+@pytest.mark.asyncio
+async def test_tui_config_panel_sets_default_level_and_writes_editable_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config_path = project_root / ".uv-agent" / "config.json"
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_config_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("config")
+
+        await pilot.press("enter")
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("config_default_level")
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        data = __import__("json").loads(config_path.read_text(encoding="utf-8"))
+        assert data["runtime"]["default_level"] == "small"
+
+
+@pytest.mark.asyncio
+async def test_tui_config_panel_sets_reasoning_option(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config_path = project_root / ".uv-agent" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        __import__("json").dumps(
+            {
+                "providers": {
+                    "p": {
+                        "base_url": "https://example.com",
+                        "reasoning_options": [
+                            {"name": "low", "label": "Low", "params": {"reasoning": {"effort": "low"}}},
+                            {"name": "high", "label": "High", "params": {"reasoning": {"effort": "high"}}},
+                        ],
+                    }
+                },
+                "models": {"default": {"provider": "p", "model": "fake"}},
+                "levels": {
+                    "small": {"model": "default"},
+                    "medium": {"model": "default"},
+                    "large": {"model": "default"},
+                },
+                "runtime": {"default_level": "medium", "auto_compress": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    engine = fake_engine(project_root, tmp_path / "state")
+    engine.config_loader = None
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_reasoning_level_panel()
+        await pilot.pause()
+
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        data = __import__("json").loads(config_path.read_text(encoding="utf-8"))
+        assert data["levels"]["medium"]["reasoning"] == "low"
+        assert app.engine.config.model_for_level("medium").params["reasoning"]["effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_tui_status_summarizes_context_rules_and_scripts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "AGENTS.md").write_text("Use local rules.", encoding="utf-8")
+    engine = fake_engine(project_root, tmp_path / "state")
+    engine.runner.store.create_script(
+        original_code="print('hi')",
+        final_code="print('hi')",
+        thread_id=None,
+        turn_id=None,
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_status_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("status")
+        assert panel.picker_mode is False
+        assert "258K" in panel.body
+        assert "AGENTS.md" in panel.body
+        assert "Use local rules" not in panel.body
+        assert "print('hi')" in panel.body
 
 
 @pytest.mark.asyncio
@@ -887,6 +1156,29 @@ async def test_tui_ctrl_c_arms_quit_when_idle(
 
         assert app._quit_armed is True
         assert any(str(toast.render()) == app._text("quit_again") for toast in app.screen.query("Toast"))
+
+
+@pytest.mark.asyncio
+async def test_tui_quit_command_exits_without_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("/quit")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+
+        assert app._quit_armed is False
+        assert app._exit is True
 
 
 @pytest.mark.asyncio

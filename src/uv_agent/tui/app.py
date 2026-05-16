@@ -26,7 +26,14 @@ from textual.worker import Worker
 from textual.widgets._option_list import Option
 
 from uv_agent.app_factory import create_engine
-from uv_agent.config import ConfigError, config_sources, load_raw_config, redact_config
+from uv_agent.config import (
+    ConfigError,
+    config_sources,
+    editable_config_path,
+    load_config,
+    load_raw_config,
+    redact_config,
+)
 from uv_agent.environment import detect_user_language, host_environment_line
 from uv_agent.errors import error_markup, format_error
 from uv_agent.i18n import command_description, tr
@@ -148,6 +155,7 @@ class FullscreenPanel(ModalScreen[str | None]):
         super().__init__()
         self.panel_title = title
         self.body = body
+        self.picker_mode = items is not None or mention_kind is not None
         self.items = items or []
         self.subtitle = subtitle
         self.initial_filter = initial_filter.strip()
@@ -161,7 +169,7 @@ class FullscreenPanel(ModalScreen[str | None]):
         with Vertical(id="panel-shell"):
             yield Static(self.panel_title, id="panel-header")
             yield Static(self.subtitle, id="panel-subtitle")
-            if self.items or self.mention_kind:
+            if self.picker_mode:
                 yield Input(placeholder=getattr(self.app, "_text", lambda key: key)("filter"), id="panel-filter")
                 yield PickerOptionList(id="panel-content", compact=False)
             else:
@@ -169,7 +177,7 @@ class FullscreenPanel(ModalScreen[str | None]):
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def on_mount(self) -> None:
-        if self.items or self.mention_kind:
+        if self.picker_mode:
             filter_input = self.query_one("#panel-filter", Input)
             if self.initial_filter:
                 filter_input.value = self.initial_filter
@@ -207,7 +215,7 @@ class FullscreenPanel(ModalScreen[str | None]):
             except SkipAction:
                 pass
             return
-        if not self.items and not self.mention_kind:
+        if not self.picker_mode:
             return
         filter_input = self.query_one("#panel-filter", Input)
         if self.mention_kind == "file" and (
@@ -215,6 +223,14 @@ class FullscreenPanel(ModalScreen[str | None]):
         ):
             event.stop()
             self._switch_mention_kind("thread", filter_value="@")
+            return
+        if self.mention_kind == "mcp" and event.key in {"backspace", "ctrl+h"} and filter_input.value == "":
+            event.stop()
+            self.dismiss(None)
+            return
+        if self.mention_kind == "skill" and event.key in {"backspace", "ctrl+h"} and filter_input.value == "":
+            event.stop()
+            self.dismiss(None)
             return
         if event.key == "backspace":
             event.stop()
@@ -238,6 +254,19 @@ class FullscreenPanel(ModalScreen[str | None]):
         query = value.casefold().strip()
         if self.mention_kind == "thread" and query.startswith("@"):
             query = query[1:].strip()
+        if self.mention_kind == "mcp" and query.startswith("@mcp:"):
+            query = query.removeprefix("@mcp:").strip()
+        if self.mention_kind == "mcp" and query.startswith("@mcp："):
+            query = query.removeprefix("@mcp：").strip()
+        if self.mention_kind == "skill":
+            if query.startswith("@skills:"):
+                query = query.removeprefix("@skills:").strip()
+            elif query.startswith("@skills："):
+                query = query.removeprefix("@skills：").strip()
+            elif query.startswith("@skill:"):
+                query = query.removeprefix("@skill:").strip()
+            elif query.startswith("@skill："):
+                query = query.removeprefix("@skill：").strip()
         if not query:
             self._filtered = list(self.items)
         else:
@@ -261,32 +290,34 @@ class FullscreenPanel(ModalScreen[str | None]):
         self.dismiss(None)
 
     def action_cursor_up(self) -> None:
-        if self.items:
+        if self.picker_mode:
             self.query_one("#panel-content", OptionList).action_cursor_up()
             return
         self.query_one("#panel-body", VerticalScroll).action_scroll_up()
 
     def action_cursor_down(self) -> None:
-        if self.items:
+        if self.picker_mode:
             self.query_one("#panel-content", OptionList).action_cursor_down()
             return
         self.query_one("#panel-body", VerticalScroll).action_scroll_down()
 
     def action_page_up(self) -> None:
-        if self.items:
+        if self.picker_mode:
             self.query_one("#panel-content", OptionList).action_page_up()
             return
         self.query_one("#panel-body", VerticalScroll).action_page_up()
 
     def action_page_down(self) -> None:
-        if self.items:
+        if self.picker_mode:
             self.query_one("#panel-content", OptionList).action_page_down()
             return
         self.query_one("#panel-body", VerticalScroll).action_page_down()
 
     def action_select_or_close(self) -> None:
-        if not self.items:
+        if not self.picker_mode:
             self.dismiss(None)
+            return
+        if not self._filtered:
             return
         option_list = self.query_one("#panel-content", OptionList)
         highlighted = option_list.highlighted
@@ -317,6 +348,10 @@ class FullscreenPanel(ModalScreen[str | None]):
                 label = text("no_mention_files")
             elif self.mention_kind == "thread":
                 label = text("no_threads")
+            elif self.mention_kind == "mcp":
+                label = text("no_mcp")
+            elif self.mention_kind == "skill":
+                label = text("no_skills")
             else:
                 label = text("no_matches")
             options = [Option(f"[dim]{escape(label)}[/dim]", id="")]
@@ -345,17 +380,11 @@ COMMAND_SPECS = [
     ("/new", "/new [title]"),
     ("/threads", "/threads"),
     ("/status", "/status"),
-    ("/context", "/context"),
-    ("/rules", "/rules"),
     ("/config", "/config"),
     ("/models", "/models"),
-    ("/level", "/level [name]"),
+    ("/level", "/level"),
     ("/mcp", "/mcp"),
     ("/skills", "/skills"),
-    ("/skill", "/skill [name]"),
-    ("/scripts", "/scripts"),
-    ("/runs", "/runs"),
-    ("/panel", "/panel"),
     ("/clear", "/clear"),
     ("/quit", "/quit"),
     ("/help", "/help"),
@@ -881,7 +910,7 @@ class UvAgentApp(App[None]):
             self._resize_composer("")
             self._open_help_panel()
         else:
-            self._maybe_open_mention_picker(event.text_area)
+            self._maybe_open_mention_picker(event.text_area, previous=previous, current=current)
 
     def on_text_area_selection_changed(self, event: TextArea.SelectionChanged) -> None:
         if event.text_area.id != "composer":
@@ -1150,6 +1179,9 @@ class UvAgentApp(App[None]):
         self._flash(f"{self._text('quit_again')}{suffix}", severity="warning")
         self.set_timer(2.0, self._clear_quit_arm)
 
+    def _quit_from_command(self) -> None:
+        self.exit()
+
     def action_interrupt_turn(self) -> None:
         if not self.busy:
             self.action_request_quit()
@@ -1294,7 +1326,7 @@ class UvAgentApp(App[None]):
             self._refresh_status(self._text("idle"))
             return True
         if command == "/quit":
-            self.action_request_quit()
+            self._quit_from_command()
             return True
         if command == "/new":
             title = rest.strip() or self._text("new_thread")
@@ -1318,12 +1350,6 @@ class UvAgentApp(App[None]):
         if command == "/status":
             self._open_status_panel()
             return True
-        if command == "/context":
-            self._open_context_panel()
-            return True
-        if command == "/rules":
-            self._open_rules_panel()
-            return True
         if command == "/config":
             self._open_config_panel()
             return True
@@ -1336,20 +1362,8 @@ class UvAgentApp(App[None]):
         if command == "/skills":
             self._open_skills_panel()
             return True
-        if command == "/skill":
-            self._append_skill(rest.strip())
-            return True
-        if command == "/scripts":
-            self._open_scripts_panel()
-            return True
         if command == "/level":
-            self._handle_level_command(rest.strip())
-            return True
-        if command == "/runs":
-            self._open_runs_panel()
-            return True
-        if command == "/panel":
-            self._flash(self._text("panel_close_hint"))
+            self._open_current_level_panel()
             return True
         if command in {"/help", "?"}:
             self._open_help_panel()
@@ -1365,7 +1379,26 @@ class UvAgentApp(App[None]):
         return
 
     def _open_help_panel(self) -> None:
-        lines = [f"[bold]{escape(self._text('commands'))}[/bold] [dim](Tab/Enter, Esc)[/dim]"]
+        lines = [
+            f"[bold]{escape(self._text('keyboard_shortcuts'))}[/bold]",
+            f"- [cyan]Ctrl+Enter / Ctrl+J[/cyan] [dim]{escape(self._text('help_send'))}[/dim]",
+            f"- [cyan]Enter[/cyan] [dim]{escape(self._text('help_newline'))}[/dim]",
+            f"- [cyan]Ctrl+P / /[/cyan] [dim]{escape(self._text('help_commands'))}[/dim]",
+            f"- [cyan]F1 / ?[/cyan] [dim]{escape(self._text('help_help'))}[/dim]",
+            f"- [cyan]Ctrl+O[/cyan] [dim]{escape(self._text('help_threads'))}[/dim]",
+            f"- [cyan]Ctrl+S[/cyan] [dim]{escape(self._text('help_status'))}[/dim]",
+            f"- [cyan]Ctrl+D[/cyan] [dim]{escape(self._text('help_details'))}[/dim]",
+            f"- [cyan]Tab[/cyan] [dim]{escape(self._text('help_height'))}[/dim]",
+            f"- [cyan]Ctrl+C[/cyan] [dim]{escape(self._text('help_interrupt_quit'))}[/dim]",
+            "",
+            f"[bold]{escape(self._text('mentions'))}[/bold]",
+            f"- [cyan]@[/cyan] [dim]{escape(self._text('help_mention_files'))}[/dim]",
+            f"- [cyan]@@[/cyan] [dim]{escape(self._text('help_mention_threads'))}[/dim]",
+            f"- [cyan]@mcp:[/cyan] [dim]{escape(self._text('help_mention_mcp'))}[/dim]",
+            f"- [cyan]@skill:[/cyan] [dim]{escape(self._text('help_mention_skills'))}[/dim]",
+            "",
+            f"[bold]{escape(self._text('commands'))}[/bold] [dim](Tab/Enter, Esc)[/dim]",
+        ]
         for spec in self._commands():
             lines.append(
                 f"[cyan]{escape(spec.usage):<18}[/cyan] [dim]{escape(spec.description)}[/dim]"
@@ -1373,7 +1406,7 @@ class UvAgentApp(App[None]):
         self._open_panel("\n".join(lines), "help", self._text("help"))
 
     def _append_help(self) -> None:
-        lines = [f"[bold]{escape(self._text('commands'))}[/bold] [dim](Ctrl+S, Esc)[/dim]"]
+        lines = [f"[bold]{escape(self._text('commands'))}[/bold] [dim](Ctrl+P, F1, Esc)[/dim]"]
         for spec in self._commands():
             lines.append(
                 f"[cyan]{escape(spec.usage):<18}[/cyan] [dim]{escape(spec.description)}[/dim]"
@@ -1538,11 +1571,24 @@ class UvAgentApp(App[None]):
             subtitle=self._text("thread_search_hint"),
         )
 
-    def _maybe_open_mention_picker(self, composer: TextArea) -> None:
+    def _maybe_open_mention_picker(self, composer: TextArea, *, previous: str, current: str) -> None:
+        if len(current) <= len(previous):
+            return
         trigger = self._mention_trigger_at_cursor(composer)
         if trigger is None:
             return
-        kind = "thread" if trigger == "@@" else "file"
+        inserted = current[len(previous) :]
+        if not inserted or not trigger.endswith(inserted):
+            return
+        kind = {
+            "@@": "thread",
+            "@mcp:": "mcp",
+            "@mcp：": "mcp",
+            "@skill:": "skill",
+            "@skill：": "skill",
+            "@skills:": "skill",
+            "@skills：": "skill",
+        }.get(trigger, "file")
         self._open_mention_picker(kind)
 
     def _mention_trigger_at_cursor(self, composer: TextArea) -> str | None:
@@ -1551,6 +1597,9 @@ class UvAgentApp(App[None]):
         if row >= len(lines):
             return None
         prefix = lines[row][:column]
+        for trigger in ("@skills:", "@skills：", "@skill:", "@skill：", "@mcp:", "@mcp：", "@@"):
+            if prefix.endswith(trigger):
+                return trigger
         if prefix.endswith("@@"):
             return "@@"
         if prefix.endswith("@"):
@@ -1562,11 +1611,22 @@ class UvAgentApp(App[None]):
             composer = self.query_one("#composer", TextArea)
         except NoMatches:
             return
-        expected_trigger = "@@" if kind == "thread" else "@"
-        if self._mention_trigger_at_cursor(composer) != expected_trigger:
+        expected_triggers = {
+            "thread": ("@@",),
+            "mcp": ("@mcp:", "@mcp："),
+            "skill": ("@skill:", "@skill：", "@skills:", "@skills："),
+            "file": ("@",),
+        }.get(kind, ("@",))
+        if self._mention_trigger_at_cursor(composer) not in expected_triggers:
             return
         if kind == "thread":
             self._open_thread_mention_picker()
+            return
+        if kind == "mcp":
+            self._open_mcp_mention_picker()
+            return
+        if kind == "skill":
+            self._open_skill_mention_picker()
             return
         self._open_file_mention_picker()
 
@@ -1593,12 +1653,46 @@ class UvAgentApp(App[None]):
             initial_filter="@",
         )
 
+    def _open_mcp_mention_picker(self) -> None:
+        title, items, subtitle = self._mention_picker_items("mcp")
+        self._open_picker(
+            title,
+            items,
+            self._choose_mcp_mention,
+            subtitle=subtitle,
+            mention_kind="mcp",
+            mention_items=self._mention_picker_items,
+        )
+
+    def _open_skill_mention_picker(self) -> None:
+        title, items, subtitle = self._mention_picker_items("skill")
+        self._open_picker(
+            title,
+            items,
+            self._choose_skill_mention,
+            subtitle=subtitle,
+            mention_kind="skill",
+            mention_items=self._mention_picker_items,
+        )
+
     def _mention_picker_items(self, kind: str) -> tuple[str, list[PickerItem], str]:
         if kind == "thread":
             return (
                 self._text("mention_threads"),
                 self._thread_mention_items(),
                 self._text("mention_threads_hint"),
+            )
+        if kind == "mcp":
+            return (
+                self._text("mention_mcp"),
+                self._mcp_mention_items(),
+                self._text("mention_mcp_hint"),
+            )
+        if kind == "skill":
+            return (
+                self._text("mention_skills"),
+                self._skill_mention_items(),
+                self._text("mention_skills_hint"),
             )
         return (
             self._text("mention_files"),
@@ -1659,11 +1753,43 @@ class UvAgentApp(App[None]):
                 )
         return items
 
+    def _mcp_mention_items(self) -> list[PickerItem]:
+        items: list[PickerItem] = []
+        for server in discover_mcp_servers(self.project_root):
+            items.append(
+                PickerItem(
+                    id=server.name,
+                    title=server.name,
+                    description=server.description,
+                    meta=f"{server.scope}" + (f" · {server.command}" if server.command else ""),
+                )
+            )
+        return items
+
+    def _skill_mention_items(self) -> list[PickerItem]:
+        items: list[PickerItem] = []
+        for skill in discover_skills(self.project_root):
+            items.append(
+                PickerItem(
+                    id=skill.name,
+                    title=skill.name,
+                    description=skill.description,
+                    meta=f"{skill.scope} · {skill.path}",
+                )
+            )
+        return items
+
     def _choose_file_mention(self, path: str) -> None:
         self._insert_mention(f"@{path}", "@")
 
     def _choose_thread_mention(self, thread_id: str) -> None:
         self._insert_mention(f"@thread:{thread_id}", ("@@", "@"))
+
+    def _choose_mcp_mention(self, name: str) -> None:
+        self._insert_mention(f"@mcp:{name}", ("@mcp:", "@mcp："))
+
+    def _choose_skill_mention(self, name: str) -> None:
+        self._insert_mention(f"@skill:{name}", ("@skill:", "@skill：", "@skills:", "@skills："))
 
     def _insert_mention(self, mention: str, triggers: str | tuple[str, ...]) -> None:
         composer = self.query_one("#composer", TextArea)
@@ -1711,12 +1837,17 @@ class UvAgentApp(App[None]):
 
     def _status_panel_markup(self) -> str:
         self.engine.refresh_config()
+        level_name = self.level or self.engine.config.runtime.default_level
+        rules = self.engine.project_rule_context()
+        scripts = self.engine.runner.store.list_scripts(limit=5)
         try:
             model = self.engine.config.model_for_level(self.level)
             provider = self.engine.config.provider_for_model(model)
             stats = self.engine.context_stats(self.thread_id, self.level)
             model_line = f"{escape(model.name)} -> {escape(model.model)}"
             provider_line = f"{escape(provider.name)} / {escape(model.api)}"
+            level_config = self.engine.config.level(level_name)
+            reasoning_line = level_config.reasoning or self._text("none")
             context_line = (
                 f"{stats.percent}% "
                 f"({format_tokens(stats.used_tokens)} / {format_tokens(stats.context_window_tokens)}, "
@@ -1730,16 +1861,29 @@ class UvAgentApp(App[None]):
         except ConfigError as exc:
             model_line = "[red]not configured[/red]"
             provider_line = escape(str(exc))
+            reasoning_line = "-"
             context_line = "-"
             compress_line = "-"
-        level_name = self.level or self.engine.config.runtime.default_level
+        rules_line = f"{len(rules.rules)} {self._text('status_rules_loaded')}"
+        if rules.truncated:
+            rules_line += f" · {self._text('truncated')}"
+        if rules.omitted_files:
+            rules_line += f" · {rules.omitted_files} {self._text('status_rules_omitted')}"
+        script_line = (
+            f"{len(scripts)} {self._text('status_scripts_saved')}"
+            if scripts
+            else self._text("no_scripts")
+        )
         lines = [
             f"- state: [cyan]{escape(self._last_status)}[/cyan]",
             f"- level: [cyan]{escape(level_name)}[/cyan]",
+            f"- reasoning: [cyan]{escape(reasoning_line)}[/cyan]",
             f"- model: {model_line}",
             f"- provider/api: {provider_line}",
             f"- context: {context_line}",
             f"- compaction: {compress_line}",
+            f"- rules: {escape(rules_line)}",
+            f"- scripts: {escape(script_line)}",
             f"- thread: {escape(short_thread(self.thread_id))}",
             f"- queued: {self._active_queue_length()}",
             f"- user state: {escape(str(uv_agent_home()))}",
@@ -1747,66 +1891,282 @@ class UvAgentApp(App[None]):
             f"- host: {escape(host_environment_line())}",
             f"- language: {escape(self.language.name)}",
         ]
+        if rules.rules:
+            lines.append("")
+            lines.append(f"[bold]{escape(self._text('rules'))}[/bold]")
+            for rule in rules.rules[:6]:
+                suffix = f" [{escape(self._text('truncated'))}]" if rule.truncated else ""
+                lines.append(f"- {escape(rule.scope)}: {escape(str(rule.path))}{suffix}")
+            if len(rules.rules) > 6:
+                lines.append(f"- ... {len(rules.rules) - 6} more")
+        if scripts:
+            lines.append("")
+            lines.append(f"[bold]{escape(self._text('scripts'))}[/bold]")
+            for script in scripts:
+                summary = str(script.get("summary") or "")
+                if len(summary) > 96:
+                    summary = summary[:93].rstrip() + "..."
+                lines.append(
+                    f"- {escape(str(script.get('script_id') or ''))}: {escape(summary)}"
+                )
         return "\n".join(lines)
-
-    def _open_context_panel(self) -> None:
-        self._open_panel(self._context_panel_markup(), "context", self._text("context"))
-
-    def _context_panel_markup(self) -> str:
-        self.engine.refresh_config()
-        rules = self.engine.project_rule_context()
-        try:
-            stats = self.engine.context_stats(self.thread_id, self.level)
-            lines = [
-                f"[bold]token budget[/bold] [dim]{escape(stats.source)}[/dim]",
-                f"- used: [cyan]{format_tokens(stats.used_tokens)}[/cyan] / {format_tokens(stats.context_window_tokens)} ({stats.percent}%)",
-                f"- headroom: {format_tokens(stats.headroom_tokens)}",
-                f"- compression trigger: {format_tokens(stats.threshold_tokens)}",
-                f"- compression target: {format_tokens(stats.target_tokens)}",
-            ]
-        except ConfigError as exc:
-            lines = ["[bold]token budget[/bold]", f"[red]{escape(str(exc))}[/red]"]
-        lines.extend(
-            [
-                "",
-                "[bold]workspace rules[/bold]",
-                f"- loaded files: {len(rules.rules)}",
-                f"- capped: {'yes' if rules.truncated else 'no'}",
-            ]
-        )
-        if rules.omitted_files:
-            lines.append(f"- omitted files: {rules.omitted_files}")
-        for rule in rules.rules:
-            suffix = " [yellow]truncated[/yellow]" if rule.truncated else ""
-            lines.append(f"  [cyan]{escape(rule.scope)}[/cyan] {escape(str(rule.path))}{suffix}")
-        if not rules.rules:
-            lines.append("[dim]no AGENTS.md files discovered[/dim]")
-        return "\n".join(lines)
-
-    def _open_rules_panel(self) -> None:
-        rules = self.engine.project_rule_context()
-        if not rules.rules:
-            self._open_panel(
-                f"[dim]{escape(self._text('no_agents'))}[/dim]",
-                "rules",
-                self._text("rules"),
-            )
-            return
-        lines: list[str] = []
-        for rule in rules.rules:
-            title = f"[cyan]{escape(rule.scope)}[/cyan] {escape(str(rule.path))}"
-            if rule.truncated:
-                title += " [yellow]truncated[/yellow]"
-            preview = rule.text.strip()
-            if len(preview) > 2400:
-                preview = preview[:2400].rstrip() + "\n..."
-            lines.append(title + "\n" + escape(preview))
-        if rules.truncated and rules.omitted_files:
-            lines.append(f"[yellow]{rules.omitted_files} file(s) omitted by context cap[/yellow]")
-        self._open_panel("\n\n".join(lines), "rules", self._text("rules"))
 
     def _open_config_panel(self) -> None:
         self.engine.refresh_config()
+        active_level = self.level or self.engine.config.runtime.default_level
+        default_level = self.engine.config.runtime.default_level
+        items = [
+            PickerItem(
+                id="default_level",
+                title=self._text("config_default_level"),
+                description=default_level,
+                meta=self._text("config_default_level_hint"),
+            ),
+            PickerItem(
+                id="current_level",
+                title=self._text("config_current_level"),
+                description=active_level,
+                meta=self._text("config_current_level_hint"),
+            ),
+            PickerItem(
+                id="level_models",
+                title=self._text("config_level_models"),
+                description=self._level_model_summary(),
+                meta=self._text("config_level_models_hint"),
+            ),
+            PickerItem(
+                id="reasoning",
+                title=self._text("config_reasoning"),
+                description=self._reasoning_summary(active_level),
+                meta=self._text("config_reasoning_hint"),
+            ),
+            PickerItem(
+                id="language",
+                title=self._text("config_language"),
+                description=self.engine.config.ui.language,
+                meta=self._text("config_language_hint"),
+            ),
+            PickerItem(
+                id="auto_compress",
+                title=self._text("config_auto_compress"),
+                description="on" if self.engine.config.runtime.auto_compress else "off",
+                meta=self._text("config_auto_compress_hint"),
+            ),
+            PickerItem(
+                id="sources",
+                title=self._text("config_sources"),
+                description=str(editable_config_path(self.project_root)),
+                meta=self._text("config_sources_hint"),
+            ),
+            PickerItem(
+                id="raw",
+                title=self._text("config_raw"),
+                description=self._text("config_raw_hint"),
+            ),
+        ]
+        self._open_picker(
+            self._text("config"),
+            items,
+            self._choose_config_item,
+            subtitle=self._text("config_hint"),
+        )
+
+    def _level_model_summary(self) -> str:
+        parts = [
+            f"{name}->{level.model}"
+            for name, level in self.engine.config.levels.items()
+        ]
+        return ", ".join(parts) or self._text("none")
+
+    def _reasoning_summary(self, level_name: str) -> str:
+        try:
+            level = self.engine.config.level(level_name)
+            return level.reasoning or self._text("none")
+        except ConfigError:
+            return self._text("none")
+
+    def _choose_config_item(self, item_id: str) -> None:
+        if item_id == "default_level":
+            self._open_default_level_panel()
+        elif item_id == "current_level":
+            self._open_current_level_panel()
+        elif item_id == "level_models":
+            self._open_level_model_panel()
+        elif item_id == "reasoning":
+            self._open_reasoning_level_panel()
+        elif item_id == "language":
+            self._open_language_panel()
+        elif item_id == "auto_compress":
+            self._toggle_auto_compress()
+        elif item_id == "sources":
+            self._open_config_sources_panel()
+        elif item_id == "raw":
+            self._open_config_raw_panel()
+
+    def _open_default_level_panel(self) -> None:
+        items = []
+        current = self.engine.config.runtime.default_level
+        for name, level in self.engine.config.levels.items():
+            marker = self._text("current") if name == current else ""
+            items.append(
+                PickerItem(
+                    id=name,
+                    title=name,
+                    description=f"{level.model}" + (f" · {level.reasoning}" if level.reasoning else ""),
+                    meta=marker,
+                )
+            )
+        self._open_picker(
+            self._text("config_default_level"),
+            items,
+            self._set_default_level,
+            subtitle=self._text("config_write_hint"),
+        )
+
+    def _open_current_level_panel(self) -> None:
+        items = []
+        current = self.level or self.engine.config.runtime.default_level
+        for name, level in self.engine.config.levels.items():
+            marker = self._text("current") if name == current else ""
+            items.append(
+                PickerItem(
+                    id=name,
+                    title=name,
+                    description=f"{level.model}" + (f" · {level.reasoning}" if level.reasoning else ""),
+                    meta=marker,
+                )
+            )
+        self._open_picker(
+            self._text("config_current_level"),
+            items,
+            self._set_current_level,
+            subtitle=self._text("config_session_hint"),
+        )
+
+    def _open_level_model_panel(self) -> None:
+        items = []
+        for name, level in self.engine.config.levels.items():
+            items.append(
+                PickerItem(
+                    id=name,
+                    title=name,
+                    description=level.model,
+                    meta=self._text("config_pick_level_model"),
+                )
+            )
+        self._open_picker(
+            self._text("config_level_models"),
+            items,
+            self._open_model_choices_for_level,
+            subtitle=self._text("config_level_models_hint"),
+        )
+
+    def _open_model_choices_for_level(self, level_name: str) -> None:
+        try:
+            level = self.engine.config.level(level_name)
+        except ConfigError as exc:
+            self._flash(str(exc), severity="error")
+            return
+        items = []
+        for name, model in self.engine.config.models.items():
+            marker = self._text("current") if name == level.model else ""
+            items.append(
+                PickerItem(
+                    id=f"{level_name}\0{name}",
+                    title=name,
+                    description=f"{model.model} · {model.api}",
+                    meta=marker,
+                )
+            )
+        self._open_picker(
+            self._text("models"),
+            items,
+            self._set_level_model_from_choice,
+            subtitle=level_name,
+        )
+
+    def _open_reasoning_level_panel(self) -> None:
+        items = []
+        for name, level in self.engine.config.levels.items():
+            items.append(
+                PickerItem(
+                    id=name,
+                    title=name,
+                    description=level.reasoning or self._text("none"),
+                    meta=f"{self._text('model')}: {level.model}",
+                )
+            )
+        self._open_picker(
+            self._text("config_reasoning"),
+            items,
+            self._open_reasoning_choices_for_level,
+            subtitle=self._text("config_reasoning_hint"),
+        )
+
+    def _open_reasoning_choices_for_level(self, level_name: str) -> None:
+        try:
+            level = self.engine.config.level(level_name)
+            model = self.engine.config.models[level.model]
+            options = self.engine.config.reasoning_options_for_model(model)
+        except ConfigError as exc:
+            self._flash(str(exc), severity="error")
+            return
+        items = [
+            PickerItem(
+                id=f"{level_name}\0",
+                title=self._text("none"),
+                description=self._text("config_reasoning_none"),
+                meta=self._text("current") if not level.reasoning else "",
+            )
+        ]
+        for option in options:
+            params = json.dumps(option.params, ensure_ascii=False, separators=(",", ":"))
+            if len(params) > 120:
+                params = params[:117] + "..."
+            items.append(
+                PickerItem(
+                    id=f"{level_name}\0{option.name}",
+                    title=option.label or option.name,
+                    description=option.name,
+                    meta=(self._text("current") + " · " if option.name == level.reasoning else "") + params,
+                )
+            )
+        if len(items) == 1:
+            items[0] = PickerItem(
+                id=f"{level_name}\0",
+                title=self._text("none"),
+                description=self._text("config_no_reasoning_options"),
+                meta=self._text("current") if not level.reasoning else "",
+            )
+        self._open_picker(
+            self._text("config_reasoning"),
+            items,
+            self._set_level_reasoning_from_choice,
+            subtitle=level_name,
+        )
+
+    def _open_language_panel(self) -> None:
+        current = self.engine.config.ui.language
+        items = [
+            PickerItem(id=value, title=label, description=self._text("current") if value == current else "")
+            for value, label in (("auto", "auto"), ("en", "English"), ("zh-CN", "中文"))
+        ]
+        self._open_picker(
+            self._text("config_language"),
+            items,
+            self._set_language,
+            subtitle=self._text("config_write_hint"),
+        )
+
+    def _toggle_auto_compress(self) -> None:
+        current = self.engine.config.runtime.auto_compress
+        self._write_user_config_patch({"runtime": {"auto_compress": not current}})
+        self._flash(
+            f"{self._text('config_auto_compress')}: {'on' if not current else 'off'}",
+        )
+        self._open_config_panel()
+
+    def _open_config_sources_panel(self) -> None:
         sources = config_sources(self.project_root)
         lines = ["[bold]sources[/bold]"]
         for source in sources:
@@ -1814,40 +2174,137 @@ class UvAgentApp(App[None]):
             lines.append(
                 f"- {escape(source['scope'])}: {escape(source['path'])} [dim]exists={exists}[/dim]"
             )
-        level_name = self.level or self.engine.config.runtime.default_level
-        lines.append("\n[bold]active[/bold]")
-        try:
-            model = self.engine.config.model_for_level(self.level)
-            provider = self.engine.config.provider_for_model(model)
-            lines.extend(
-                [
-                    f"- level: [cyan]{escape(level_name)}[/cyan]",
-                    f"- model: {escape(model.name)} -> {escape(model.model)}",
-                    f"- provider: {escape(provider.name)}",
-                    f"- api: {escape(model.api)}",
-                    f"- context window: {format_tokens(model.context_window_tokens)}",
-                ]
-            )
-        except ConfigError as exc:
-            lines.append(f"[red]{escape(str(exc))}[/red]")
+        lines.append(f"\n[bold]editable[/bold]\n{escape(str(editable_config_path(self.project_root)))}")
+        self._open_panel("\n".join(lines), "config", self._text("config_sources"))
+
+    def _open_config_raw_panel(self) -> None:
         redacted = redact_config(load_raw_config(self.project_root))
         preview = json.dumps(redacted, ensure_ascii=False, indent=2)
-        if len(preview) > 2200:
-            preview = preview[:2200].rstrip() + "\n..."
-        lines.extend(["\n[bold]redacted merged config[/bold]", escape(preview)])
-        self._open_panel("\n".join(lines), "config", self._text("config"))
+        if len(preview) > 3200:
+            preview = preview[:3200].rstrip() + "\n..."
+        self._open_panel(escape(preview), "config", self._text("config_raw"))
+
+    def _set_default_level(self, name: str) -> None:
+        if name not in self.engine.config.levels:
+            self._flash(f"{self._text('unknown_level')}: {name}", severity="error")
+            return
+        self._write_user_config_patch({"runtime": {"default_level": name}})
+        self._flash(f"{self._text('config_default_level')}: {name}")
+        if self.level is None:
+            self._refresh_status()
+
+    def _set_current_level(self, name: str) -> None:
+        self._handle_level_command(name)
+
+    def _set_level_model_from_choice(self, value: str) -> None:
+        level_name, _, model_name = value.partition("\0")
+        if not level_name or not model_name:
+            return
+        self._write_user_config_patch({"levels": {level_name: {"model": model_name}}})
+        self._flash(f"{level_name}: {model_name}")
+
+    def _set_level_reasoning_from_choice(self, value: str) -> None:
+        level_name, _, reasoning = value.partition("\0")
+        if not level_name:
+            return
+        self._write_user_config_patch({"levels": {level_name: {"reasoning": reasoning or None}}})
+        self._flash(f"{self._text('config_reasoning')}: {level_name} -> {reasoning or self._text('none')}")
+
+    def _set_language(self, value: str) -> None:
+        self._write_user_config_patch({"ui": {"language": value}})
+        self._flash(f"{self._text('config_language')}: {value}")
+
+    def _write_user_config_patch(self, patch: dict[str, Any]) -> None:
+        path = editable_config_path(self.project_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raw = {}
+        else:
+            raw = {}
+        updated = self._config_deep_merge(raw, patch)
+        path.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.engine.config = load_config(self.project_root)
+        self.engine.runner.config = self.engine.config.runner
+        if hasattr(self.engine.model_client, "reload_config"):
+            self.engine.model_client.reload_config(self.engine.config)  # type: ignore[attr-defined]
+        self.language = detect_user_language(self.engine.config.ui.language)
+        self._refresh_status()
+
+    def _config_deep_merge(self, base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key, value in patch.items():
+            current = merged.get(key)
+            if isinstance(current, dict) and isinstance(value, dict):
+                merged[key] = self._config_deep_merge(current, value)
+            else:
+                merged[key] = value
+        return merged
 
     def _open_models_panel(self) -> None:
         self.engine.refresh_config()
-        lines = ["[bold]levels[/bold] [dim](/level name selects)[/dim]"]
+        current = self.level or self.engine.config.runtime.default_level
+        items = []
         for name, level in self.engine.config.levels.items():
-            marker = "*" if name == (self.level or self.engine.config.runtime.default_level) else "-"
-            lines.append(f"{marker} [cyan]{escape(name)}[/cyan] -> {escape(level.model)}")
-        lines.append("\n[bold]models[/bold]")
-        for name, model in self.engine.config.models.items():
-            lines.append(
-                f"- {escape(name)}: {escape(model.model)} [dim]{escape(model.api)} · {format_tokens(model.context_window_tokens)}[/dim]"
+            marker = self._text("current") if name == current else ""
+            items.append(
+                PickerItem(
+                    id=f"level:{name}",
+                    title=f"{self._text('level')} {name}",
+                    description=f"{level.model}" + (f" · {level.reasoning}" if level.reasoning else ""),
+                    meta=marker,
+                )
             )
+        for name, model in self.engine.config.models.items():
+            items.append(
+                PickerItem(
+                    id=f"model:{name}",
+                    title=f"{self._text('model')} {name}",
+                    description=model.model,
+                    meta=f"{model.api} · {format_tokens(model.context_window_tokens)}",
+                )
+            )
+        self._open_picker(
+            self._text("models"),
+            items,
+            self._choose_model_panel_item,
+            subtitle=self._text("models_hint"),
+        )
+
+    def _choose_model_panel_item(self, value: str) -> None:
+        kind, _, name = value.partition(":")
+        if kind == "level":
+            self._handle_level_command(name)
+        elif kind == "model":
+            self._open_model_detail_panel(name)
+
+    def _open_model_detail_panel(self, name: str) -> None:
+        model = self.engine.config.models.get(name)
+        if model is None:
+            self._flash(f"{self._text('models')}: {name}", severity="error")
+            return
+        try:
+            provider = self.engine.config.provider_for_model(model)
+            options = self.engine.config.reasoning_options_for_model(model)
+        except ConfigError as exc:
+            self._flash(str(exc), severity="error")
+            return
+        lines = [
+            f"[bold]{escape(name)}[/bold]",
+            f"- provider: {escape(provider.name)}",
+            f"- model: {escape(model.model)}",
+            f"- api: {escape(model.api)}",
+            f"- context window: {format_tokens(model.context_window_tokens)}",
+            "",
+            f"[bold]{escape(self._text('config_reasoning'))}[/bold]",
+        ]
+        if options:
+            for option in options:
+                params = json.dumps(option.params, ensure_ascii=False, separators=(",", ":"))
+                lines.append(f"- [cyan]{escape(option.name)}[/cyan] {escape(option.label)} [dim]{escape(params)}[/dim]")
+        else:
+            lines.append(f"[dim]{escape(self._text('config_no_reasoning_options'))}[/dim]")
         self._open_panel("\n".join(lines), "models", self._text("models"))
 
     def _handle_level_command(self, name: str) -> None:
@@ -1861,89 +2318,22 @@ class UvAgentApp(App[None]):
         self._append_cell(f"[dim]{escape(self._text('level'))}[/dim] [cyan]{escape(name)}[/cyan]", "event")
         self._refresh_status()
 
-    def _open_runs_panel(self) -> None:
-        if not self._last_tool_payload:
-            self._open_panel(
-                f"[dim]{escape(self._text('no_runs'))}[/dim]",
-                "runs",
-                self._text("runs"),
-            )
-            return
-        self._open_panel(
-            tool_result_markup(self._last_tool_payload),
-            "runs",
-            self._text("last_run"),
-        )
-
-    def _open_scripts_panel(self) -> None:
-        scripts = self.engine.runner.store.list_scripts(limit=32)
-        if not scripts:
-            self._open_panel(f"[dim]{escape(self._text('no_scripts'))}[/dim]", "scripts", self._text("scripts"))
-            return
-        lines = [
-            f"[bold]{escape(self._text('scripts_header'))}[/bold] "
-            f"[dim]({escape(self._text('scripts_limit'))})[/dim]"
-        ]
-        for script in scripts:
-            lines.append(
-                f"- [cyan]{escape(str(script.get('script_id') or ''))}[/cyan] "
-                f"[dim]runs={script.get('run_count', 0)} · {escape(str(script.get('last_used_at') or ''))}[/dim]\n"
-                f"  {escape(str(script.get('summary') or ''))}"
-            )
-        self._open_panel("\n".join(lines), "scripts", self._text("scripts"))
-
     def _open_mcp_panel(self) -> None:
         self.engine.refresh_config()
-        servers = discover_mcp_servers(self.project_root)
-        if not servers:
-            self._open_panel(
-                f"[dim]{escape(self._text('no_mcp'))}[/dim]",
-                "mcp",
-                self._text("mcp"),
-            )
-            return
-        lines = [f"[dim]{escape(self._text('mcp_declarations'))}[/dim]"]
-        for server in servers:
-            command = f" [dim]{escape(server.command)}[/dim]" if server.command else ""
-            lines.append(
-                f"- [cyan]{escape(server.name)}[/cyan] ({escape(server.scope)}) {escape(server.description)}{command}"
-            )
-        self._open_panel("\n".join(lines), "mcp", self._text("mcp"))
+        self._open_picker(
+            self._text("mcp"),
+            self._mcp_mention_items(),
+            self._choose_mcp_mention,
+            subtitle=self._text("mention_mcp_hint"),
+        )
 
     def _open_skills_panel(self) -> None:
         self.engine.refresh_config()
-        skills = discover_skills(self.project_root)
-        if not skills:
-            self._open_panel(
-                f"[dim]{escape(self._text('no_skills'))}[/dim]",
-                "skills",
-                self._text("skills"),
-            )
-            return
-        lines = [f"[dim]{escape(self._text('skill_hint'))}[/dim]"]
-        for skill in skills:
-            lines.append(
-                f"- [cyan]{escape(skill.name)}[/cyan] ({escape(skill.scope)}) {escape(skill.description)}"
-            )
-        self._open_panel("\n".join(lines), "skills", self._text("skills"))
-
-    def _append_skill(self, name: str) -> None:
-        if not name:
-            self._open_skills_panel()
-            return
-        skills = {skill.name: skill for skill in discover_skills(self.project_root)}
-        skill = skills.get(name)
-        if skill is None:
-            self._append_cell(f"[red]{escape(self._text('unknown_skill'))}[/red] {escape(name)}", "error")
-            return
-        text = skill.path.read_text(encoding="utf-8")
-        preview = "\n".join(text.splitlines()[:18])
-        if len(text.splitlines()) > 18:
-            preview += "\n..."
-        self._append_cell(
-            f"[bold]skill {escape(skill.name)}[/bold] [dim]{escape(str(skill.path))}[/dim]\n"
-            + escape(preview),
-            "event",
+        self._open_picker(
+            self._text("skills"),
+            self._skill_mention_items(),
+            self._choose_skill_mention,
+            subtitle=self._text("mention_skills_hint"),
         )
 
     def _open_command_palette(self, *, query: str = "") -> None:
@@ -2093,6 +2483,10 @@ class UvAgentApp(App[None]):
                     kind = panel._selected_mention_kind
                     if kind == "thread":
                         self._choose_thread_mention(result)
+                    elif kind == "mcp":
+                        self._choose_mcp_mention(result)
+                    elif kind == "skill":
+                        self._choose_skill_mention(result)
                     elif kind == "file":
                         self._choose_file_mention(result)
                     else:
