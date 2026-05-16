@@ -23,6 +23,7 @@ from uv_agent_runtime import (
     write_json,
     write_text,
 )
+from uv_agent_runtime.subagent import _extract_subagent_thread_id
 
 
 def test_runtime_file_helpers(tmp_path: Path) -> None:
@@ -136,7 +137,7 @@ def test_runtime_subagent_accepts_model_level_alias() -> None:
     assert "--level small ask ignored" in result.text
 
 
-def test_runtime_subagent_ask_uses_temporary_project_state() -> None:
+def test_runtime_subagent_ask_uses_temporary_project_state_without_host_state() -> None:
     code = (
         "import os; from pathlib import Path; "
         "state = Path(os.environ['UV_AGENT_PROJECT_STATE_DIR']); "
@@ -148,6 +149,28 @@ def test_runtime_subagent_ask_uses_temporary_project_state() -> None:
     assert result.text
     assert not Path(result.text).exists()
     assert "UV_AGENT_PROJECT_STATE_DIR" not in os.environ
+
+
+def test_runtime_subagent_ask_retains_project_state_when_host_state_is_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    code = (
+        "import os; "
+        "print(os.environ['UV_AGENT_PROJECT_STATE_DIR']); "
+        "import sys; print('[subagent-thread] thr_child', file=sys.stderr)"
+    )
+    monkeypatch.setenv("UV_AGENT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("UV_AGENT_THREAD_ID", "thr_parent")
+    monkeypatch.setenv("UV_AGENT_TURN_ID", "turn_parent")
+    result = ask("ignored", executable=[sys.executable, "-c", code], check=True)
+
+    assert result.text == str(tmp_path)
+    assert result.thread_id == "thr_child"
+
+
+def test_extract_subagent_thread_id_from_stderr() -> None:
+    assert _extract_subagent_thread_id("noise\n[subagent-thread] thr_123\n") == "thr_123"
 
 
 def test_runtime_saved_scripts_reads_state_dir(tmp_path: Path) -> None:

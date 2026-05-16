@@ -12,24 +12,53 @@ class ThreadStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
         self.threads_dir = data_dir / "threads"
+        self.subthreads_dir = data_dir / "subthreads"
         self.threads_dir.mkdir(parents=True, exist_ok=True)
+        self.subthreads_dir.mkdir(parents=True, exist_ok=True)
 
-    def create_thread(self, title: str = "New thread") -> str:
+    def create_thread(
+        self,
+        title: str = "New thread",
+        *,
+        kind: str = "thread",
+        parent_thread_id: str | None = None,
+        parent_turn_id: str | None = None,
+        parent_run_id: str | None = None,
+        parent_script_id: str | None = None,
+    ) -> str:
         thread_id = new_id("thr")
-        self.writer(thread_id).write(
-            {
-                "type": "thread.created",
-                "created_at": utc_now_iso(),
-                "thread_id": thread_id,
-                "title": title,
-            }
-        )
+        created = {
+            "type": "thread.created",
+            "created_at": utc_now_iso(),
+            "thread_id": thread_id,
+            "title": title,
+            "kind": kind,
+        }
+        if parent_thread_id:
+            created["parent_thread_id"] = parent_thread_id
+        if parent_turn_id:
+            created["parent_turn_id"] = parent_turn_id
+        if parent_run_id:
+            created["parent_run_id"] = parent_run_id
+        if parent_script_id:
+            created["parent_script_id"] = parent_script_id
+        self.writer(thread_id, kind=kind).write(created)
         return thread_id
 
-    def writer(self, thread_id: str) -> JsonlWriter:
-        return JsonlWriter(self.path(thread_id))
+    def writer(self, thread_id: str, *, kind: str | None = None) -> JsonlWriter:
+        return JsonlWriter(self.path(thread_id, kind=kind))
 
-    def path(self, thread_id: str) -> Path:
+    def path(self, thread_id: str, *, kind: str | None = None) -> Path:
+        if kind == "subagent":
+            return self.subthreads_dir / f"{thread_id}.jsonl"
+        if kind == "thread":
+            return self.threads_dir / f"{thread_id}.jsonl"
+        thread_path = self.threads_dir / f"{thread_id}.jsonl"
+        if thread_path.exists():
+            return thread_path
+        subthread_path = self.subthreads_dir / f"{thread_id}.jsonl"
+        if subthread_path.exists():
+            return subthread_path
         return self.threads_dir / f"{thread_id}.jsonl"
 
     def append(self, thread_id: str, event_type: str, **data: Any) -> None:
@@ -46,17 +75,17 @@ class ThreadStore:
         return read_jsonl(self.path(thread_id))
 
     def list_threads(self) -> list[dict[str, Any]]:
-        threads: list[dict[str, Any]] = []
-        for path in sorted(self.threads_dir.glob("*.jsonl")):
-            events = read_jsonl(path)
-            created = next((event for event in events if event.get("type") == "thread.created"), None)
-            if created:
-                summary = dict(created)
-                summary["updated_at"] = events[-1].get("created_at", created.get("created_at"))
-                summary["turn_count"] = sum(1 for event in events if event.get("type") == "turn.completed")
-                summary["last_text"] = latest_thread_text(events)
-                threads.append(summary)
-        return sorted(threads, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        return self._list_from_dir(self.threads_dir)
+
+    def list_subthreads(self, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
+        subthreads = self._list_from_dir(self.subthreads_dir)
+        if parent_thread_id is not None:
+            subthreads = [
+                thread
+                for thread in subthreads
+                if thread.get("parent_thread_id") == parent_thread_id
+            ]
+        return subthreads
 
     def thread_digest(
         self,
@@ -103,6 +132,19 @@ class ThreadStore:
             )
             for thread in self.list_threads()[:limit]
         ]
+
+    def _list_from_dir(self, directory: Path) -> list[dict[str, Any]]:
+        threads: list[dict[str, Any]] = []
+        for path in sorted(directory.glob("*.jsonl")):
+            events = read_jsonl(path)
+            created = next((event for event in events if event.get("type") == "thread.created"), None)
+            if created:
+                summary = dict(created)
+                summary["updated_at"] = events[-1].get("created_at", created.get("created_at"))
+                summary["turn_count"] = sum(1 for event in events if event.get("type") == "turn.completed")
+                summary["last_text"] = latest_thread_text(events)
+                threads.append(summary)
+        return sorted(threads, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
 
 
 def latest_thread_text(events: list[dict[str, Any]]) -> str:

@@ -10,12 +10,13 @@ def thread_digest(
     thread_id: str,
     *,
     state_dir: str | Path | None = None,
+    kind: str | None = None,
     since_last_compaction: bool = True,
     include_tools: bool = False,
 ) -> dict[str, Any]:
     """Return a compact human/assistant digest for one stored thread."""
     base = _state_dir(state_dir)
-    events = _read_jsonl(base / "threads" / f"{thread_id}.jsonl")
+    events = _read_jsonl(_thread_path(base, thread_id, kind=kind))
     created = next((event for event in events if event.get("type") == "thread.created"), {})
     start_index = _latest_compaction_index(events) if since_last_compaction else -1
     compaction = events[start_index] if start_index >= 0 else None
@@ -42,15 +43,21 @@ def list_thread_digests(
     *,
     state_dir: str | Path | None = None,
     limit: int = 10,
+    kind: str = "thread",
+    parent_thread_id: str | None = None,
     since_last_compaction: bool = True,
     include_tools: bool = False,
 ) -> list[dict[str, Any]]:
     """Return compact digests for recent stored threads."""
     base = _state_dir(state_dir)
     summaries: list[dict[str, Any]] = []
-    for path in (base / "threads").glob("*.jsonl"):
+    directory = base / ("subthreads" if kind == "subagent" else "threads")
+    for path in directory.glob("*.jsonl"):
         events = _read_jsonl(path)
         if not events:
+            continue
+        created = next((event for event in events if event.get("type") == "thread.created"), {})
+        if parent_thread_id is not None and created.get("parent_thread_id") != parent_thread_id:
             continue
         summaries.append(
             {
@@ -63,6 +70,7 @@ def list_thread_digests(
         thread_digest(
             str(summary["thread_id"]),
             state_dir=base,
+            kind=kind,
             since_last_compaction=since_last_compaction,
             include_tools=include_tools,
         )
@@ -83,6 +91,20 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _thread_path(base: Path, thread_id: str, *, kind: str | None) -> Path:
+    if kind == "subagent":
+        return base / "subthreads" / f"{thread_id}.jsonl"
+    if kind == "thread":
+        return base / "threads" / f"{thread_id}.jsonl"
+    thread_path = base / "threads" / f"{thread_id}.jsonl"
+    if thread_path.exists():
+        return thread_path
+    subthread_path = base / "subthreads" / f"{thread_id}.jsonl"
+    if subthread_path.exists():
+        return subthread_path
+    return thread_path
 
 
 def _latest_compaction_index(events: list[dict[str, Any]]) -> int:

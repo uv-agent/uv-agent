@@ -20,6 +20,16 @@ def main() -> None:
     )
     parser.add_argument("--level", default=None, help="Model level to use for ask mode.")
     parser.add_argument("--thread", default=None, help="Thread id to resume in ask mode.")
+    parser.add_argument(
+        "--thread-kind",
+        default="thread",
+        choices=["thread", "subagent"],
+        help="Thread storage kind for ask mode.",
+    )
+    parser.add_argument("--parent-thread", default=None, help="Parent thread id for subagent ask mode.")
+    parser.add_argument("--parent-turn", default=None, help="Parent turn id for subagent ask mode.")
+    parser.add_argument("--parent-run", default=None, help="Parent run id for subagent ask mode.")
+    parser.add_argument("--parent-script", default=None, help="Parent script id for subagent ask mode.")
     parser.add_argument("--no-stream", action="store_true", help="Only print the final answer in ask mode.")
     parser.add_argument("prompt", nargs="*", help="Prompt text for ask mode.")
     args = parser.parse_args()
@@ -27,15 +37,51 @@ def main() -> None:
         prompt = " ".join(args.prompt).strip()
         if not prompt:
             raise SystemExit("ask mode requires a prompt")
-        asyncio.run(_ask(prompt, args.level, args.thread, stream=not args.no_stream))
+        asyncio.run(
+            _ask(
+                prompt,
+                args.level,
+                args.thread,
+                stream=not args.no_stream,
+                thread_kind=args.thread_kind,
+                parent_thread_id=args.parent_thread,
+                parent_turn_id=args.parent_turn,
+                parent_run_id=args.parent_run,
+                parent_script_id=args.parent_script,
+            )
+        )
         return
     from uv_agent.tui.app import UvAgentApp
 
     UvAgentApp(project_root=Path.cwd()).run()
 
 
-async def _ask(prompt: str, level: str | None, thread_id: str | None, *, stream: bool) -> None:
+async def _ask(
+    prompt: str,
+    level: str | None,
+    thread_id: str | None,
+    *,
+    stream: bool,
+    thread_kind: str = "thread",
+    parent_thread_id: str | None = None,
+    parent_turn_id: str | None = None,
+    parent_run_id: str | None = None,
+    parent_script_id: str | None = None,
+) -> None:
     engine = create_engine(Path.cwd())
+    if thread_id is None and thread_kind == "subagent":
+        title = prompt.splitlines()[0].strip()
+        if len(title) > 80:
+            title = title[:77].rstrip() + "..."
+        thread_id = engine.thread_store.create_thread(
+            f"Subagent: {title or 'task'}",
+            kind="subagent",
+            parent_thread_id=parent_thread_id,
+            parent_turn_id=parent_turn_id,
+            parent_run_id=parent_run_id,
+            parent_script_id=parent_script_id,
+        )
+        print(f"[subagent-thread] {thread_id}", file=sys.stderr)
     saw_delta = False
     async for event in engine.run_turn(user_text=prompt, thread_id=thread_id, level=level):
         event_type = event["type"]

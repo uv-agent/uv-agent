@@ -151,6 +151,12 @@ class PythonRunner:
         argv = ["uv", "run", *uv_args, str(final_path), *script_args]
         env = dict(os.environ)
         env["UV_AGENT_STATE_DIR"] = str(self.store.data_dir)
+        if thread_id:
+            env["UV_AGENT_THREAD_ID"] = thread_id
+        if turn_id:
+            env["UV_AGENT_TURN_ID"] = turn_id
+        env["UV_AGENT_RUN_ID"] = run_id
+        env["UV_AGENT_SCRIPT_ID"] = script_id
         started = {
             "type": "run.started",
             "created_at": utc_now_iso(),

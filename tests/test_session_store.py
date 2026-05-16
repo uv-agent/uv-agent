@@ -58,3 +58,27 @@ def test_thread_digest_starts_after_latest_compaction_and_hides_tools(tmp_path: 
         {"role": "assistant", "text": "partial"},
         {"role": "system", "text": "turn interrupted: user_interrupt"},
     ]
+
+
+def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    parent = store.create_thread("Parent")
+    child = store.create_thread(
+        "Subagent: inspect",
+        kind="subagent",
+        parent_thread_id=parent,
+        parent_turn_id="turn_1",
+        parent_run_id="run_1",
+        parent_script_id="scr_1",
+    )
+    store.append(child, "turn.completed", turn_id="turn_child", final_text="done")
+
+    assert (tmp_path / "threads" / f"{parent}.jsonl").exists()
+    assert (tmp_path / "subthreads" / f"{child}.jsonl").exists()
+    assert [thread["thread_id"] for thread in store.list_threads()] == [parent]
+
+    subthreads = store.list_subthreads(parent)
+
+    assert [thread["thread_id"] for thread in subthreads] == [child]
+    assert subthreads[0]["kind"] == "subagent"
+    assert subthreads[0]["parent_turn_id"] == "turn_1"
