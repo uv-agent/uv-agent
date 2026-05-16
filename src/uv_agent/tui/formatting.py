@@ -100,8 +100,9 @@ def tool_timeline_markup(payload: dict[str, Any]) -> str:
         lines.append("[red]stderr[/red]\n" + escape(stderr))
     elif stderr:
         lines.append("[dim]stderr[/dim]\n" + escape(stderr))
-    if payload.get("stdout"):
-        lines.append("[dim]stdout hidden in details[/dim]")
+    stdout = short_block(str(payload.get("stdout") or ""), max_lines=3, max_chars=600)
+    if stdout:
+        lines.append("[dim]stdout[/dim]\n" + escape(stdout))
     if payload.get("truncated"):
         lines.append("[dim]output truncated[/dim]")
     return "\n".join(lines)

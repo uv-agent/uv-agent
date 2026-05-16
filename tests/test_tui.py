@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 from textual import events
-from textual.widgets import TextArea
+from textual.widgets import Static, TextArea
 
 from uv_agent.agent import AgentEngine
 from uv_agent.config import (
@@ -20,7 +20,7 @@ from uv_agent.config import (
 from uv_agent.model_client import FakeModelClient
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
-from uv_agent.tui.app import EmptyState, ExpandableTranscriptCell, FullscreenPanel, UvAgentApp
+from uv_agent.tui.app import EmptyState, ExpandableTranscriptCell, FullscreenPanel, ToolDetailsPanel, UvAgentApp
 
 
 class BlockingEngine(AgentEngine):
@@ -777,7 +777,7 @@ async def test_tui_tool_result_details_expand_on_click(
         "script_id": "scr_1",
         "run_id": "run_1",
         "returncode": 0,
-        "stdout": "hidden stdout",
+        "stdout": "visible one\nvisible two\nvisible three\nhidden tail",
         "stderr": "",
         "events": [{"kind": "subagent.completed", "thread_id": "thr_child", "summary": "child done"}],
         "run_log_path": str(tmp_path / "run.jsonl"),
@@ -793,14 +793,79 @@ async def test_tui_tool_result_details_expand_on_click(
         await pilot.pause()
         cell = app.query_one(ExpandableTranscriptCell)
 
-        assert cell.expanded is False
-        assert "hidden stdout" not in str(cell.render())
+        rendered = str(cell.render())
+        assert "visible one" in rendered
+        assert "visible three" in rendered
+        assert "hidden tail" not in rendered
 
         await pilot.click(cell)
         await pilot.pause()
 
-        assert cell.expanded is True
-        assert "hidden stdout" in str(cell.render())
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, ToolDetailsPanel)
+        assert "hidden tail" in str(panel.query_one("#panel-body-content", Static).render())
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_result_details_support_keyboard_navigation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        for index in range(2):
+            app._append_tool_output(
+                {
+                    "call": {"call_id": f"call_{index}"},
+                    "output": {
+                        "output": __import__("json").dumps(
+                            {
+                                "script_id": f"scr_{index}",
+                                "run_id": f"run_{index}",
+                                "returncode": 0,
+                                "stdout": f"preview {index}\nfull tail {index}",
+                                "stderr": "",
+                                "events": [],
+                                "run_log_path": str(tmp_path / f"run-{index}.jsonl"),
+                            }
+                        )
+                    },
+                }
+            )
+        await pilot.pause()
+        first, second = app.query(ExpandableTranscriptCell).nodes
+
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, ToolDetailsPanel)
+        assert panel.current_cell is second
+        assert "full tail 1" in str(panel.query_one("#panel-body-content", Static).render())
+
+        await pilot.press("k")
+        await pilot.pause()
+
+        assert panel.current_cell is first
+        assert "full tail 0" in str(panel.query_one("#panel-body-content", Static).render())
+
+        await pilot.press("j")
+        await pilot.pause()
+
+        assert panel.current_cell is second
+        assert "full tail 1" in str(panel.query_one("#panel-body-content", Static).render())
+
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+
+        assert app.screen is app.default_screen
 
 
 @pytest.mark.asyncio

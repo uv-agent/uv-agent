@@ -165,7 +165,7 @@ class FullscreenPanel(ModalScreen[str | None]):
                 yield Input(placeholder=getattr(self.app, "_text", lambda key: key)("filter"), id="panel-filter")
                 yield PickerOptionList(id="panel-content", compact=False)
             else:
-                yield VerticalScroll(Static(self.body, markup=True), id="panel-body")
+                yield VerticalScroll(Static(self.body, markup=True, id="panel-body-content"), id="panel-body")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def on_mount(self) -> None:
@@ -592,35 +592,113 @@ class TranscriptCell(Static):
         return None
 
 
-class ExpandableTranscriptCell(TranscriptCell):
-    """Transcript cell with hidden details toggled by click."""
+class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
+    """Transcript cell that opens hidden details in a panel."""
 
     def __init__(
         self,
         summary: str,
         details: str,
-        *,
-        expanded: bool = False,
         **kwargs: Any,
     ) -> None:
         self.summary = summary
         self.details = details
-        self.expanded = expanded
         super().__init__(self._content(), **kwargs)
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
-        self.toggle()
+        self.open_details()
 
-    def toggle(self) -> None:
-        self.expanded = not self.expanded
+    def on_key(self, event: events.Key) -> None:
+        app = self.app
+        if event.key in {"enter", "space"}:
+            event.stop()
+            self.open_details()
+        elif event.key == "j" and hasattr(app, "_focus_relative_expandable_cell"):
+            event.stop()
+            app._focus_relative_expandable_cell(self, 1)
+        elif event.key == "k" and hasattr(app, "_focus_relative_expandable_cell"):
+            event.stop()
+            app._focus_relative_expandable_cell(self, -1)
+        elif event.key == "escape" and hasattr(app, "action_focus_composer"):
+            event.stop()
+            app.action_focus_composer()
+
+    def set_details(self, summary: str, details: str) -> None:
+        self.summary = summary
+        self.details = details
         self.update(self._content())
 
+    def open_details(self) -> None:
+        app = self.app
+        if hasattr(app, "_open_tool_details_panel"):
+            app._open_tool_details_panel(self)
+
     def _content(self) -> str:
-        marker = "[-]" if self.expanded else "[+]"
-        if self.expanded:
-            return f"{self.summary}\n[dim]{marker} details[/dim]\n{self.details}"
-        return f"{self.summary}\n[dim]{marker} details[/dim]"
+        return f"{self.summary}\n[dim][details][/dim]"
+
+
+class ToolDetailsPanel(FullscreenPanel):
+    """Full-screen tool detail panel with j/k navigation between tool results."""
+
+    BINDINGS = [
+        Binding("j", "next_detail", "Next", priority=True, show=False),
+        Binding("k", "previous_detail", "Previous", priority=True, show=False),
+        Binding("ctrl+d", "dismiss_panel", "Close", priority=True, show=False),
+        *FullscreenPanel.BINDINGS,
+    ]
+
+    def __init__(self, cell: ExpandableTranscriptCell) -> None:
+        self.current_cell = cell
+        super().__init__(title="", body=cell.details, subtitle="")
+
+    def on_mount(self) -> None:
+        self._refresh_current()
+        try:
+            self.query_one("#panel-body", VerticalScroll).focus()
+        except NoMatches:
+            pass
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "j":
+            event.stop()
+            self.action_next_detail()
+            return
+        if event.key == "k":
+            event.stop()
+            self.action_previous_detail()
+            return
+        if event.key == "ctrl+d":
+            event.stop()
+            self.action_dismiss_panel()
+            return
+        super().on_key(event)
+
+    def action_next_detail(self) -> None:
+        self._move(1)
+
+    def action_previous_detail(self) -> None:
+        self._move(-1)
+
+    def _move(self, step: int) -> None:
+        app = self.app
+        if not hasattr(app, "_relative_expandable_cell"):
+            return
+        self.current_cell = app._relative_expandable_cell(self.current_cell, step)
+        self._refresh_current()
+
+    def _refresh_current(self) -> None:
+        text = getattr(self.app, "_text", lambda key: key)
+        self.panel_title = text("tool_details")
+        self.subtitle = text("tool_details_hint")
+        self.body = self.current_cell.details
+        try:
+            self.query_one("#panel-header", Static).update(self.panel_title)
+            self.query_one("#panel-subtitle", Static).update(self.subtitle)
+            self.query_one("#panel-body-content", Static).update(self.body)
+            self.query_one("#panel-body", VerticalScroll).scroll_to(y=0, animate=False)
+        except NoMatches:
+            pass
 
 
 class UvAgentApp(App[None]):
@@ -705,6 +783,7 @@ class UvAgentApp(App[None]):
         Binding("ctrl+s", "toggle_status_panel", "Status", priority=True),
         Binding("ctrl+o", "open_threads", "Threads", priority=True),
         Binding("ctrl+p", "open_command_palette", "Commands", priority=True),
+        Binding("ctrl+d", "toggle_tool_details", "Details", priority=True),
         Binding("ctrl+c", "interrupt_turn", "Interrupt", priority=True, show=False),
         Binding("enter", "focus_composer", "Focus composer", priority=True, show=False),
         Binding("f1", "help", "Help", priority=True),
@@ -714,6 +793,8 @@ class UvAgentApp(App[None]):
     busy = reactive(False)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "toggle_tool_details":
+            return self.is_mounted and self.screen is self.default_screen
         if action == "focus_composer":
             if not self.is_mounted or self.screen is not self.default_screen:
                 return False
@@ -1104,6 +1185,50 @@ class UvAgentApp(App[None]):
             return
         composer.focus()
 
+    def action_toggle_tool_details(self) -> None:
+        focused = self.screen.focused
+        if isinstance(focused, ExpandableTranscriptCell):
+            self._open_tool_details_panel(focused)
+            return
+        cell = self._latest_expandable_cell()
+        if cell is None:
+            self._flash(self._text("no_details"))
+            return
+        self._open_tool_details_panel(cell)
+
+    def _expandable_cells(self) -> list[ExpandableTranscriptCell]:
+        try:
+            transcript = self.query_one("#transcript", VerticalScroll)
+        except NoMatches:
+            return []
+        return [
+            child
+            for child in transcript.children
+            if isinstance(child, ExpandableTranscriptCell)
+        ]
+
+    def _latest_expandable_cell(self) -> ExpandableTranscriptCell | None:
+        cells = self._expandable_cells()
+        return cells[-1] if cells else None
+
+    def _focus_relative_expandable_cell(self, current: ExpandableTranscriptCell, step: int) -> None:
+        next_cell = self._relative_expandable_cell(current, step)
+        next_cell.focus()
+        next_cell.scroll_visible(animate=False)
+
+    def _relative_expandable_cell(self, current: ExpandableTranscriptCell, step: int) -> ExpandableTranscriptCell:
+        cells = self._expandable_cells()
+        if not cells:
+            return current
+        try:
+            index = cells.index(current)
+        except ValueError:
+            index = len(cells) - 1
+        return cells[(index + step) % len(cells)]
+
+    def _open_tool_details_panel(self, cell: ExpandableTranscriptCell) -> None:
+        self.push_screen(ToolDetailsPanel(cell))
+
     def action_help(self) -> None:
         self._open_help_panel()
 
@@ -1300,11 +1425,9 @@ class UvAgentApp(App[None]):
             self._append_expandable_cell(markup, details, "event")
         else:
             if isinstance(cell, ExpandableTranscriptCell):
-                cell.summary = markup
-                cell.details = details
-                cell.update(cell._content())
+                cell.set_details(markup, details)
             else:
-                cell.update(markup)
+                self._replace_with_expandable_cell(cell, markup, details, "event")
             self._scroll_end()
         self._refresh_status(self._text("working"))
 
@@ -1349,6 +1472,18 @@ class UvAgentApp(App[None]):
         cell = ExpandableTranscriptCell(summary, details, classes=classes, markup=True)
         self.query_one("#transcript", VerticalScroll).mount(cell)
         self._scroll_end()
+        return cell
+
+    def _replace_with_expandable_cell(
+        self,
+        old_cell: TranscriptCell,
+        summary: str,
+        details: str,
+        classes: str,
+    ) -> ExpandableTranscriptCell:
+        cell = ExpandableTranscriptCell(summary, details, classes=classes, markup=True)
+        self.query_one("#transcript", VerticalScroll).mount(cell, before=old_cell)
+        old_cell.remove()
         return cell
 
     def _mark_transcript_content(self) -> None:
