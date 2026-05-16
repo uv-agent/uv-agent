@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import json
 from pathlib import Path
 import sys
@@ -133,6 +134,20 @@ def test_runtime_subagent_accepts_model_level_alias() -> None:
     )
 
     assert "--level small ask ignored" in result.text
+
+
+def test_runtime_subagent_ask_uses_temporary_project_state() -> None:
+    code = (
+        "import os; from pathlib import Path; "
+        "state = Path(os.environ['UV_AGENT_PROJECT_STATE_DIR']); "
+        "(state / 'marker.txt').write_text('temporary', encoding='utf-8'); "
+        "print(state)"
+    )
+    result = ask("ignored", executable=[sys.executable, "-c", code], check=True)
+
+    assert result.text
+    assert not Path(result.text).exists()
+    assert "UV_AGENT_PROJECT_STATE_DIR" not in os.environ
 
 
 def test_runtime_saved_scripts_reads_state_dir(tmp_path: Path) -> None:

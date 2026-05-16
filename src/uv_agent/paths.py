@@ -40,4 +40,7 @@ def project_id(project_root: Path) -> str:
 
 def project_state_dir(project_root: Path) -> Path:
     """Return the user-level state directory for one workspace."""
+    override = os.environ.get("UV_AGENT_PROJECT_STATE_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
     return uv_agent_home() / "projects" / project_id(project_root)

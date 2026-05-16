@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -49,7 +51,10 @@ def ask(
     if selected_level:
         args.extend(["--level", selected_level])
     args.extend(["ask", prompt])
-    result = run_command(args, cwd=cwd, env=env, timeout_s=timeout_s)
+    with tempfile.TemporaryDirectory(prefix="uv-agent-subagent-") as state_dir:
+        subagent_env = dict(env) if env is not None else os.environ.copy()
+        subagent_env["UV_AGENT_PROJECT_STATE_DIR"] = state_dir
+        result = run_command(args, cwd=cwd, env=subagent_env, timeout_s=timeout_s)
     subagent_result = SubagentResult(
         prompt=prompt,
         level=selected_level,
