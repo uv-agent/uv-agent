@@ -388,7 +388,7 @@ class FullscreenPanel(ModalScreen[str | None]):
 
 
 COMMAND_SPECS = [
-    ("/new", "/new [title]"),
+    ("/new", "/new"),
     ("/threads", "/threads"),
     ("/status", "/status"),
     ("/config", "/config"),
@@ -485,6 +485,10 @@ class CommandSpec:
     name: str
     usage: str
     description: str
+
+    @property
+    def palette_title(self) -> str:
+        return self.name.removeprefix("/")
 
 
 @dataclass(frozen=True)
@@ -2007,9 +2011,8 @@ class UvAgentApp(App[None]):
             self._quit_from_command()
             return True
         if command == "/new":
-            title = rest.strip()
-            self.thread_id = self.engine.thread_store.create_thread(title or self._text("new_thread"))
-            if not title and self._text("new_thread") not in DEFAULT_THREAD_TITLES:
+            self.thread_id = self.engine.thread_store.create_thread(self._text("new_thread"))
+            if self._text("new_thread") not in DEFAULT_THREAD_TITLES:
                 self.engine.thread_store.update_title(
                     self.thread_id,
                     self._text("new_thread"),
@@ -2433,6 +2436,12 @@ class UvAgentApp(App[None]):
     def _choose_thread_mention(self, thread_id: str) -> None:
         self._insert_mention(f"@thread:{thread_id}", ("@@", "@"))
 
+    def _choose_mcp_mention(self, name: str) -> None:
+        self._insert_mention(f"@mcp:{name}", "")
+
+    def _choose_skill_mention(self, name: str) -> None:
+        self._insert_mention(f"@skill:{name}", "")
+
     def _insert_mention(self, mention: str, triggers: str | tuple[str, ...]) -> None:
         composer = self.query_one("#composer", TextArea)
         row, column = composer.cursor_location
@@ -2820,8 +2829,8 @@ class UvAgentApp(App[None]):
         self._open_picker(
             self._text("mcp"),
             self._mcp_mention_items(),
-            self._noop_select,
-            subtitle=self._text("inspect_only_hint"),
+            self._choose_mcp_mention,
+            subtitle=self._text("mention_mcp_hint"),
         )
 
     def _open_skills_panel(self) -> None:
@@ -2829,19 +2838,19 @@ class UvAgentApp(App[None]):
         self._open_picker(
             self._text("skills"),
             self._skill_mention_items(),
-            self._noop_select,
-            subtitle=self._text("inspect_only_hint"),
+            self._choose_skill_mention,
+            subtitle=self._text("mention_skills_hint"),
         )
 
     def _noop_select(self, _value: str) -> None:
-        """Callback used by inspect-only pickers like /mcp and /skills."""
+        """Callback used by inspect-only pickers."""
         return
 
     def _open_command_palette(self, *, query: str = "") -> None:
         items = [
             PickerItem(
                 id=spec.name,
-                title=spec.usage,
+                title=spec.palette_title,
                 description=spec.description,
             )
             for spec in self._commands()
@@ -2857,14 +2866,6 @@ class UvAgentApp(App[None]):
     def _choose_command(self, command: str) -> None:
         spec = next((item for item in self._commands() if item.name == command), None)
         if spec is None:
-            return
-        if "[" in spec.usage:
-            replacement = command + " "
-            composer = self.query_one("#composer", TextArea)
-            composer.load_text(replacement)
-            self._last_composer_text = replacement
-            self._resize_composer(replacement)
-            composer.focus()
             return
         self._handle_command(command)
 

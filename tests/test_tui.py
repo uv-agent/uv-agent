@@ -505,8 +505,33 @@ async def test_tui_command_palette_hides_run_and_skill_name_commands(
         assert "/rules" not in titles
         assert "/scripts" not in titles
         assert "/panel" not in titles
-        assert "/level" in titles
-        assert "/skills" in titles
+        assert "level" in titles
+        assert "skills" in titles
+        assert all(not title.startswith("/") for title in titles)
+
+
+@pytest.mark.asyncio
+async def test_tui_command_palette_executes_new_without_custom_title(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.thread_id is not None
+        assert app.engine.thread_store.thread_digest(app.thread_id)["title"] == app._text("new_thread")
+        composer = app.query_one("#composer", TextArea)
+        assert composer.text == ""
 
 
 @pytest.mark.asyncio
@@ -948,22 +973,31 @@ async def test_tui_mcp_and_skill_mentions_are_disabled(
         await pilot.pause()
         assert len(app.screen_stack) == baseline_screens
         assert composer.text == "@mcp:@skill："
+        composer.load_text("")
 
-        # The /mcp and /skills slash commands must still surface inspection
-        # pickers using the same underlying data.
+        # The /mcp and /skills slash commands still use the same underlying
+        # data, but selecting an item inserts a mention instead of only
+        # inspecting it.
         app._open_mcp_panel()
         await pilot.pause()
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
         assert panel.panel_title == app._text("mcp")
-        await pilot.press("escape")
+        await pilot.press("f")
+        await pilot.press("enter")
         await pilot.pause()
+        assert composer.text == "@mcp:files "
+        composer.load_text("")
 
         app._open_skills_panel()
         await pilot.pause()
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
         assert panel.panel_title == app._text("skills")
+        await pilot.press("d")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert composer.text == "@skill:demo "
 
 
 @pytest.mark.asyncio
