@@ -138,9 +138,10 @@ TUI 允许多个顶层 thread 同时运行。前台 thread 负责实时渲染；
 
 当前 subagent 快捷入口位于 `uv_agent_runtime.ask`，通过 Python 脚本里的 subprocess 调用 `uv-agent ask`；MCP 快捷入口位于 `uv_agent_runtime.connect_stdio` / `connect_declared`，也必须从 Python runner 内部使用。
 
-subagent 启动参数应优先暴露模型等级而不是具体模型，例如
-`ask("review this failure", level="small")` 或 `model_level="large"`。等级到具体模型
-的映射由用户级配置决定，主 agent 不需要知道 provider/model 细节。
+subagent 启动参数应优先暴露模型等级而不是具体模型。默认情况下省略
+`level`/`model_level` 使用配置里的默认等级；只有在明确需要切换时，才传入配置中
+已经定义的等级名。等级到具体模型的映射由用户级配置决定，主 agent 不需要知道
+provider/model 细节，也不应假设存在固定的 `small`/`medium`/`large` 等级。
 默认情况下，runtime subagent 使用同一个 project state，但创建 `kind=subagent`
 的子线程并保存到 `subthreads/`；如果没有 host state，则退回临时 state。
 

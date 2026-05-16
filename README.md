@@ -109,9 +109,12 @@ models:
 ```python
 from uv_agent_runtime import ask
 
-result = ask("inspect the test failure", level="small", check=True)
+result = ask("inspect the test failure", check=True)
 print(result.text)
 ```
+
+Pass `level` only when intentionally selecting one of the level names defined in
+the config; omit it to use the default level.
 
 MCP remains a Python-triggered runtime capability, not a direct model tool:
 
@@ -154,7 +157,7 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `/new [title]`, `/threads`, and `/clear`: light thread controls
 - `/config`: edit user-facing settings (`default_level`, `language`, `auto_compress`) and show config sources / redacted merged config
 - `/models`: read-only view of configured models. Add or modify models in the config file; this command never writes
-- `/level [name]`: the only runtime model switch. Picks the active level for this session (small/medium/large or any level name defined in the config)
+- `/level [name]`: the only runtime model switch. Picks one of the levels defined in the config for this session
 - `/mcp`: show MCP declarations from `.agents/mcp.json`
 - `/skills` and `/skill [name]`: inspect `.agents/skills` entries
 - `/runs`: show the latest Python run summary from this TUI session
