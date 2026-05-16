@@ -1522,7 +1522,15 @@ async def test_tui_tool_result_details_expand_on_click(
 
         panel = app.screen_stack[-1]
         assert isinstance(panel, ToolDetailsPanel)
+        shell = panel.query_one("#panel-shell")
+        assert shell.region.x == (app.size.width - shell.region.width) // 2
+        assert shell.region.y == (app.size.height - shell.region.height) // 2
         assert "hidden tail" in str(panel.query_one("#panel-body-content", Static).render())
+
+        await pilot.click(panel, offset=(0, 0))
+        await pilot.pause()
+
+        assert app.screen is app.default_screen
 
 
 @pytest.mark.asyncio

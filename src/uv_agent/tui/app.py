@@ -78,7 +78,9 @@ class FullscreenPanel(ModalScreen[str | None]):
     """Scrollable full-screen panel/picker."""
 
     CSS = """
-    FullscreenPanel {
+    FullscreenPanel,
+    ToolDetailsPanel,
+    ImagePreviewPanel {
         align: center middle;
         background: #05070acc;
     }
@@ -217,6 +219,17 @@ class FullscreenPanel(ModalScreen[str | None]):
             else:
                 self._refresh_options()
             self.query_one("#panel-content", OptionList).focus()
+
+    def on_click(self, event: events.Click) -> None:
+        try:
+            shell = self.query_one("#panel-shell", Vertical)
+        except NoMatches:
+            return
+        screen_x = event.screen_x if event.screen_x is not None else event.x
+        screen_y = event.screen_y if event.screen_y is not None else event.y
+        if not shell.region.contains(screen_x, screen_y):
+            event.stop()
+            self.dismiss(None)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "panel-filter":
