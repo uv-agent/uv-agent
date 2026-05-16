@@ -24,6 +24,13 @@ class EndpointConfig:
 
 
 @dataclass(frozen=True)
+class ReasoningOption:
+    name: str
+    label: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ProviderConfig:
     name: str
     base_url: str
@@ -38,6 +45,7 @@ class ProviderConfig:
     anthropic_messages: EndpointConfig = field(
         default_factory=lambda: EndpointConfig(path="/v1/messages")
     )
+    reasoning_options: list[ReasoningOption] = field(default_factory=list)
 
     def resolved_api_key(self) -> str | None:
         if self.api_key:
@@ -64,12 +72,14 @@ class ModelConfig:
     api: str = "responses"
     context_window_tokens: int = 128_000
     params: dict[str, Any] = field(default_factory=dict)
+    reasoning_options: list[ReasoningOption] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class LevelConfig:
     name: str
     model: str
+    reasoning: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -140,6 +150,13 @@ class AppConfig:
         except KeyError as exc:
             raise ConfigError(f"Unknown model for level {level.name}: {level.model}") from exc
         merged_params = deep_merge(model.params, level.params)
+        if level.reasoning:
+            option = self.reasoning_option_for_model(model, level.reasoning)
+            if option is None:
+                raise ConfigError(
+                    f"Unknown reasoning option for level {level.name}: {level.reasoning}"
+                )
+            merged_params = deep_merge(merged_params, option.params)
         return ModelConfig(
             name=model.name,
             provider=model.provider,
@@ -147,6 +164,7 @@ class AppConfig:
             api=model.api,
             context_window_tokens=model.context_window_tokens,
             params=merged_params,
+            reasoning_options=model.reasoning_options,
         )
 
     def provider_for_model(self, model: ModelConfig) -> ProviderConfig:
@@ -154,6 +172,29 @@ class AppConfig:
             return self.providers[model.provider]
         except KeyError as exc:
             raise ConfigError(f"Unknown provider for model {model.name}: {model.provider}") from exc
+
+    def reasoning_options_for_model(self, model: ModelConfig) -> list[ReasoningOption]:
+        provider = self.provider_for_model(model)
+        if not model.reasoning_options:
+            return list(provider.reasoning_options)
+        provider_options = {option.name: option for option in provider.reasoning_options}
+        resolved: list[ReasoningOption] = []
+        for option in provider.reasoning_options:
+            provider_options[option.name] = option
+        for option in model.reasoning_options:
+            base = provider_options.get(option.name)
+            if base is not None and not option.params:
+                label = option.label or base.label
+                resolved.append(ReasoningOption(name=option.name, label=label, params=base.params))
+            else:
+                resolved.append(option)
+        return resolved
+
+    def reasoning_option_for_model(self, model: ModelConfig, name: str) -> ReasoningOption | None:
+        for option in self.reasoning_options_for_model(model):
+            if option.name == name:
+                return option
+        return None
 
 
 def default_config(project_root: Path) -> dict[str, Any]:
@@ -247,6 +288,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         responses_raw = provider_value.pop("responses", None)
         chat_raw = provider_value.pop("chat_completions", None)
         anthropic_raw = provider_value.pop("anthropic_messages", None)
+        reasoning_options_raw = provider_value.pop("reasoning_options", None)
         if responses_raw is None:
             responses_raw = {"path": legacy_endpoint or "/responses"}
         if chat_raw is None:
@@ -256,6 +298,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         provider_value["responses"] = EndpointConfig(**responses_raw)
         provider_value["chat_completions"] = EndpointConfig(**chat_raw)
         provider_value["anthropic_messages"] = EndpointConfig(**anthropic_raw)
+        provider_value["reasoning_options"] = parse_reasoning_options(reasoning_options_raw)
         if legacy_api and legacy_api != "responses":
             # Older experimental configs used provider-level api_format. Models now own API choice.
             provider_value.setdefault("params", {})
@@ -264,6 +307,9 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
     for name, value in raw.get("models", {}).items():
         model_value = dict(value)
         model_value.setdefault("api", model_value.pop("api_format", "responses"))
+        model_value["reasoning_options"] = parse_reasoning_options(
+            model_value.get("reasoning_options")
+        )
         models[name] = ModelConfig(name=name, **model_value)
     levels = {
         name: LevelConfig(name=name, **value)
@@ -312,6 +358,34 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
     )
 
 
+def parse_reasoning_options(raw: Any) -> list[ReasoningOption]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ConfigError("reasoning_options must be an array")
+    options: list[ReasoningOption] = []
+    for item in raw:
+        if isinstance(item, str):
+            options.append(ReasoningOption(name=item, label=item))
+            continue
+        if not isinstance(item, dict):
+            raise ConfigError("reasoning_options entries must be objects or strings")
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise ConfigError("reasoning_options entries require a name")
+        params = item.get("params") or {}
+        if not isinstance(params, dict):
+            raise ConfigError(f"reasoning option {name} params must be an object")
+        options.append(
+            ReasoningOption(
+                name=name,
+                label=str(item.get("label") or name),
+                params=params,
+            )
+        )
+    return options
+
+
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(base)
     for key, value in override.items():
@@ -331,6 +405,14 @@ def redact_config(value: Any) -> Any:
     if isinstance(value, list):
         return [redact_config(item) for item in value]
     return value
+
+
+def editable_config_path(project_root: Path) -> Path:
+    """Return the config file the TUI should edit for user-facing settings."""
+    user_path = user_config_path()
+    if user_path.exists():
+        return user_path
+    return project_config_path(project_root)
 
 
 def default_runtime_uv_args(runtime_dependency: str, package_name: str) -> list[str]:
