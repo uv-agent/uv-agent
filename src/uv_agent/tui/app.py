@@ -2940,7 +2940,7 @@ class UvAgentApp(App[None]):
             elif event_type == "item.image_attachment":
                 attachment = event.get("attachment") or {}
                 self._append_image_attachment_cell(attachment)
-            elif event_type == "item.reasoning_delta":
+            elif event_type in {"item.reasoning_delta", "item.reasoning_partial"}:
                 self._append_reasoning_delta(str(event.get("text") or ""))
             elif event_type == "item.compaction":
                 self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")

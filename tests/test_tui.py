@@ -552,7 +552,7 @@ async def test_tui_thread_picker_resumes_and_renders_history(
     )
     engine.thread_store.append(
         thread_id,
-        "item.reasoning_delta",
+        "item.reasoning_partial",
         turn_id="turn_1",
         text="checking files",
     )

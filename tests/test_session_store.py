@@ -30,6 +30,35 @@ def test_list_threads_returns_latest_first_with_snippet(tmp_path: Path) -> None:
     assert threads[0]["last_text"] == "new"
 
 
+def test_list_threads_uses_model_response_text_as_latest_snippet(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Model response")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    )
+    store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="t1",
+        response_id="resp_1",
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "answer"}],
+            }
+        ],
+        usage={},
+    )
+    store.append(thread_id, "turn.completed", turn_id="t1", final_text="answer")
+
+    assert store.list_threads()[0]["last_text"] == "answer"
+    assert store.thread_digest(thread_id)["last_text"] == "answer"
+
+
 def test_thread_title_update_overrides_created_title(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("New thread")
@@ -57,7 +86,7 @@ def test_thread_digest_starts_after_latest_compaction_and_hides_tools(tmp_path: 
         item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]},
     )
     store.append(thread_id, "item.tool_call", turn_id="t2", item={"name": "run_python"})
-    store.append(thread_id, "item.assistant_delta", turn_id="t2", text="partial")
+    store.append(thread_id, "item.assistant_partial", turn_id="t2", text="partial")
     store.append(thread_id, "turn.interrupted", turn_id="t2", reason="user_interrupt")
 
     digest = store.thread_digest(thread_id)

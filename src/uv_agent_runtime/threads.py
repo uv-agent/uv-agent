@@ -127,8 +127,12 @@ def _latest_thread_title(events: list[dict[str, Any]]) -> str:
 
 def _latest_thread_text(events: list[dict[str, Any]]) -> str:
     for event in reversed(events):
-        if event.get("type") == "item.assistant":
+        if event.get("type") in {"item.assistant", "item.assistant_partial"}:
             return str(event.get("text") or "")
+        if event.get("type") == "item.model_response":
+            text = _model_response_text(event.get("output") or [])
+            if text:
+                return text
         if event.get("type") == "item.user":
             return _item_text(event.get("item") or {})
     return ""
@@ -136,39 +140,16 @@ def _latest_thread_text(events: list[dict[str, Any]]) -> str:
 
 def _digest_items(events: list[dict[str, Any]], *, include_tools: bool) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    assistant_parts: list[str] = []
-    assistant_delta_turn_id: str | None = None
     completed_assistant_turns: set[str] = set()
-
-    def flush_assistant() -> None:
-        nonlocal assistant_delta_turn_id
-        if not assistant_parts:
-            return
-        text = "".join(assistant_parts).strip()
-        assistant_parts.clear()
-        turn_id = assistant_delta_turn_id
-        assistant_delta_turn_id = None
-        if turn_id and turn_id in completed_assistant_turns:
-            return
-        if text:
-            items.append({"role": "assistant", "text": text})
 
     for event in events:
         event_type = event.get("type")
         turn_id = str(event.get("turn_id") or "")
         if event_type == "item.user":
-            flush_assistant()
             text = _item_text(event.get("item") or {})
             if text:
                 items.append({"role": "user", "text": text})
-        elif event_type == "item.assistant_delta":
-            if assistant_delta_turn_id and assistant_delta_turn_id != turn_id:
-                flush_assistant()
-            assistant_delta_turn_id = turn_id
-            assistant_parts.append(str(event.get("text") or ""))
-        elif event_type == "item.assistant":
-            assistant_parts.clear()
-            assistant_delta_turn_id = None
+        elif event_type in {"item.assistant", "item.assistant_partial"}:
             if turn_id in completed_assistant_turns:
                 continue
             completed_assistant_turns.add(turn_id)
@@ -176,8 +157,6 @@ def _digest_items(events: list[dict[str, Any]], *, include_tools: bool) -> list[
             if text:
                 items.append({"role": "assistant", "text": text})
         elif event_type == "item.model_response":
-            assistant_parts.clear()
-            assistant_delta_turn_id = None
             if turn_id in completed_assistant_turns:
                 continue
             text = _model_response_text(event.get("output") or [])
@@ -185,12 +164,9 @@ def _digest_items(events: list[dict[str, Any]], *, include_tools: bool) -> list[
                 completed_assistant_turns.add(turn_id)
                 items.append({"role": "assistant", "text": text})
         elif event_type == "turn.interrupted":
-            flush_assistant()
             items.append({"role": "system", "text": f"turn interrupted: {event.get('reason') or 'user_interrupt'}"})
         elif include_tools and event_type in {"item.tool_call", "item.runner_result", "item.tool_output"}:
-            flush_assistant()
             items.append({"role": "tool", "text": _tool_event_text(event)})
-    flush_assistant()
     return items
 
 
