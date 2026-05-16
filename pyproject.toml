@@ -1,6 +1,6 @@
 [project]
 name = "uv-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Experimental Python-runner coding agent with a Textual TUI"
 readme = "README.md"
 license = "MIT"
@@ -11,6 +11,9 @@ dependencies = [
     "pillow>=12.0.0",
     "textual>=6.5.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/4fuu/uv-agent"
 
 [project.scripts]
 uv-agent = "uv_agent.cli:main"
