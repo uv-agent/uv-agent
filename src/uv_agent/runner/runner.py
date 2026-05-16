@@ -148,7 +148,7 @@ class PythonRunner:
         run_log_path = self.store.create_run_log_path(run_id)
         writer = JsonlWriter(run_log_path)
         run_cwd = (cwd or self.project_root).resolve()
-        argv = ["uv", "run", *uv_args, str(final_path), *script_args]
+        argv = uv_run_argv(uv_args, final_path, script_args)
         env = dict(os.environ)
         # Force UTF-8 for the child Python so non-ASCII stdout/stderr (e.g.
         # Chinese on Windows where the default code page is cp936) round-trips
@@ -355,6 +355,22 @@ class PythonRunner:
             if arg not in merged:
                 merged.append(arg)
         return merged
+
+
+def uv_run_argv(uv_args: list[str], script_path: Path, script_args: list[str]) -> list[str]:
+    effective_uv_args = list(uv_args)
+    if not has_uv_log_level_arg(effective_uv_args):
+        effective_uv_args.insert(0, "--quiet")
+    return ["uv", "run", *effective_uv_args, str(script_path), *script_args]
+
+
+def has_uv_log_level_arg(args: list[str]) -> bool:
+    for arg in args:
+        if arg in {"--quiet", "--verbose"}:
+            return True
+        if arg.startswith("-") and not arg.startswith("--") and set(arg[1:]) <= {"q", "v"}:
+            return True
+    return False
 
 
 def parse_structured_event(text: str) -> dict[str, Any] | None:

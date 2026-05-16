@@ -8,7 +8,7 @@ import pytest
 from uv_agent.config import RunnerConfig
 from uv_agent.jsonl import read_jsonl
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
-from uv_agent.runner.runner import parse_structured_event
+from uv_agent.runner.runner import parse_structured_event, uv_run_argv
 from uv_agent.runner.store import ScriptStore
 
 
@@ -37,7 +37,13 @@ async def test_runner_executes_script_and_records_jsonl(tmp_path: Path) -> None:
     events = read_jsonl(result.run_log_path)
     assert events[0]["type"] == "run.started"
     assert events[-1]["type"] == "run.completed"
-    assert events[0]["argv"][0:4] == ["uv", "run", "--reinstall-package", "uv-agent"]
+    assert events[0]["argv"][0:5] == [
+        "uv",
+        "run",
+        "--quiet",
+        "--reinstall-package",
+        "uv-agent",
+    ]
     assert "--with" not in events[0]["argv"]
 
 
@@ -119,6 +125,22 @@ def test_parse_structured_event_reads_runtime_json_line() -> None:
         "path": "image.png",
     }
     assert parse_structured_event("plain text\n") is None
+
+
+def test_uv_run_argv_defaults_to_quiet() -> None:
+    argv = uv_run_argv(["--python", "3.12"], Path("script.py"), ["--flag"])
+
+    assert argv == ["uv", "run", "--quiet", "--python", "3.12", "script.py", "--flag"]
+
+
+def test_uv_run_argv_respects_explicit_log_level() -> None:
+    assert uv_run_argv(["--verbose"], Path("script.py"), []) == [
+        "uv",
+        "run",
+        "--verbose",
+        "script.py",
+    ]
+    assert uv_run_argv(["-q"], Path("script.py"), []) == ["uv", "run", "-q", "script.py"]
 
 
 @pytest.mark.asyncio
