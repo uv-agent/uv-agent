@@ -71,6 +71,9 @@ class ThreadStore:
             }
         )
 
+    def update_title(self, thread_id: str, title: str, *, source: str = "manual") -> None:
+        self.append(thread_id, "thread.title_updated", title=title, source=source)
+
     def read(self, thread_id: str) -> list[dict[str, Any]]:
         return read_jsonl(self.path(thread_id))
 
@@ -96,12 +99,13 @@ class ThreadStore:
     ) -> dict[str, Any]:
         events = self.read(thread_id)
         created = next((event for event in events if event.get("type") == "thread.created"), {})
+        title = latest_thread_title(events)
         start_index = latest_compaction_index(events) if since_last_compaction else -1
         compaction = events[start_index] if start_index >= 0 else None
         items = digest_items(events[start_index + 1 :], include_tools=include_tools)
         return {
             "thread_id": thread_id,
-            "title": created.get("title") or "New thread",
+            "title": title or created.get("title") or "New thread",
             "created_at": created.get("created_at"),
             "updated_at": events[-1].get("created_at") if events else None,
             "last_text": latest_thread_text(events),
@@ -140,11 +144,24 @@ class ThreadStore:
             created = next((event for event in events if event.get("type") == "thread.created"), None)
             if created:
                 summary = dict(created)
+                title = latest_thread_title(events)
+                if title:
+                    summary["title"] = title
                 summary["updated_at"] = events[-1].get("created_at", created.get("created_at"))
                 summary["turn_count"] = sum(1 for event in events if event.get("type") == "turn.completed")
                 summary["last_text"] = latest_thread_text(events)
                 threads.append(summary)
         return sorted(threads, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+
+
+def latest_thread_title(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        if event.get("type") == "thread.title_updated":
+            title = str(event.get("title") or "").strip()
+            if title:
+                return title
+    created = next((event for event in events if event.get("type") == "thread.created"), {})
+    return str(created.get("title") or "").strip()
 
 
 def latest_thread_text(events: list[dict[str, Any]]) -> str:

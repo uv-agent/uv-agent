@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import AsyncIterator
 from html import escape as xml_escape
 from pathlib import Path
@@ -21,6 +22,9 @@ from uv_agent.project_rules import ProjectRuleContext, load_project_rules
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
 from uv_agent.session.store import ThreadStore, digest_items
 from uv_agent.skills import discover_skills, render_skill_summary
+
+
+DEFAULT_THREAD_TITLES = {"New thread", "new thread", "新会话"}
 
 
 class TurnInterrupted(Exception):
@@ -96,6 +100,8 @@ You are uv-agent, an experimental coding agent.
 <persistence>Persisted scripts, runs, and threads live under the project state directory.</persistence>
 </environment>
 
+{model_levels}
+
 <tool_boundary>
 <rule>You have exactly one external action tool: run_python.</rule>
 <rule>Use Python for file inspection, edits, subprocesses, network access, and verification.</rule>
@@ -156,8 +162,9 @@ Rerun saved scripts by passing script_id or run_id to run_python; omit code when
 </helper>
 <helper name="ask">
 Invokes a nested uv-agent subagent for isolated, tedious, or parallelizable work. The result has .text, .stdout, .stderr, .thread_id, and .raise_for_error().
+Pass level only when intentionally choosing one of the configured model levels listed in <model_levels>; otherwise omit it.
 Example:
-result = ask("Inspect parser tests", level="small", check=True, timeout_s=300)
+result = ask("Inspect parser tests", check=True, timeout_s=300)
 print(result.text[:1000])
 </helper>
 <helper name="saved_scripts">
@@ -250,6 +257,7 @@ class AgentEngine:
         self.refresh_config(force=True)
         thread_id = thread_id or self.thread_store.create_thread("New thread")
         turn_id = new_id("turn")
+        should_generate_title = self._should_generate_title(thread_id)
         conversation_items = self._reconstruct_input(thread_id)
         input_items = list(conversation_items)
         context_items = self._workspace_context_items(thread_id)
@@ -429,12 +437,73 @@ class AgentEngine:
                 "thread_id": thread_id,
                 "turn_id": turn_id,
             }
+        generated_title = await self._maybe_generate_title(
+            thread_id,
+            user_text,
+            should_generate=should_generate_title,
+        )
+        if generated_title:
+            yield {
+                "type": "thread.title",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "title": generated_title,
+            }
         yield {
             "type": "turn.completed",
             "thread_id": thread_id,
             "turn_id": turn_id,
             "final_text": final_text,
         }
+
+    def _should_generate_title(self, thread_id: str) -> bool:
+        if not self.config.runtime.title_generation.enabled:
+            return False
+        events = self.thread_store.read(thread_id)
+        if any(event.get("type") == "item.user" for event in events):
+            return False
+        return self._thread_title_is_pending(events)
+
+    def _thread_title_is_pending(self, events: list[dict[str, Any]]) -> bool:
+        if any(event.get("type") == "thread.title_updated" for event in events):
+            return False
+        created = next((event for event in events if event.get("type") == "thread.created"), {})
+        return is_default_thread_title(str(created.get("title") or ""))
+
+    async def _maybe_generate_title(
+        self,
+        thread_id: str,
+        user_text: str,
+        *,
+        should_generate: bool,
+    ) -> str | None:
+        if not should_generate:
+            return None
+        try:
+            title = await self._generate_thread_title(user_text)
+        except Exception:
+            return None
+        if not title or not self._thread_title_is_pending(self.thread_store.read(thread_id)):
+            return None
+        self.thread_store.update_title(thread_id, title, source="generated")
+        return title
+
+    async def _generate_thread_title(self, user_text: str) -> str | None:
+        prompt = self.config.runtime.title_generation.prompt
+        response = await self.model_client.create_response(
+            input_items=[
+                message_item(
+                    "user",
+                    prompt
+                    + "\n\nUser message:\n"
+                    + user_text.strip(),
+                )
+            ],
+            level=self.config.runtime.title_generation.model_level,
+            tools=[],
+            instructions="Generate a short thread title. Return only the title.",
+        )
+        return clean_thread_title(response.output_text)
 
     async def _maybe_compact(
         self,
@@ -880,7 +949,25 @@ class AgentEngine:
             project_state=xml_text(project_state_dir(self.project_root)),
             host_environment=xml_text(host_environment_line(self._host_environment)),
             user_language=xml_text(detect_user_language(self.config.ui.language).name),
+            model_levels=self._model_levels_context(),
         )
+
+    def _model_levels_context(self) -> str:
+        lines = [
+            "<model_levels>",
+            f"<default>{xml_text(self.config.runtime.default_level)}</default>",
+            "<available>",
+        ]
+        for name in self.config.levels:
+            lines.append(f"<level>{xml_text(name)}</level>")
+        lines.extend(
+            [
+                "</available>",
+                "<rule>level and model_level values are configuration-defined; use only an available name, or omit them to use the default.</rule>",
+                "</model_levels>",
+            ]
+        )
+        return "\n".join(lines)
 
 def message_item(role: str, text: str) -> dict[str, Any]:
     return {
@@ -888,6 +975,22 @@ def message_item(role: str, text: str) -> dict[str, Any]:
         "role": role,
         "content": [{"type": "input_text", "text": text}],
     }
+
+
+def is_default_thread_title(title: str) -> bool:
+    return title.strip() in DEFAULT_THREAD_TITLES
+
+
+def clean_thread_title(text: str) -> str | None:
+    title = text.strip().splitlines()[0].strip()
+    title = title.strip(" \t\r\n\"'`“”‘’")
+    title = re.sub(r"^[#*\-\d\.\)\s]+", "", title).strip()
+    title = re.sub(r"\s+", " ", title)
+    if not title:
+        return None
+    if len(title) > 80:
+        title = title[:77].rstrip() + "..."
+    return title
 
 
 def function_output(call: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:

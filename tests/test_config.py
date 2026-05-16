@@ -18,18 +18,6 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                         "api_key": "secret",
                         "responses": {"path": "/v1/responses"},
                         "chat_completions": {"path": "/v1/chat/completions"},
-                        "reasoning_options": [
-                            {
-                                "name": "low",
-                                "label": "Low",
-                                "params": {"reasoning": {"effort": "low"}},
-                            },
-                            {
-                                "name": "high",
-                                "label": "High",
-                                "params": {"reasoning": {"effort": "high"}},
-                            },
-                        ],
                     }
                 },
                 "models": {
@@ -39,16 +27,15 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                         "api": "chat_completions",
                         "supports_images": False,
                         "params": {"reasoning": {"effort": "low"}},
-                        "reasoning_options": [{"name": "high"}],
                     }
                 },
                 "levels": {
                     "medium": {
                         "model": "m",
-                        "reasoning": "high",
                         "params": {"reasoning": {"effort": "high"}},
                     }
                 },
+                "runtime": {"title_generation": {"model_level": "small"}},
             }
         ),
         encoding="utf-8",
@@ -64,13 +51,14 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert model.api == "chat_completions"
     assert model.supports_images is False
     assert model.params["reasoning"]["effort"] == "high"
-    assert [option.name for option in config.reasoning_options_for_model(config.models["m"])] == ["high"]
+    assert config.runtime.title_generation.enabled is True
+    assert config.runtime.title_generation.model_level == "small"
     assert "uv-agent @ file:///" in config.runner.runtime_dependency
     assert config.runner.default_uv_args == ["--reinstall-package", "uv-agent"]
     assert config.runner.max_saved_scripts == 32
 
 
-def test_model_reasoning_options_inherit_provider_when_model_omits_list(tmp_path: Path) -> None:
+def test_legacy_reasoning_option_fields_are_ignored(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -84,7 +72,7 @@ def test_model_reasoning_options_inherit_provider_when_model_omits_list(tmp_path
                     }
                 },
                 "models": {"m": {"provider": "p", "model": "remote"}},
-                "levels": {"medium": {"model": "m", "reasoning": "low"}},
+                "levels": {"medium": {"model": "m", "reasoning": "low", "params": {"temperature": 0}}},
             }
         ),
         encoding="utf-8",
@@ -92,7 +80,28 @@ def test_model_reasoning_options_inherit_provider_when_model_omits_list(tmp_path
 
     config = load_config(tmp_path, [config_path])
 
-    assert config.model_for_level("medium").params["reasoning"]["effort"] == "low"
+    assert config.model_for_level("medium").params == {"temperature": 0}
+
+
+def test_configured_levels_replace_default_level_template(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {"p": {"base_url": "https://example.com"}},
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {
+                    "small": {"model": "m"},
+                    "medium": {"model": "m"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert list(config.levels) == ["small", "medium"]
 
 
 def test_redact_config_masks_sensitive_values() -> None:

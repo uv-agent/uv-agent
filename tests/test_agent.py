@@ -16,6 +16,7 @@ from uv_agent.config import (
     ProviderConfig,
     RunnerConfig,
     RuntimeConfig,
+    TitleGenerationConfig,
     load_config,
 )
 from uv_agent.model_client import FakeModelClient
@@ -63,6 +64,7 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
             default_level="medium",
             auto_compress=True,
             compression=CompressionConfig(model_level="small", trigger_ratio=0.1, min_tokens=1),
+            title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
@@ -183,6 +185,200 @@ async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_agent_generates_title_for_default_new_thread(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={
+            "medium": LevelConfig(name="medium", model="default", params={}),
+            "small": LevelConfig(name="small", model="default", params={}),
+        },
+        runtime=RuntimeConfig(auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_title",
+                "output_text": '"Fix import error in runner"',
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": '"Fix import error in runner"'}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="fix the import error in runner")]
+    thread_id = str(events[-1]["thread_id"])
+
+    assert any(event["type"] == "thread.title" for event in events)
+    assert engine.thread_store.thread_digest(thread_id)["title"] == "Fix import error in runner"
+    assert client.requests[1]["level"] == "small"
+    assert "first message" in str(client.requests[1]["input"])
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_replace_manual_thread_title(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={
+            "medium": LevelConfig(name="medium", model="default", params={}),
+            "small": LevelConfig(name="small", model="default", params={}),
+        },
+        runtime=RuntimeConfig(
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread("Manual title")
+
+    events = [event async for event in engine.run_turn(user_text="please rename nothing", thread_id=thread_id)]
+
+    assert not any(event["type"] == "thread.title" for event in events)
+    assert engine.thread_store.thread_digest(thread_id)["title"] == "Manual title"
+    assert len(client.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_configured_title_generation_level(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={
+            "medium": LevelConfig(name="medium", model="default", params={}),
+            "title": LevelConfig(name="title", model="default", params={}),
+        },
+        runtime=RuntimeConfig(
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(model_level="title"),
+        ),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_title",
+                "output_text": "Configured title",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Configured title"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    [event async for event in engine.run_turn(user_text="use custom title model")]
+
+    assert client.requests[1]["level"] == "title"
+
+
+@pytest.mark.asyncio
 async def test_agent_attaches_user_turn_images(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -200,7 +396,10 @@ async def test_agent_attaches_user_turn_images(tmp_path: Path) -> None:
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -249,7 +448,10 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
         providers=config.providers,
         models=config.models,
         levels=config.levels,
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
         runner=config.runner,
     )
     runner = PythonRunner(
@@ -326,7 +528,10 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -410,7 +615,10 @@ async def test_agent_can_rerun_saved_script_by_id(tmp_path: Path) -> None:
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -496,6 +704,10 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<environment>" in prompt
     assert "<host>" in prompt
     assert "<user_language>" in prompt
+    assert "<model_levels>" in prompt
+    assert "<default>medium</default>" in prompt
+    assert "<level>small</level>" in prompt
+    assert "<level>medium</level>" in prompt
     assert "</runtime_helpers>" in prompt
     assert 'requires-python = ">=3.12"' in prompt
     assert '# dependencies = [' in prompt
@@ -509,6 +721,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "connect_named(\"files\")" in prompt
     assert "client.call_tool" in prompt
     assert "result = ask(" in prompt
+    assert 'level="small"' not in prompt
     assert "pathlib" in prompt
     assert "Mentions are plain-text hints only" in prompt
     assert "saved_scripts(limit=32)" in prompt
@@ -523,6 +736,48 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
 
     assert "demo (project)" in turn_context
     assert "available_mcp_servers" in turn_context
+
+
+def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={
+            "fast": LevelConfig(name="fast", model="default", params={}),
+            "deep": LevelConfig(name="deep", model="default", params={}),
+        },
+        runtime=RuntimeConfig(default_level="deep", auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    prompt = engine.system_instructions()
+
+    assert "<default>deep</default>" in prompt
+    assert "<level>fast</level>" in prompt
+    assert "<level>deep</level>" in prompt
+    assert 'level="small"' not in prompt
+    assert 'model_level="large"' not in prompt
+    assert "small/medium/large" not in prompt
 
 
 def test_usage_token_count_supports_provider_shapes() -> None:
@@ -547,7 +802,11 @@ def test_context_percent_prefers_latest_usage(tmp_path: Path) -> None:
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(default_level="medium", auto_compress=False),
+        runtime=RuntimeConfig(
+            default_level="medium",
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -656,6 +915,7 @@ async def test_compaction_does_not_include_project_rules(tmp_path: Path) -> None
             default_level="medium",
             auto_compress=True,
             compression=CompressionConfig(model_level="small", trigger_ratio=0.1, min_tokens=1),
+            title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
@@ -721,7 +981,11 @@ async def test_dynamic_context_only_appends_when_changed(tmp_path: Path) -> None
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(default_level="medium", auto_compress=False),
+        runtime=RuntimeConfig(
+            default_level="medium",
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",

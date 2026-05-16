@@ -30,6 +30,16 @@ def test_list_threads_returns_latest_first_with_snippet(tmp_path: Path) -> None:
     assert threads[0]["last_text"] == "new"
 
 
+def test_thread_title_update_overrides_created_title(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("New thread")
+
+    store.update_title(thread_id, "Generated title", source="generated")
+
+    assert store.list_threads()[0]["title"] == "Generated title"
+    assert store.thread_digest(thread_id)["title"] == "Generated title"
+
+
 def test_thread_digest_starts_after_latest_compaction_and_hides_tools(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Digest")

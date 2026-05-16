@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from rich.markup import escape
-
 
 # Glyphs shared by transcript cells. Sigils (not emoji) render uniformly across
 # terminals; chosen to match codex/gemini/opencode conventions.
@@ -16,6 +14,11 @@ GLYPH_OK = "✓"
 GLYPH_ERR = "✗"
 GLYPH_RUNNING = "⠿"
 GLYPH_NESTED = "└─"
+
+
+def escape(value: Any) -> str:
+    """Escape text for Textual markup surfaces."""
+    return str(value).replace("[", "\\[").replace("]", "\\]")
 
 
 def parse_tool_payload(output_item: dict[str, Any]) -> dict[str, Any] | None:

@@ -14,7 +14,6 @@ from uv_agent.config import (
     LevelConfig,
     ModelConfig,
     ProviderConfig,
-    ReasoningOption,
     RunnerConfig,
     RuntimeConfig,
     UiConfig,
@@ -138,18 +137,6 @@ def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
             "p": ProviderConfig(
                 name="p",
                 base_url="https://example.com",
-                reasoning_options=[
-                    ReasoningOption(
-                        name="low",
-                        label="Low",
-                        params={"reasoning": {"effort": "low"}},
-                    ),
-                    ReasoningOption(
-                        name="high",
-                        label="High",
-                        params={"reasoning": {"effort": "high"}},
-                    ),
-                ],
             )
         },
         models={
@@ -180,6 +167,20 @@ def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
         thread_store=ThreadStore(state_dir),
         project_root=project_root,
     )
+
+
+def response(text: str, response_id: str = "resp") -> dict[str, object]:
+    return {
+        "id": response_id,
+        "output_text": text,
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -234,6 +235,38 @@ async def test_tui_slash_picker_does_not_open_when_deleting_existing_command(
 
         assert not isinstance(app.screen_stack[-1], FullscreenPanel)
         assert composer.text == "/"
+
+
+@pytest.mark.asyncio
+async def test_tui_empty_new_thread_gets_generated_title_from_first_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    engine.model_client = FakeModelClient(
+        [
+            response("done", "resp_1"),
+            response("Investigate startup crash", "resp_title"),
+        ]
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("/new")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        thread_id = app.thread_id
+        assert thread_id is not None
+
+        composer.insert("investigate the startup crash")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        assert engine.thread_store.thread_digest(thread_id)["title"] == "Investigate startup crash"
 
 
 @pytest.mark.asyncio
@@ -394,6 +427,37 @@ async def test_tui_command_picker_opens_level_panel(
         await pilot.pause()
 
         assert app.level == "small"
+
+
+@pytest.mark.asyncio
+async def test_tui_level_panel_uses_configured_levels_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    engine.config = AppConfig(
+        providers=engine.config.providers,
+        models=engine.config.models,
+        levels={
+            "small": LevelConfig(name="small", model="default", params={}),
+            "medium": LevelConfig(name="medium", model="default", params={}),
+        },
+        runtime=engine.config.runtime,
+        runner=engine.config.runner,
+        ui=engine.config.ui,
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_current_level_panel()
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert [item.id for item in panel.items] == ["small", "medium"]
 
 
 @pytest.mark.asyncio
@@ -991,14 +1055,7 @@ async def test_tui_models_panel_is_read_only(
     config_path.write_text(
         __import__("json").dumps(
             {
-                "providers": {
-                    "p": {
-                        "base_url": "https://example.com",
-                        "reasoning_options": [
-                            {"name": "low", "label": "Low", "params": {"reasoning": {"effort": "low"}}},
-                        ],
-                    }
-                },
+                "providers": {"p": {"base_url": "https://example.com"}},
                 "models": {"default": {"provider": "p", "model": "fake"}},
                 "levels": {
                     "small": {"model": "default"},
@@ -1035,7 +1092,7 @@ async def test_tui_config_panel_omits_model_editing_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`/config` must not offer level→model or reasoning editing rows."""
+    """`/config` must not offer model editing rows."""
     monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -1055,7 +1112,6 @@ async def test_tui_config_panel_omits_model_editing_entries(
         assert "default_level" in ids
         assert "level_models" not in ids
         assert "current_level" not in ids
-        assert "reasoning" not in ids
         # Helpers used by the removed flows must also be gone.
         assert not hasattr(app, "_open_reasoning_level_panel")
         assert not hasattr(app, "_open_level_model_panel")
@@ -1347,6 +1403,51 @@ async def test_tui_tool_result_details_expand_on_click(
         panel = app.screen_stack[-1]
         assert isinstance(panel, ToolDetailsPanel)
         assert "hidden tail" in str(panel.query_one("#panel-body-content", Static).render())
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_result_details_escape_literal_brackets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+    payload = {
+        "script_id": "scr_1",
+        "run_id": "run_1",
+        "returncode": 0,
+        "stdout": (
+            "assert '# dependencies = [' in prompt\n"
+            "+    assert 'level=\"small\"' not in prompt\n"
+        ),
+        "stderr": "",
+        "events": [],
+        "run_log_path": str(tmp_path / "run.jsonl"),
+    }
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._append_tool_output(
+            {
+                "call": {"call_id": "call_1"},
+                "output": {"output": __import__("json").dumps(payload)},
+            }
+        )
+        await pilot.pause()
+        cell = app.query_one(ExpandableTranscriptCell)
+
+        await pilot.click(cell)
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, ToolDetailsPanel)
+        rendered = str(panel.query_one("#panel-body-content", Static).render())
+        assert "# dependencies = [" in rendered
+        assert "level=\"small\"" in rendered
 
 
 @pytest.mark.asyncio

@@ -18,11 +18,12 @@ def thread_digest(
     base = _state_dir(state_dir)
     events = _read_jsonl(_thread_path(base, thread_id, kind=kind))
     created = next((event for event in events if event.get("type") == "thread.created"), {})
+    title = _latest_thread_title(events)
     start_index = _latest_compaction_index(events) if since_last_compaction else -1
     compaction = events[start_index] if start_index >= 0 else None
     return {
         "thread_id": thread_id,
-        "title": created.get("title") or "New thread",
+        "title": title or created.get("title") or "New thread",
         "created_at": created.get("created_at"),
         "updated_at": events[-1].get("created_at") if events else None,
         "last_text": _latest_thread_text(events),
@@ -112,6 +113,16 @@ def _latest_compaction_index(events: list[dict[str, Any]]) -> int:
         if events[index].get("type") == "item.compaction":
             return index
     return -1
+
+
+def _latest_thread_title(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        if event.get("type") == "thread.title_updated":
+            title = str(event.get("title") or "").strip()
+            if title:
+                return title
+    created = next((event for event in events if event.get("type") == "thread.created"), {})
+    return str(created.get("title") or "").strip()
 
 
 def _latest_thread_text(events: list[dict[str, Any]]) -> str:

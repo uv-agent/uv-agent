@@ -26,6 +26,7 @@ from textual.widgets import Input, OptionList, Static, TextArea
 from textual.worker import Worker
 from textual.widgets._option_list import Option
 
+from uv_agent.agent import DEFAULT_THREAD_TITLES
 from uv_agent.app_factory import create_engine
 from uv_agent.clipboard import ClipboardImageError, save_clipboard_image
 from uv_agent.config import (
@@ -1444,7 +1445,7 @@ class UvAgentApp(App[None]):
 
     def _start_turn(self, prompt: str, *, image_paths: list[Path] | None = None) -> None:
         if self.thread_id is None:
-            self.thread_id = self.engine.thread_store.create_thread(self._text("new_thread"))
+            self.thread_id = self.engine.thread_store.create_thread()
         self._start_background_turn(self.thread_id, prompt, image_paths=image_paths)
 
     def _start_background_turn(
@@ -1524,6 +1525,9 @@ class UvAgentApp(App[None]):
                     run_state.status = self._text("reading")
                     if self._is_active_thread(item_thread_id):
                         self._refresh_status(self._text("reading"))
+                elif event_type == "thread.title":
+                    if self._is_active_thread(item_thread_id):
+                        self._refresh_status(self._text("idle"))
                 elif event_type == "tool.started":
                     await self._handle_thread_event(item_thread_id, "tool.started", item, run_state)
                 elif event_type == "tool.output":
@@ -1652,7 +1656,7 @@ class UvAgentApp(App[None]):
 
     def _run_state_for_thread(self, thread_id: str | None) -> ThreadRunState:
         if thread_id is None:
-            thread_id = self.engine.thread_store.create_thread(self._text("new_thread"))
+            thread_id = self.engine.thread_store.create_thread()
             self.thread_id = thread_id
         run_state = self._thread_runs.get(thread_id)
         if run_state is None:
@@ -1993,8 +1997,14 @@ class UvAgentApp(App[None]):
             self._quit_from_command()
             return True
         if command == "/new":
-            title = rest.strip() or self._text("new_thread")
-            self.thread_id = self.engine.thread_store.create_thread(title)
+            title = rest.strip()
+            self.thread_id = self.engine.thread_store.create_thread(title or self._text("new_thread"))
+            if not title and self._text("new_thread") not in DEFAULT_THREAD_TITLES:
+                self.engine.thread_store.update_title(
+                    self.thread_id,
+                    self._text("new_thread"),
+                    source="placeholder",
+                )
             self._assistant_buffer = ""
             self._assistant_cell = None
             self._reasoning_cell = None
@@ -2468,8 +2478,6 @@ class UvAgentApp(App[None]):
             stats = self.engine.context_stats(self.thread_id, self.level)
             model_line = f"{escape(model.name)} -> {escape(model.model)}"
             provider_line = f"{escape(provider.name)} / {escape(model.api)}"
-            level_config = self.engine.config.level(level_name)
-            reasoning_line = level_config.reasoning or self._text("none")
             context_line = (
                 f"{stats.percent}% "
                 f"({format_tokens(stats.used_tokens)} / {format_tokens(stats.context_window_tokens)}, "
@@ -2483,7 +2491,6 @@ class UvAgentApp(App[None]):
         except ConfigError as exc:
             model_line = "[red]not configured[/red]"
             provider_line = escape(str(exc))
-            reasoning_line = "-"
             context_line = "-"
             compress_line = "-"
         rules_line = f"{len(rules.rules)} {self._text('status_rules_loaded')}"
@@ -2499,7 +2506,6 @@ class UvAgentApp(App[None]):
         lines = [
             f"- state: [cyan]{escape(self._last_status)}[/cyan]",
             f"- level: [cyan]{escape(level_name)}[/cyan]",
-            f"- reasoning: [cyan]{escape(reasoning_line)}[/cyan]",
             f"- model: {model_line}",
             f"- provider/api: {provider_line}",
             f"- context: {context_line}",
@@ -2600,7 +2606,7 @@ class UvAgentApp(App[None]):
                 PickerItem(
                     id=name,
                     title=name,
-                    description=f"{level.model}" + (f" · {level.reasoning}" if level.reasoning else ""),
+                    description=level.model,
                     meta=marker,
                 )
             )
@@ -2620,7 +2626,7 @@ class UvAgentApp(App[None]):
                 PickerItem(
                     id=name,
                     title=name,
-                    description=f"{level.model}" + (f" · {level.reasoning}" if level.reasoning else ""),
+                    description=level.model,
                     meta=marker,
                 )
             )
@@ -2770,7 +2776,6 @@ class UvAgentApp(App[None]):
             return
         try:
             provider = self.engine.config.provider_for_model(model)
-            options = self.engine.config.reasoning_options_for_model(model)
         except ConfigError as exc:
             self._flash(str(exc), severity="error")
             return
@@ -2781,20 +2786,7 @@ class UvAgentApp(App[None]):
             f"- {self._text('models_api')}: {escape(model.api)}",
             f"- {self._text('models_context_window')}: "
             f"{format_tokens(model.context_window_tokens)}",
-            "",
-            f"[bold]{escape(self._text('models_reasoning_options'))}[/bold]",
         ]
-        if options:
-            for option in options:
-                params = json.dumps(option.params, ensure_ascii=False, separators=(",", ":"))
-                lines.append(
-                    f"- [cyan]{escape(option.name)}[/cyan] "
-                    f"{escape(option.label)} [dim]{escape(params)}[/dim]"
-                )
-        else:
-            lines.append(
-                f"[dim]{escape(self._text('config_no_reasoning_options'))}[/dim]"
-            )
         lines.append("")
         lines.append(
             f"[dim]{escape(self._text('models_edit_hint'))} "

@@ -24,13 +24,6 @@ class EndpointConfig:
 
 
 @dataclass(frozen=True)
-class ReasoningOption:
-    name: str
-    label: str = ""
-    params: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class ProviderConfig:
     name: str
     base_url: str
@@ -45,7 +38,6 @@ class ProviderConfig:
     anthropic_messages: EndpointConfig = field(
         default_factory=lambda: EndpointConfig(path="/v1/messages")
     )
-    reasoning_options: list[ReasoningOption] = field(default_factory=list)
 
     def resolved_api_key(self) -> str | None:
         if self.api_key:
@@ -73,14 +65,12 @@ class ModelConfig:
     context_window_tokens: int = 128_000
     supports_images: bool | None = None
     params: dict[str, Any] = field(default_factory=dict)
-    reasoning_options: list[ReasoningOption] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class LevelConfig:
     name: str
     model: str
-    reasoning: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -97,12 +87,24 @@ class CompressionConfig:
 
 
 @dataclass(frozen=True)
+class TitleGenerationConfig:
+    enabled: bool = True
+    model_level: str = "small"
+    prompt: str = (
+        "Create a concise title for this uv-agent thread from the user's first message. "
+        "Return only the title, without quotes or punctuation. Prefer the user's language. "
+        "Keep it under 8 words or 24 CJK characters."
+    )
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     default_level: str = "medium"
     auto_compress: bool = True
     store_provider_response: bool = False
     max_agent_rounds: int = 100
     compression: CompressionConfig = field(default_factory=CompressionConfig)
+    title_generation: TitleGenerationConfig = field(default_factory=TitleGenerationConfig)
 
 
 @dataclass(frozen=True)
@@ -151,13 +153,6 @@ class AppConfig:
         except KeyError as exc:
             raise ConfigError(f"Unknown model for level {level.name}: {level.model}") from exc
         merged_params = deep_merge(model.params, level.params)
-        if level.reasoning:
-            option = self.reasoning_option_for_model(model, level.reasoning)
-            if option is None:
-                raise ConfigError(
-                    f"Unknown reasoning option for level {level.name}: {level.reasoning}"
-                )
-            merged_params = deep_merge(merged_params, option.params)
         return ModelConfig(
             name=model.name,
             provider=model.provider,
@@ -166,7 +161,6 @@ class AppConfig:
             context_window_tokens=model.context_window_tokens,
             supports_images=model.supports_images,
             params=merged_params,
-            reasoning_options=model.reasoning_options,
         )
 
     def provider_for_model(self, model: ModelConfig) -> ProviderConfig:
@@ -174,30 +168,6 @@ class AppConfig:
             return self.providers[model.provider]
         except KeyError as exc:
             raise ConfigError(f"Unknown provider for model {model.name}: {model.provider}") from exc
-
-    def reasoning_options_for_model(self, model: ModelConfig) -> list[ReasoningOption]:
-        provider = self.provider_for_model(model)
-        if not model.reasoning_options:
-            return list(provider.reasoning_options)
-        provider_options = {option.name: option for option in provider.reasoning_options}
-        resolved: list[ReasoningOption] = []
-        for option in provider.reasoning_options:
-            provider_options[option.name] = option
-        for option in model.reasoning_options:
-            base = provider_options.get(option.name)
-            if base is not None and not option.params:
-                label = option.label or base.label
-                resolved.append(ReasoningOption(name=option.name, label=label, params=base.params))
-            else:
-                resolved.append(option)
-        return resolved
-
-    def reasoning_option_for_model(self, model: ModelConfig, name: str) -> ReasoningOption | None:
-        for option in self.reasoning_options_for_model(model):
-            if option.name == name:
-                return option
-        return None
-
 
 def default_config(project_root: Path) -> dict[str, Any]:
     runtime_dependency = f"uv-agent @ {project_root.resolve().as_uri()}"
@@ -220,6 +190,11 @@ def default_config(project_root: Path) -> dict[str, Any]:
                 "trigger_ratio": 0.7,
                 "target_ratio": 0.3,
                 "min_tokens": 5_000,
+            },
+            "title_generation": {
+                "enabled": True,
+                "model_level": "small",
+                "prompt": TitleGenerationConfig().prompt,
             },
         },
         "ui": {
@@ -273,10 +248,11 @@ def load_config(project_root: Path | None = None, paths: list[Path] | None = Non
 def load_raw_config(project_root: Path | None = None, paths: list[Path] | None = None) -> dict[str, Any]:
     """Load merged config as raw dictionaries for redacted UI/debug display."""
     root = (project_root or Path.cwd()).resolve()
-    raw = default_config(root)
+    default_raw = default_config(root)
+    raw = copy.deepcopy(default_raw)
     for path in paths if paths is not None else config_paths(root):
         if path.exists():
-            raw = deep_merge(raw, json.loads(path.read_text(encoding="utf-8")))
+            raw = merge_config_layer(raw, json.loads(path.read_text(encoding="utf-8")), default_raw)
     return raw
 
 
@@ -290,7 +266,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         responses_raw = provider_value.pop("responses", None)
         chat_raw = provider_value.pop("chat_completions", None)
         anthropic_raw = provider_value.pop("anthropic_messages", None)
-        reasoning_options_raw = provider_value.pop("reasoning_options", None)
+        provider_value.pop("reasoning_options", None)
         if responses_raw is None:
             responses_raw = {"path": legacy_endpoint or "/responses"}
         if chat_raw is None:
@@ -300,7 +276,6 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         provider_value["responses"] = EndpointConfig(**responses_raw)
         provider_value["chat_completions"] = EndpointConfig(**chat_raw)
         provider_value["anthropic_messages"] = EndpointConfig(**anthropic_raw)
-        provider_value["reasoning_options"] = parse_reasoning_options(reasoning_options_raw)
         if legacy_api and legacy_api != "responses":
             # Older experimental configs used provider-level api_format. Models now own API choice.
             provider_value.setdefault("params", {})
@@ -309,22 +284,23 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
     for name, value in raw.get("models", {}).items():
         model_value = dict(value)
         model_value.setdefault("api", model_value.pop("api_format", "responses"))
-        model_value["reasoning_options"] = parse_reasoning_options(
-            model_value.get("reasoning_options")
-        )
+        model_value.pop("reasoning_options", None)
         models[name] = ModelConfig(name=name, **model_value)
-    levels = {
-        name: LevelConfig(name=name, **value)
-        for name, value in raw.get("levels", {}).items()
-    }
+    levels = {}
+    for name, value in raw.get("levels", {}).items():
+        level_value = dict(value)
+        level_value.pop("reasoning", None)
+        levels[name] = LevelConfig(name=name, **level_value)
     runtime_raw = raw.get("runtime", {})
     compression = CompressionConfig(**runtime_raw.get("compression", {}))
+    title_generation = TitleGenerationConfig(**runtime_raw.get("title_generation", {}))
     runtime = RuntimeConfig(
         default_level=runtime_raw.get("default_level", "medium"),
         auto_compress=runtime_raw.get("auto_compress", True),
         store_provider_response=runtime_raw.get("store_provider_response", False),
         max_agent_rounds=runtime_raw.get("max_agent_rounds", 100),
         compression=compression,
+        title_generation=title_generation,
     )
     runner_raw = raw.get("runner", {})
     runner = RunnerConfig(
@@ -360,39 +336,31 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
     )
 
 
-def parse_reasoning_options(raw: Any) -> list[ReasoningOption]:
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        raise ConfigError("reasoning_options must be an array")
-    options: list[ReasoningOption] = []
-    for item in raw:
-        if isinstance(item, str):
-            options.append(ReasoningOption(name=item, label=item))
-            continue
-        if not isinstance(item, dict):
-            raise ConfigError("reasoning_options entries must be objects or strings")
-        name = str(item.get("name") or "").strip()
-        if not name:
-            raise ConfigError("reasoning_options entries require a name")
-        params = item.get("params") or {}
-        if not isinstance(params, dict):
-            raise ConfigError(f"reasoning option {name} params must be an object")
-        options.append(
-            ReasoningOption(
-                name=name,
-                label=str(item.get("label") or name),
-                params=params,
-            )
-        )
-    return options
-
-
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(result.get(key), dict):
             result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def merge_config_layer(
+    base: dict[str, Any],
+    override: dict[str, Any],
+    default_raw: dict[str, Any],
+) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if (
+            key == "levels"
+            and isinstance(value, dict)
+            and result.get(key) == default_raw.get(key)
+        ):
+            result[key] = copy.deepcopy(value)
+        elif isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge_config_layer(result[key], value, default_raw.get(key, {}))
         else:
             result[key] = copy.deepcopy(value)
     return result
