@@ -1309,6 +1309,73 @@ async def test_tui_mouse_drag_selects_and_copies_assistant_reply(
 
 
 @pytest.mark.asyncio
+async def test_tui_mouse_drag_selection_tracks_after_intermediate_render(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await app._append_assistant_delta("agent reply")
+        assert app._assistant_cell is not None
+        await pilot.pause(0.2)
+
+        await pilot.mouse_down(app._assistant_cell, offset=(1, 0))
+        await pilot.hover(app._assistant_cell, offset=(4, 0))
+        await pilot.pause()
+        app._assistant_cell.render_line(0)
+        await pilot.hover(app._assistant_cell, offset=(9, 0))
+        await pilot.pause()
+
+        assert app.screen.get_selected_text() == "agent rep"
+
+
+@pytest.mark.asyncio
+async def test_tui_wide_character_selection_highlight_preserves_edge_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await app._append_assistant_delta("你好世界abc")
+        assert app._assistant_cell is not None
+        await pilot.pause(0.2)
+
+        await pilot.mouse_down(app._assistant_cell, offset=(1, 0))
+        await pilot.hover(app._assistant_cell, offset=(8, 0))
+        await pilot.pause()
+
+        strip = app._assistant_cell.render_line(0)
+        highlighted_text = "".join(
+            segment.text
+            for segment in strip
+            if segment.style is not None
+            and segment.style.bgcolor is not None
+            and segment.style.bgcolor.triplet is not None
+            and segment.style.bgcolor.triplet.red == 125
+            and segment.style.bgcolor.triplet.green == 211
+            and segment.style.bgcolor.triplet.blue == 252
+        )
+
+        assert app.screen.get_selected_text() == "你好世界a"
+        assert strip.text.rstrip() == "你好世界abc"
+        assert highlighted_text == "你好世界a"
+
+
+@pytest.mark.asyncio
 async def test_tui_ctrl_c_twice_interrupts_busy_turn_without_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

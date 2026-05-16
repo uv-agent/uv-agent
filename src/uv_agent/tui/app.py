@@ -11,6 +11,7 @@ from rich.markdown import Markdown
 from rich.markup import escape, render as render_markup
 from rich.segment import Segment
 from rich.style import Style
+from rich.cells import cell_len
 from PIL import Image, UnidentifiedImageError
 from textual import events
 from textual.actions import SkipAction
@@ -803,7 +804,9 @@ class TranscriptCell(Static):
         rendered_text = strip.text.rstrip()
         if rendered_text:
             self._rendered_copy_lines[y] = rendered_text
+        return self._with_content_offsets(self._highlight_selection(strip, y), y)
 
+    def _with_content_offsets(self, strip: Strip, y: int) -> Strip:
         offset_x = 0
         segments = []
         for segment in strip:
@@ -812,11 +815,11 @@ class TranscriptCell(Static):
                 continue
             text = segment.text
             style = segment.style
-            if text and (style is None or style._meta is None or "offset" not in style.meta):
+            if text:
                 style = (style or Style()) + Style(meta={"offset": (offset_x, y)})
             segments.append(Segment(text, style, segment.control))
             offset_x += len(text)
-        return self._highlight_selection(Strip(segments, strip.cell_length), y)
+        return Strip(segments, strip.cell_length)
 
     def _highlight_selection(self, strip: Strip, y: int) -> Strip:
         selection = self.text_selection
@@ -828,6 +831,9 @@ class TranscriptCell(Static):
         start, end = span
         if end == -1:
             end = strip.cell_length
+        line_text = strip.text
+        start = self._character_offset_to_cell(line_text, start)
+        end = self._character_offset_to_cell(line_text, end)
         start = max(0, min(start, strip.cell_length))
         end = max(start, min(end, strip.cell_length))
         if start == end:
@@ -836,6 +842,10 @@ class TranscriptCell(Static):
         selected = self._apply_selection_style(strip.crop(start, end))
         after = strip.crop(end, strip.cell_length)
         return Strip.join([before, selected, after])
+
+    def _character_offset_to_cell(self, text: str, offset: int) -> int:
+        offset = max(0, min(offset, len(text)))
+        return cell_len(text[:offset])
 
     def _apply_selection_style(self, strip: Strip) -> Strip:
         segments = []
