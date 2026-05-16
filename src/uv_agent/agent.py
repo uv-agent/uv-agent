@@ -264,6 +264,12 @@ class AgentEngine:
         self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
         user_item = message_item("user", user_text)
         self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
+        title_task = self._start_title_generation_task(
+            thread_id,
+            user_text,
+            should_generate=should_generate_title,
+            level=level,
+        )
         input_items.extend(context_items)
         input_items.append(user_item)
         conversation_items.append(user_item)
@@ -422,6 +428,8 @@ class AgentEngine:
                 "turn_id": turn_id,
                 "reason": "user_interrupt",
             }
+            if title_task is not None:
+                title_task.cancel()
             return
 
         self.thread_store.append(
@@ -430,18 +438,14 @@ class AgentEngine:
             turn_id=turn_id,
             final_text=final_text,
         )
-        compacted = await self._maybe_compact(thread_id, turn_id, conversation_items)
+        compacted = await self._maybe_compact(thread_id, turn_id, conversation_items, level=level)
         if compacted:
             yield {
                 "type": "compaction.completed",
                 "thread_id": thread_id,
                 "turn_id": turn_id,
             }
-        generated_title = await self._maybe_generate_title(
-            thread_id,
-            user_text,
-            should_generate=should_generate_title,
-        )
+        generated_title = await self._finish_title_generation(title_task)
         if generated_title:
             yield {
                 "type": "thread.title",
@@ -470,17 +474,38 @@ class AgentEngine:
         created = next((event for event in events if event.get("type") == "thread.created"), {})
         return is_default_thread_title(str(created.get("title") or ""))
 
-    async def _maybe_generate_title(
+    def _start_title_generation_task(
         self,
         thread_id: str,
         user_text: str,
         *,
         should_generate: bool,
-    ) -> str | None:
+        level: str | None,
+    ) -> asyncio.Task[str | None] | None:
         if not should_generate:
             return None
+        return asyncio.create_task(self._maybe_generate_title(thread_id, user_text, level=level))
+
+    async def _finish_title_generation(
+        self,
+        title_task: asyncio.Task[str | None] | None,
+    ) -> str | None:
+        if title_task is None:
+            return None
         try:
-            title = await self._generate_thread_title(user_text)
+            return await title_task
+        except asyncio.CancelledError:
+            return None
+
+    async def _maybe_generate_title(
+        self,
+        thread_id: str,
+        user_text: str,
+        *,
+        level: str | None,
+    ) -> str | None:
+        try:
+            title = await self._generate_thread_title(user_text, level=level)
         except Exception:
             return None
         if not title or not self._thread_title_is_pending(self.thread_store.read(thread_id)):
@@ -488,8 +513,9 @@ class AgentEngine:
         self.thread_store.update_title(thread_id, title, source="generated")
         return title
 
-    async def _generate_thread_title(self, user_text: str) -> str | None:
+    async def _generate_thread_title(self, user_text: str, *, level: str | None) -> str | None:
         prompt = self.config.runtime.title_generation.prompt
+        title_level = self.config.runtime.title_generation.model_level or level
         response = await self.model_client.create_response(
             input_items=[
                 message_item(
@@ -499,7 +525,7 @@ class AgentEngine:
                     + user_text.strip(),
                 )
             ],
-            level=self.config.runtime.title_generation.model_level,
+            level=title_level,
             tools=[],
             instructions="Generate a short thread title. Return only the title.",
         )
@@ -510,21 +536,24 @@ class AgentEngine:
         thread_id: str,
         turn_id: str,
         input_items: list[dict[str, Any]],
+        *,
+        level: str | None,
     ) -> bool:
         if not self.config.runtime.auto_compress:
             return False
-        default_model = self.config.model_for_level(None)
+        compact_level = self.config.runtime.compression.model_level or level
+        model = self.config.model_for_level(compact_level)
         approx_tokens = estimate_tokens(input_items)
         if approx_tokens < self.config.runtime.compression.min_tokens:
             return False
         trigger_tokens = int(
-            default_model.context_window_tokens
+            model.context_window_tokens
             * self.config.runtime.compression.trigger_ratio
         )
         if approx_tokens < trigger_tokens:
             return False
         target_tokens = compact_target_tokens(
-            default_model.context_window_tokens,
+            model.context_window_tokens,
             target_ratio=self.config.runtime.compression.target_ratio,
         )
         prompt = self.config.runtime.compression.prompt
@@ -539,7 +568,7 @@ class AgentEngine:
         ]
         response = await self.model_client.create_response(
             input_items=compact_input,
-            level=self.config.runtime.compression.model_level,
+            level=compact_level,
             tools=[],
             instructions="Create a concise continuation summary for this uv-agent thread.",
         )

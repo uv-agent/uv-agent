@@ -18,7 +18,7 @@ from uv_agent.config import (
     RuntimeConfig,
     UiConfig,
 )
-from uv_agent.model_client import FakeModelClient
+from uv_agent.model_client import FakeModelClient, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
 from uv_agent.tui.app import (
@@ -129,6 +129,27 @@ class ImageCaptureEngine(AgentEngine):
         self.thread_store.append(thread_id, "item.assistant", turn_id=turn_id, text=text)
         self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text=text)
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": text}
+
+
+class RoutedModelClient(FakeModelClient):
+    def __init__(self, *, main: dict[str, object], title: dict[str, object]) -> None:
+        super().__init__([])
+        self.main = main
+        self.title = title
+
+    async def create_response(self, **kwargs):
+        self.requests.append(
+            {
+                "input": kwargs.get("input_items", []),
+                "level": kwargs.get("level"),
+                "tools": kwargs.get("tools") or [],
+                "instructions": kwargs.get("instructions"),
+                "stream": False,
+            }
+        )
+        if "Generate a short thread title" in str(kwargs.get("instructions") or ""):
+            return parse_responses_response(self.title)
+        return parse_responses_response(self.main)
 
 
 def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
@@ -245,11 +266,9 @@ async def test_tui_empty_new_thread_gets_generated_title_from_first_prompt(
     project_root = tmp_path / "project"
     project_root.mkdir()
     engine = fake_engine(project_root, tmp_path / "state")
-    engine.model_client = FakeModelClient(
-        [
-            response("done", "resp_1"),
-            response("Investigate startup crash", "resp_title"),
-        ]
+    engine.model_client = RoutedModelClient(
+        main=response("done", "resp_1"),
+        title=response("Investigate startup crash", "resp_title"),
     )
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
     app = UvAgentApp(project_root=project_root)

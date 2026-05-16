@@ -35,7 +35,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                         "params": {"reasoning": {"effort": "high"}},
                     }
                 },
-                "runtime": {"title_generation": {"model_level": "small"}},
+                "runtime": {"title_generation": {"model_level": "quick"}},
             }
         ),
         encoding="utf-8",
@@ -52,7 +52,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert model.supports_images is False
     assert model.params["reasoning"]["effort"] == "high"
     assert config.runtime.title_generation.enabled is True
-    assert config.runtime.title_generation.model_level == "small"
+    assert config.runtime.title_generation.model_level == "quick"
     assert "uv-agent @ file:///" in config.runner.runtime_dependency
     assert config.runner.default_uv_args == ["--reinstall-package", "uv-agent"]
     assert config.runner.max_saved_scripts == 32
@@ -102,6 +102,31 @@ def test_configured_levels_replace_default_level_template(tmp_path: Path) -> Non
     config = load_config(tmp_path, [config_path])
 
     assert list(config.levels) == ["small", "medium"]
+
+
+def test_default_title_and_compression_levels_do_not_assume_small(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {"p": {"base_url": "https://example.com"}},
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {
+                    "fast": {"model": "m"},
+                    "deep": {"model": "m"},
+                },
+                "runtime": {"default_level": "fast"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert list(config.levels) == ["fast", "deep"]
+    assert config.runtime.default_level == "fast"
+    assert config.runtime.title_generation.model_level is None
+    assert config.runtime.compression.model_level is None
 
 
 def test_redact_config_masks_sensitive_values() -> None:

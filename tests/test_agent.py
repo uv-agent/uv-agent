@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,7 @@ from uv_agent.config import (
     TitleGenerationConfig,
     load_config,
 )
-from uv_agent.model_client import FakeModelClient
+from uv_agent.model_client import FakeModelClient, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.runner.models import PythonRunRequest
 from uv_agent.session import ThreadStore
@@ -34,6 +35,28 @@ class BlockingModelClient(FakeModelClient):
         self.started.set()
         await asyncio.Event().wait()
         yield
+
+
+class RoutedModelClient(FakeModelClient):
+    def __init__(self, *, main: dict[str, Any], title: dict[str, Any] | None = None) -> None:
+        super().__init__([])
+        self.main = main
+        self.title = title
+
+    async def create_response(self, **kwargs):
+        request = {
+            "input": kwargs.get("input_items", []),
+            "level": kwargs.get("level"),
+            "tools": kwargs.get("tools") or [],
+            "instructions": kwargs.get("instructions"),
+            "stream": False,
+        }
+        instructions = str(kwargs.get("instructions") or "")
+        if "Generate a short thread title" in instructions and self.title is not None:
+            self.requests.append(request)
+            return parse_responses_response(self.title)
+        self.requests.append(request)
+        return parse_responses_response(self.main)
 
 
 def test_agent_exposes_only_python_runner_tool() -> None:
@@ -116,6 +139,75 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
 
     stored = engine.thread_store.read(events[-1]["thread_id"])
     assert any(event["type"] == "item.compaction" for event in stored)
+    assert client.requests[1]["level"] == "small"
+
+
+@pytest.mark.asyncio
+async def test_agent_compaction_falls_back_to_current_level(tmp_path: Path) -> None:
+    project_root = Path.cwd()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=1,
+                params={},
+            )
+        },
+        levels={
+            "fast": LevelConfig(name="fast", model="default", params={}),
+            "deep": LevelConfig(name="deep", model="default", params={}),
+        },
+        runtime=RuntimeConfig(
+            default_level="fast",
+            auto_compress=True,
+            compression=CompressionConfig(trigger_ratio=0.1, min_tokens=1),
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "final",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "final"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "summary",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "summary"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / ".uv-agent", config=config.runner),
+        thread_store=ThreadStore(tmp_path / ".uv-agent"),
+        project_root=project_root,
+    )
+
+    [event async for event in engine.run_turn(user_text="hello", level="deep")]
+
+    assert client.requests[1]["level"] == "deep"
 
 
 @pytest.mark.asyncio
@@ -209,31 +301,29 @@ async def test_agent_generates_title_for_default_new_thread(tmp_path: Path) -> N
             runtime_package_name="uv-agent",
         ),
     )
-    client = FakeModelClient(
-        [
-            {
-                "id": "resp_1",
-                "output_text": "done",
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "done"}],
-                    }
-                ],
-            },
-            {
-                "id": "resp_title",
-                "output_text": '"Fix import error in runner"',
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": '"Fix import error in runner"'}],
-                    }
-                ],
-            },
-        ]
+    client = RoutedModelClient(
+        main={
+            "id": "resp_1",
+            "output_text": "done",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }
+            ],
+        },
+        title={
+            "id": "resp_title",
+            "output_text": '"Fix import error in runner"',
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": '"Fix import error in runner"'}],
+                }
+            ],
+        },
     )
     engine = AgentEngine(
         config=config,
@@ -248,8 +338,11 @@ async def test_agent_generates_title_for_default_new_thread(tmp_path: Path) -> N
 
     assert any(event["type"] == "thread.title" for event in events)
     assert engine.thread_store.thread_digest(thread_id)["title"] == "Fix import error in runner"
-    assert client.requests[1]["level"] == "small"
-    assert "first message" in str(client.requests[1]["input"])
+    title_request = next(
+        request for request in client.requests if "Generate a short thread title" in str(request["instructions"])
+    )
+    assert title_request["level"] is None
+    assert "first message" in str(title_request["input"])
 
 
 @pytest.mark.asyncio
@@ -339,31 +432,29 @@ async def test_agent_uses_configured_title_generation_level(tmp_path: Path) -> N
             runtime_package_name="uv-agent",
         ),
     )
-    client = FakeModelClient(
-        [
-            {
-                "id": "resp_1",
-                "output_text": "done",
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "done"}],
-                    }
-                ],
-            },
-            {
-                "id": "resp_title",
-                "output_text": "Configured title",
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Configured title"}],
-                    }
-                ],
-            },
-        ]
+    client = RoutedModelClient(
+        main={
+            "id": "resp_1",
+            "output_text": "done",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }
+            ],
+        },
+        title={
+            "id": "resp_title",
+            "output_text": "Configured title",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Configured title"}],
+                }
+            ],
+        },
     )
     engine = AgentEngine(
         config=config,
@@ -375,7 +466,75 @@ async def test_agent_uses_configured_title_generation_level(tmp_path: Path) -> N
 
     [event async for event in engine.run_turn(user_text="use custom title model")]
 
-    assert client.requests[1]["level"] == "title"
+    title_request = next(
+        request for request in client.requests if "Generate a short thread title" in str(request["instructions"])
+    )
+    assert title_request["level"] == "title"
+
+
+@pytest.mark.asyncio
+async def test_agent_title_generation_falls_back_to_current_level(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={
+            "fast": LevelConfig(name="fast", model="default", params={}),
+            "deep": LevelConfig(name="deep", model="default", params={}),
+        },
+        runtime=RuntimeConfig(default_level="fast", auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    client = RoutedModelClient(
+        main={
+            "id": "resp_1",
+            "output_text": "done",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }
+            ],
+        },
+        title={
+            "id": "resp_title",
+            "output_text": "Current level title",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Current level title"}],
+                }
+            ],
+        },
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    [event async for event in engine.run_turn(user_text="use current title level", level="deep")]
+
+    title_request = next(
+        request for request in client.requests if "Generate a short thread title" in str(request["instructions"])
+    )
+    assert title_request["level"] == "deep"
 
 
 @pytest.mark.asyncio
@@ -853,7 +1012,11 @@ async def test_agent_records_project_rule_context_update(tmp_path: Path) -> None
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(default_level="medium", auto_compress=False),
+        runtime=RuntimeConfig(
+            default_level="medium",
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",

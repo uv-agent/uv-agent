@@ -76,7 +76,7 @@ class LevelConfig:
 
 @dataclass(frozen=True)
 class CompressionConfig:
-    model_level: str = "small"
+    model_level: str | None = None
     prompt: str = (
         "Summarize the conversation context for future continuation. Keep user intent, "
         "decisions, file changes, tool results, and unresolved tasks. Be concise but complete."
@@ -89,7 +89,7 @@ class CompressionConfig:
 @dataclass(frozen=True)
 class TitleGenerationConfig:
     enabled: bool = True
-    model_level: str = "small"
+    model_level: str | None = None
     prompt: str = (
         "Create a concise title for this uv-agent thread from the user's first message. "
         "Return only the title, without quotes or punctuation. Prefer the user's language. "
@@ -185,7 +185,6 @@ def default_config(project_root: Path) -> dict[str, Any]:
             "store_provider_response": False,
             "max_agent_rounds": 100,
             "compression": {
-                "model_level": "small",
                 "prompt": CompressionConfig().prompt,
                 "trigger_ratio": 0.7,
                 "target_ratio": 0.3,
@@ -193,7 +192,6 @@ def default_config(project_root: Path) -> dict[str, Any]:
             },
             "title_generation": {
                 "enabled": True,
-                "model_level": "small",
                 "prompt": TitleGenerationConfig().prompt,
             },
         },
@@ -294,8 +292,11 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
     runtime_raw = raw.get("runtime", {})
     compression = CompressionConfig(**runtime_raw.get("compression", {}))
     title_generation = TitleGenerationConfig(**runtime_raw.get("title_generation", {}))
+    default_level = runtime_raw.get("default_level", "medium")
+    if default_level not in levels and levels:
+        default_level = next(iter(levels))
     runtime = RuntimeConfig(
-        default_level=runtime_raw.get("default_level", "medium"),
+        default_level=default_level,
         auto_compress=runtime_raw.get("auto_compress", True),
         store_provider_response=runtime_raw.get("store_provider_response", False),
         max_agent_rounds=runtime_raw.get("max_agent_rounds", 100),
