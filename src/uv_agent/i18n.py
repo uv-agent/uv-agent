@@ -76,6 +76,12 @@ TEXT = {
         "skill_hint": "/skill name previews a skill file",
         "unknown_skill": "unknown skill",
         "copied": "Copied",
+        "mention_files": "Mention files",
+        "mention_threads": "Mention threads",
+        "mention_files_hint": "Select a file mention · @ switches to threads",
+        "mention_threads_hint": "Select a thread mention · Backspace returns to files",
+        "mention_file_description": "file reference only",
+        "no_mention_files": "No code files found",
     },
     "zh": {
         "idle": "空闲",
@@ -149,6 +155,12 @@ TEXT = {
         "skill_hint": "/skill 名称 可预览 skill 文件",
         "unknown_skill": "未知 skill",
         "copied": "已复制",
+        "mention_files": "艾特文件",
+        "mention_threads": "艾特线程",
+        "mention_files_hint": "选择文件引用 · @ 切到线程",
+        "mention_threads_hint": "选择线程引用 · Backspace 回到文件",
+        "mention_file_description": "仅文件引用",
+        "no_mention_files": "没有找到代码文件",
     },
 }
 

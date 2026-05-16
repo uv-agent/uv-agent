@@ -12,6 +12,7 @@ from rich.markup import escape, render as render_markup
 from rich.segment import Segment
 from rich.style import Style
 from textual import events
+from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -39,6 +40,10 @@ from uv_agent.tui.formatting import (
     tool_result_markup,
     tool_timeline_markup,
 )
+
+
+COMPOSER_COLLAPSED_HEIGHT = 5
+COMPOSER_BOTTOM_RESERVED_ROWS = 2
 
 
 @dataclass(frozen=True)
@@ -136,6 +141,8 @@ class FullscreenPanel(ModalScreen[str | None]):
         items: list[PickerItem] | None = None,
         subtitle: str = "",
         initial_filter: str = "",
+        mention_kind: str | None = None,
+        mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None,
     ) -> None:
         super().__init__()
         self.panel_title = title
@@ -143,6 +150,9 @@ class FullscreenPanel(ModalScreen[str | None]):
         self.items = items or []
         self.subtitle = subtitle
         self.initial_filter = initial_filter.strip()
+        self.mention_kind = mention_kind
+        self.mention_items = mention_items
+        self._selected_mention_kind: str | None = None
         self._filtered = list(self.items)
         self._option_ids: dict[str, str] = {}
 
@@ -150,7 +160,7 @@ class FullscreenPanel(ModalScreen[str | None]):
         with Vertical(id="panel-shell"):
             yield Static(self.panel_title, id="panel-header")
             yield Static(self.subtitle, id="panel-subtitle")
-            if self.items:
+            if self.items or self.mention_kind:
                 yield Input(placeholder=getattr(self.app, "_text", lambda key: key)("filter"), id="panel-filter")
                 yield PickerOptionList(id="panel-content", compact=False)
             else:
@@ -158,7 +168,7 @@ class FullscreenPanel(ModalScreen[str | None]):
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def on_mount(self) -> None:
-        if self.items:
+        if self.items or self.mention_kind:
             filter_input = self.query_one("#panel-filter", Input)
             if self.initial_filter:
                 filter_input.value = self.initial_filter
@@ -191,13 +201,25 @@ class FullscreenPanel(ModalScreen[str | None]):
         action = actions.get(event.key)
         if action is not None:
             event.stop()
-            action()
+            try:
+                action()
+            except SkipAction:
+                pass
             return
-        if not self.items:
+        if not self.items and not self.mention_kind:
             return
         filter_input = self.query_one("#panel-filter", Input)
+        if self.mention_kind == "file" and (
+            event.character == "@" or event.key in {"@", "at", "commercial_at"}
+        ):
+            event.stop()
+            self._switch_mention_kind("thread", filter_value="@")
+            return
         if event.key == "backspace":
             event.stop()
+            if self.mention_kind == "thread" and filter_input.value == "@":
+                self._switch_mention_kind("file", filter_value="")
+                return
             filter_input.value = filter_input.value[:-1]
             self._apply_filter(filter_input.value)
             return
@@ -213,6 +235,8 @@ class FullscreenPanel(ModalScreen[str | None]):
 
     def _apply_filter(self, value: str) -> None:
         query = value.casefold().strip()
+        if self.mention_kind == "thread" and query.startswith("@"):
+            query = query[1:].strip()
         if not query:
             self._filtered = list(self.items)
         else:
@@ -269,6 +293,7 @@ class FullscreenPanel(ModalScreen[str | None]):
             return
         option = option_list.get_option_at_index(highlighted)
         if option.id:
+            self._selected_mention_kind = self.mention_kind
             self.dismiss(self._option_ids.get(option.id, option.id))
 
     def _refresh_options(self) -> None:
@@ -286,13 +311,33 @@ class FullscreenPanel(ModalScreen[str | None]):
                 )
             )
         if not options:
-            label = getattr(self.app, "_text", lambda key: key)("no_matches")
+            text = getattr(self.app, "_text", lambda key: key)
+            if self.mention_kind == "file":
+                label = text("no_mention_files")
+            elif self.mention_kind == "thread":
+                label = text("no_threads")
+            else:
+                label = text("no_matches")
             options = [Option(f"[dim]{escape(label)}[/dim]", id="")]
         option_list = self.query_one("#panel-content", OptionList)
         previous = option_list.highlighted
         option_list.set_options(options)
         if options:
             option_list.highlighted = min(previous if previous is not None else 0, len(options) - 1)
+
+    def _switch_mention_kind(self, kind: str, *, filter_value: str) -> None:
+        if self.mention_items is None:
+            return
+        title, items, subtitle = self.mention_items(kind)
+        self.mention_kind = kind
+        self.panel_title = title
+        self.items = items
+        self.subtitle = subtitle
+        self.query_one("#panel-header", Static).update(title)
+        self.query_one("#panel-subtitle", Static).update(subtitle)
+        filter_input = self.query_one("#panel-filter", Input)
+        filter_input.value = filter_value
+        self._apply_filter(filter_value)
 
 
 COMMAND_SPECS = [
@@ -314,6 +359,47 @@ COMMAND_SPECS = [
     ("/quit", "/quit"),
     ("/help", "/help"),
 ]
+
+
+CODE_FILE_SUFFIXES = {
+    ".cfg",
+    ".css",
+    ".csv",
+    ".env",
+    ".gd",
+    ".go",
+    ".html",
+    ".ini",
+    ".js",
+    ".json",
+    ".jsonl",
+    ".jsx",
+    ".lock",
+    ".md",
+    ".mjs",
+    ".py",
+    ".rs",
+    ".scss",
+    ".toml",
+    ".tsx",
+    ".ts",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+IGNORED_MENTION_DIRS = {
+    ".code-search",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".uv-agent",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+}
+MAX_MENTION_ITEMS = 300
 
 
 @dataclass(frozen=True)
@@ -375,6 +461,8 @@ class ComposerTextArea(TextArea):
 
 class TranscriptCell(Static):
     """Small transcript block used by the Textual chat timeline."""
+
+    SELECTION_STYLE = Style(color="#061018", bgcolor="#7dd3fc")
 
     DEFAULT_CSS = """
     TranscriptCell {
@@ -442,6 +530,34 @@ class TranscriptCell(Static):
                 style = (style or Style()) + Style(meta={"offset": (offset_x, y)})
             segments.append(Segment(text, style, segment.control))
             offset_x += len(text)
+        return self._highlight_selection(Strip(segments, strip.cell_length), y)
+
+    def _highlight_selection(self, strip: Strip, y: int) -> Strip:
+        selection = self.text_selection
+        if selection is None:
+            return strip
+        span = selection.get_span(y)
+        if span is None:
+            return strip
+        start, end = span
+        if end == -1:
+            end = strip.cell_length
+        start = max(0, min(start, strip.cell_length))
+        end = max(start, min(end, strip.cell_length))
+        if start == end:
+            return strip
+        before = strip.crop(0, start)
+        selected = self._apply_selection_style(strip.crop(start, end))
+        after = strip.crop(end, strip.cell_length)
+        return Strip.join([before, selected, after])
+
+    def _apply_selection_style(self, strip: Strip) -> Strip:
+        segments = []
+        for text, style, control in strip:
+            if control:
+                segments.append(Segment(text, style, control))
+            else:
+                segments.append(Segment(text, (style or Style()) + self.SELECTION_STYLE))
         return Strip(segments, strip.cell_length)
 
     def _current_copy_text(self) -> str | None:
@@ -469,6 +585,11 @@ class UvAgentApp(App[None]):
         color: #d8dee9;
     }
 
+    Screen > .screen--selection {
+        background: #7dd3fc;
+        color: #061018;
+    }
+
     ToastRack {
         dock: top;
         align-horizontal: right;
@@ -490,9 +611,8 @@ class UvAgentApp(App[None]):
 
     #bottom-pane {
         height: auto;
-        max-height: 18;
-        padding: 0 1 1 1;
-        border-top: solid #1e2a38;
+        max-height: 50%;
+        padding: 0 1 0 1;
         background: #0b0f14;
     }
 
@@ -511,18 +631,17 @@ class UvAgentApp(App[None]):
 
     #composer {
         width: 1fr;
-        height: 3;
-        min-height: 3;
-        max-height: 8;
-        margin: 1 0 0 0;
-        border: tall #2a3646;
+        height: 5;
+        min-height: 5;
+        margin: 0;
+        border: round #2a3646;
         padding: 0 1;
-        background: #0f1721;
+        background: #0b0f14;
         color: #edf2f7;
     }
 
     #composer:focus {
-        border: tall #3f9bc9;
+        border: round #3f9bc9;
     }
 
     #composer-footer {
@@ -536,7 +655,7 @@ class UvAgentApp(App[None]):
     BINDINGS = [
         Binding("ctrl+enter", "submit_composer", "Send", priority=True),
         Binding("ctrl+j", "submit_composer", "Send", priority=True),
-        Binding("tab", "complete_command", "Complete", priority=True),
+        Binding("tab", "toggle_composer_height", "Height", priority=True),
         Binding("ctrl+s", "toggle_status_panel", "Status", priority=True),
         Binding("ctrl+o", "open_threads", "Threads", priority=True),
         Binding("ctrl+p", "open_command_palette", "Commands", priority=True),
@@ -586,6 +705,8 @@ class UvAgentApp(App[None]):
         self._selection_copy_timer: Any | None = None
         self._pending_selection_copy = ""
         self._last_auto_copied_selection = ""
+        self._composer_height_override: str | None = None
+        self._composer_expanded = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -631,6 +752,8 @@ class UvAgentApp(App[None]):
             self._last_composer_text = ""
             self._resize_composer("")
             self._open_help_panel()
+        else:
+            self._maybe_open_mention_picker(event.text_area)
 
     def on_text_area_selection_changed(self, event: TextArea.SelectionChanged) -> None:
         if event.text_area.id != "composer":
@@ -676,6 +799,7 @@ class UvAgentApp(App[None]):
             return
         composer.load_text("")
         self._last_composer_text = ""
+        self._composer_height_override = None
         self._resize_composer("")
         if "\n" not in prompt and self._handle_command(prompt):
             return
@@ -758,6 +882,7 @@ class UvAgentApp(App[None]):
         if composer.text:
             composer.load_text("")
             self._last_composer_text = ""
+            self._composer_height_override = None
             self._resize_composer("")
             return
 
@@ -800,11 +925,9 @@ class UvAgentApp(App[None]):
     def action_open_command_palette(self) -> None:
         self._open_command_palette()
 
-    def action_complete_command(self) -> None:
-        composer = self.query_one("#composer", TextArea)
-        if not composer.text.strip().startswith("/"):
-            return
-        self._open_command_palette(query=composer.text.strip().removeprefix("/"))
+    def action_toggle_composer_height(self) -> None:
+        self._composer_height_override = "collapsed" if self._composer_expanded else "expanded"
+        self._resize_composer(self.query_one("#composer", TextArea).text)
 
     def action_focus_composer(self) -> None:
         composer = self.query_one("#composer", TextArea)
@@ -1086,6 +1209,174 @@ class UvAgentApp(App[None]):
             self._resume_thread,
             subtitle=self._text("thread_search_hint"),
         )
+
+    def _maybe_open_mention_picker(self, composer: TextArea) -> None:
+        trigger = self._mention_trigger_at_cursor(composer)
+        if trigger is None:
+            return
+        kind = "thread" if trigger == "@@" else "file"
+        self._open_mention_picker(kind)
+
+    def _mention_trigger_at_cursor(self, composer: TextArea) -> str | None:
+        row, column = composer.cursor_location
+        lines = composer.text.split("\n")
+        if row >= len(lines):
+            return None
+        prefix = lines[row][:column]
+        if prefix.endswith("@@"):
+            return "@@"
+        if prefix.endswith("@"):
+            return "@"
+        return None
+
+    def _open_mention_picker(self, kind: str) -> None:
+        try:
+            composer = self.query_one("#composer", TextArea)
+        except NoMatches:
+            return
+        expected_trigger = "@@" if kind == "thread" else "@"
+        if self._mention_trigger_at_cursor(composer) != expected_trigger:
+            return
+        if kind == "thread":
+            self._open_thread_mention_picker()
+            return
+        self._open_file_mention_picker()
+
+    def _open_file_mention_picker(self) -> None:
+        title, items, subtitle = self._mention_picker_items("file")
+        self._open_picker(
+            title,
+            items,
+            self._choose_file_mention,
+            subtitle=subtitle,
+            mention_kind="file",
+            mention_items=self._mention_picker_items,
+        )
+
+    def _open_thread_mention_picker(self) -> None:
+        title, items, subtitle = self._mention_picker_items("thread")
+        self._open_picker(
+            title,
+            items,
+            self._choose_thread_mention,
+            subtitle=subtitle,
+            mention_kind="thread",
+            mention_items=self._mention_picker_items,
+            initial_filter="@",
+        )
+
+    def _mention_picker_items(self, kind: str) -> tuple[str, list[PickerItem], str]:
+        if kind == "thread":
+            return (
+                self._text("mention_threads"),
+                self._thread_mention_items(),
+                self._text("mention_threads_hint"),
+            )
+        return (
+            self._text("mention_files"),
+            self._file_mention_items(),
+            self._text("mention_files_hint"),
+        )
+
+    def _thread_mention_items(self) -> list[PickerItem]:
+        threads = self.engine.thread_store.list_threads()
+        items = []
+        for thread in threads:
+            thread_id = str(thread.get("thread_id") or "")
+            title = str(thread.get("title") or self._text("new_thread"))
+            last_text = str(thread.get("last_text") or "").replace("\n", " ")
+            if len(last_text) > 120:
+                last_text = last_text[:117].rstrip() + "..."
+            marker = f"{self._text('current')} " if thread_id == self.thread_id else ""
+            items.append(
+                PickerItem(
+                    id=thread_id,
+                    title=f"{marker}{title}",
+                    description=last_text or self._text("no_messages"),
+                    meta=f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} {self._text('turns')}",
+                )
+            )
+        return items
+
+    def _file_mention_items(self) -> list[PickerItem]:
+        root = self.project_root.resolve()
+        items: list[PickerItem] = []
+        stack = [root]
+        while stack and len(items) < MAX_MENTION_ITEMS:
+            directory = stack.pop()
+            try:
+                children = sorted(directory.iterdir(), key=lambda item: (item.is_file(), item.name.casefold()))
+            except OSError:
+                continue
+            for path in children:
+                if len(items) >= MAX_MENTION_ITEMS:
+                    break
+                if path.is_dir():
+                    if path.name not in IGNORED_MENTION_DIRS and not path.name.startswith("."):
+                        stack.append(path)
+                    continue
+                if not path.is_file() or path.suffix.lower() not in CODE_FILE_SUFFIXES:
+                    continue
+                try:
+                    relative = path.relative_to(root)
+                except ValueError:
+                    continue
+                mention = relative.as_posix()
+                items.append(
+                    PickerItem(
+                        id=mention,
+                        title=mention,
+                        description=self._text("mention_file_description"),
+                    )
+                )
+        return items
+
+    def _choose_file_mention(self, path: str) -> None:
+        self._insert_mention(f"@{path}", "@")
+
+    def _choose_thread_mention(self, thread_id: str) -> None:
+        self._insert_mention(f"@thread:{thread_id}", ("@@", "@"))
+
+    def _insert_mention(self, mention: str, triggers: str | tuple[str, ...]) -> None:
+        composer = self.query_one("#composer", TextArea)
+        row, column = composer.cursor_location
+        lines = composer.text.split("\n")
+        replacement = mention + " "
+        trigger_options = (triggers,) if isinstance(triggers, str) else triggers
+        if row < len(lines) and mention.startswith("@thread:") and lines[row][:column].endswith("@"):
+            trigger_options = ("@",)
+        matched_trigger = next(
+            (
+                trigger
+                for trigger in sorted(trigger_options, key=len, reverse=True)
+                if row < len(lines) and lines[row][:column].endswith(trigger)
+            ),
+            "",
+        )
+        if matched_trigger:
+            composer.replace(
+                replacement,
+                (row, column - len(matched_trigger)),
+                (row, column),
+                maintain_selection_offset=False,
+            )
+        else:
+            end_trigger = next(
+                (
+                    trigger
+                    for trigger in sorted(trigger_options, key=len, reverse=True)
+                    if composer.text.endswith(trigger)
+                ),
+                "",
+            )
+            if end_trigger:
+                composer.load_text(composer.text[: -len(end_trigger)] + replacement)
+                composer.cursor_location = composer.document.end
+            else:
+                composer.insert(replacement)
+        self._last_composer_text = composer.text
+        self._resize_composer(composer.text)
+        composer.focus()
 
     def _open_status_panel(self) -> None:
         self._open_panel(self._status_panel_markup(), "status", self._text("status"))
@@ -1433,16 +1724,33 @@ class UvAgentApp(App[None]):
         *,
         subtitle: str = "",
         initial_filter: str = "",
+        mention_kind: str | None = None,
+        mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None,
     ) -> None:
+        panel = FullscreenPanel(
+            title=title,
+            items=items,
+            subtitle=subtitle,
+            initial_filter=initial_filter,
+            mention_kind=mention_kind,
+            mention_items=mention_items,
+        )
+
         def handle(result: str | None) -> None:
             if result:
-                callback(result)
+                if mention_kind is not None:
+                    kind = panel._selected_mention_kind
+                    if kind == "thread":
+                        self._choose_thread_mention(result)
+                    elif kind == "file":
+                        self._choose_file_mention(result)
+                    else:
+                        callback(result)
+                else:
+                    callback(result)
             self.query_one("#composer", TextArea).focus()
 
-        self.push_screen(
-            FullscreenPanel(title=title, items=items, subtitle=subtitle, initial_filter=initial_filter),
-            handle,
-        )
+        self.push_screen(panel, handle)
 
     def _open_panel(self, markup: str, name: str | None = None, title: str | None = None) -> None:
         panel_title = title or (name.title() if name else self._text("panel"))
@@ -1451,8 +1759,23 @@ class UvAgentApp(App[None]):
 
     def _resize_composer(self, text: str) -> None:
         line_count = max(1, text.count("\n") + 1)
-        height = min(8, max(3, line_count + 1))
+        if line_count <= 4 and self._composer_height_override == "collapsed":
+            self._composer_height_override = None
+        if self._composer_height_override == "expanded":
+            expanded = True
+        elif self._composer_height_override == "collapsed":
+            expanded = False
+        else:
+            expanded = line_count > 4
+        self._composer_expanded = expanded
+        height = self._expanded_composer_height() if expanded else COMPOSER_COLLAPSED_HEIGHT
         self.query_one("#composer", TextArea).styles.height = height
+
+    def _expanded_composer_height(self) -> int:
+        return max(
+            COMPOSER_COLLAPSED_HEIGHT,
+            (self.size.height // 2) - COMPOSER_BOTTOM_RESERVED_ROWS,
+        )
 
     def _flash(self, message: str, *, severity: str = "information") -> None:
         self.notify(message, severity=severity, timeout=2.0)

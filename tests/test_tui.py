@@ -148,6 +148,30 @@ async def test_tui_status_panel_opens_fullscreen_overlay(
 
 
 @pytest.mark.asyncio
+async def test_tui_short_text_panel_ignores_unavailable_scroll_actions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        panel = FullscreenPanel(title="Short", body="short")
+        app.push_screen(panel)
+        await pilot.pause()
+
+        await pilot.press("down", "pagedown", "up", "pageup")
+        await pilot.pause()
+
+        assert app.screen_stack[-1] is panel
+
+
+@pytest.mark.asyncio
 async def test_tui_command_picker_supports_keyboard_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -298,6 +322,151 @@ async def test_tui_enter_keeps_newline_when_composer_has_focus(
 
 
 @pytest.mark.asyncio
+async def test_tui_composer_expands_and_collapses_with_tab_without_button(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 30)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        footer = app.query_one("#composer-footer")
+
+        assert composer.styles.height.value == 5
+        assert not app.query("#composer-toggle")
+        assert str(footer.content)
+
+        composer.insert("1\n2\n3\n4\n5")
+        await pilot.pause()
+
+        assert app._composer_expanded is True
+        assert composer.styles.height.value == 13
+        assert str(footer.content)
+
+        await pilot.press("tab")
+        await pilot.pause()
+
+        assert app._composer_expanded is False
+        assert composer.styles.height.value == 5
+        assert str(footer.content)
+
+
+@pytest.mark.asyncio
+async def test_tui_at_mention_inserts_file_reference_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    source_dir = project_root / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "example.py").write_text("print('hi')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("@")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("mention_files")
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert composer.text == "@src/example.py "
+        assert app.thread_id is None
+        assert app._transcript_has_content is False
+
+
+@pytest.mark.asyncio
+async def test_tui_mention_switches_from_files_to_threads_with_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    state = tmp_path / "state"
+    engine = fake_engine(project_root, state)
+    thread_id = engine.thread_store.create_thread("Saved work")
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id="turn_1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("@")
+        await pilot.pause()
+
+        file_panel = app.screen_stack[-1]
+        assert isinstance(file_panel, FullscreenPanel)
+        assert file_panel.panel_title == app._text("mention_files")
+
+        await pilot.press("@")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("mention_threads")
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert composer.text == f"@thread:{thread_id} "
+        assert app.thread_id is None
+        assert app._transcript_has_content is False
+
+
+@pytest.mark.asyncio
+async def test_tui_mention_backspace_returns_from_threads_to_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    source_dir = project_root / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "example.py").write_text("print('hi')\n", encoding="utf-8")
+    state = tmp_path / "state"
+    engine = fake_engine(project_root, state)
+    engine.thread_store.create_thread("Saved work")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("@")
+        await pilot.pause()
+        await pilot.press("@")
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("mention_threads")
+
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert panel.panel_title == app._text("mention_files")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert composer.text == "@src/example.py "
+
+
+@pytest.mark.asyncio
 async def test_tui_uses_chinese_when_configured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -423,6 +592,44 @@ async def test_tui_markdown_assistant_selection_auto_copies_plain_text(
 
         assert app._clipboard == "agent reply"
         assert any(str(toast.render()) == "Copied" for toast in app.screen.query("Toast"))
+
+
+@pytest.mark.asyncio
+async def test_tui_markdown_assistant_selection_is_visibly_highlighted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await app._append_assistant_delta("agent reply")
+        assert app._assistant_cell is not None
+
+        await pilot.pause(0.2)
+        await pilot.mouse_down(app._assistant_cell, offset=(2, 0))
+        await pilot.hover(app._assistant_cell, offset=(10, 0))
+        await pilot.mouse_up(app._assistant_cell, offset=(10, 0))
+        await pilot.pause()
+
+        strip = app._assistant_cell.render_line(0)
+        highlighted = [
+            segment
+            for segment in strip
+            if segment.style is not None
+            and segment.style.bgcolor is not None
+            and segment.style.bgcolor.triplet is not None
+            and segment.style.bgcolor.triplet.red == 125
+            and segment.style.bgcolor.triplet.green == 211
+            and segment.style.bgcolor.triplet.blue == 252
+        ]
+
+        assert highlighted
 
 
 @pytest.mark.asyncio
