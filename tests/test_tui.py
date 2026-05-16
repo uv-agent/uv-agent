@@ -7,6 +7,7 @@ import pytest
 from textual import events
 from textual.widgets import Static, TextArea
 
+from uv_agent.clipboard import ClipboardImage
 from uv_agent.agent import AgentEngine
 from uv_agent.config import (
     AppConfig,
@@ -21,7 +22,15 @@ from uv_agent.config import (
 from uv_agent.model_client import FakeModelClient
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
-from uv_agent.tui.app import EmptyState, ExpandableTranscriptCell, FullscreenPanel, ToolDetailsPanel, UvAgentApp
+from uv_agent.tui.app import (
+    EmptyState,
+    ExpandableTranscriptCell,
+    FullscreenPanel,
+    ImageAttachmentCell,
+    ImagePreviewPanel,
+    ToolDetailsPanel,
+    UvAgentApp,
+)
 
 
 class BlockingEngine(AgentEngine):
@@ -72,6 +81,46 @@ class ReleasableEngine(AgentEngine):
                 return
             await asyncio.sleep(0.01)
         text = f"done {user_text}"
+        self.thread_store.append(thread_id, "item.assistant", turn_id=turn_id, text=text)
+        self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text=text)
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": text}
+
+
+class ImageCaptureEngine(AgentEngine):
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+        self.image_paths: list[Path] = []
+
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        image_paths: list[Path] | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        self.image_paths = list(image_paths or [])
+        thread_id = thread_id or self.thread_store.create_thread("New thread")
+        turn_id = "turn_image"
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        )
+        for image_path in image_paths or []:
+            attachment = self.attachments.register_image(
+                image_path,
+                cwd=self.project_root,
+                thread_id=thread_id,
+                note="pasted from clipboard",
+            )
+            payload = attachment.to_event_payload()
+            self.thread_store.append(thread_id, "item.image_attachment", turn_id=turn_id, attachment=payload)
+            yield {"type": "image.attachment", "thread_id": thread_id, "turn_id": turn_id, "attachment": payload}
+        text = "done"
         self.thread_store.append(thread_id, "item.assistant", turn_id=turn_id, text=text)
         self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text=text)
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": text}
@@ -1132,6 +1181,88 @@ async def test_tui_tool_result_details_support_keyboard_navigation(
         assert "full tail 1" in str(panel.query_one("#panel-body-content", Static).render())
 
         await pilot.press("ctrl+d")
+        await pilot.pause()
+
+        assert app.screen is app.default_screen
+
+
+@pytest.mark.asyncio
+async def test_tui_f2_attaches_clipboard_image_and_sends_with_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    image = tmp_path / "clip.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    engine = ImageCaptureEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    monkeypatch.setattr(
+        "uv_agent.tui.app.save_clipboard_image",
+        lambda target_dir: ClipboardImage(path=image, width=20, height=10),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        await pilot.press("f2")
+        await pilot.pause()
+
+        assert len(app._pending_images) == 1
+        assert "clip.png" in str(app.query_one("#composer-meta", Static).render())
+
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("inspect")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        assert app._pending_images == []
+        assert engine.image_paths == [image]
+        assert app.query_one(ImageAttachmentCell)
+
+
+@pytest.mark.asyncio
+async def test_tui_image_preview_panel_switches_sent_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("images")
+    for index in range(2):
+        image = tmp_path / f"image-{index}.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        attachment = engine.attachments.register_image(image, cwd=project_root, thread_id=thread_id)
+        engine.thread_store.append(
+            thread_id,
+            "item.image_attachment",
+            turn_id=f"turn_{index}",
+            attachment=attachment.to_event_payload(),
+        )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._resume_thread(thread_id)
+        await pilot.pause()
+        cells = app.query(ImageAttachmentCell).nodes
+        assert len(cells) == 2
+
+        await pilot.press("f3")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, ImagePreviewPanel)
+        assert panel.index == 1
+        assert "image-1" in str(panel.query_one("#panel-body-content", Static).render())
+
+        await pilot.press("k")
+        await pilot.pause()
+
+        assert panel.index == 0
+        assert "image-0" in str(panel.query_one("#panel-body-content", Static).render())
+
+        await pilot.press("f3")
         await pilot.pause()
 
         assert app.screen is app.default_screen

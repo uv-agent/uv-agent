@@ -244,6 +244,7 @@ class AgentEngine:
         user_text: str,
         thread_id: str | None = None,
         level: str | None = None,
+        image_paths: list[str | Path] | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         self.refresh_config(force=True)
@@ -258,6 +259,29 @@ class AgentEngine:
         input_items.extend(context_items)
         input_items.append(user_item)
         conversation_items.append(user_item)
+        for image_path in image_paths or []:
+            attachment = self.attachments.register_image(
+                image_path,
+                cwd=self.project_root,
+                thread_id=thread_id,
+                note="pasted from clipboard",
+            )
+            payload = attachment.to_event_payload()
+            self.thread_store.append(
+                thread_id,
+                "item.image_attachment",
+                turn_id=turn_id,
+                attachment=payload,
+            )
+            image_item = image_message_item(payload)
+            input_items.append(image_item)
+            conversation_items.append(image_item)
+            yield {
+                "type": "image.attachment",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "attachment": payload,
+            }
 
         final_text = ""
         try:

@@ -11,6 +11,7 @@ from rich.markdown import Markdown
 from rich.markup import escape, render as render_markup
 from rich.segment import Segment
 from rich.style import Style
+from PIL import Image, UnidentifiedImageError
 from textual import events
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
@@ -26,6 +27,7 @@ from textual.worker import Worker
 from textual.widgets._option_list import Option
 
 from uv_agent.app_factory import create_engine
+from uv_agent.clipboard import ClipboardImageError, save_clipboard_image
 from uv_agent.config import (
     ConfigError,
     config_sources,
@@ -433,6 +435,43 @@ IGNORED_MENTION_DIRS = {
 MAX_MENTION_ITEMS = 300
 
 
+def image_attachment_markup(attachment: dict[str, Any], *, label: str = "image attached") -> str:
+    path = Path(str(attachment.get("stored_path") or ""))
+    name = path.name or str(path)
+    size = int(attachment.get("size_bytes") or 0)
+    size_label = f" · {format_tokens(size)}B" if size else ""
+    return (
+        f"[dim]{escape(label)}[/dim] "
+        f"[cyan]{escape(name)}[/cyan]"
+        f"[dim]{escape(size_label)}[/dim]\n"
+        "[dim][preview][/dim]"
+    )
+
+
+def image_ascii_preview(path: Path, *, width: int = 64, height: int = 36) -> str:
+    try:
+        with Image.open(path) as image:
+            image.thumbnail((width, height), Image.Resampling.LANCZOS)
+            image = image.convert("RGB")
+            rows = []
+            for y in range(0, image.height, 2):
+                segments = []
+                for x in range(image.width):
+                    top_red, top_green, top_blue = image.getpixel((x, y))
+                    if y + 1 < image.height:
+                        bottom_red, bottom_green, bottom_blue = image.getpixel((x, y + 1))
+                    else:
+                        bottom_red, bottom_green, bottom_blue = top_red, top_green, top_blue
+                    segments.append(
+                        f"[#{top_red:02x}{top_green:02x}{top_blue:02x} "
+                        f"on #{bottom_red:02x}{bottom_green:02x}{bottom_blue:02x}]▀[/]"
+                    )
+                rows.append("".join(segments))
+    except (OSError, UnidentifiedImageError, ValueError):
+        return ""
+    return "\n".join(rows)
+
+
 @dataclass(frozen=True)
 class CommandSpec:
     name: str
@@ -440,12 +479,25 @@ class CommandSpec:
     description: str
 
 
+@dataclass(frozen=True)
+class PendingImage:
+    path: Path
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class QueuedTurn:
+    prompt: str
+    image_paths: list[Path] = field(default_factory=list)
+
+
 @dataclass
 class ThreadRunState:
     thread_id: str
     worker: Worker[None] | None
     cancel_event: asyncio.Event
-    queue: list[str]
+    queue: list[QueuedTurn]
     status: str
     assistant_buffer: str = ""
     assistant_cell: TranscriptCell | None = None
@@ -668,6 +720,45 @@ class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
         return f"{self.summary}\n[dim][details][/dim]"
 
 
+class ImageAttachmentCell(TranscriptCell, can_focus=True):
+    """Transcript cell that opens image attachments in the preview panel."""
+
+    def __init__(self, attachment: dict[str, Any], **kwargs: Any) -> None:
+        self.attachment = attachment
+        super().__init__("", **kwargs)
+
+    def on_mount(self) -> None:
+        self._refresh_content()
+
+    def _refresh_content(self) -> None:
+        text = getattr(self.app, "_text", lambda key: key)
+        self.update(image_attachment_markup(self.attachment, label=text("image_attached")))
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.open_preview()
+
+    def on_key(self, event: events.Key) -> None:
+        app = self.app
+        if event.key in {"enter", "space"}:
+            event.stop()
+            self.open_preview()
+        elif event.key == "j" and hasattr(app, "_focus_relative_image_cell"):
+            event.stop()
+            app._focus_relative_image_cell(self, 1)
+        elif event.key == "k" and hasattr(app, "_focus_relative_image_cell"):
+            event.stop()
+            app._focus_relative_image_cell(self, -1)
+        elif event.key == "escape" and hasattr(app, "action_focus_composer"):
+            event.stop()
+            app.action_focus_composer()
+
+    def open_preview(self) -> None:
+        app = self.app
+        if hasattr(app, "_open_image_preview_for_cell"):
+            app._open_image_preview_for_cell(self)
+
+
 class ToolDetailsPanel(FullscreenPanel):
     """Full-screen tool detail panel with j/k navigation between tool results."""
 
@@ -731,6 +822,101 @@ class ToolDetailsPanel(FullscreenPanel):
             pass
 
 
+class ImagePreviewPanel(FullscreenPanel):
+    """Full-screen image attachment panel with j/k navigation."""
+
+    BINDINGS = [
+        Binding("j", "next_image", "Next", priority=True, show=False),
+        Binding("k", "previous_image", "Previous", priority=True, show=False),
+        Binding("right", "next_image", "Next", priority=True, show=False),
+        Binding("down", "next_image", "Next", priority=True, show=False),
+        Binding("left", "previous_image", "Previous", priority=True, show=False),
+        Binding("up", "previous_image", "Previous", priority=True, show=False),
+        Binding("f3", "dismiss_panel", "Close", priority=True, show=False),
+        *FullscreenPanel.BINDINGS,
+    ]
+
+    def __init__(self, attachments: list[dict[str, Any]], index: int = 0) -> None:
+        self.attachments = attachments
+        self.index = max(0, min(index, len(attachments) - 1)) if attachments else 0
+        super().__init__(title="", body="", subtitle="")
+
+    def on_mount(self) -> None:
+        self._refresh_current()
+        try:
+            self.query_one("#panel-body", VerticalScroll).focus()
+        except NoMatches:
+            pass
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"j", "right", "down"}:
+            event.stop()
+            self.action_next_image()
+            return
+        if event.key in {"k", "left", "up"}:
+            event.stop()
+            self.action_previous_image()
+            return
+        if event.key == "f3":
+            event.stop()
+            self.action_dismiss_panel()
+            return
+        super().on_key(event)
+
+    def action_next_image(self) -> None:
+        self._move(1)
+
+    def action_previous_image(self) -> None:
+        self._move(-1)
+
+    def _move(self, step: int) -> None:
+        if not self.attachments:
+            return
+        self.index = (self.index + step) % len(self.attachments)
+        self._refresh_current()
+
+    def _refresh_current(self) -> None:
+        text = getattr(self.app, "_text", lambda key: key)
+        self.panel_title = text("image_preview")
+        self.subtitle = text("image_preview_hint")
+        self.body = self._attachment_markup()
+        try:
+            self.query_one("#panel-header", Static).update(self.panel_title)
+            self.query_one("#panel-subtitle", Static).update(self.subtitle)
+            self.query_one("#panel-body-content", Static).update(self.body)
+            self.query_one("#panel-body", VerticalScroll).scroll_to(y=0, animate=False)
+        except NoMatches:
+            pass
+
+    def _attachment_markup(self) -> str:
+        text = getattr(self.app, "_text", lambda key: key)
+        if not self.attachments:
+            return f"[dim]{escape(text('no_images'))}[/dim]"
+        attachment = self.attachments[self.index]
+        path = Path(str(attachment.get("stored_path") or ""))
+        source = str(attachment.get("source_path") or "")
+        note = str(attachment.get("note") or "").strip()
+        size = int(attachment.get("size_bytes") or 0)
+        lines = [
+            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold] "
+            f"[cyan]{escape(path.name or str(path))}[/cyan]",
+            "",
+            f"- {escape(text('image_path'))}: [cyan]{escape(str(path))}[/cyan]",
+            f"- {escape(text('image_mime'))}: {escape(str(attachment.get('mime_type') or ''))}",
+            f"- {escape(text('image_size'))}: {format_tokens(size)}B",
+        ]
+        if source:
+            lines.append(f"- {escape(text('image_source'))}: {escape(source)}")
+        if note:
+            lines.append(f"- {escape(text('image_note'))}: {escape(note)}")
+        preview = image_ascii_preview(path)
+        if preview:
+            lines.extend(["", preview])
+        lines.append("")
+        lines.append(f"[dim]{escape(text('image_open_hint'))}[/dim]")
+        return "\n".join(lines)
+
+
 class UvAgentApp(App[None]):
     CSS = """
     Screen {
@@ -780,7 +966,10 @@ class UvAgentApp(App[None]):
     }
 
     #composer-meta {
-        display: none;
+        height: auto;
+        color: #8fa2b8;
+        padding: 0 1;
+        background: #0b0f14;
     }
 
     #composer {
@@ -814,6 +1003,8 @@ class UvAgentApp(App[None]):
         Binding("ctrl+o", "open_threads", "Threads", priority=True),
         Binding("ctrl+p", "open_command_palette", "Commands", priority=True),
         Binding("ctrl+d", "toggle_tool_details", "Details", priority=True),
+        Binding("f2", "attach_clipboard_image", "Attach image", priority=True),
+        Binding("f3", "preview_images", "Images", priority=True),
         Binding("ctrl+c", "interrupt_turn", "Interrupt", priority=True, show=False),
         Binding("enter", "focus_composer", "Focus composer", priority=True, show=False),
         Binding("f1", "help", "Help", priority=True),
@@ -824,6 +1015,8 @@ class UvAgentApp(App[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_tool_details":
+            return self.is_mounted and self.screen is self.default_screen
+        if action in {"attach_clipboard_image", "preview_images"}:
             return self.is_mounted and self.screen is self.default_screen
         if action == "focus_composer":
             if not self.is_mounted or self.screen is not self.default_screen:
@@ -845,7 +1038,6 @@ class UvAgentApp(App[None]):
         self._assistant_buffer = ""
         self._assistant_cell: TranscriptCell | None = None
         self._tool_cells: dict[str, TranscriptCell] = {}
-        self._queue: list[str] = []
         self._last_status = tr(self.language, "idle")
         self._spinner_index = 0
         self._last_tool_payload: dict[str, object] | None = None
@@ -865,6 +1057,7 @@ class UvAgentApp(App[None]):
         self._last_auto_copied_selection = ""
         self._composer_height_override: str | None = None
         self._composer_expanded = False
+        self._pending_images: list[PendingImage] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -952,31 +1145,47 @@ class UvAgentApp(App[None]):
     def action_submit_composer(self) -> None:
         composer = self.query_one("#composer", TextArea)
         prompt = composer.text.strip()
-        if not prompt:
+        pending_images = list(self._pending_images)
+        if not prompt and not pending_images:
             self._flash(self._text("write_first"))
             return
         composer.load_text("")
         self._last_composer_text = ""
         self._composer_height_override = None
         self._resize_composer("")
+        if not prompt:
+            prompt = self._text("image_only_prompt")
         if "\n" not in prompt and self._handle_command(prompt):
             return
+        image_paths = [image.path for image in pending_images]
+        self._pending_images.clear()
+        self._refresh_pending_images()
         active_run = self._active_run_state()
         if active_run is not None:
             run_state = active_run
-            run_state.queue.append(prompt)
+            run_state.queue.append(QueuedTurn(prompt=prompt, image_paths=image_paths))
             if self._is_active_thread(run_state.thread_id):
-                self._append_cell(f"[dim]{escape(self._text('queued'))}[/dim]\n{escape(prompt)}", "event")
+                self._append_cell(
+                    self._queued_turn_markup(prompt, image_paths),
+                    "event",
+                )
             self._refresh_status()
             return
-        self._start_turn(prompt)
+        self._start_turn(prompt, image_paths=image_paths)
 
-    def _start_turn(self, prompt: str) -> None:
+    def _start_turn(self, prompt: str, *, image_paths: list[Path] | None = None) -> None:
         if self.thread_id is None:
             self.thread_id = self.engine.thread_store.create_thread(self._text("new_thread"))
-        self._start_background_turn(self.thread_id, prompt)
+        self._start_background_turn(self.thread_id, prompt, image_paths=image_paths)
 
-    def _start_background_turn(self, thread_id: str, prompt: str, *, queue: list[str] | None = None) -> None:
+    def _start_background_turn(
+        self,
+        thread_id: str,
+        prompt: str,
+        *,
+        image_paths: list[Path] | None = None,
+        queue: list[QueuedTurn] | None = None,
+    ) -> None:
         cancel_event = asyncio.Event()
         run_state = ThreadRunState(
             thread_id=thread_id,
@@ -995,31 +1204,46 @@ class UvAgentApp(App[None]):
             self._tool_cells.clear()
             self._interrupt_armed = False
             self._append_user(prompt)
+            for image_path in image_paths or []:
+                self._append_cell(
+                    f"[dim]{escape(self._text('image_pending_sent'))}[/dim] "
+                    f"[cyan]{escape(Path(image_path).name)}[/cyan]",
+                    "event",
+                )
             self._reasoning_cell = self._append_cell(
                 f"[dim]{escape(self._text('thinking'))}...[/dim]",
                 "event",
             )
             self._sync_run_state_from_active(run_state)
             self._refresh_status(self._text("working"))
-        worker = self.run_worker(self._run_turn(prompt, thread_id), exclusive=False, thread=False)
+        worker = self.run_worker(
+            self._run_turn(prompt, thread_id, image_paths=list(image_paths or [])),
+            exclusive=False,
+            thread=False,
+        )
         run_state.worker = worker
         if self._is_active_thread(thread_id):
             self._current_worker = worker
             self._current_cancel_event = cancel_event
         self._refresh_active_run_state()
 
-    async def _run_turn(self, prompt: str, thread_id: str) -> None:
+    async def _run_turn(self, prompt: str, thread_id: str, *, image_paths: list[Path]) -> None:
         run_state = self._thread_runs[thread_id]
         try:
-            async for item in self.engine.run_turn(
-                user_text=prompt,
-                thread_id=thread_id,
-                level=self.level,
-                cancel_event=run_state.cancel_event,
-            ):
+            turn_kwargs: dict[str, Any] = {
+                "user_text": prompt,
+                "thread_id": thread_id,
+                "level": self.level,
+                "cancel_event": run_state.cancel_event,
+            }
+            if image_paths:
+                turn_kwargs["image_paths"] = image_paths
+            async for item in self.engine.run_turn(**turn_kwargs):
                 item_thread_id = str(item.get("thread_id") or thread_id)
                 event_type = item["type"]
-                if event_type == "assistant.delta":
+                if event_type == "image.attachment":
+                    await self._handle_thread_event(item_thread_id, "image.attachment", item, run_state)
+                elif event_type == "assistant.delta":
                     await self._handle_thread_event(item_thread_id, "assistant.delta", item, run_state)
                 elif event_type == "assistant.reasoning_delta":
                     await self._handle_thread_event(item_thread_id, "assistant.reasoning_delta", item, run_state)
@@ -1059,12 +1283,17 @@ class UvAgentApp(App[None]):
                 self._append_cell(error_markup(format_error(exc)), "error")
                 self._refresh_status(self._text("error"))
         finally:
-            next_prompt = run_state.queue.pop(0) if run_state.queue else None
-            if next_prompt is not None:
+            next_turn = run_state.queue.pop(0) if run_state.queue else None
+            if next_turn is not None:
                 remaining_queue = list(run_state.queue)
                 if self._is_active_thread(thread_id):
                     self.thread_id = thread_id
-                self._start_background_turn(thread_id, next_prompt, queue=remaining_queue)
+                self._start_background_turn(
+                    thread_id,
+                    next_turn.prompt,
+                    image_paths=next_turn.image_paths,
+                    queue=remaining_queue,
+                )
             else:
                 self._thread_runs.pop(thread_id, None)
                 if self._is_active_thread(thread_id):
@@ -1160,6 +1389,9 @@ class UvAgentApp(App[None]):
             await self._append_assistant_delta(str(item.get("text") or ""))
         elif event_type == "assistant.reasoning_delta":
             self._append_reasoning_delta(str(item.get("text") or ""))
+        elif event_type == "image.attachment":
+            attachment = item.get("attachment") or {}
+            self._append_image_attachment_cell(attachment)
         elif event_type == "tool.started":
             self._append_tool_started(item)
         elif event_type == "tool.output":
@@ -1229,6 +1461,34 @@ class UvAgentApp(App[None]):
             return
         self._open_tool_details_panel(cell)
 
+    def action_attach_clipboard_image(self) -> None:
+        try:
+            model = self.engine.config.model_for_level(self.level)
+        except ConfigError as exc:
+            self._flash(str(exc), severity="error")
+            return
+        if model.supports_images is False:
+            self._flash(self._text("image_model_disabled"), severity="error")
+            return
+        try:
+            image = save_clipboard_image(project_state_dir(self.project_root) / "clipboard")
+        except ClipboardImageError as exc:
+            self._flash(str(exc), severity="warning")
+            return
+        pending = PendingImage(path=image.path, width=image.width, height=image.height)
+        self._pending_images.append(pending)
+        self._refresh_pending_images()
+        self._flash(
+            f"{self._text('image_queued')} {image.width}x{image.height}",
+        )
+
+    def action_preview_images(self) -> None:
+        attachments = self._thread_image_attachments()
+        if not attachments:
+            self._flash(self._text("no_images"))
+            return
+        self.push_screen(ImagePreviewPanel(attachments, len(attachments) - 1))
+
     def _expandable_cells(self) -> list[ExpandableTranscriptCell]:
         try:
             transcript = self.query_one("#transcript", VerticalScroll)
@@ -1259,8 +1519,59 @@ class UvAgentApp(App[None]):
             index = len(cells) - 1
         return cells[(index + step) % len(cells)]
 
+    def _image_cells(self) -> list[ImageAttachmentCell]:
+        try:
+            transcript = self.query_one("#transcript", VerticalScroll)
+        except NoMatches:
+            return []
+        return [
+            child
+            for child in transcript.children
+            if isinstance(child, ImageAttachmentCell)
+        ]
+
+    def _focus_relative_image_cell(self, current: ImageAttachmentCell, step: int) -> None:
+        next_cell = self._relative_image_cell(current, step)
+        next_cell.focus()
+        next_cell.scroll_visible(animate=False)
+
+    def _relative_image_cell(self, current: ImageAttachmentCell, step: int) -> ImageAttachmentCell:
+        cells = self._image_cells()
+        if not cells:
+            return current
+        try:
+            index = cells.index(current)
+        except ValueError:
+            index = len(cells) - 1
+        return cells[(index + step) % len(cells)]
+
+    def _open_image_preview_for_cell(self, cell: ImageAttachmentCell) -> None:
+        attachments = self._thread_image_attachments()
+        if not attachments:
+            attachments = [cell.attachment]
+        index = next(
+            (
+                idx
+                for idx, attachment in enumerate(attachments)
+                if attachment.get("attachment_id") == cell.attachment.get("attachment_id")
+            ),
+            len(attachments) - 1,
+        )
+        self.push_screen(ImagePreviewPanel(attachments, index))
+
     def _open_tool_details_panel(self, cell: ExpandableTranscriptCell) -> None:
         self.push_screen(ToolDetailsPanel(cell))
+
+    def _thread_image_attachments(self) -> list[dict[str, Any]]:
+        if not self.thread_id:
+            return []
+        attachments: list[dict[str, Any]] = []
+        for event in self.engine.thread_store.read(self.thread_id):
+            if event.get("type") == "item.image_attachment":
+                attachment = event.get("attachment")
+                if isinstance(attachment, dict):
+                    attachments.append(attachment)
+        return attachments
 
     def action_help(self) -> None:
         self._open_help_panel()
@@ -1312,6 +1623,29 @@ class UvAgentApp(App[None]):
         self._last_auto_copied_selection = text
         self.notify(self._text("copied"), timeout=1.5)
 
+    def _refresh_pending_images(self) -> None:
+        try:
+            meta = self.query_one("#composer-meta", Static)
+        except NoMatches:
+            return
+        if not self._pending_images:
+            meta.update("")
+            return
+        labels = [
+            f"{image.path.name} {image.width}x{image.height}"
+            for image in self._pending_images
+        ]
+        meta.update(
+            f"[dim]{escape(self._text('pending_images'))}: "
+            f"{escape(', '.join(labels))}[/dim]"
+        )
+
+    def _queued_turn_markup(self, prompt: str, image_paths: list[Path]) -> str:
+        suffix = ""
+        if image_paths:
+            suffix = "\n" + f"[dim]+{len(image_paths)} {escape(self._text('images'))}[/dim]"
+        return f"[dim]{escape(self._text('queued'))}[/dim]\n{escape(prompt)}{suffix}"
+
     def _handle_command(self, prompt: str) -> bool:
         command, _, rest = prompt.partition(" ")
         if command == "/clear":
@@ -1319,10 +1653,12 @@ class UvAgentApp(App[None]):
             self._assistant_buffer = ""
             self._assistant_cell = None
             self._tool_cells.clear()
+            self._pending_images.clear()
             active_run = self._active_run_state()
             if active_run is not None:
                 active_run.queue.clear()
             self._reset_transcript()
+            self._refresh_pending_images()
             self._refresh_active_run_state()
             self._refresh_status(self._text("idle"))
             return True
@@ -1337,7 +1673,9 @@ class UvAgentApp(App[None]):
             self._reasoning_cell = None
             self._reasoning_buffer = ""
             self._tool_cells.clear()
+            self._pending_images.clear()
             self._reset_transcript()
+            self._refresh_pending_images()
             self._append_cell(
                 f"[dim]{escape(self._text('new_thread'))}[/dim] [cyan]{escape(short_thread(self.thread_id))}[/cyan]",
                 "event",
@@ -1389,6 +1727,8 @@ class UvAgentApp(App[None]):
             f"- [cyan]Ctrl+O[/cyan] [dim]{escape(self._text('help_threads'))}[/dim]",
             f"- [cyan]Ctrl+S[/cyan] [dim]{escape(self._text('help_status'))}[/dim]",
             f"- [cyan]Ctrl+D[/cyan] [dim]{escape(self._text('help_details'))}[/dim]",
+            f"- [cyan]F2[/cyan] [dim]{escape(self._text('help_attach_image'))}[/dim]",
+            f"- [cyan]F3[/cyan] [dim]{escape(self._text('help_preview_images'))}[/dim]",
             f"- [cyan]Tab[/cyan] [dim]{escape(self._text('help_height'))}[/dim]",
             f"- [cyan]Ctrl+C[/cyan] [dim]{escape(self._text('help_interrupt_quit'))}[/dim]",
             "",
@@ -1477,6 +1817,13 @@ class UvAgentApp(App[None]):
         if call_id:
             self._tool_cells[call_id] = cell
         self._refresh_status(self._text("running_python"))
+
+    def _append_image_attachment_cell(self, attachment: dict[str, Any]) -> ImageAttachmentCell:
+        self._mark_transcript_content()
+        cell = ImageAttachmentCell(attachment, classes="event", markup=True)
+        self.query_one("#transcript", VerticalScroll).mount(cell)
+        self._scroll_end()
+        return cell
 
     def _tool_call_preview(self, call: dict[str, Any]) -> str:
         raw_args = call.get("arguments") or ""
@@ -2425,11 +2772,7 @@ class UvAgentApp(App[None]):
                 self._append_expandable_cell(tool_timeline_markup(result), tool_detail_markup(result), "event")
             elif event_type == "item.image_attachment":
                 attachment = event.get("attachment") or {}
-                self._append_cell(
-                    f"[dim]{escape(self._text('image_attached'))}[/dim] "
-                    f"[cyan]{escape(str(attachment.get('stored_path') or ''))}[/cyan]",
-                    "event",
-                )
+                self._append_image_attachment_cell(attachment)
             elif event_type == "item.reasoning_delta":
                 self._append_reasoning_delta(str(event.get("text") or ""))
             elif event_type == "item.compaction":
@@ -2565,8 +2908,8 @@ class UvAgentApp(App[None]):
                 f"[dim]{escape(level_name)} · {escape(compact_context)} · "
                 f"{escape(short_thread(self.thread_id))}{queued}[/dim]"
             )
-        self.query_one("#composer-meta", Static).update("")
         self.query_one("#composer-footer", Static).update(footer)
+        self._refresh_pending_images()
 
     def _scroll_end(self) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)

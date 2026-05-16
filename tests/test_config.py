@@ -37,6 +37,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                         "provider": "p",
                         "model": "remote",
                         "api": "chat_completions",
+                        "supports_images": False,
                         "params": {"reasoning": {"effort": "low"}},
                         "reasoning_options": [{"name": "high"}],
                     }
@@ -61,6 +62,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert provider.resolved_api_key() == "secret"
     assert provider.endpoint_for_api("chat_completions").path == "/v1/chat/completions"
     assert model.api == "chat_completions"
+    assert model.supports_images is False
     assert model.params["reasoning"]["effort"] == "high"
     assert [option.name for option in config.reasoning_options_for_model(config.models["m"])] == ["high"]
     assert "uv-agent @ file:///" in config.runner.runtime_dependency

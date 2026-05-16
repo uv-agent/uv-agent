@@ -183,6 +183,65 @@ async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_agent_attaches_user_turn_images(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    image = tmp_path / "clipboard.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(auto_compress=False),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_image",
+                "output_text": "seen",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "seen"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="look", image_paths=[image])]
+    thread_id = str(events[-1]["thread_id"])
+
+    assert any(event["type"] == "image.attachment" for event in events)
+    assert any(event["type"] == "item.image_attachment" for event in engine.thread_store.read(thread_id))
+    assert any(
+        content.get("type") == "input_image"
+        for item in client.requests[0]["input"]
+        for content in item.get("content", [])
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     project_root = Path.cwd()
     config = load_config(project_root, [])

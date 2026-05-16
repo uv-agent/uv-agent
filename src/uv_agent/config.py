@@ -71,6 +71,7 @@ class ModelConfig:
     model: str
     api: str = "responses"
     context_window_tokens: int = 128_000
+    supports_images: bool | None = None
     params: dict[str, Any] = field(default_factory=dict)
     reasoning_options: list[ReasoningOption] = field(default_factory=list)
 
@@ -163,6 +164,7 @@ class AppConfig:
             model=model.model,
             api=model.api,
             context_window_tokens=model.context_window_tokens,
+            supports_images=model.supports_images,
             params=merged_params,
             reasoning_options=model.reasoning_options,
         )
