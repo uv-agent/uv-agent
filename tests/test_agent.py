@@ -138,8 +138,12 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
     events = [event async for event in engine.run_turn(user_text="hello")]
 
     stored = engine.thread_store.read(events[-1]["thread_id"])
-    assert any(event["type"] == "item.compaction" for event in stored)
+    compaction = next(event for event in stored if event["type"] == "item.compaction")
+    assert compaction["replacement_input"]
     assert client.requests[1]["level"] == "small"
+    assert client.requests[1]["tools"] == [PYTHON_TOOL]
+    assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
+    assert "context_compaction_request" in str(client.requests[1]["input"][-1])
 
 
 @pytest.mark.asyncio
@@ -252,7 +256,9 @@ async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path:
     thread_id = str(events[-1]["thread_id"])
 
     assert events[-1]["type"] == "turn.interrupted"
-    assert any(event["type"] == "turn.interrupted" for event in engine.thread_store.read(thread_id))
+    stored_events = engine.thread_store.read(thread_id)
+    assert any(event["type"] == "turn.interrupted" for event in stored_events)
+    assert not any(event["type"] == "item.assistant_delta" for event in stored_events)
 
     follow_client = FakeModelClient(
         [
@@ -670,6 +676,8 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     thread_id = events[-1]["thread_id"]
     stored_events = engine.thread_store.read(thread_id)
     assert any(event["type"] == "item.tool_output" for event in stored_events)
+    assert not any(event["type"] == "item.assistant_delta" for event in stored_events)
+    assert not any(event["type"] == "item.reasoning_delta" for event in stored_events)
 
 
 @pytest.mark.asyncio
@@ -1055,7 +1063,7 @@ async def test_agent_records_project_rule_context_update(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_compaction_does_not_include_project_rules(tmp_path: Path) -> None:
+async def test_compaction_request_reuses_main_prefix(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "AGENTS.md").write_text("Never persist this rule.", encoding="utf-8")
@@ -1123,11 +1131,12 @@ async def test_compaction_does_not_include_project_rules(tmp_path: Path) -> None
 
     assert events[-1]["type"] == "turn.completed"
     assert "Never persist this rule." in str(client.requests[0]["input"])
-    assert "Never persist this rule." not in str(client.requests[1]["input"])
+    assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
+    assert "context_compaction_request" in str(client.requests[1]["input"][-1])
 
 
 @pytest.mark.asyncio
-async def test_dynamic_context_only_appends_when_changed(tmp_path: Path) -> None:
+async def test_dynamic_context_is_reused_as_stable_prefix_until_changed(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     rules = project_root / "AGENTS.md"
@@ -1215,14 +1224,16 @@ async def test_dynamic_context_only_appends_when_changed(tmp_path: Path) -> None
     requests_text = [str(request["input"]) for request in client.requests[:2]]
 
     assert "Rule v1." in requests_text[0]
-    assert "Rule v1." not in requests_text[1]
+    assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
 
     rules.write_text("Rule v2.", encoding="utf-8")
     [event async for event in engine.run_turn(user_text="three", thread_id=first)]
+    assert client.requests[1]["input"] == client.requests[2]["input"][: len(client.requests[1]["input"])]
     assert "Rule v2." in str(client.requests[2]["input"])
 
     rules.unlink()
     [event async for event in engine.run_turn(user_text="four", thread_id=first)]
+    assert client.requests[2]["input"] == client.requests[3]["input"][: len(client.requests[2]["input"])]
     assert "Do not rely on older appended" in str(client.requests[3]["input"])
 
 
@@ -1266,7 +1277,7 @@ async def test_context_update_reappears_after_compaction(tmp_path: Path) -> None
     assert "After compaction rule." in str(second)
 
 
-def test_reconstruct_input_starts_after_latest_compaction(tmp_path: Path) -> None:
+def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = AppConfig(
@@ -1296,22 +1307,33 @@ def test_reconstruct_input_starts_after_latest_compaction(tmp_path: Path) -> Non
     )
     thread_id = engine.thread_store.create_thread()
     engine.thread_store.append(thread_id, "item.user", turn_id="t1", item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old"}]})
-    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    replacement = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "kept"}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "summary"}]},
+    ]
+    engine.thread_store.append(
+        thread_id,
+        "item.compaction",
+        turn_id="t1",
+        text="summary",
+        replacement_input=replacement,
+        usage={},
+    )
     engine.thread_store.append(thread_id, "item.user", turn_id="t2", item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]})
 
     reconstructed = engine._reconstruct_input(thread_id)
     text = str(reconstructed)
 
+    assert reconstructed[: len(replacement)] == replacement
+    assert "kept" in text
     assert "summary" in text
     assert "new" in text
     assert "old" not in text
 
 
-def test_image_attachment_reconstructs_after_compaction(tmp_path: Path) -> None:
+def test_context_update_reconstructs_as_stable_prefix(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
-    image = tmp_path / "image.png"
-    image.write_bytes(b"\x89PNG\r\n\x1a\n")
     config = AppConfig(
         providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
         models={
@@ -1338,25 +1360,23 @@ def test_image_attachment_reconstructs_after_compaction(tmp_path: Path) -> None:
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread()
-    attachment = engine.attachments.register_image(image, cwd=project_root, thread_id=thread_id)
-    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
     engine.thread_store.append(
         thread_id,
-        "item.image_attachment",
+        "item.context_update",
         turn_id="t1",
-        attachment=attachment.to_event_payload(),
+        context_fingerprint="fp",
+        context_state={"fingerprint": "fp", "parts": {"rules": "rules-fp"}},
+        context_kind="workspace",
+        removed=[],
+        text="stable rules",
     )
+    engine.thread_store.append(thread_id, "item.user", turn_id="t1", item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]})
 
     reconstructed = engine._reconstruct_input(thread_id)
 
-    assert any(
-        content.get("type") == "input_image"
-        for item in reconstructed
-        for content in item.get("content", [])
-    )
-    assert image_message_item(attachment.to_event_payload())["content"][1]["image_url"].startswith(
-        "data:image/png;base64,"
-    )
+    assert reconstructed[0]["role"] == "user"
+    assert "stable rules" in str(reconstructed[0])
+    assert "hello" in str(reconstructed[1])
 
 
 def test_refresh_config_updates_engine_and_runner(tmp_path: Path, monkeypatch) -> None:

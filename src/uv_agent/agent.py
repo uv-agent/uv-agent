@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import re
@@ -258,8 +259,7 @@ class AgentEngine:
         thread_id = thread_id or self.thread_store.create_thread("New thread")
         turn_id = new_id("turn")
         should_generate_title = self._should_generate_title(thread_id)
-        conversation_items = self._reconstruct_input(thread_id)
-        input_items = list(conversation_items)
+        input_items = self._reconstruct_input(thread_id)
         context_items = self._workspace_context_items(thread_id)
         self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
         user_item = message_item("user", user_text)
@@ -272,7 +272,6 @@ class AgentEngine:
         )
         input_items.extend(context_items)
         input_items.append(user_item)
-        conversation_items.append(user_item)
         for image_path in image_paths or []:
             attachment = self.attachments.register_image(
                 image_path,
@@ -289,7 +288,6 @@ class AgentEngine:
             )
             image_item = image_message_item(payload)
             input_items.append(image_item)
-            conversation_items.append(image_item)
             yield {
                 "type": "image.attachment",
                 "thread_id": thread_id,
@@ -298,6 +296,8 @@ class AgentEngine:
             }
 
         final_text = ""
+        assistant_parts: list[str] = []
+        reasoning_parts: list[str] = []
         try:
             for round_index in range(self.config.runtime.max_agent_rounds):
                 self._raise_if_cancelled(cancel_event)
@@ -309,12 +309,7 @@ class AgentEngine:
                 ):
                     self._raise_if_cancelled(cancel_event)
                     if stream_event.type == "text_delta" and stream_event.text:
-                        self.thread_store.append(
-                            thread_id,
-                            "item.assistant_delta",
-                            turn_id=turn_id,
-                            text=stream_event.text,
-                        )
+                        assistant_parts.append(stream_event.text)
                         yield {
                             "type": "assistant.delta",
                             "thread_id": thread_id,
@@ -322,12 +317,7 @@ class AgentEngine:
                             "text": stream_event.text,
                         }
                     elif stream_event.type == "reasoning_delta" and stream_event.text:
-                        self.thread_store.append(
-                            thread_id,
-                            "item.reasoning_delta",
-                            turn_id=turn_id,
-                            text=stream_event.text,
-                        )
+                        reasoning_parts.append(stream_event.text)
                         yield {
                             "type": "assistant.reasoning_delta",
                             "thread_id": thread_id,
@@ -361,17 +351,12 @@ class AgentEngine:
                     "response": response,
                 }
                 input_items.extend(response.output)
-                conversation_items.extend(response.output)
+                assistant_parts.clear()
+                reasoning_parts.clear()
 
                 tool_calls = [item for item in response.output if item.get("type") == "function_call"]
                 if not tool_calls:
                     final_text = response.output_text
-                    self.thread_store.append(
-                        thread_id,
-                        "item.assistant",
-                        turn_id=turn_id,
-                        text=final_text,
-                    )
                     break
 
                 for call in tool_calls:
@@ -401,11 +386,9 @@ class AgentEngine:
                         item=tool_output,
                     )
                     input_items.append(tool_output)
-                    conversation_items.append(tool_output)
                     for attachment in attachments:
                         image_item = image_message_item(attachment)
                         input_items.append(image_item)
-                        conversation_items.append(image_item)
                     yield {
                         "type": "tool.output",
                         "thread_id": thread_id,
@@ -416,6 +399,22 @@ class AgentEngine:
             else:
                 raise RuntimeError("Agent exceeded max_agent_rounds")
         except (asyncio.CancelledError, TurnInterrupted):
+            partial_text = "".join(assistant_parts).strip()
+            if partial_text:
+                self.thread_store.append(
+                    thread_id,
+                    "item.assistant_partial",
+                    turn_id=turn_id,
+                    text=partial_text,
+                )
+            reasoning_text = "".join(reasoning_parts).strip()
+            if reasoning_text:
+                self.thread_store.append(
+                    thread_id,
+                    "item.reasoning_partial",
+                    turn_id=turn_id,
+                    text=reasoning_text,
+                )
             self.thread_store.append(
                 thread_id,
                 "turn.interrupted",
@@ -438,7 +437,7 @@ class AgentEngine:
             turn_id=turn_id,
             final_text=final_text,
         )
-        compacted = await self._maybe_compact(thread_id, turn_id, conversation_items, level=level)
+        compacted = await self._maybe_compact(thread_id, turn_id, input_items, level=level)
         if compacted:
             yield {
                 "type": "compaction.completed",
@@ -556,30 +555,60 @@ class AgentEngine:
             model.context_window_tokens,
             target_ratio=self.config.runtime.compression.target_ratio,
         )
-        prompt = self.config.runtime.compression.prompt
-        compact_input = [
-            message_item(
-                "user",
-                prompt
-                + f"\n\nTarget length: about {target_tokens} tokens."
-                + "\n\nConversation items:\n"
-                + json.dumps(input_items, ensure_ascii=False),
-            )
-        ]
+        compact_input = list(input_items)
+        compact_input.append(self._compaction_trigger_item(target_tokens))
         response = await self.model_client.create_response(
             input_items=compact_input,
             level=compact_level,
-            tools=[],
-            instructions="Create a concise continuation summary for this uv-agent thread.",
+            tools=[PYTHON_TOOL],
+            instructions=self.system_instructions(),
         )
+        replacement_input = self._compaction_replacement_input(input_items, response)
+        context_state = self._latest_context_state(thread_id)
         self.thread_store.append(
             thread_id,
             "item.compaction",
             turn_id=turn_id,
             text=response.output_text,
+            output=response.output,
+            replacement_input=replacement_input,
+            context_state=context_state,
             usage=response.usage,
         )
         return True
+
+    def _compaction_trigger_item(self, target_tokens: int) -> dict[str, Any]:
+        prompt = self.config.runtime.compression.prompt
+        return message_item(
+            "user",
+            "<context_compaction_request>\n"
+            + prompt
+            + f"\n\nTarget length: about {target_tokens} tokens.\n"
+            + "Return only the continuation summary. Preserve user intent, decisions, "
+            + "file changes, tool results, and unresolved tasks. Do not restate workspace "
+            + "rules or capability declarations that remain present as retained context messages.\n"
+            + "</context_compaction_request>",
+        )
+
+    def _compaction_replacement_input(
+        self,
+        input_items: list[dict[str, Any]],
+        response: ModelResponse,
+    ) -> list[dict[str, Any]]:
+        replacement = [
+            copy.deepcopy(item)
+            for item in input_items
+            if self._retain_item_after_compaction(item)
+        ]
+        output = copy.deepcopy(response.output)
+        if not output and response.output_text.strip():
+            output = [assistant_output_item(response.output_text.strip())]
+        replacement.extend(output)
+        return replacement
+
+    @staticmethod
+    def _retain_item_after_compaction(item: dict[str, Any]) -> bool:
+        return item.get("type") == "message" and item.get("role") in {"system", "developer", "user"}
 
     async def _handle_tool_call(
         self,
@@ -753,21 +782,27 @@ class AgentEngine:
             if event.get("type") == "item.compaction":
                 last_compaction_index = index
         if last_compaction_index >= 0:
-            summary = str(events[last_compaction_index].get("text") or "").strip()
-            if summary:
-                input_items.append(
-                    message_item(
-                        "user",
-                        "<conversation_summary>\n"
-                        + summary
-                        + "\n</conversation_summary>\nContinue from this compacted context.",
+            compaction = events[last_compaction_index]
+            replacement_input = compaction.get("replacement_input")
+            if isinstance(replacement_input, list):
+                input_items.extend(copy.deepcopy(replacement_input))
+            else:
+                summary = str(compaction.get("text") or "").strip()
+                if summary:
+                    input_items.append(
+                        message_item(
+                            "user",
+                            "<conversation_summary>\n"
+                            + summary
+                            + "\n</conversation_summary>\nContinue from this compacted context.",
+                        )
                     )
-                )
-        for event in events[: last_compaction_index + 1]:
-            if event.get("type") == "item.image_attachment":
-                input_items.append(image_message_item(event["attachment"]))
         for event in events[last_compaction_index + 1 :]:
-            if event.get("type") == "item.user":
+            if event.get("type") == "item.context_update":
+                text = str(event.get("text") or "")
+                if text:
+                    input_items.append(message_item("user", text))
+            elif event.get("type") == "item.user":
                 input_items.append(event["item"])
             elif event.get("type") == "item.model_response":
                 input_items.extend(event.get("output") or [])
@@ -873,17 +908,17 @@ class AgentEngine:
     def _latest_context_state(self, thread_id: str | None) -> dict[str, Any] | None:
         if not thread_id:
             return None
-        after_compaction = False
         for event in reversed(self.thread_store.read(thread_id)):
             if event.get("type") == "item.context_update":
-                if after_compaction:
-                    return None
                 state = event.get("context_state")
                 if isinstance(state, dict):
                     return state
                 return {"fingerprint": str(event.get("context_fingerprint") or ""), "parts": {}}
             if event.get("type") == "item.compaction":
-                after_compaction = True
+                state = event.get("context_state")
+                if isinstance(state, dict):
+                    return state
+                return None
         return None
 
     def _turn_context_text(self) -> str:
@@ -1003,6 +1038,14 @@ def message_item(role: str, text: str) -> dict[str, Any]:
         "type": "message",
         "role": role,
         "content": [{"type": "input_text", "text": text}],
+    }
+
+
+def assistant_output_item(text: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}],
     }
 
 
