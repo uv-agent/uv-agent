@@ -53,9 +53,30 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert model.params["reasoning"]["effort"] == "high"
     assert config.runtime.title_generation.enabled is True
     assert config.runtime.title_generation.model_level == "quick"
-    assert "uv-agent @ file:///" in config.runner.runtime_dependency
-    assert config.runner.default_uv_args == ["--reinstall-package", "uv-agent"]
+    assert config.runner.runtime_dependency == "uv-agent==0.1.0"
+    assert config.runner.default_uv_args == []
     assert config.runner.max_saved_scripts == 32
+
+
+def test_runtime_dependency_can_be_overridden_for_local_development(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    project_root = tmp_path / "workspace"
+    project_root.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "runner": {
+                    "runtime_dependency": f"uv-agent @ {project_root.resolve().as_uri()}",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(project_root, [config_path])
+
+    assert config.runner.runtime_dependency.startswith("uv-agent @ file:///")
+    assert config.runner.default_uv_args == ["--reinstall-package", "uv-agent"]
 
 
 def test_legacy_reasoning_option_fields_are_ignored(tmp_path: Path) -> None:

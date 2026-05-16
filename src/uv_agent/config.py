@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from importlib.metadata import PackageNotFoundError, version
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from uv_agent.paths import project_config_path, project_local_dir, user_config_p
 
 
 SENSITIVE_KEYS = {"api_key", "authorization", "token", "secret", "password"}
+DEFAULT_PACKAGE_NAME = "uv-agent"
 
 
 class ConfigError(ValueError):
@@ -170,7 +172,7 @@ class AppConfig:
             raise ConfigError(f"Unknown provider for model {model.name}: {model.provider}") from exc
 
 def default_config(project_root: Path) -> dict[str, Any]:
-    runtime_dependency = f"uv-agent @ {project_root.resolve().as_uri()}"
+    runtime_dependency = default_runtime_dependency(DEFAULT_PACKAGE_NAME)
     return {
         "providers": {},
         "models": {},
@@ -201,8 +203,7 @@ def default_config(project_root: Path) -> dict[str, Any]:
         },
         "runner": {
             "runtime_dependency": runtime_dependency,
-            "runtime_package_name": "uv-agent",
-            "default_uv_args": default_runtime_uv_args(runtime_dependency, "uv-agent"),
+            "runtime_package_name": DEFAULT_PACKAGE_NAME,
             "default_timeout_s": 60,
             "max_output_bytes": 1_000_000,
             "max_saved_scripts": 32,
@@ -304,24 +305,20 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         title_generation=title_generation,
     )
     runner_raw = raw.get("runner", {})
+    runner_package_name = runner_raw.get("runtime_package_name", DEFAULT_PACKAGE_NAME)
+    runner_dependency = runner_raw.get(
+        "runtime_dependency",
+        default_runtime_dependency(runner_package_name),
+    )
+    runner_uv_args = (
+        list(runner_raw["default_uv_args"])
+        if "default_uv_args" in runner_raw
+        else default_runtime_uv_args(runner_dependency, runner_package_name)
+    )
     runner = RunnerConfig(
-        runtime_dependency=runner_raw.get(
-            "runtime_dependency",
-            f"uv-agent @ {project_root.resolve().as_uri()}",
-        ),
-        runtime_package_name=runner_raw.get("runtime_package_name", "uv-agent"),
-        default_uv_args=list(
-            runner_raw.get(
-                "default_uv_args",
-                default_runtime_uv_args(
-                    runner_raw.get(
-                        "runtime_dependency",
-                        f"uv-agent @ {project_root.resolve().as_uri()}",
-                    ),
-                    runner_raw.get("runtime_package_name", "uv-agent"),
-                ),
-            )
-        ),
+        runtime_dependency=runner_dependency,
+        runtime_package_name=runner_package_name,
+        default_uv_args=runner_uv_args,
         default_timeout_s=float(runner_raw.get("default_timeout_s", 60)),
         max_output_bytes=int(runner_raw.get("max_output_bytes", 1_000_000)),
         max_saved_scripts=int(runner_raw.get("max_saved_scripts", 32)),
@@ -391,3 +388,12 @@ def default_runtime_uv_args(runtime_dependency: str, package_name: str) -> list[
     if " @ file:" not in runtime_dependency:
         return []
     return ["--reinstall-package", package_name]
+
+
+def default_runtime_dependency(package_name: str = DEFAULT_PACKAGE_NAME) -> str:
+    """Return the installable package spec injected into managed scripts."""
+    try:
+        package_version = version(package_name)
+    except PackageNotFoundError:
+        return package_name
+    return f"{package_name}=={package_version}"
