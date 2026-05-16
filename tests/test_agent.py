@@ -354,7 +354,13 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<host>" in prompt
     assert "<user_language>" in prompt
     assert "</runtime_helpers>" in prompt
-    assert "ask(prompt, level=\"small\"|\"medium\"|\"large\")" in prompt
+    assert 'requires-python = ">=3.12"' in prompt
+    assert '# dependencies = [' in prompt
+    assert "plain Python source without a metadata block" in prompt
+    assert "not a temporary-script wrapper" in prompt
+    assert "temporary nested uv-agent subprocess" in prompt
+    assert "summarizing a thread" in prompt
+    assert "Mentions are plain-text hints only" in prompt
     assert "saved_scripts(limit=32)" in prompt
     assert "Rules, skills, and MCP declarations are appended only when first seen" in prompt
     assert "demo (project)" not in prompt
