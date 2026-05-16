@@ -28,9 +28,15 @@ from uv_agent.tui.app import (
     FullscreenPanel,
     ImageAttachmentCell,
     ImagePreviewPanel,
+    TranscriptScroll,
     ToolDetailsPanel,
     UvAgentApp,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_uv_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
 
 
 class BlockingEngine(AgentEngine):
@@ -277,6 +283,62 @@ async def test_tui_short_text_panel_ignores_unavailable_scroll_actions(
 
 
 @pytest.mark.asyncio
+async def test_tui_scroll_y_changes_do_not_disable_auto_follow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(80, 12)) as pilot:
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        for index in range(30):
+            app._append_cell(f"line {index}\nextra text", "event")
+        await pilot.pause(0.2)
+
+        assert transcript.max_scroll_y > 0
+        transcript.follow_tail = True
+        transcript.scroll_y = max(0, transcript.scroll_y - 3)
+        await pilot.pause()
+
+        assert transcript.follow_tail is True
+
+
+@pytest.mark.asyncio
+async def test_tui_user_scroll_disables_auto_follow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(80, 12)) as pilot:
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        for index in range(30):
+            app._append_cell(f"line {index}\nextra text", "event")
+        await pilot.pause(0.2)
+        transcript.engage_follow_tail()
+        await pilot.pause(0.2)
+
+        assert transcript.follow_tail is True
+        transcript.action_page_up()
+        await pilot.pause()
+
+        assert transcript.follow_tail is False
+        assert not app.query_one("#scroll-to-bottom-bar").has_class("hidden")
+
+
+@pytest.mark.asyncio
 async def test_tui_command_picker_supports_keyboard_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -465,6 +527,123 @@ async def test_tui_enter_keeps_newline_when_composer_has_focus(
 
 
 @pytest.mark.asyncio
+async def test_tui_composer_up_down_browses_recent_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        app._remember_composer_input("first prompt")
+        app._remember_composer_input("second prompt")
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.text == "second prompt"
+        assert composer.cursor_location == composer.document.end
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.text == "first prompt"
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.text == "second prompt"
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.text == ""
+
+
+@pytest.mark.asyncio
+async def test_tui_composer_up_keeps_normal_editing_when_text_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        app._remember_composer_input("previous prompt")
+        composer.insert("draft")
+
+        await pilot.press("up")
+        await pilot.pause()
+
+        assert composer.text == "draft"
+        assert app._composer_history_index is None
+
+
+@pytest.mark.asyncio
+async def test_tui_composer_history_is_bounded_and_skips_consecutive_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        for index in range(55):
+            app._remember_composer_input(f"prompt {index}")
+        app._remember_composer_input("prompt 54")
+
+        assert len(app._composer_history) == 50
+        assert app._composer_history[0] == "prompt 5"
+        assert app._composer_history[-1] == "prompt 54"
+
+        await pilot.press("up")
+        await pilot.pause()
+
+        assert composer.text == "prompt 54"
+
+
+@pytest.mark.asyncio
+async def test_tui_composer_history_persists_globally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, state_dir),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)):
+        app._remember_composer_input("persisted prompt")
+
+    restarted = UvAgentApp(project_root=project_root)
+    async with restarted.run_test(size=(90, 24)) as pilot:
+        composer = restarted.query_one("#composer", TextArea)
+
+        await pilot.press("up")
+        await pilot.pause()
+
+        assert composer.text == "persisted prompt"
+
+
+@pytest.mark.asyncio
 async def test_tui_composer_expands_and_collapses_with_tab_without_button(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -639,10 +818,15 @@ async def test_tui_mention_picker_does_not_reopen_when_backspacing_to_trigger(
 
 
 @pytest.mark.asyncio
-async def test_tui_mcp_and_skill_mentions_insert_plain_text(
+async def test_tui_mcp_and_skill_mentions_are_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """`@mcp:` / `@skill:` triggers were removed; use /mcp and /skills instead.
+
+    Typing those literal strings must leave the composer alone (no popup) so the
+    user can still type the same prefix as plain text without losing focus.
+    """
     project_root = tmp_path / "project"
     agents_dir = project_root / ".agents"
     skill_dir = agents_dir / "skills" / "demo"
@@ -670,27 +854,33 @@ async def test_tui_mcp_and_skill_mentions_insert_plain_text(
 
     async with app.run_test(size=(90, 24)) as pilot:
         composer = app.query_one("#composer", TextArea)
+        baseline_screens = len(app.screen_stack)
+
         composer.insert("@mcp:")
         await pilot.pause()
-
-        panel = app.screen_stack[-1]
-        assert isinstance(panel, FullscreenPanel)
-        assert panel.panel_title == app._text("mention_mcp")
-
-        await pilot.press("enter")
-        await pilot.pause()
-        assert composer.text == "@mcp:files "
+        assert len(app.screen_stack) == baseline_screens
+        assert composer.text == "@mcp:"
 
         composer.insert("@skill：")
         await pilot.pause()
+        assert len(app.screen_stack) == baseline_screens
+        assert composer.text == "@mcp:@skill："
 
+        # The /mcp and /skills slash commands must still surface inspection
+        # pickers using the same underlying data.
+        app._open_mcp_panel()
+        await pilot.pause()
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
-        assert panel.panel_title == app._text("mention_skills")
-
-        await pilot.press("enter")
+        assert panel.panel_title == app._text("mcp")
+        await pilot.press("escape")
         await pilot.pause()
-        assert composer.text == "@mcp:files @skill:demo "
+
+        app._open_skills_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("skills")
 
 
 @pytest.mark.asyncio
@@ -784,10 +974,15 @@ async def test_tui_config_panel_sets_default_level_and_writes_editable_config(
 
 
 @pytest.mark.asyncio
-async def test_tui_config_panel_sets_reasoning_option(
+async def test_tui_models_panel_is_read_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """`/models` must list configured models without offering edits.
+
+    Model and level definitions belong in `config.json`; the TUI may only let
+    the user switch the active level at runtime via `/level`.
+    """
     monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -801,7 +996,6 @@ async def test_tui_config_panel_sets_reasoning_option(
                         "base_url": "https://example.com",
                         "reasoning_options": [
                             {"name": "low", "label": "Low", "params": {"reasoning": {"effort": "low"}}},
-                            {"name": "high", "label": "High", "params": {"reasoning": {"effort": "high"}}},
                         ],
                     }
                 },
@@ -822,20 +1016,51 @@ async def test_tui_config_panel_sets_reasoning_option(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24)) as pilot:
-        app._open_reasoning_level_panel()
+        app._open_models_panel()
         await pilot.pause()
 
-        await pilot.press("down")
-        await pilot.press("enter")
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("models")
+        # The picker must list every configured model and nothing else;
+        # no "level ..." rows that would imply runtime level switching here.
+        ids = [item.id for item in panel.items]
+        assert ids == ["default"]
+        # Subtitle must steer the user to the config file for any edits.
+        assert app._text("models_edit_hint") in panel.subtitle
+
+
+@pytest.mark.asyncio
+async def test_tui_config_panel_omits_model_editing_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/config` must not offer level→model or reasoning editing rows."""
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_config_panel()
         await pilot.pause()
 
-        await pilot.press("down")
-        await pilot.press("enter")
-        await pilot.pause()
-
-        data = __import__("json").loads(config_path.read_text(encoding="utf-8"))
-        assert data["levels"]["medium"]["reasoning"] == "low"
-        assert app.engine.config.model_for_level("medium").params["reasoning"]["effort"] == "low"
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        ids = [item.id for item in panel.items]
+        assert "default_level" in ids
+        assert "level_models" not in ids
+        assert "current_level" not in ids
+        assert "reasoning" not in ids
+        # Helpers used by the removed flows must also be gone.
+        assert not hasattr(app, "_open_reasoning_level_panel")
+        assert not hasattr(app, "_open_level_model_panel")
+        assert not hasattr(app, "_set_level_model_from_choice")
+        assert not hasattr(app, "_set_level_reasoning_from_choice")
 
 
 @pytest.mark.asyncio
@@ -960,9 +1185,9 @@ async def test_tui_markdown_assistant_selection_is_visibly_highlighted(
         assert app._assistant_cell is not None
 
         await pilot.pause(0.2)
-        await pilot.mouse_down(app._assistant_cell, offset=(2, 0))
-        await pilot.hover(app._assistant_cell, offset=(10, 0))
-        await pilot.mouse_up(app._assistant_cell, offset=(10, 0))
+        await pilot.mouse_down(app._assistant_cell, offset=(1, 0))
+        await pilot.hover(app._assistant_cell, offset=(9, 0))
+        await pilot.mouse_up(app._assistant_cell, offset=(9, 0))
         await pilot.pause()
 
         strip = app._assistant_cell.render_line(0)
@@ -998,9 +1223,9 @@ async def test_tui_mouse_drag_selects_and_copies_assistant_reply(
         assert app._assistant_cell is not None
         await pilot.pause(0.2)
 
-        await pilot.mouse_down(app._assistant_cell, offset=(2, 0))
-        await pilot.hover(app._assistant_cell, offset=(10, 0))
-        await pilot.mouse_up(app._assistant_cell, offset=(10, 0))
+        await pilot.mouse_down(app._assistant_cell, offset=(1, 0))
+        await pilot.hover(app._assistant_cell, offset=(9, 0))
+        await pilot.mouse_up(app._assistant_cell, offset=(9, 0))
         await pilot.pause(1.1)
 
         assert app.screen.get_selected_text() == "agent rep"

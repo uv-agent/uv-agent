@@ -43,6 +43,7 @@ from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.skills import discover_skills
 from uv_agent.tui.formatting import (
+    format_elapsed,
     format_tokens,
     parse_tool_payload,
     short_thread,
@@ -55,6 +56,8 @@ from uv_agent.tui.formatting import (
 COMPOSER_COLLAPSED_HEIGHT = 5
 COMPOSER_BOTTOM_RESERVED_ROWS = 2
 QUIT_KEY_DEBOUNCE_SECONDS = 0.08
+MAX_COMPOSER_HISTORY = 50
+COMPOSER_HISTORY_FILENAME = "composer_history.json"
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,14 @@ class FullscreenPanel(ModalScreen[str | None]):
         border: tall #1f2b3a;
         background: #0a0f15;
         padding: 0 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-background: #0a0f15;
+        scrollbar-background-hover: #0a0f15;
+        scrollbar-background-active: #0a0f15;
+        scrollbar-color: #2b3542;
+        scrollbar-color-hover: #3a4a60;
+        scrollbar-color-active: #7dd3fc;
+        scrollbar-corner-color: #0a0f15;
     }
 
     #panel-body {
@@ -120,6 +131,14 @@ class FullscreenPanel(ModalScreen[str | None]):
         border: tall #1f2b3a;
         background: #0a0f15;
         padding: 1 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-background: #0a0f15;
+        scrollbar-background-hover: #0a0f15;
+        scrollbar-background-active: #0a0f15;
+        scrollbar-color: #2b3542;
+        scrollbar-color-hover: #3a4a60;
+        scrollbar-color-active: #7dd3fc;
+        scrollbar-corner-color: #0a0f15;
     }
 
     #panel-footer {
@@ -132,6 +151,14 @@ class FullscreenPanel(ModalScreen[str | None]):
         height: 1fr;
         border: none;
         background: #0a0f15;
+        scrollbar-size-vertical: 1;
+        scrollbar-background: #0a0f15;
+        scrollbar-background-hover: #0a0f15;
+        scrollbar-background-active: #0a0f15;
+        scrollbar-color: #2b3542;
+        scrollbar-color-hover: #3a4a60;
+        scrollbar-color-active: #7dd3fc;
+        scrollbar-corner-color: #0a0f15;
     }
     """
 
@@ -227,14 +254,6 @@ class FullscreenPanel(ModalScreen[str | None]):
             event.stop()
             self._switch_mention_kind("thread", filter_value="@")
             return
-        if self.mention_kind == "mcp" and event.key in {"backspace", "ctrl+h"} and filter_input.value == "":
-            event.stop()
-            self.dismiss(None)
-            return
-        if self.mention_kind == "skill" and event.key in {"backspace", "ctrl+h"} and filter_input.value == "":
-            event.stop()
-            self.dismiss(None)
-            return
         if event.key == "backspace":
             event.stop()
             if self.mention_kind == "thread" and filter_input.value == "@":
@@ -257,19 +276,6 @@ class FullscreenPanel(ModalScreen[str | None]):
         query = value.casefold().strip()
         if self.mention_kind == "thread" and query.startswith("@"):
             query = query[1:].strip()
-        if self.mention_kind == "mcp" and query.startswith("@mcp:"):
-            query = query.removeprefix("@mcp:").strip()
-        if self.mention_kind == "mcp" and query.startswith("@mcp："):
-            query = query.removeprefix("@mcp：").strip()
-        if self.mention_kind == "skill":
-            if query.startswith("@skills:"):
-                query = query.removeprefix("@skills:").strip()
-            elif query.startswith("@skills："):
-                query = query.removeprefix("@skills：").strip()
-            elif query.startswith("@skill:"):
-                query = query.removeprefix("@skill:").strip()
-            elif query.startswith("@skill："):
-                query = query.removeprefix("@skill：").strip()
         if not query:
             self._filtered = list(self.items)
         else:
@@ -506,6 +512,129 @@ class ThreadRunState:
     tool_cells: dict[str, TranscriptCell] = field(default_factory=dict)
 
 
+class TranscriptScroll(VerticalScroll):
+    """VerticalScroll that auto-follows tail until the user intervenes.
+
+    The streaming SSE renderer used to call `scroll_end` on every delta, which
+    fought the user when they were dragging the scrollbar to read history. As
+    soon as the user moves the scroll position themselves we drop the
+    `follow_tail` flag and never re-enable it on our own — the user has to
+    click the "back to bottom" button (or trigger `engage_follow_tail`) to
+    resume auto-follow.
+    """
+
+    follow_tail = reactive(True)
+    # Independent of follow_tail: True whenever the viewport is at (or within
+    # a small slack from) the bottom, regardless of how it got there. Drives
+    # the "back to bottom" button visibility so the button hides as soon as
+    # the user is already at the bottom, even if they got there by scrolling
+    # manually rather than via the button.
+    near_bottom = reactive(True)
+
+    _BOTTOM_THRESHOLD = 2
+
+    def programmatic_scroll_end(self) -> None:
+        # Defer the actual scroll to after the next refresh so any pending
+        # mount/update has had a chance to recompute virtual_size; otherwise
+        # `scroll_end` reads a stale `max_scroll_y` and only crawls along
+        # one row at a time during streaming.
+        def _do() -> None:
+            self.scroll_end(animate=False, immediate=True)
+            self._recompute_near_bottom()
+
+        self.call_after_refresh(_do)
+
+    def engage_follow_tail(self) -> None:
+        self.follow_tail = True
+        self.programmatic_scroll_end()
+
+    def _disengage_follow_tail(self) -> None:
+        if self.follow_tail:
+            self.follow_tail = False
+
+    def _disengage_follow_tail_if_scrolled(self, old_scroll_y: float) -> None:
+        if self.scroll_y != old_scroll_y:
+            self._disengage_follow_tail()
+
+    def _disengage_follow_tail_for_target(self, target_y: float) -> None:
+        if self.validate_scroll_y(target_y) != self.scroll_y:
+            self._disengage_follow_tail()
+
+    def _recompute_near_bottom(self) -> None:
+        # When there's nothing to scroll, the bottom is trivially "right here"
+        # so the button stays hidden.
+        if self.max_scroll_y <= 0:
+            self.near_bottom = True
+            return
+        self.near_bottom = (self.max_scroll_y - self.scroll_y) <= self._BOTTOM_THRESHOLD
+
+    def watch_scroll_y(self, old: float, new: float) -> None:
+        super().watch_scroll_y(old, new)
+        self._recompute_near_bottom()
+
+    def watch_virtual_size(self, old: Any, new: Any) -> None:
+        # Content height changed (new cells appended, expand/collapse, etc.)
+        # so the distance-from-bottom may have changed even though scroll_y
+        # did not.
+        self._recompute_near_bottom()
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        old_scroll_y = self.scroll_y
+        super()._on_mouse_scroll_up(event)
+        self._disengage_follow_tail_if_scrolled(old_scroll_y)
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        old_scroll_y = self.scroll_y
+        super()._on_mouse_scroll_down(event)
+        self._disengage_follow_tail_if_scrolled(old_scroll_y)
+
+    def _on_scroll_up(self, event: Any) -> None:
+        self._disengage_follow_tail_for_target(
+            self.scroll_y - self.scrollable_content_region.height
+        )
+        super()._on_scroll_up(event)
+
+    def _on_scroll_down(self, event: Any) -> None:
+        self._disengage_follow_tail_for_target(
+            self.scroll_y + self.scrollable_content_region.height
+        )
+        super()._on_scroll_down(event)
+
+    def _on_scroll_to(self, message: Any) -> None:
+        y = getattr(message, "y", None)
+        if y is not None and y != self.scroll_y:
+            self._disengage_follow_tail()
+        super()._on_scroll_to(message)
+
+    def action_scroll_up(self) -> None:
+        self._disengage_follow_tail_for_target(self.scroll_target_y - 1)
+        super().action_scroll_up()
+
+    def action_scroll_down(self) -> None:
+        self._disengage_follow_tail_for_target(self.scroll_target_y + 1)
+        super().action_scroll_down()
+
+    def action_page_up(self) -> None:
+        self._disengage_follow_tail_for_target(
+            self.scroll_y - self.scrollable_content_region.height
+        )
+        super().action_page_up()
+
+    def action_page_down(self) -> None:
+        self._disengage_follow_tail_for_target(
+            self.scroll_y + self.scrollable_content_region.height
+        )
+        super().action_page_down()
+
+    def action_scroll_home(self) -> None:
+        self._disengage_follow_tail_for_target(0)
+        super().action_scroll_home()
+
+    def action_scroll_end(self) -> None:
+        super().action_scroll_end()
+        self.follow_tail = True
+
+
 class EmptyState(Static):
     """Animated empty transcript state."""
 
@@ -541,6 +670,20 @@ class EmptyState(Static):
 class ComposerTextArea(TextArea):
     """Composer text area with Ctrl+C reserved for app-level interrupt/quit."""
 
+    def action_cursor_up(self, select: bool = False) -> None:
+        if not select:
+            handler = getattr(self.app, "_handle_composer_history_key", None)
+            if callable(handler) and handler(self, "up"):
+                return
+        super().action_cursor_up(select)
+
+    def action_cursor_down(self, select: bool = False) -> None:
+        if not select:
+            handler = getattr(self.app, "_handle_composer_history_key", None)
+            if callable(handler) and handler(self, "down"):
+                return
+        super().action_cursor_down(select)
+
     def action_copy(self) -> None:
         super().action_copy()
         app = self.app
@@ -554,6 +697,44 @@ class ComposerTextArea(TextArea):
             key.strip() for key in binding.key.split(",")
         )
     ]
+
+
+def composer_history_path() -> Path:
+    return uv_agent_home() / COMPOSER_HISTORY_FILENAME
+
+
+def load_composer_history() -> list[str]:
+    path = composer_history_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    raw_items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(raw_items, list):
+        return []
+    items: list[str] = []
+    for value in raw_items:
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if not text:
+            continue
+        if items and items[-1] == text:
+            continue
+        items.append(text)
+    return items[-MAX_COMPOSER_HISTORY:]
+
+
+def save_composer_history(items: list[str]) -> None:
+    path = composer_history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    payload = {"items": items[-MAX_COMPOSER_HISTORY:]}
+    tmp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
 
 
 class TranscriptCell(Static):
@@ -571,25 +752,32 @@ class TranscriptCell(Static):
     TranscriptCell.user {
         background: #111a24;
         color: #dce7f3;
-        border-left: solid #2e9ad8;
     }
 
     TranscriptCell.assistant {
-        background: #0f151d;
+        background: #101a17;
         color: #e5e7eb;
-        border-left: solid #516071;
     }
 
     TranscriptCell.event {
         background: #0e141b;
         color: #aeb7c4;
-        border-left: solid #2b3542;
+    }
+
+    TranscriptCell.reasoning {
+        background: #0c1219;
+        color: #9aa6b6;
+        text-style: italic;
+    }
+
+    TranscriptCell.tool_pending {
+        background: #0e141b;
+        color: #c8d2e0;
     }
 
     TranscriptCell.error {
         background: #241316;
         color: #ffb4b4;
-        border-left: solid #e26363;
     }
     """
 
@@ -947,6 +1135,14 @@ class UvAgentApp(App[None]):
         min-height: 6;
         padding: 1 2 0 1;
         background: #0b0f14;
+        scrollbar-size-vertical: 1;
+        scrollbar-background: #0b0f14;
+        scrollbar-background-hover: #0b0f14;
+        scrollbar-background-active: #0b0f14;
+        scrollbar-color: #2b3542;
+        scrollbar-color-hover: #3a4a60;
+        scrollbar-color-active: #7dd3fc;
+        scrollbar-corner-color: #0b0f14;
     }
 
     #bottom-pane {
@@ -970,6 +1166,31 @@ class UvAgentApp(App[None]):
         color: #8fa2b8;
         padding: 0 1;
         background: #0b0f14;
+    }
+
+    #scroll-to-bottom-bar {
+        height: auto;
+        align: right top;
+        background: #0b0f14;
+        padding: 0 1;
+    }
+
+    #scroll-to-bottom-btn {
+        width: auto;
+        height: 1;
+        color: #7dd3fc;
+        background: #1a2330;
+        padding: 0 2;
+        text-style: bold;
+    }
+
+    #scroll-to-bottom-btn:hover {
+        background: #2b3542;
+        color: #ffffff;
+    }
+
+    #scroll-to-bottom-bar.hidden {
+        display: none;
     }
 
     #composer {
@@ -1013,6 +1234,18 @@ class UvAgentApp(App[None]):
 
     busy = reactive(False)
 
+    def watch_busy(self, old: bool, new: bool) -> None:
+        # Track when work begins so the status footer can render a live elapsed
+        # timer alongside the spinner, codex-style. When the turn ends we must
+        # also re-render the footer immediately; otherwise the busy branch (with
+        # spinner + "Working") keeps showing until the next unrelated refresh.
+        if new and not old:
+            self._busy_started_at = monotonic()
+        elif old and not new:
+            self._busy_started_at = None
+            if self.is_mounted:
+                self._refresh_status()
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_tool_details":
             return self.is_mounted and self.screen is self.default_screen
@@ -1040,7 +1273,11 @@ class UvAgentApp(App[None]):
         self._tool_cells: dict[str, TranscriptCell] = {}
         self._last_status = tr(self.language, "idle")
         self._spinner_index = 0
+        self._busy_started_at: float | None = None
         self._last_tool_payload: dict[str, object] | None = None
+        self._composer_history: list[str] = load_composer_history()
+        self._composer_history_index: int | None = None
+        self._composer_history_draft = ""
         self._quit_armed = False
         self._last_quit_request_at = 0.0
         self._transcript_has_content = False
@@ -1061,9 +1298,14 @@ class UvAgentApp(App[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
-            with VerticalScroll(id="transcript"):
+            with TranscriptScroll(id="transcript"):
                 yield EmptyState()
             with Vertical(id="bottom-pane"):
+                with Vertical(id="scroll-to-bottom-bar", classes="hidden"):
+                    yield Static(
+                        f"↓ {tr(self.language, 'back_to_bottom')}",
+                        id="scroll-to-bottom-btn",
+                    )
                 with Vertical(id="composer-shell"):
                     yield Static("", id="composer-meta")
                     yield ComposerTextArea(
@@ -1081,6 +1323,28 @@ class UvAgentApp(App[None]):
         self._refresh_status(self._text("idle"))
         self.set_interval(0.16, self._tick, name="spinner")
         self.query_one("#composer", TextArea).focus()
+        transcript = self.query_one("#transcript", TranscriptScroll)
+        self.watch(transcript, "near_bottom", self._on_near_bottom_changed)
+
+    def _on_near_bottom_changed(self, near: bool) -> None:
+        try:
+            bar = self.query_one("#scroll-to-bottom-bar", Vertical)
+        except NoMatches:
+            return
+        if near:
+            bar.add_class("hidden")
+        else:
+            bar.remove_class("hidden")
+
+    def on_click(self, event: events.Click) -> None:
+        widget = getattr(event, "widget", None)
+        if widget is not None and widget.id == "scroll-to-bottom-btn":
+            event.stop()
+            try:
+                transcript = self.query_one("#transcript", TranscriptScroll)
+            except NoMatches:
+                return
+            transcript.engage_follow_tail()
 
     def on_resize(self) -> None:
         self._refresh_status()
@@ -1090,6 +1354,8 @@ class UvAgentApp(App[None]):
             return
         previous = self._last_composer_text
         current = event.text_area.text
+        if self._composer_history_index is not None and current != self._composer_history_text():
+            self._reset_composer_history_navigation()
         self._last_composer_text = current
         self._resize_composer(current)
         self._refresh_status()
@@ -1149,6 +1415,9 @@ class UvAgentApp(App[None]):
         if not prompt and not pending_images:
             self._flash(self._text("write_first"))
             return
+        if prompt:
+            self._remember_composer_input(prompt)
+        self._reset_composer_history_navigation()
         composer.load_text("")
         self._last_composer_text = ""
         self._composer_height_override = None
@@ -1308,11 +1577,69 @@ class UvAgentApp(App[None]):
     def action_clear_input(self) -> None:
         composer = self.query_one("#composer", TextArea)
         if composer.text:
+            self._reset_composer_history_navigation()
             composer.load_text("")
             self._last_composer_text = ""
             self._composer_height_override = None
             self._resize_composer("")
             return
+
+    def _remember_composer_input(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        if self._composer_history and self._composer_history[-1] == text:
+            return
+        self._composer_history.append(text)
+        overflow = len(self._composer_history) - MAX_COMPOSER_HISTORY
+        if overflow > 0:
+            del self._composer_history[:overflow]
+        try:
+            save_composer_history(self._composer_history)
+        except OSError as exc:
+            self._flash(str(exc), severity="error")
+
+    def _handle_composer_history_key(self, composer: TextArea, key: str) -> bool:
+        if key == "up":
+            if not self._composer_history:
+                return False
+            if self._composer_history_index is None:
+                if composer.text:
+                    return False
+                self._composer_history_draft = composer.text
+                self._composer_history_index = len(self._composer_history) - 1
+            else:
+                self._composer_history_index = max(0, self._composer_history_index - 1)
+            self._load_composer_history_text(composer, self._composer_history_text())
+            return True
+
+        if key == "down" and self._composer_history_index is not None:
+            if self._composer_history_index >= len(self._composer_history) - 1:
+                draft = self._composer_history_draft
+                self._reset_composer_history_navigation()
+                self._load_composer_history_text(composer, draft)
+            else:
+                self._composer_history_index += 1
+                self._load_composer_history_text(composer, self._composer_history_text())
+            return True
+
+        return False
+
+    def _composer_history_text(self) -> str:
+        if self._composer_history_index is None:
+            return self._composer_history_draft
+        return self._composer_history[self._composer_history_index]
+
+    def _load_composer_history_text(self, composer: TextArea, text: str) -> None:
+        composer.load_text(text)
+        composer.cursor_location = composer.document.end
+        self._last_composer_text = text
+        self._resize_composer(text)
+        self._refresh_status()
+
+    def _reset_composer_history_navigation(self) -> None:
+        self._composer_history_index = None
+        self._composer_history_draft = ""
 
     def _active_run_state(self) -> ThreadRunState | None:
         if self.thread_id is None:
@@ -1735,8 +2062,6 @@ class UvAgentApp(App[None]):
             f"[bold]{escape(self._text('mentions'))}[/bold]",
             f"- [cyan]@[/cyan] [dim]{escape(self._text('help_mention_files'))}[/dim]",
             f"- [cyan]@@[/cyan] [dim]{escape(self._text('help_mention_threads'))}[/dim]",
-            f"- [cyan]@mcp:[/cyan] [dim]{escape(self._text('help_mention_mcp'))}[/dim]",
-            f"- [cyan]@skill:[/cyan] [dim]{escape(self._text('help_mention_skills'))}[/dim]",
             "",
             f"[bold]{escape(self._text('commands'))}[/bold] [dim](Tab/Enter, Esc)[/dim]",
         ]
@@ -1756,7 +2081,11 @@ class UvAgentApp(App[None]):
 
     def _append_user(self, text: str) -> None:
         label = "你" if self.language.is_chinese else "you"
-        self._append_cell(f"[bold #7dd3fc]{label}[/bold #7dd3fc]\n{escape(text)}", "user")
+        # Codex-style "› " prefix keeps user turns easy to spot.
+        self._append_cell(
+            f"[bold #7dd3fc]› {label}[/bold #7dd3fc]\n{escape(text)}",
+            "user",
+        )
 
     async def _append_assistant_delta(self, text: str) -> None:
         self._assistant_buffer += text
@@ -1775,9 +2104,12 @@ class UvAgentApp(App[None]):
         first = self._reasoning_buffer.splitlines()[0]
         if len(first) > 120:
             first = first[:117].rstrip() + "..."
-        markup = f"[dim]{escape(self._text('thinking'))}[/dim] [italic]{escape(first)}[/italic]"
+        markup = (
+            f"[dim italic]{escape(self._text('thinking'))}[/dim italic]  "
+            f"[italic #a3b1c2]{escape(first)}[/italic #a3b1c2]"
+        )
         if self._reasoning_cell is None:
-            self._reasoning_cell = self._append_cell(markup, "event")
+            self._reasoning_cell = self._append_cell(markup, "reasoning")
         else:
             self._reasoning_cell.update(markup)
             self._scroll_end()
@@ -1811,8 +2143,9 @@ class UvAgentApp(App[None]):
         name = str(call.get("name") or "python")
         detail = self._tool_call_preview(call)
         cell = self._append_cell(
-            f"[cyan]{escape(name)}[/cyan] [dim]{escape(self._text('python_running'))}[/dim]{detail}",
-            "event",
+            f"[#7dd3fc]⠿[/#7dd3fc] [bold]{escape(name)}[/bold] "
+            f"[dim]{escape(self._text('python_running'))}[/dim]{detail}",
+            "tool_pending",
         )
         if call_id:
             self._tool_cells[call_id] = cell
@@ -1875,9 +2208,12 @@ class UvAgentApp(App[None]):
             pass
 
     def _reset_transcript(self, *, show_empty: bool = True) -> None:
-        transcript = self.query_one("#transcript", VerticalScroll)
+        transcript = self.query_one("#transcript", TranscriptScroll)
         transcript.query("*").remove()
         self._transcript_has_content = False
+        # Brand new transcript: re-engage auto-follow so the first incoming
+        # delta isn't stranded above the fold.
+        transcript.follow_tail = True
         if show_empty:
             empty_state = EmptyState()
             transcript.mount(empty_state)
@@ -1928,15 +2264,7 @@ class UvAgentApp(App[None]):
         inserted = current[len(previous) :]
         if not inserted or not trigger.endswith(inserted):
             return
-        kind = {
-            "@@": "thread",
-            "@mcp:": "mcp",
-            "@mcp：": "mcp",
-            "@skill:": "skill",
-            "@skill：": "skill",
-            "@skills:": "skill",
-            "@skills：": "skill",
-        }.get(trigger, "file")
+        kind = "thread" if trigger == "@@" else "file"
         self._open_mention_picker(kind)
 
     def _mention_trigger_at_cursor(self, composer: TextArea) -> str | None:
@@ -1945,9 +2273,6 @@ class UvAgentApp(App[None]):
         if row >= len(lines):
             return None
         prefix = lines[row][:column]
-        for trigger in ("@skills:", "@skills：", "@skill:", "@skill：", "@mcp:", "@mcp：", "@@"):
-            if prefix.endswith(trigger):
-                return trigger
         if prefix.endswith("@@"):
             return "@@"
         if prefix.endswith("@"):
@@ -1959,22 +2284,11 @@ class UvAgentApp(App[None]):
             composer = self.query_one("#composer", TextArea)
         except NoMatches:
             return
-        expected_triggers = {
-            "thread": ("@@",),
-            "mcp": ("@mcp:", "@mcp："),
-            "skill": ("@skill:", "@skill：", "@skills:", "@skills："),
-            "file": ("@",),
-        }.get(kind, ("@",))
+        expected_triggers = {"thread": ("@@",), "file": ("@",)}.get(kind, ("@",))
         if self._mention_trigger_at_cursor(composer) not in expected_triggers:
             return
         if kind == "thread":
             self._open_thread_mention_picker()
-            return
-        if kind == "mcp":
-            self._open_mcp_mention_picker()
-            return
-        if kind == "skill":
-            self._open_skill_mention_picker()
             return
         self._open_file_mention_picker()
 
@@ -2001,46 +2315,12 @@ class UvAgentApp(App[None]):
             initial_filter="@",
         )
 
-    def _open_mcp_mention_picker(self) -> None:
-        title, items, subtitle = self._mention_picker_items("mcp")
-        self._open_picker(
-            title,
-            items,
-            self._choose_mcp_mention,
-            subtitle=subtitle,
-            mention_kind="mcp",
-            mention_items=self._mention_picker_items,
-        )
-
-    def _open_skill_mention_picker(self) -> None:
-        title, items, subtitle = self._mention_picker_items("skill")
-        self._open_picker(
-            title,
-            items,
-            self._choose_skill_mention,
-            subtitle=subtitle,
-            mention_kind="skill",
-            mention_items=self._mention_picker_items,
-        )
-
     def _mention_picker_items(self, kind: str) -> tuple[str, list[PickerItem], str]:
         if kind == "thread":
             return (
                 self._text("mention_threads"),
                 self._thread_mention_items(),
                 self._text("mention_threads_hint"),
-            )
-        if kind == "mcp":
-            return (
-                self._text("mention_mcp"),
-                self._mcp_mention_items(),
-                self._text("mention_mcp_hint"),
-            )
-        if kind == "skill":
-            return (
-                self._text("mention_skills"),
-                self._skill_mention_items(),
-                self._text("mention_skills_hint"),
             )
         return (
             self._text("mention_files"),
@@ -2132,12 +2412,6 @@ class UvAgentApp(App[None]):
 
     def _choose_thread_mention(self, thread_id: str) -> None:
         self._insert_mention(f"@thread:{thread_id}", ("@@", "@"))
-
-    def _choose_mcp_mention(self, name: str) -> None:
-        self._insert_mention(f"@mcp:{name}", ("@mcp:", "@mcp："))
-
-    def _choose_skill_mention(self, name: str) -> None:
-        self._insert_mention(f"@skill:{name}", ("@skill:", "@skill：", "@skills:", "@skills："))
 
     def _insert_mention(self, mention: str, triggers: str | tuple[str, ...]) -> None:
         composer = self.query_one("#composer", TextArea)
@@ -2261,7 +2535,6 @@ class UvAgentApp(App[None]):
 
     def _open_config_panel(self) -> None:
         self.engine.refresh_config()
-        active_level = self.level or self.engine.config.runtime.default_level
         default_level = self.engine.config.runtime.default_level
         items = [
             PickerItem(
@@ -2269,24 +2542,6 @@ class UvAgentApp(App[None]):
                 title=self._text("config_default_level"),
                 description=default_level,
                 meta=self._text("config_default_level_hint"),
-            ),
-            PickerItem(
-                id="current_level",
-                title=self._text("config_current_level"),
-                description=active_level,
-                meta=self._text("config_current_level_hint"),
-            ),
-            PickerItem(
-                id="level_models",
-                title=self._text("config_level_models"),
-                description=self._level_model_summary(),
-                meta=self._text("config_level_models_hint"),
-            ),
-            PickerItem(
-                id="reasoning",
-                title=self._text("config_reasoning"),
-                description=self._reasoning_summary(active_level),
-                meta=self._text("config_reasoning_hint"),
             ),
             PickerItem(
                 id="language",
@@ -2312,36 +2567,21 @@ class UvAgentApp(App[None]):
                 description=self._text("config_raw_hint"),
             ),
         ]
+        subtitle = (
+            self._text("config_hint")
+            + " · "
+            + self._text("config_models_readonly_hint")
+        )
         self._open_picker(
             self._text("config"),
             items,
             self._choose_config_item,
-            subtitle=self._text("config_hint"),
+            subtitle=subtitle,
         )
-
-    def _level_model_summary(self) -> str:
-        parts = [
-            f"{name}->{level.model}"
-            for name, level in self.engine.config.levels.items()
-        ]
-        return ", ".join(parts) or self._text("none")
-
-    def _reasoning_summary(self, level_name: str) -> str:
-        try:
-            level = self.engine.config.level(level_name)
-            return level.reasoning or self._text("none")
-        except ConfigError:
-            return self._text("none")
 
     def _choose_config_item(self, item_id: str) -> None:
         if item_id == "default_level":
             self._open_default_level_panel()
-        elif item_id == "current_level":
-            self._open_current_level_panel()
-        elif item_id == "level_models":
-            self._open_level_model_panel()
-        elif item_id == "reasoning":
-            self._open_reasoning_level_panel()
         elif item_id == "language":
             self._open_language_panel()
         elif item_id == "auto_compress":
@@ -2389,108 +2629,6 @@ class UvAgentApp(App[None]):
             items,
             self._set_current_level,
             subtitle=self._text("config_session_hint"),
-        )
-
-    def _open_level_model_panel(self) -> None:
-        items = []
-        for name, level in self.engine.config.levels.items():
-            items.append(
-                PickerItem(
-                    id=name,
-                    title=name,
-                    description=level.model,
-                    meta=self._text("config_pick_level_model"),
-                )
-            )
-        self._open_picker(
-            self._text("config_level_models"),
-            items,
-            self._open_model_choices_for_level,
-            subtitle=self._text("config_level_models_hint"),
-        )
-
-    def _open_model_choices_for_level(self, level_name: str) -> None:
-        try:
-            level = self.engine.config.level(level_name)
-        except ConfigError as exc:
-            self._flash(str(exc), severity="error")
-            return
-        items = []
-        for name, model in self.engine.config.models.items():
-            marker = self._text("current") if name == level.model else ""
-            items.append(
-                PickerItem(
-                    id=f"{level_name}\0{name}",
-                    title=name,
-                    description=f"{model.model} · {model.api}",
-                    meta=marker,
-                )
-            )
-        self._open_picker(
-            self._text("models"),
-            items,
-            self._set_level_model_from_choice,
-            subtitle=level_name,
-        )
-
-    def _open_reasoning_level_panel(self) -> None:
-        items = []
-        for name, level in self.engine.config.levels.items():
-            items.append(
-                PickerItem(
-                    id=name,
-                    title=name,
-                    description=level.reasoning or self._text("none"),
-                    meta=f"{self._text('model')}: {level.model}",
-                )
-            )
-        self._open_picker(
-            self._text("config_reasoning"),
-            items,
-            self._open_reasoning_choices_for_level,
-            subtitle=self._text("config_reasoning_hint"),
-        )
-
-    def _open_reasoning_choices_for_level(self, level_name: str) -> None:
-        try:
-            level = self.engine.config.level(level_name)
-            model = self.engine.config.models[level.model]
-            options = self.engine.config.reasoning_options_for_model(model)
-        except ConfigError as exc:
-            self._flash(str(exc), severity="error")
-            return
-        items = [
-            PickerItem(
-                id=f"{level_name}\0",
-                title=self._text("none"),
-                description=self._text("config_reasoning_none"),
-                meta=self._text("current") if not level.reasoning else "",
-            )
-        ]
-        for option in options:
-            params = json.dumps(option.params, ensure_ascii=False, separators=(",", ":"))
-            if len(params) > 120:
-                params = params[:117] + "..."
-            items.append(
-                PickerItem(
-                    id=f"{level_name}\0{option.name}",
-                    title=option.label or option.name,
-                    description=option.name,
-                    meta=(self._text("current") + " · " if option.name == level.reasoning else "") + params,
-                )
-            )
-        if len(items) == 1:
-            items[0] = PickerItem(
-                id=f"{level_name}\0",
-                title=self._text("none"),
-                description=self._text("config_no_reasoning_options"),
-                meta=self._text("current") if not level.reasoning else "",
-            )
-        self._open_picker(
-            self._text("config_reasoning"),
-            items,
-            self._set_level_reasoning_from_choice,
-            subtitle=level_name,
         )
 
     def _open_language_panel(self) -> None:
@@ -2544,20 +2682,6 @@ class UvAgentApp(App[None]):
     def _set_current_level(self, name: str) -> None:
         self._handle_level_command(name)
 
-    def _set_level_model_from_choice(self, value: str) -> None:
-        level_name, _, model_name = value.partition("\0")
-        if not level_name or not model_name:
-            return
-        self._write_user_config_patch({"levels": {level_name: {"model": model_name}}})
-        self._flash(f"{level_name}: {model_name}")
-
-    def _set_level_reasoning_from_choice(self, value: str) -> None:
-        level_name, _, reasoning = value.partition("\0")
-        if not level_name:
-            return
-        self._write_user_config_patch({"levels": {level_name: {"reasoning": reasoning or None}}})
-        self._flash(f"{self._text('config_reasoning')}: {level_name} -> {reasoning or self._text('none')}")
-
     def _set_language(self, value: str) -> None:
         self._write_user_config_patch({"ui": {"language": value}})
         self._flash(f"{self._text('config_language')}: {value}")
@@ -2591,43 +2715,55 @@ class UvAgentApp(App[None]):
         return merged
 
     def _open_models_panel(self) -> None:
+        """Read-only models picker. Editing models lives in config.json."""
         self.engine.refresh_config()
-        current = self.level or self.engine.config.runtime.default_level
-        items = []
-        for name, level in self.engine.config.levels.items():
-            marker = self._text("current") if name == current else ""
-            items.append(
-                PickerItem(
-                    id=f"level:{name}",
-                    title=f"{self._text('level')} {name}",
-                    description=f"{level.model}" + (f" · {level.reasoning}" if level.reasoning else ""),
-                    meta=marker,
-                )
-            )
+        items: list[PickerItem] = []
+        # Show which level each configured model is referenced by so users can
+        # cross-reference without having to open config.json first.
+        levels_by_model: dict[str, list[str]] = {}
+        for level_name, level in self.engine.config.levels.items():
+            levels_by_model.setdefault(level.model, []).append(level_name)
         for name, model in self.engine.config.models.items():
+            level_refs = ", ".join(levels_by_model.get(name, [])) or "-"
             items.append(
                 PickerItem(
-                    id=f"model:{name}",
-                    title=f"{self._text('model')} {name}",
-                    description=model.model,
-                    meta=f"{model.api} · {format_tokens(model.context_window_tokens)}",
+                    id=name,
+                    title=name,
+                    description=f"{model.model}  ·  {model.api}",
+                    meta=(
+                        f"{self._text('models_provider')}: {model.provider}  ·  "
+                        f"{self._text('models_context_window')}: "
+                        f"{format_tokens(model.context_window_tokens)}  ·  "
+                        f"{self._text('level')}: {level_refs}"
+                    ),
                 )
             )
+        if not items:
+            items.append(
+                PickerItem(
+                    id="",
+                    title=self._text("none"),
+                    description=self._text("models_edit_hint"),
+                    meta=str(editable_config_path(self.project_root)),
+                )
+            )
+        subtitle = (
+            self._text("models_hint")
+            + "  ·  "
+            + self._text("models_edit_hint")
+            + " "
+            + str(editable_config_path(self.project_root))
+        )
         self._open_picker(
             self._text("models"),
             items,
-            self._choose_model_panel_item,
-            subtitle=self._text("models_hint"),
+            self._open_model_detail_panel,
+            subtitle=subtitle,
         )
 
-    def _choose_model_panel_item(self, value: str) -> None:
-        kind, _, name = value.partition(":")
-        if kind == "level":
-            self._handle_level_command(name)
-        elif kind == "model":
-            self._open_model_detail_panel(name)
-
     def _open_model_detail_panel(self, name: str) -> None:
+        if not name:
+            return
         model = self.engine.config.models.get(name)
         if model is None:
             self._flash(f"{self._text('models')}: {name}", severity="error")
@@ -2639,20 +2775,31 @@ class UvAgentApp(App[None]):
             self._flash(str(exc), severity="error")
             return
         lines = [
-            f"[bold]{escape(name)}[/bold]",
-            f"- provider: {escape(provider.name)}",
+            f"[bold cyan]{escape(name)}[/bold cyan]",
+            f"- {self._text('models_provider')}: {escape(provider.name)}",
             f"- model: {escape(model.model)}",
-            f"- api: {escape(model.api)}",
-            f"- context window: {format_tokens(model.context_window_tokens)}",
+            f"- {self._text('models_api')}: {escape(model.api)}",
+            f"- {self._text('models_context_window')}: "
+            f"{format_tokens(model.context_window_tokens)}",
             "",
-            f"[bold]{escape(self._text('config_reasoning'))}[/bold]",
+            f"[bold]{escape(self._text('models_reasoning_options'))}[/bold]",
         ]
         if options:
             for option in options:
                 params = json.dumps(option.params, ensure_ascii=False, separators=(",", ":"))
-                lines.append(f"- [cyan]{escape(option.name)}[/cyan] {escape(option.label)} [dim]{escape(params)}[/dim]")
+                lines.append(
+                    f"- [cyan]{escape(option.name)}[/cyan] "
+                    f"{escape(option.label)} [dim]{escape(params)}[/dim]"
+                )
         else:
-            lines.append(f"[dim]{escape(self._text('config_no_reasoning_options'))}[/dim]")
+            lines.append(
+                f"[dim]{escape(self._text('config_no_reasoning_options'))}[/dim]"
+            )
+        lines.append("")
+        lines.append(
+            f"[dim]{escape(self._text('models_edit_hint'))} "
+            f"{escape(str(editable_config_path(self.project_root)))}[/dim]"
+        )
         self._open_panel("\n".join(lines), "models", self._text("models"))
 
     def _handle_level_command(self, name: str) -> None:
@@ -2671,8 +2818,8 @@ class UvAgentApp(App[None]):
         self._open_picker(
             self._text("mcp"),
             self._mcp_mention_items(),
-            self._choose_mcp_mention,
-            subtitle=self._text("mention_mcp_hint"),
+            self._noop_select,
+            subtitle=self._text("inspect_only_hint"),
         )
 
     def _open_skills_panel(self) -> None:
@@ -2680,9 +2827,13 @@ class UvAgentApp(App[None]):
         self._open_picker(
             self._text("skills"),
             self._skill_mention_items(),
-            self._choose_skill_mention,
-            subtitle=self._text("mention_skills_hint"),
+            self._noop_select,
+            subtitle=self._text("inspect_only_hint"),
         )
+
+    def _noop_select(self, _value: str) -> None:
+        """Callback used by inspect-only pickers like /mcp and /skills."""
+        return
 
     def _open_command_palette(self, *, query: str = "") -> None:
         items = [
@@ -2827,10 +2978,6 @@ class UvAgentApp(App[None]):
                     kind = panel._selected_mention_kind
                     if kind == "thread":
                         self._choose_thread_mention(result)
-                    elif kind == "mcp":
-                        self._choose_mcp_mention(result)
-                    elif kind == "skill":
-                        self._choose_skill_mention(result)
                     elif kind == "file":
                         self._choose_file_mention(result)
                     else:
@@ -2892,14 +3039,18 @@ class UvAgentApp(App[None]):
         queue_length = self._active_queue_length()
         queued = f" · q{queue_length}" if queue_length else ""
         spinner = ""
+        elapsed_suffix = ""
         if self.busy:
             frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
             spinner = frames[self._spinner_index % len(frames)] + " "
             self._spinner_index += 1
+            if self._busy_started_at is not None:
+                elapsed = format_elapsed(monotonic() - self._busy_started_at)
+                elapsed_suffix = f" [dim]({escape(elapsed)})[/dim]"
 
         if self.busy:
             footer = (
-                f"[cyan]{spinner}{escape(state_text)}[/cyan] "
+                f"[cyan]{spinner}{escape(state_text)}[/cyan]{elapsed_suffix} "
                 f"[dim]{escape(level_name)} · {escape(compact_context)} · "
                 f"{escape(short_thread(self.thread_id))}{queued}[/dim]"
             )
@@ -2912,5 +3063,10 @@ class UvAgentApp(App[None]):
         self._refresh_pending_images()
 
     def _scroll_end(self) -> None:
-        transcript = self.query_one("#transcript", VerticalScroll)
-        self.call_after_refresh(transcript.scroll_end, animate=False)
+        transcript = self.query_one("#transcript", TranscriptScroll)
+        if not transcript.follow_tail:
+            # User dragged the scrollbar / pressed PgUp; don't yank them back to
+            # the bottom on every streaming SSE delta. They re-engage follow by
+            # pressing the "↓ bottom" button above the composer.
+            return
+        transcript.programmatic_scroll_end()

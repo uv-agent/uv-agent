@@ -152,8 +152,9 @@ The default TUI follows a Codex-style shape: a single transcript, inline Python 
 - `/context`: show context budget and loaded workspace rules
 - `/rules`: inspect loaded `AGENTS.md` files
 - `/new [title]`, `/threads`, and `/clear`: light thread controls
-- `/config`: show config sources and redacted merged config
-- `/models` and `/level [name]`: inspect and switch configured model levels
+- `/config`: edit user-facing settings (`default_level`, `language`, `auto_compress`) and show config sources / redacted merged config
+- `/models`: read-only view of configured models. Add or modify models in the config file; this command never writes
+- `/level [name]`: the only runtime model switch. Picks the active level for this session (small/medium/large or any level name defined in the config)
 - `/mcp`: show MCP declarations from `.agents/mcp.json`
 - `/skills` and `/skill [name]`: inspect `.agents/skills` entries
 - `/runs`: show the latest Python run summary from this TUI session
