@@ -20,7 +20,7 @@ from uv_agent.config import (
 from uv_agent.model_client import FakeModelClient
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
-from uv_agent.tui.app import FullscreenPanel, UvAgentApp
+from uv_agent.tui.app import EmptyState, ExpandableTranscriptCell, FullscreenPanel, UvAgentApp
 
 
 class BlockingEngine(AgentEngine):
@@ -44,6 +44,36 @@ class BlockingEngine(AgentEngine):
             await asyncio.sleep(0.01)
         self.thread_store.append(thread_id, "turn.interrupted", turn_id=turn_id, reason="user_interrupt")
         yield {"type": "turn.interrupted", "thread_id": thread_id, "turn_id": turn_id, "reason": "user_interrupt"}
+
+
+class ReleasableEngine(AgentEngine):
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+        self.started: dict[str, asyncio.Event] = {}
+        self.release: dict[str, asyncio.Event] = {}
+
+    async def run_turn(self, *, user_text: str, thread_id: str | None = None, level: str | None = None, cancel_event: asyncio.Event | None = None):
+        thread_id = thread_id or self.thread_store.create_thread("New thread")
+        turn_id = f"turn_{user_text.replace(' ', '_')}"
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        )
+        self.started.setdefault(thread_id, asyncio.Event()).set()
+        release = self.release.setdefault(thread_id, asyncio.Event())
+        while not release.is_set():
+            if cancel_event is not None and cancel_event.is_set():
+                self.thread_store.append(thread_id, "turn.interrupted", turn_id=turn_id, reason="user_interrupt")
+                yield {"type": "turn.interrupted", "thread_id": thread_id, "turn_id": turn_id, "reason": "user_interrupt"}
+                return
+            await asyncio.sleep(0.01)
+        text = f"done {user_text}"
+        self.thread_store.append(thread_id, "item.assistant", turn_id=turn_id, text=text)
+        self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text=text)
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": text}
 
 
 def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
@@ -271,7 +301,7 @@ async def test_tui_thread_picker_resumes_and_renders_history(
         assert app.thread_id == thread_id
         assert app._transcript_has_content is True
         assert app._reasoning_buffer == "checking files"
-        assert not app.query("#empty-state")
+        assert not app.query(EmptyState)
 
 
 @pytest.mark.asyncio
@@ -687,6 +717,90 @@ async def test_tui_ctrl_c_twice_interrupts_busy_turn_without_selection(
 
         assert app.busy is False
         assert any(event["type"] == "turn.interrupted" for event in engine.thread_store.read(app.thread_id))
+
+
+@pytest.mark.asyncio
+async def test_tui_new_thread_while_current_thread_runs_keeps_old_thread_backgrounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = ReleasableEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("old work")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        old_thread = app.thread_id
+        assert old_thread is not None
+        await engine.started[old_thread].wait()
+
+        composer.insert("/new second")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        new_thread = app.thread_id
+
+        assert new_thread != old_thread
+        assert old_thread in app._thread_runs
+        assert app.busy is False
+
+        composer.insert("new work")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        assert new_thread in app._thread_runs
+
+        engine.release[old_thread].set()
+        engine.release[new_thread].set()
+        await pilot.pause(0.2)
+
+        assert old_thread not in app._thread_runs
+        assert new_thread not in app._thread_runs
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_result_details_expand_on_click(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+    payload = {
+        "script_id": "scr_1",
+        "run_id": "run_1",
+        "returncode": 0,
+        "stdout": "hidden stdout",
+        "stderr": "",
+        "events": [{"kind": "subagent.completed", "thread_id": "thr_child", "summary": "child done"}],
+        "run_log_path": str(tmp_path / "run.jsonl"),
+    }
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._append_tool_output(
+            {
+                "call": {"call_id": "call_1"},
+                "output": {"output": __import__("json").dumps(payload)},
+            }
+        )
+        await pilot.pause()
+        cell = app.query_one(ExpandableTranscriptCell)
+
+        assert cell.expanded is False
+        assert "hidden stdout" not in str(cell.render())
+
+        await pilot.click(cell)
+        await pilot.pause()
+
+        assert cell.expanded is True
+        assert "hidden stdout" in str(cell.render())
 
 
 @pytest.mark.asyncio

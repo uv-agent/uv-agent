@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -37,6 +37,7 @@ from uv_agent.tui.formatting import (
     format_tokens,
     parse_tool_payload,
     short_thread,
+    tool_detail_markup,
     tool_result_markup,
     tool_timeline_markup,
 )
@@ -409,6 +410,20 @@ class CommandSpec:
     description: str
 
 
+@dataclass
+class ThreadRunState:
+    thread_id: str
+    worker: Worker[None] | None
+    cancel_event: asyncio.Event
+    queue: list[str]
+    status: str
+    assistant_buffer: str = ""
+    assistant_cell: TranscriptCell | None = None
+    reasoning_buffer: str = ""
+    reasoning_cell: TranscriptCell | None = None
+    tool_cells: dict[str, TranscriptCell] = field(default_factory=dict)
+
+
 class EmptyState(Static):
     """Animated empty transcript state."""
 
@@ -427,7 +442,7 @@ class EmptyState(Static):
     }
     """
 
-    def __init__(self, *, id: str) -> None:
+    def __init__(self, *, id: str | None = None) -> None:
         super().__init__("", id=id)
         self.frame = 0
 
@@ -577,6 +592,37 @@ class TranscriptCell(Static):
         return None
 
 
+class ExpandableTranscriptCell(TranscriptCell):
+    """Transcript cell with hidden details toggled by click."""
+
+    def __init__(
+        self,
+        summary: str,
+        details: str,
+        *,
+        expanded: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        self.summary = summary
+        self.details = details
+        self.expanded = expanded
+        super().__init__(self._content(), **kwargs)
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.toggle()
+
+    def toggle(self) -> None:
+        self.expanded = not self.expanded
+        self.update(self._content())
+
+    def _content(self) -> str:
+        marker = "[-]" if self.expanded else "[+]"
+        if self.expanded:
+            return f"{self.summary}\n[dim]{marker} details[/dim]\n{self.details}"
+        return f"{self.summary}\n[dim]{marker} details[/dim]"
+
+
 class UvAgentApp(App[None]):
     CSS = """
     Screen {
@@ -702,6 +748,7 @@ class UvAgentApp(App[None]):
         self._last_interrupt_request_at = 0.0
         self._current_worker: Worker[None] | None = None
         self._current_cancel_event: asyncio.Event | None = None
+        self._thread_runs: dict[str, ThreadRunState] = {}
         self._selection_copy_timer: Any | None = None
         self._pending_selection_copy = ""
         self._last_auto_copied_selection = ""
@@ -711,7 +758,7 @@ class UvAgentApp(App[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
             with VerticalScroll(id="transcript"):
-                yield EmptyState(id="empty-state")
+                yield EmptyState()
             with Vertical(id="bottom-pane"):
                 with Vertical(id="composer-shell"):
                     yield Static("", id="composer-meta")
@@ -726,7 +773,7 @@ class UvAgentApp(App[None]):
                     yield Static("", id="composer-footer")
 
     def on_mount(self) -> None:
-        self.query_one("#empty-state", EmptyState).tick()
+        self.query_one(EmptyState).tick()
         self._refresh_status(self._text("idle"))
         self.set_interval(0.16, self._tick, name="spinner")
         self.query_one("#composer", TextArea).focus()
@@ -776,7 +823,7 @@ class UvAgentApp(App[None]):
     def _tick(self) -> None:
         if not self._transcript_has_content:
             try:
-                self.query_one("#empty-state", EmptyState).tick()
+                self.query_one(EmptyState).tick()
             except NoMatches:
                 pass
         if self.busy:
@@ -803,79 +850,120 @@ class UvAgentApp(App[None]):
         self._resize_composer("")
         if "\n" not in prompt and self._handle_command(prompt):
             return
-        if self.busy:
-            self._queue.append(prompt)
-            self._append_cell(f"[dim]{escape(self._text('queued'))}[/dim]\n{escape(prompt)}", "event")
+        active_run = self._active_run_state()
+        if active_run is not None:
+            run_state = active_run
+            run_state.queue.append(prompt)
+            if self._is_active_thread(run_state.thread_id):
+                self._append_cell(f"[dim]{escape(self._text('queued'))}[/dim]\n{escape(prompt)}", "event")
             self._refresh_status()
             return
         self._start_turn(prompt)
 
     def _start_turn(self, prompt: str) -> None:
-        self.busy = True
-        self.query_one("#composer-shell", Vertical).add_class("busy")
-        self._assistant_buffer = ""
-        self._assistant_cell = None
-        self._reasoning_cell = None
-        self._reasoning_buffer = ""
-        self._interrupt_armed = False
-        self._current_cancel_event = asyncio.Event()
-        self._append_user(prompt)
-        self._reasoning_cell = self._append_cell(
-            f"[dim]{escape(self._text('thinking'))}...[/dim]",
-            "event",
-        )
-        self._refresh_status(self._text("working"))
-        self._current_worker = self.run_worker(self._run_turn(prompt), exclusive=True, thread=False)
+        if self.thread_id is None:
+            self.thread_id = self.engine.thread_store.create_thread(self._text("new_thread"))
+        self._start_background_turn(self.thread_id, prompt)
 
-    async def _run_turn(self, prompt: str) -> None:
+    def _start_background_turn(self, thread_id: str, prompt: str, *, queue: list[str] | None = None) -> None:
+        cancel_event = asyncio.Event()
+        run_state = ThreadRunState(
+            thread_id=thread_id,
+            worker=None,
+            cancel_event=cancel_event,
+            queue=list(queue or []),
+            status=self._text("working"),
+        )
+        self._thread_runs[thread_id] = run_state
+        if self._is_active_thread(thread_id):
+            self.query_one("#composer-shell", Vertical).add_class("busy")
+            self._assistant_buffer = ""
+            self._assistant_cell = None
+            self._reasoning_cell = None
+            self._reasoning_buffer = ""
+            self._tool_cells.clear()
+            self._interrupt_armed = False
+            self._append_user(prompt)
+            self._reasoning_cell = self._append_cell(
+                f"[dim]{escape(self._text('thinking'))}...[/dim]",
+                "event",
+            )
+            self._sync_run_state_from_active(run_state)
+            self._refresh_status(self._text("working"))
+        worker = self.run_worker(self._run_turn(prompt, thread_id), exclusive=False, thread=False)
+        run_state.worker = worker
+        if self._is_active_thread(thread_id):
+            self._current_worker = worker
+            self._current_cancel_event = cancel_event
+        self._refresh_active_run_state()
+
+    async def _run_turn(self, prompt: str, thread_id: str) -> None:
+        run_state = self._thread_runs[thread_id]
         try:
             async for item in self.engine.run_turn(
                 user_text=prompt,
-                thread_id=self.thread_id,
+                thread_id=thread_id,
                 level=self.level,
-                cancel_event=self._current_cancel_event,
+                cancel_event=run_state.cancel_event,
             ):
-                self.thread_id = item.get("thread_id", self.thread_id)
+                item_thread_id = str(item.get("thread_id") or thread_id)
                 event_type = item["type"]
                 if event_type == "assistant.delta":
-                    await self._append_assistant_delta(item["text"])
+                    await self._handle_thread_event(item_thread_id, "assistant.delta", item, run_state)
                 elif event_type == "assistant.reasoning_delta":
-                    self._append_reasoning_delta(item["text"])
+                    await self._handle_thread_event(item_thread_id, "assistant.reasoning_delta", item, run_state)
                 elif event_type == "tool.delta":
-                    self._refresh_status(self._text("running_python"))
+                    run_state.status = self._text("running_python")
+                    if self._is_active_thread(item_thread_id):
+                        self._refresh_status(self._text("running_python"))
                 elif event_type == "model.response":
-                    self._refresh_status(self._text("reading"))
+                    run_state.status = self._text("reading")
+                    if self._is_active_thread(item_thread_id):
+                        self._refresh_status(self._text("reading"))
                 elif event_type == "tool.started":
-                    self._append_tool_started(item)
+                    await self._handle_thread_event(item_thread_id, "tool.started", item, run_state)
                 elif event_type == "tool.output":
-                    self._append_tool_output(item)
+                    await self._handle_thread_event(item_thread_id, "tool.output", item, run_state)
                 elif event_type == "compaction.completed":
-                    self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
+                    if self._is_active_thread(item_thread_id):
+                        self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
                 elif event_type == "turn.completed":
-                    text = item["final_text"] or self._assistant_buffer
-                    if text and self._assistant_cell is None:
+                    text = item["final_text"] or run_state.assistant_buffer
+                    if text and self._is_active_thread(item_thread_id) and self._assistant_cell is None:
                         await self._append_assistant_delta(text)
-                    self._refresh_status(self._text("idle"))
+                        self._sync_run_state_from_active(run_state)
+                    run_state.status = self._text("idle")
+                    if self._is_active_thread(item_thread_id):
+                        self._refresh_status(self._text("idle"))
                 elif event_type == "turn.interrupted":
-                    self._append_cell(f"[dim]{escape(self._text('interrupted'))}[/dim]", "event")
-                    self._refresh_status(self._text("interrupted"))
+                    run_state.status = self._text("interrupted")
+                    if self._is_active_thread(item_thread_id):
+                        self._append_cell(f"[dim]{escape(self._text('interrupted'))}[/dim]", "event")
+                        self._refresh_status(self._text("interrupted"))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._append_cell(error_markup(format_error(exc)), "error")
-            self._refresh_status(self._text("error"))
+            run_state.status = self._text("error")
+            if self._is_active_thread(thread_id):
+                self._append_cell(error_markup(format_error(exc)), "error")
+                self._refresh_status(self._text("error"))
         finally:
-            self.busy = False
-            self._current_worker = None
-            self._current_cancel_event = None
-            self._interrupt_armed = False
-            self.query_one("#composer-shell", Vertical).remove_class("busy")
-            if self._last_status != self._text("error"):
-                self._refresh_status(self._text("idle"))
-            self.query_one("#composer", TextArea).focus()
-            if self._queue:
-                next_prompt = self._queue.pop(0)
-                self._start_turn(next_prompt)
+            next_prompt = run_state.queue.pop(0) if run_state.queue else None
+            if next_prompt is not None:
+                remaining_queue = list(run_state.queue)
+                if self._is_active_thread(thread_id):
+                    self.thread_id = thread_id
+                self._start_background_turn(thread_id, next_prompt, queue=remaining_queue)
+            else:
+                self._thread_runs.pop(thread_id, None)
+                if self._is_active_thread(thread_id):
+                    self._current_worker = None
+                    self._current_cancel_event = None
+                    self._interrupt_armed = False
+                    if self._last_status != self._text("error"):
+                        self._refresh_status(self._text("idle"))
+                    self.query_one("#composer", TextArea).focus()
+                self._refresh_active_run_state()
 
     def action_clear_input(self) -> None:
         composer = self.query_one("#composer", TextArea)
@@ -885,6 +973,87 @@ class UvAgentApp(App[None]):
             self._composer_height_override = None
             self._resize_composer("")
             return
+
+    def _active_run_state(self) -> ThreadRunState | None:
+        if self.thread_id is None:
+            return None
+        return self._thread_runs.get(self.thread_id)
+
+    def _active_queue_length(self) -> int:
+        run_state = self._active_run_state()
+        return len(run_state.queue) if run_state is not None else 0
+
+    def _run_state_for_thread(self, thread_id: str | None) -> ThreadRunState:
+        if thread_id is None:
+            thread_id = self.engine.thread_store.create_thread(self._text("new_thread"))
+            self.thread_id = thread_id
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is None:
+            run_state = ThreadRunState(
+                thread_id=thread_id,
+                worker=None,
+                cancel_event=asyncio.Event(),
+                queue=[],
+                status=self._text("idle"),
+            )
+            self._thread_runs[thread_id] = run_state
+        return run_state
+
+    def _is_active_thread(self, thread_id: str | None) -> bool:
+        return bool(thread_id and self.thread_id == thread_id)
+
+    def _refresh_active_run_state(self) -> None:
+        run_state = self._active_run_state()
+        self.busy = run_state is not None
+        shell = self.query_one("#composer-shell", Vertical)
+        if run_state is None:
+            shell.remove_class("busy")
+            self._current_worker = None
+            self._current_cancel_event = None
+            return
+        shell.add_class("busy")
+        self._current_worker = run_state.worker
+        self._current_cancel_event = run_state.cancel_event
+
+    def _sync_run_state_from_active(self, run_state: ThreadRunState) -> None:
+        run_state.assistant_buffer = self._assistant_buffer
+        run_state.assistant_cell = self._assistant_cell
+        run_state.reasoning_buffer = self._reasoning_buffer
+        run_state.reasoning_cell = self._reasoning_cell
+        run_state.tool_cells = dict(self._tool_cells)
+
+    def _sync_active_from_run_state(self, run_state: ThreadRunState) -> None:
+        self._assistant_buffer = run_state.assistant_buffer
+        self._assistant_cell = run_state.assistant_cell
+        self._reasoning_buffer = run_state.reasoning_buffer
+        self._reasoning_cell = run_state.reasoning_cell
+        self._tool_cells = dict(run_state.tool_cells)
+
+    async def _handle_thread_event(
+        self,
+        thread_id: str,
+        event_type: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        if not self._is_active_thread(thread_id):
+            if event_type == "assistant.delta":
+                run_state.assistant_buffer += str(item.get("text") or "")
+            elif event_type == "assistant.reasoning_delta":
+                stripped = str(item.get("text") or "").strip()
+                if stripped:
+                    run_state.reasoning_buffer = (run_state.reasoning_buffer + " " + stripped).strip()
+            return
+        self._sync_active_from_run_state(run_state)
+        if event_type == "assistant.delta":
+            await self._append_assistant_delta(str(item.get("text") or ""))
+        elif event_type == "assistant.reasoning_delta":
+            self._append_reasoning_delta(str(item.get("text") or ""))
+        elif event_type == "tool.started":
+            self._append_tool_started(item)
+        elif event_type == "tool.output":
+            self._append_tool_output(item)
+        self._sync_run_state_from_active(run_state)
 
     def action_request_quit(self) -> None:
         now = monotonic()
@@ -992,8 +1161,11 @@ class UvAgentApp(App[None]):
             self._assistant_buffer = ""
             self._assistant_cell = None
             self._tool_cells.clear()
-            self._queue.clear()
+            active_run = self._active_run_state()
+            if active_run is not None:
+                active_run.queue.clear()
             self._reset_transcript()
+            self._refresh_active_run_state()
             self._refresh_status(self._text("idle"))
             return True
         if command == "/quit":
@@ -1002,10 +1174,17 @@ class UvAgentApp(App[None]):
         if command == "/new":
             title = rest.strip() or self._text("new_thread")
             self.thread_id = self.engine.thread_store.create_thread(title)
+            self._assistant_buffer = ""
+            self._assistant_cell = None
+            self._reasoning_cell = None
+            self._reasoning_buffer = ""
+            self._tool_cells.clear()
+            self._reset_transcript()
             self._append_cell(
                 f"[dim]{escape(self._text('new_thread'))}[/dim] [cyan]{escape(short_thread(self.thread_id))}[/cyan]",
                 "event",
             )
+            self._refresh_active_run_state()
             self._refresh_status(self._text("idle"))
             return True
         if command == "/threads":
@@ -1115,11 +1294,17 @@ class UvAgentApp(App[None]):
 
         self._last_tool_payload = payload
         markup = tool_timeline_markup(payload)
+        details = tool_detail_markup(payload)
         cell = self._tool_cells.pop(str(item.get("call", {}).get("call_id") or ""), None)
         if cell is None:
-            self._append_cell(markup, "event")
+            self._append_expandable_cell(markup, details, "event")
         else:
-            cell.update(markup)
+            if isinstance(cell, ExpandableTranscriptCell):
+                cell.summary = markup
+                cell.details = details
+                cell.update(cell._content())
+            else:
+                cell.update(markup)
             self._scroll_end()
         self._refresh_status(self._text("working"))
 
@@ -1159,10 +1344,17 @@ class UvAgentApp(App[None]):
         self._scroll_end()
         return cell
 
+    def _append_expandable_cell(self, summary: str, details: str, classes: str) -> ExpandableTranscriptCell:
+        self._mark_transcript_content()
+        cell = ExpandableTranscriptCell(summary, details, classes=classes, markup=True)
+        self.query_one("#transcript", VerticalScroll).mount(cell)
+        self._scroll_end()
+        return cell
+
     def _mark_transcript_content(self) -> None:
         self._transcript_has_content = True
         try:
-            self.query_one("#empty-state", EmptyState).add_class("hidden")
+            self.query_one(EmptyState).add_class("hidden")
         except NoMatches:
             pass
 
@@ -1171,7 +1363,7 @@ class UvAgentApp(App[None]):
         transcript.query("*").remove()
         self._transcript_has_content = False
         if show_empty:
-            empty_state = EmptyState(id="empty-state")
+            empty_state = EmptyState()
             transcript.mount(empty_state)
             self.call_after_refresh(empty_state.tick)
 
@@ -1192,6 +1384,7 @@ class UvAgentApp(App[None]):
             if len(last_text) > 120:
                 last_text = last_text[:117].rstrip() + "..."
             marker = f"{self._text('current')} " if thread_id == self.thread_id else ""
+            running = f" · {self._text('working')}" if thread_id in self._thread_runs else ""
             items.append(
                 PickerItem(
                     id=thread_id,
@@ -1199,7 +1392,7 @@ class UvAgentApp(App[None]):
                     description=last_text or self._text("no_messages"),
                     meta=(
                         f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} "
-                        f"{self._text('turns')} · {updated}"
+                        f"{self._text('turns')} · {updated}{running}"
                     ),
                 )
             )
@@ -1413,7 +1606,7 @@ class UvAgentApp(App[None]):
             f"- context: {context_line}",
             f"- compaction: {compress_line}",
             f"- thread: {escape(short_thread(self.thread_id))}",
-            f"- queued: {len(self._queue)}",
+            f"- queued: {self._active_queue_length()}",
             f"- user state: {escape(str(uv_agent_home()))}",
             f"- project state: {escape(str(project_state_dir(self.project_root)))}",
             f"- host: {escape(host_environment_line())}",
@@ -1660,8 +1853,31 @@ class UvAgentApp(App[None]):
         self._tool_cells.clear()
         self._reset_transcript(show_empty=False)
         self._render_thread_history(thread_id)
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is not None:
+            if run_state.worker is not None:
+                if run_state.reasoning_buffer:
+                    first = run_state.reasoning_buffer.splitlines()[0]
+                    if len(first) > 120:
+                        first = first[:117].rstrip() + "..."
+                    self._reasoning_cell = self._append_cell(
+                        f"[dim]{escape(self._text('thinking'))}[/dim] [italic]{escape(first)}[/italic]",
+                        "event",
+                    )
+                    run_state.reasoning_cell = self._reasoning_cell
+                if run_state.assistant_buffer:
+                    self._assistant_buffer = run_state.assistant_buffer
+                    self._assistant_cell = self._append_cell(
+                        Markdown(run_state.assistant_buffer),
+                        "assistant",
+                    )
+                    self._assistant_cell.copy_text = run_state.assistant_buffer
+                    run_state.assistant_cell = self._assistant_cell
+                self._append_cell(f"[dim]{escape(run_state.status)}...[/dim]", "event")
+                self._sync_run_state_from_active(run_state)
         if not self._transcript_has_content:
             self._reset_transcript()
+        self._refresh_active_run_state()
         self._refresh_status(self._text("resumed"))
 
     def _render_thread_history(self, thread_id: str) -> None:
@@ -1680,7 +1896,7 @@ class UvAgentApp(App[None]):
             elif event_type == "item.runner_result":
                 result = event.get("result") or {}
                 self._last_tool_payload = result
-                self._append_cell(tool_timeline_markup(result), "event")
+                self._append_expandable_cell(tool_timeline_markup(result), tool_detail_markup(result), "event")
             elif event_type == "item.image_attachment":
                 attachment = event.get("attachment") or {}
                 self._append_cell(
@@ -1800,7 +2016,8 @@ class UvAgentApp(App[None]):
         state_text = self._last_status
         if self.busy and state_text == self._text("idle"):
             state_text = self._text("working")
-        queued = f" · q{len(self._queue)}" if self._queue else ""
+        queue_length = self._active_queue_length()
+        queued = f" · q{queue_length}" if queue_length else ""
         spinner = ""
         if self.busy:
             frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
