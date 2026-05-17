@@ -50,6 +50,7 @@ from uv_agent.tui.formatting import (
     format_tokens,
     parse_tool_payload,
     short_thread,
+    tool_call_detail_highlight_markup,
     tool_call_detail_markup,
     tool_call_preview_line,
     tool_call_summary_markup,
@@ -64,7 +65,6 @@ COMPOSER_BOTTOM_RESERVED_ROWS = 2
 QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
-THREAD_HISTORY_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -2062,9 +2062,8 @@ class UvAgentApp(App[None]):
         folds = self._visible_process_fold_cells()
         if not folds:
             return
-        collapse = all(not fold.collapsed for fold in folds)
-        for fold in folds:
-            fold.set_collapsed(collapse)
+        fold = folds[-1]
+        fold.set_collapsed(not fold.collapsed)
 
     def action_attach_clipboard_image(self) -> None:
         try:
@@ -2188,21 +2187,14 @@ class UvAgentApp(App[None]):
         if not self.thread_id:
             return []
         attachments: list[dict[str, Any]] = []
-        before_offset: int | None = None
-        while True:
-            events, has_more = self.engine.thread_store.read_recent_events(
-                self.thread_id,
-                limit=THREAD_HISTORY_PAGE_SIZE,
-                before_offset=before_offset,
-                event_types={"item.image_attachment"},
-            )
-            for event in events:
-                attachment = event.get("attachment")
-                if isinstance(attachment, dict):
-                    attachments.append(attachment)
-            if not has_more or not events:
-                break
-            before_offset = _event_offset(events[0])
+        events = self.engine.thread_store.read_events(
+            self.thread_id,
+            event_types={"item.image_attachment"},
+        )
+        for event in events:
+            attachment = event.get("attachment")
+            if isinstance(attachment, dict):
+                attachments.append(attachment)
         return attachments
 
     def action_help(self) -> None:
@@ -2563,7 +2555,7 @@ class UvAgentApp(App[None]):
                 "",
                 call={**call, "_status_label": self._text("python_called")},
             )
-            details = tool_call_detail_markup(call)
+            details = tool_call_detail_highlight_markup(call)
             if isinstance(pending_cell, ExpandableTranscriptCell):
                 pending_cell.set_details(markup, details)
             elif tool_call_preview_line(call):
@@ -2598,7 +2590,7 @@ class UvAgentApp(App[None]):
         )
         if cell is None and len(self._tool_delta_cells) == 1:
             _, cell = self._tool_delta_cells.popitem()
-        details = tool_call_detail_markup(call)
+        details = tool_call_detail_highlight_markup(call)
         if cell is None:
             if tool_call_preview_line(call):
                 cell = self._append_expandable_cell(markup, details, "tool_pending")
@@ -2632,20 +2624,20 @@ class UvAgentApp(App[None]):
             if tool_call_preview_line(call):
                 cell = self._append_expandable_cell(
                     markup,
-                    tool_call_detail_markup(call),
+                    tool_call_detail_highlight_markup(call),
                     "tool_pending",
                 )
             else:
                 cell = self._append_cell(markup, "tool_pending")
             self._tool_delta_cells[index] = cell
         elif isinstance(cell, ExpandableTranscriptCell):
-            cell.set_details(markup, tool_call_detail_markup(call))
+            cell.set_details(markup, tool_call_detail_highlight_markup(call))
         elif tool_call_preview_line(call):
             old_cell = cell
             cell = self._replace_with_expandable_cell(
                 cell,
                 markup,
-                tool_call_detail_markup(call),
+                tool_call_detail_highlight_markup(call),
                 "tool_pending",
             )
             self._replace_process_cell(old_cell, cell)
@@ -2684,7 +2676,13 @@ class UvAgentApp(App[None]):
         self._scroll_end()
         return cell
 
-    def _prepend_history_cells(self, events: list[dict[str, Any]], *, has_more: bool) -> None:
+    def _prepend_history_cells(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        has_more: bool,
+        start_offset: int | None = None,
+    ) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)
         insert_before: object | None = transcript.children[0] if transcript.children else None
         if self._history_more_cell is not None:
@@ -2697,7 +2695,9 @@ class UvAgentApp(App[None]):
             self._history_more_cell.remove()
             self._history_more_cell = None
         self._history_has_more = has_more
-        if events:
+        if start_offset is not None:
+            self._history_before_offset = start_offset
+        elif events:
             self._history_before_offset = _event_offset(events[0])
         if has_more or events:
             marker = LoadOlderHistoryCell(has_more=has_more, classes="event", markup=True)
@@ -2820,7 +2820,7 @@ class UvAgentApp(App[None]):
     def _append_tool_call_history(self, item: dict[str, Any], *, before: object | None = None) -> ExpandableTranscriptCell:
         return self._append_expandable_cell(
             tool_call_summary_markup({**item, "_status_label": self._text("python_called")}),
-            tool_call_detail_markup(item),
+            tool_call_detail_highlight_markup(item),
             "event",
             before=before,
         )
@@ -3617,30 +3617,32 @@ class UvAgentApp(App[None]):
         self._refresh_status(self._text("resumed"))
 
     def _render_thread_history(self, thread_id: str) -> None:
-        events, has_more = self.engine.thread_store.read_recent_events(
+        segment = self.engine.thread_store.read_history_segment(
             thread_id,
-            limit=THREAD_HISTORY_PAGE_SIZE,
             event_types=VISIBLE_HISTORY_EVENT_TYPES,
         )
-        self._history_has_more = has_more
-        self._history_before_offset = _event_offset(events[0]) if events else None
-        if has_more:
+        self._history_has_more = segment.has_more
+        self._history_before_offset = segment.start_offset
+        if segment.has_more:
             transcript = self.query_one("#transcript", VerticalScroll)
             marker = LoadOlderHistoryCell(has_more=True, classes="event", markup=True)
             transcript.mount(marker)
             self._history_more_cell = marker
-        self._mount_history_events(events)
+        self._mount_history_events(segment.events)
 
     def _load_older_thread_history(self) -> None:
         if not self.thread_id or self._history_before_offset is None:
             return
-        events, has_more = self.engine.thread_store.read_recent_events(
+        segment = self.engine.thread_store.read_history_segment(
             self.thread_id,
-            limit=THREAD_HISTORY_PAGE_SIZE,
             before_offset=self._history_before_offset,
             event_types=VISIBLE_HISTORY_EVENT_TYPES,
         )
-        self._prepend_history_cells(events, has_more=has_more)
+        self._prepend_history_cells(
+            segment.events,
+            has_more=segment.has_more,
+            start_offset=segment.start_offset,
+        )
 
     def _append_user_from_history(self, item: dict[str, Any], *, before: object | None = None) -> TranscriptCell | None:
         self._reasoning_cell = None

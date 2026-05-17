@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
+import keyword
+import tokenize
 from typing import Any
 
 
@@ -101,6 +104,99 @@ def tool_call_detail_markup(call: dict[str, Any]) -> str:
             lines.append("[dim]arguments[/dim]")
             lines.append(escape(raw_args))
     return "\n".join(lines)
+
+
+def tool_call_detail_highlight_markup(call: dict[str, Any]) -> str:
+    """Render hidden details with Python syntax highlighting for script source."""
+    args = tool_call_args(call)
+    lines = [
+        "[dim]call[/dim]",
+        f"name: {escape(str(call.get('name') or 'python'))}",
+    ]
+    call_id = str(call.get("call_id") or "")
+    if call_id:
+        lines.append(f"call_id: {escape(call_id)}")
+    code = str(args.get("code") or "").strip()
+    if code:
+        lines.append("[dim]script[/dim]")
+        lines.append(python_syntax_markup(code))
+    if args:
+        remainder = {key: value for key, value in args.items() if key != "code"}
+        if remainder:
+            lines.append("[dim]arguments[/dim]")
+            lines.append(escape(json.dumps(remainder, ensure_ascii=False, indent=2)))
+    else:
+        raw_args = str(call.get("arguments") or "").strip()
+        if raw_args:
+            lines.append("[dim]arguments[/dim]")
+            lines.append(escape(raw_args))
+    return "\n".join(lines)
+
+
+def python_syntax_markup(code: str) -> str:
+    """Return Textual markup with lightweight Python token highlighting."""
+    lines = code.splitlines(keepends=True)
+    if not lines:
+        return ""
+    rendered: list[str] = []
+    cursor_line = 1
+    cursor_col = 0
+
+    def append_plain(text: str) -> None:
+        if text:
+            rendered.append(escape(text))
+
+    def append_gap(end_line: int, end_col: int) -> None:
+        nonlocal cursor_line, cursor_col
+        if end_line < cursor_line or (end_line == cursor_line and end_col < cursor_col):
+            return
+        if end_line == cursor_line:
+            append_plain(lines[cursor_line - 1][cursor_col:end_col])
+        else:
+            append_plain(lines[cursor_line - 1][cursor_col:])
+            for line_no in range(cursor_line + 1, end_line):
+                append_plain(lines[line_no - 1])
+            append_plain(lines[end_line - 1][:end_col])
+        cursor_line = end_line
+        cursor_col = end_col
+
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
+        for token in tokens:
+            token_type = token.type
+            token_text = token.string
+            start_line, start_col = token.start
+            end_line, end_col = token.end
+            if token_type in {
+                tokenize.ENCODING,
+                tokenize.ENDMARKER,
+                tokenize.INDENT,
+                tokenize.DEDENT,
+                tokenize.NL,
+                tokenize.NEWLINE,
+            }:
+                continue
+            append_gap(start_line, start_col)
+            rendered.append(_python_token_markup(token_type, token_text))
+            cursor_line = end_line
+            cursor_col = end_col
+    except tokenize.TokenError:
+        return escape(code)
+
+    append_gap(len(lines), len(lines[-1]))
+    return "".join(rendered)
+
+
+def _python_token_markup(token_type: int, token_text: str) -> str:
+    escaped = escape(token_text)
+    if token_type == tokenize.COMMENT:
+        return f"[#94a3b8 italic]{escaped}[/#94a3b8 italic]"
+    if token_type == tokenize.STRING:
+        return f"[#fbbf24]{escaped}[/#fbbf24]"
+    if token_type == tokenize.NAME:
+        if keyword.iskeyword(token_text):
+            return f"[bold #7dd3fc]{escaped}[/bold #7dd3fc]"
+    return escaped
 
 
 def short_block(value: str, *, max_lines: int = 8, max_chars: int = 1800) -> str:

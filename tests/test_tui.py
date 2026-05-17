@@ -884,7 +884,9 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
             for cell in fold_cell.cells
         )
         assert any(
-            isinstance(cell, ExpandableTranscriptCell) and "print('ok')" in cell.details
+            isinstance(cell, ExpandableTranscriptCell)
+            and "print(" in cell.details
+            and "'ok'" in cell.details
             for cell in fold_cell.cells
         )
         assert any(
@@ -1130,6 +1132,52 @@ async def test_tui_process_fold_expands_original_cells(
 
 
 @pytest.mark.asyncio
+async def test_tui_ctrl_g_toggles_lowest_visible_process_fold_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        top_process = [
+            app._append_cell("[dim]top reasoning[/dim]", "reasoning"),
+            app._append_cell("[dim]top tool[/dim]", "event"),
+        ]
+        top_fold = app._append_process_fold_cell(top_process, collapsed=True)
+        bottom_process = [
+            app._append_cell("[dim]bottom reasoning[/dim]", "reasoning"),
+            app._append_cell("[dim]bottom tool[/dim]", "event"),
+        ]
+        bottom_fold = app._append_process_fold_cell(bottom_process, collapsed=True)
+        await pilot.pause()
+
+        assert top_fold in app._visible_process_fold_cells()
+        assert bottom_fold in app._visible_process_fold_cells()
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+
+        assert top_fold.collapsed is True
+        assert all(cell.has_class("process_fold_hidden") for cell in top_process)
+        assert bottom_fold.collapsed is False
+        assert all(not cell.has_class("process_fold_hidden") for cell in bottom_process)
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+
+        assert top_fold.collapsed is True
+        assert all(cell.has_class("process_fold_hidden") for cell in top_process)
+        assert bottom_fold.collapsed is True
+        assert all(cell.has_class("process_fold_hidden") for cell in bottom_process)
+
+
+@pytest.mark.asyncio
 async def test_tui_clears_initial_thinking_when_response_has_no_reasoning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1169,18 +1217,39 @@ async def test_tui_thread_resume_pages_older_history(
     project_root.mkdir()
     state = tmp_path / "state"
     engine = fake_engine(project_root, state)
-    thread_id = engine.thread_store.create_thread("Long work")
-    for index in range(105):
-        engine.thread_store.append(
-            thread_id,
-            "item.user",
-            turn_id=f"turn_{index}",
-            item={
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": f"message {index}"}],
-            },
-        )
+    thread_id = engine.thread_store.create_thread("Long compacted work")
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id="turn_1",
+        item={
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old segment"}],
+        },
+    )
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="turn_1", text="summary one")
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id="turn_2",
+        item={
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "middle segment"}],
+        },
+    )
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="turn_2", text="summary two")
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id="turn_3",
+        item={
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "new segment"}],
+        },
+    )
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
     app = UvAgentApp(project_root=project_root)
 
@@ -1192,9 +1261,9 @@ async def test_tui_thread_resume_pages_older_history(
             str(getattr(child, "copy_text", None) or "")
             for child in app.query_one("#transcript", TranscriptScroll).children
         )
-        assert "message 0" not in transcript_text
-        assert "message 5" in transcript_text
-        assert "message 104" in transcript_text
+        assert "old segment" not in transcript_text
+        assert "middle segment" not in transcript_text
+        assert "new segment" in transcript_text
         assert app._history_has_more is True
 
         app._load_older_thread_history()
@@ -1204,7 +1273,19 @@ async def test_tui_thread_resume_pages_older_history(
             str(getattr(child, "copy_text", None) or "")
             for child in app.query_one("#transcript", TranscriptScroll).children
         )
-        assert "message 0" in transcript_text
+        assert "old segment" not in transcript_text
+        assert "middle segment" in transcript_text
+        assert "new segment" in transcript_text
+        assert app._history_has_more is True
+
+        app._load_older_thread_history()
+        await pilot.pause()
+
+        transcript_text = "\n".join(
+            str(getattr(child, "copy_text", None) or "")
+            for child in app.query_one("#transcript", TranscriptScroll).children
+        )
+        assert "old segment" in transcript_text
         assert app._history_has_more is False
 
 
@@ -2255,6 +2336,43 @@ async def test_tui_tool_result_details_escape_literal_brackets(
         rendered = str(panel.query_one("#panel-body-content", Static).render())
         assert "# dependencies = [" in rendered
         assert "level=\"small\"" in rendered
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_call_details_highlight_python_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+    code = "for item in ['alpha', 'beta']:\n    print(item)\n"
+    call = {
+        "call_id": "call_1",
+        "name": "run_python",
+        "arguments": __import__("json").dumps({"code": code}),
+    }
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._append_tool_started({"call": call})
+        await pilot.pause()
+        cell = app.query_one(ExpandableTranscriptCell)
+
+        await pilot.click(cell)
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, ToolDetailsPanel)
+        content = panel.query_one("#panel-body-content", Static)
+        rendered = str(content.render())
+        assert "for item in ['alpha', 'beta'" in rendered
+        assert "print(item)" in rendered
+        assert "[bold #7dd3fc]for[/bold #7dd3fc]" in panel.body
+        assert "[#fbbf24]'alpha'[/#fbbf24]" in panel.body
 
 
 @pytest.mark.asyncio
