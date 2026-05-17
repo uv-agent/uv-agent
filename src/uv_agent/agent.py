@@ -1403,9 +1403,6 @@ class AgentEngine:
             return None
         snap = self.thread_store.snapshot(thread_id)
         events = snap.events_after_compaction
-        compaction = snap.latest_compaction
-        if compaction is not None:
-            return None
         for event in reversed(events):
             if event.get("type") == "item.context_update":
                 state = event.get("context_state")

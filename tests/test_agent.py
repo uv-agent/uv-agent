@@ -1799,6 +1799,30 @@ def test_workspace_context_reappears_after_compaction_epoch(tmp_path: Path) -> N
     assert "demo (project)" in str(second)
 
 
+def test_workspace_context_is_not_repeated_after_compaction_epoch_update(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    skill_dir = project_root / ".agents" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+
+    engine._workspace_context_items(thread_id)
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    after_compaction = engine._workspace_context_items(thread_id)
+    repeated = engine._workspace_context_items(thread_id)
+
+    assert "demo (project)" in str(after_compaction)
+    assert repeated == []
+
+
 @pytest.mark.asyncio
 async def test_compaction_uses_persisted_system_instructions(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
