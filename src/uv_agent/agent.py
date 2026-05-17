@@ -361,6 +361,7 @@ class AgentEngine:
                 self._raise_if_cancelled(cancel_event)
                 if response is None:
                     raise RuntimeError("Model stream ended without completion")
+                reasoning_text = response.reasoning_text or "".join(reasoning_parts).strip()
                 self.thread_store.append(
                     thread_id,
                     "item.model_response",
@@ -369,6 +370,7 @@ class AgentEngine:
                     response_id=response.id,
                     output=response.output,
                     usage=response.usage,
+                    reasoning_text=reasoning_text,
                 )
                 yield {
                     "type": "model.response",

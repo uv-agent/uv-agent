@@ -898,10 +898,14 @@ class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
         self,
         summary: str,
         details: str,
+        detail_title: str = "tool_details",
+        detail_hint: str = "tool_details_hint",
         **kwargs: Any,
     ) -> None:
         self.summary = summary
         self.details = details
+        self.detail_title = detail_title
+        self.detail_hint = detail_hint
         super().__init__(self._content(), **kwargs)
 
     def on_click(self, event: events.Click) -> None:
@@ -1027,8 +1031,8 @@ class ToolDetailsPanel(FullscreenPanel):
 
     def _refresh_current(self) -> None:
         text = getattr(self.app, "_text", lambda key: key)
-        self.panel_title = text("tool_details")
-        self.subtitle = text("tool_details_hint")
+        self.panel_title = text(self.current_cell.detail_title)
+        self.subtitle = text(self.current_cell.detail_hint)
         self.body = self.current_cell.details
         try:
             self.query_one("#panel-header", Static).update(self.panel_title)
@@ -1550,6 +1554,15 @@ class UvAgentApp(App[None]):
                 elif event_type == "tool.delta":
                     await self._handle_thread_event(item_thread_id, "tool.delta", item, run_state)
                 elif event_type == "model.response":
+                    response = item.get("response")
+                    reasoning_text = str(getattr(response, "reasoning_text", "") or "")
+                    if reasoning_text:
+                        await self._handle_thread_event(
+                            item_thread_id,
+                            "assistant.reasoning_completed",
+                            {"text": reasoning_text},
+                            run_state,
+                        )
                     run_state.status = self._text("reading")
                     if self._is_active_thread(item_thread_id):
                         self._refresh_status(self._text("reading"))
@@ -1744,6 +1757,10 @@ class UvAgentApp(App[None]):
                 stripped = str(item.get("text") or "").strip()
                 if stripped:
                     run_state.reasoning_buffer = (run_state.reasoning_buffer + " " + stripped).strip()
+            elif event_type == "assistant.reasoning_completed":
+                stripped = str(item.get("text") or "").strip()
+                if stripped:
+                    run_state.reasoning_buffer = stripped
             elif event_type == "tool.delta":
                 run_state.status = self._text("running_python")
             return
@@ -1752,6 +1769,10 @@ class UvAgentApp(App[None]):
             await self._append_assistant_delta(str(item.get("text") or ""))
         elif event_type == "assistant.reasoning_delta":
             self._append_reasoning_delta(str(item.get("text") or ""))
+        elif event_type == "assistant.reasoning_completed":
+            self._append_reasoning_history(str(item.get("text") or ""))
+            self._reasoning_cell = None
+            self._reasoning_buffer = ""
         elif event_type == "image.attachment":
             attachment = item.get("attachment") or {}
             self._append_image_attachment_cell(attachment)
@@ -2159,6 +2180,19 @@ class UvAgentApp(App[None]):
             self._reasoning_cell.update(markup)
             self._scroll_end()
 
+    def _append_reasoning_history(self, text: str) -> None:
+        stripped = text.strip()
+        if not stripped:
+            return
+        first = stripped.splitlines()[0]
+        if len(first) > 120:
+            first = first[:117].rstrip() + "..."
+        summary = (
+            f"[dim italic]{escape(self._text('thinking'))}[/dim italic]  "
+            f"[italic #a3b1c2]{escape(first)}[/italic #a3b1c2]"
+        )
+        self._append_reasoning_cell(summary, escape(stripped))
+
     def _append_tool_output(self, item: dict[str, Any]) -> None:
         payload = parse_tool_payload(item.get("output", {}))
         delta_index = item.get("tool_call_index")
@@ -2268,6 +2302,20 @@ class UvAgentApp(App[None]):
     def _append_expandable_cell(self, summary: str, details: str, classes: str) -> ExpandableTranscriptCell:
         self._mark_transcript_content()
         cell = ExpandableTranscriptCell(summary, details, classes=classes, markup=True)
+        self.query_one("#transcript", VerticalScroll).mount(cell)
+        self._scroll_end()
+        return cell
+
+    def _append_reasoning_cell(self, summary: str, details: str) -> ExpandableTranscriptCell:
+        self._mark_transcript_content()
+        cell = ExpandableTranscriptCell(
+            summary,
+            details,
+            detail_title="reasoning_details",
+            detail_hint="reasoning_details_hint",
+            classes="reasoning",
+            markup=True,
+        )
         self.query_one("#transcript", VerticalScroll).mount(cell)
         self._scroll_end()
         return cell
@@ -2975,6 +3023,7 @@ class UvAgentApp(App[None]):
             if event_type == "item.user":
                 self._append_user_from_history(event.get("item") or {})
             elif event_type == "item.model_response":
+                self._append_reasoning_history(str(event.get("reasoning_text") or ""))
                 text = self._model_response_text(event.get("output") or [])
                 if text:
                     self._append_cell(Markdown(text), "assistant")
@@ -2990,7 +3039,7 @@ class UvAgentApp(App[None]):
                 attachment = event.get("attachment") or {}
                 self._append_image_attachment_cell(attachment)
             elif event_type in {"item.reasoning_delta", "item.reasoning_partial"}:
-                self._append_reasoning_delta(str(event.get("text") or ""))
+                self._append_reasoning_history(str(event.get("text") or ""))
             elif event_type == "item.compaction":
                 self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
 

@@ -20,7 +20,7 @@ from uv_agent.config import (
     TitleGenerationConfig,
     load_config,
 )
-from uv_agent.model_client import FakeModelClient, parse_responses_response
+from uv_agent.model_client import FakeModelClient, ModelStreamEvent, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.runner.models import PythonRunRequest
 from uv_agent.session import ThreadStore
@@ -57,6 +57,36 @@ class RoutedModelClient(FakeModelClient):
             return parse_responses_response(self.title)
         self.requests.append(request)
         return parse_responses_response(self.main)
+
+
+class ReasoningStreamClient(FakeModelClient):
+    async def stream_response(self, **kwargs):
+        self.requests.append(
+            {
+                "input": kwargs.get("input_items", []),
+                "level": kwargs.get("level"),
+                "tools": kwargs.get("tools") or [],
+                "instructions": kwargs.get("instructions"),
+                "stream": True,
+            }
+        )
+        yield ModelStreamEvent(type="reasoning_delta", text="provider reasoning")
+        yield ModelStreamEvent(
+            type="completed",
+            response=parse_responses_response(
+                {
+                    "id": "resp_1",
+                    "output_text": "done",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done"}],
+                        }
+                    ],
+                }
+            ),
+        )
 
 
 def make_test_config(
@@ -1500,6 +1530,28 @@ async def test_compaction_uses_persisted_system_instructions(tmp_path: Path) -> 
     assert client.requests[0]["instructions"] == frozen
     assert client.requests[1]["instructions"] == frozen
     assert client.requests[0]["instructions"] == client.requests[1]["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_agent_persists_completed_reasoning_text(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    client = ReasoningStreamClient([])
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    thread_id = str([event async for event in engine.run_turn(user_text="hello")][-1]["thread_id"])
+    response = next(
+        event for event in engine.thread_store.read(thread_id) if event["type"] == "item.model_response"
+    )
+
+    assert response["reasoning_text"] == "provider reasoning"
 
 
 def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> None:

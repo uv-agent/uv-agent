@@ -552,12 +552,6 @@ async def test_tui_thread_picker_resumes_and_renders_history(
     )
     engine.thread_store.append(
         thread_id,
-        "item.reasoning_partial",
-        turn_id="turn_1",
-        text="checking files",
-    )
-    engine.thread_store.append(
-        thread_id,
         "item.model_response",
         turn_id="turn_1",
         response_id="resp_1",
@@ -568,6 +562,7 @@ async def test_tui_thread_picker_resumes_and_renders_history(
                 "content": [{"type": "output_text", "text": "hi there"}],
             }
         ],
+        reasoning_text="checking files",
         usage={},
     )
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
@@ -583,7 +578,13 @@ async def test_tui_thread_picker_resumes_and_renders_history(
 
         assert app.thread_id == thread_id
         assert app._transcript_has_content is True
-        assert app._reasoning_buffer == "checking files"
+        reasoning_cells = [
+            child
+            for child in app.query_one("#transcript", TranscriptScroll).children
+            if isinstance(child, ExpandableTranscriptCell) and child.detail_title == "reasoning_details"
+        ]
+        assert reasoning_cells
+        assert "checking files" in reasoning_cells[0].details
         assert not app.query(EmptyState)
 
 
