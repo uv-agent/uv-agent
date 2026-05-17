@@ -14,19 +14,44 @@ from typing import Any, Callable
 
 from uv_agent.attachments import AttachmentStore, image_message_item
 from uv_agent.config import AppConfig
-from uv_agent.context import ContextStats, compact_target_tokens, estimate_tokens, usage_token_count
+from uv_agent.context import ContextStats, estimate_tokens, usage_token_count
 from uv_agent.environment import detect_user_language, host_environment, host_environment_line
 from uv_agent.ids import new_id
 from uv_agent.mcp_config import discover_mcp_servers, render_mcp_summary
 from uv_agent.model_client import ModelClient, ModelResponse
 from uv_agent.paths import project_state_dir, uv_agent_home
-from uv_agent.project_rules import ProjectRuleContext, load_project_rules
+from uv_agent.project_rules import (
+    ProjectRuleContext,
+    discover_workspace_rule_index,
+    load_directory_rules,
+    load_project_rules,
+)
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
 from uv_agent.session.store import ThreadStore, digest_items
 from uv_agent.skills import discover_skills, render_skill_summary
 
 
 DEFAULT_THREAD_TITLES = {"New thread", "new thread", "新会话"}
+COMPACTION_USER_MESSAGE_MAX_TOKENS = 20_000
+COMPACTION_SUMMARIZATION_PROMPT = (
+    "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for "
+    "another LLM that will resume the task.\n\n"
+    "Include:\n"
+    "- Current progress and key decisions made\n"
+    "- Important context, constraints, or user preferences\n"
+    "- What remains to be done (clear next steps)\n"
+    "- Any critical data, examples, or references needed to continue\n\n"
+    "Be concise, structured, and focused on helping the next LLM seamlessly continue the work."
+)
+TITLE_GENERATION_PROMPT = (
+    "Create a concise title for this uv-agent thread from the user's first message. "
+    "Return only the title, without quotes or punctuation. Prefer the user's language. "
+    "Keep it under 8 words or 24 CJK characters."
+)
+COMPACTED_CONTEXT_CONTINUATION = (
+    "The messages above may include several earlier user messages preserved for continuity. "
+    "Continue from this compacted context."
+)
 
 
 class TurnInterrupted(Exception):
@@ -127,6 +152,7 @@ You are uv-agent, an experimental coding agent.
 <imports>
 from uv_agent_runtime import (
     apply_patch,
+    enter_dir,
     look_at,
     ask,
     saved_scripts,
@@ -153,6 +179,11 @@ apply_patch('''*** Begin Patch
 +new value
 *** End Patch
 ''')
+</helper>
+<helper name="enter_dir">
+Changes the script working directory like os.chdir(path), persists that directory for later runs in this thread, and may automatically load AGENTS directory rules for that location.
+Example:
+enter_dir("src")
 </helper>
 <helper name="look_at">
 Attaches an image to future model context.
@@ -205,8 +236,9 @@ Raw MCP requests are also available with client.request(method, params) and noti
 </mentions>
 
 <dynamic_workspace_context>
-<rule>Rules, skills, and MCP declarations are appended only when first seen, changed, removed, or after compaction.</rule>
-<rule>A removal notice means older appended rule/capability context must not be used unless it appears again.</rule>
+<rule>Directory rules from AGENTS files are loaded automatically for the active working directory. A bounded workspace_rule_index may list rule file locations without loading their full contents.</rule>
+<rule>Skills and MCP declarations are appended only when first seen, changed, removed, or after compaction, and only as context immediately before the current user message.</rule>
+<rule>A removal notice means older appended capability context must not be used unless it appears again.</rule>
 <rule>Interrupted turns may appear in context as summaries of partial work; do not assume unfinished tool calls completed.</rule>
 </dynamic_workspace_context>
 </uv_agent_system_prompt>
@@ -224,6 +256,14 @@ class TurnInputState:
         if self.use_previous_response_id and self.previous_response_id:
             return copy.deepcopy(self.pending_items)
         return copy.deepcopy(self.input_items)
+
+
+@dataclass
+class RuleRuntimeState:
+    active_cwd: Path
+    loaded_rule_paths: set[Path] = field(default_factory=set)
+    index_emitted: bool = False
+    cwd_notice_cwd: Path | None = None
 
 
 class AgentEngine:
@@ -246,6 +286,7 @@ class AgentEngine:
         self._last_config_refresh_at = 0.0
         self._config_loader = config_loader
         self._host_environment = host_environment()
+        self._rule_states: dict[str, RuleRuntimeState] = {}
 
     def refresh_config(self, *, force: bool = False) -> None:
         """Reload user/project config for long-running sessions."""
@@ -271,13 +312,13 @@ class AgentEngine:
     ) -> AsyncIterator[dict[str, Any]]:
         self.refresh_config(force=True)
         thread_id = thread_id or self.thread_store.create_thread("New thread")
-        system_instructions = self._ensure_system_instructions(thread_id)
+        system_instructions = self._system_instructions_for_turn(thread_id)
         turn_id = new_id("turn")
         should_generate_title = self._should_generate_title(thread_id)
         turn_input = self._prepare_turn_input(thread_id, level=level)
         input_items = turn_input.input_items
         request_input_items = turn_input.request_input_items()
-        context_items = self._workspace_context_items(thread_id)
+        pre_user_items = self._pre_user_context_items(thread_id)
         self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
         user_item = message_item("user", user_text)
         self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
@@ -287,9 +328,9 @@ class AgentEngine:
             should_generate=should_generate_title,
             level=level,
         )
-        input_items.extend(context_items)
-        request_input_items.extend(context_items)
-        turn_input.pending_items.extend(context_items)
+        input_items.extend(pre_user_items)
+        request_input_items.extend(pre_user_items)
+        turn_input.pending_items.extend(pre_user_items)
         input_items.append(user_item)
         request_input_items.append(user_item)
         turn_input.pending_items.append(user_item)
@@ -559,13 +600,12 @@ class AgentEngine:
         return title
 
     async def _generate_thread_title(self, user_text: str, *, level: str | None) -> str | None:
-        prompt = self.config.runtime.title_generation.prompt
         title_level = self.config.runtime.title_generation.model_level or level
         response = await self.model_client.create_response(
             input_items=[
                 message_item(
                     "user",
-                    prompt
+                    TITLE_GENERATION_PROMPT
                     + "\n\nUser message:\n"
                     + user_text.strip(),
                 )
@@ -585,7 +625,7 @@ class AgentEngine:
         level: str | None,
         instructions: str,
     ) -> bool:
-        if not self.config.runtime.auto_compress:
+        if not self.config.runtime.compression.enabled:
             return False
         compact_level = self.config.runtime.compression.model_level or level
         model = self.config.model_for_level(compact_level)
@@ -598,12 +638,8 @@ class AgentEngine:
         )
         if approx_tokens < trigger_tokens:
             return False
-        target_tokens = compact_target_tokens(
-            model.context_window_tokens,
-            target_ratio=self.config.runtime.compression.target_ratio,
-        )
         compact_input = copy.deepcopy(input_items)
-        compact_input.append(self._compaction_trigger_item(target_tokens))
+        compact_input.append(self._compaction_trigger_item())
         response = await self.model_client.create_response(
             input_items=compact_input,
             level=compact_level,
@@ -622,18 +658,18 @@ class AgentEngine:
             context_state=context_state,
             usage=response.usage,
         )
+        self._reset_rule_epoch(thread_id)
         return True
 
-    def _compaction_trigger_item(self, target_tokens: int) -> dict[str, Any]:
-        prompt = self.config.runtime.compression.prompt
+    def _compaction_trigger_item(self) -> dict[str, Any]:
         return message_item(
             "user",
             "<context_compaction_request>\n"
-            + prompt
-            + f"\n\nTarget length: about {target_tokens} tokens.\n"
+            + COMPACTION_SUMMARIZATION_PROMPT
+            + "\n\n"
             + "Return only the continuation summary. Preserve user intent, decisions, "
-            + "file changes, tool results, and unresolved tasks. Do not restate workspace "
-            + "rules or capability declarations that remain present as retained context messages.\n"
+            + "file changes, tool results, and unresolved tasks. Do not restate AGENTS "
+            + "directory rules; they are reloaded automatically when needed.\n"
             + "</context_compaction_request>",
         )
 
@@ -642,20 +678,54 @@ class AgentEngine:
         input_items: list[dict[str, Any]],
         response: ModelResponse,
     ) -> list[dict[str, Any]]:
-        replacement = [
-            copy.deepcopy(item)
-            for item in input_items
-            if self._retain_item_after_compaction(item)
-        ]
-        output = copy.deepcopy(response.output)
-        if not output and response.output_text.strip():
-            output = [assistant_output_item(response.output_text.strip())]
-        replacement.extend(output)
+        replacement = self._retained_user_messages_after_compaction(input_items)
+        summary = response.output_text.strip() or "(no summary available)"
+        replacement.append(
+            message_item(
+                "user",
+                "<conversation_summary>\n"
+                + summary
+                + "\n</conversation_summary>\n"
+                + COMPACTED_CONTEXT_CONTINUATION,
+            )
+        )
         return replacement
+
+    def _retained_user_messages_after_compaction(self, input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        selected: list[dict[str, Any]] = []
+        remaining = COMPACTION_USER_MESSAGE_MAX_TOKENS
+        for item in reversed(input_items):
+            if not self._retain_item_after_compaction(item):
+                continue
+            tokens = estimate_tokens([item])
+            if tokens <= remaining:
+                selected.append(copy.deepcopy(item))
+                remaining -= tokens
+                if remaining <= 0:
+                    break
+                continue
+            text = message_item_text(item)
+            if remaining > 0 and text:
+                selected.append(message_item("user", truncate_text_to_estimated_tokens(text, remaining)))
+            break
+        selected.reverse()
+        return selected
 
     @staticmethod
     def _retain_item_after_compaction(item: dict[str, Any]) -> bool:
-        return item.get("type") == "message" and item.get("role") in {"system", "developer", "user"}
+        if item.get("type") != "message" or item.get("role") not in {"user"}:
+            return False
+        text = message_item_text(item)
+        return not (
+            "<workspace_rules" in text
+            or "<workspace_rule_index>" in text
+            or "<directory_rules_loaded>" in text
+            or "<active_cwd_notice>" in text
+            or "<conversation_summary>" in text
+            or "<available_skills>" in text
+            or "<available_mcp_servers>" in text
+            or "<context_update" in text
+        )
 
     async def _handle_tool_call(
         self,
@@ -685,7 +755,7 @@ class AgentEngine:
                     uv_args=list(args.get("uv_args") or []),
                     script_args=list(args.get("script_args") or []),
                     timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
-                    cwd=self.project_root,
+                    cwd=self._active_cwd(thread_id),
                     thread_id=thread_id,
                     turn_id=turn_id,
                     cancel_event=cancel_event,
@@ -703,7 +773,7 @@ class AgentEngine:
                     uv_args=list(args.get("uv_args") or []),
                     script_args=list(args.get("script_args") or []),
                     timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
-                    cwd=self.project_root,
+                    cwd=self._active_cwd(thread_id),
                     thread_id=thread_id,
                     turn_id=turn_id,
                     cancel_event=cancel_event,
@@ -711,6 +781,11 @@ class AgentEngine:
             )
         if result.interrupted:
             raise TurnInterrupted()
+        rule_events, visible_events = self._process_runner_events(
+            result.events,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
         payload = {
             "script_id": result.script_id,
             "run_id": result.run_id,
@@ -720,14 +795,16 @@ class AgentEngine:
             "truncated": result.truncated,
             "stdout": result.stdout,
             "stderr": result.stderr,
-            "events": result.events,
+            "events": visible_events,
             "run_log_path": str(result.run_log_path),
         }
+        if rule_events:
+            payload["rules_loaded"] = rule_events
         attachments = self._register_look_at_events(
-            result.events,
+            visible_events,
             thread_id=thread_id,
             turn_id=turn_id,
-            cwd=self.project_root,
+            cwd=self._active_cwd(thread_id),
         )
         if attachments:
             payload["attachments"] = attachments
@@ -824,6 +901,53 @@ class AgentEngine:
             attachments.append(payload)
         return attachments
 
+    def _process_runner_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        thread_id: str,
+        turn_id: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        visible_events: list[dict[str, Any]] = []
+        rules_loaded: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("kind") == "enter_dir":
+                entered = self._handle_enter_dir_event(event, thread_id=thread_id, turn_id=turn_id)
+                if entered is not None:
+                    visible_events.append({"kind": "cwd", "cwd": self._relative_to_project(entered)})
+                    rules_loaded.extend(
+                        self._load_unseen_rules_for_dir(thread_id, entered, source="tool_result")
+                    )
+                continue
+            visible_events.append(event)
+        return rules_loaded, visible_events
+
+    def _handle_enter_dir_event(
+        self,
+        event: dict[str, Any],
+        *,
+        thread_id: str,
+        turn_id: str,
+    ) -> Path | None:
+        raw_cwd = event.get("cwd")
+        if not isinstance(raw_cwd, str) or not raw_cwd:
+            return None
+        try:
+            cwd = Path(raw_cwd).resolve()
+        except OSError:
+            return None
+        if not self._is_within_project(cwd):
+            return None
+        state = self._rule_state(thread_id)
+        state.active_cwd = cwd
+        self.thread_store.append(
+            thread_id,
+            "thread.cwd_updated",
+            turn_id=turn_id,
+            cwd=str(cwd),
+        )
+        return cwd
+
     def _prepare_turn_input(self, thread_id: str, *, level: str | None) -> TurnInputState:
         input_items = self._reconstruct_input(thread_id)
         if not self._level_uses_responses_api(level):
@@ -841,9 +965,9 @@ class AgentEngine:
             pending_items=pending_items,
         )
 
-    def _ensure_system_instructions(self, thread_id: str) -> str:
+    def _system_instructions_for_turn(self, thread_id: str) -> str:
         existing = self._thread_system_instructions(thread_id)
-        if existing is not None:
+        if existing is not None and not self._needs_system_instruction_refresh(thread_id):
             return existing
         instructions = self.system_instructions()
         self.thread_store.append(
@@ -851,17 +975,28 @@ class AgentEngine:
             "item.system_instructions",
             text=instructions,
             fingerprint=context_fingerprint(instructions),
+            after_compaction=self._has_compaction(thread_id),
         )
         return instructions
 
+    def _ensure_system_instructions(self, thread_id: str) -> str:
+        return self._system_instructions_for_turn(thread_id)
+
     def _thread_system_instructions(self, thread_id: str) -> str | None:
-        for event in self.thread_store.read(thread_id):
+        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+        for event in reversed(events):
             if event.get("type") != "item.system_instructions":
                 continue
             text = event.get("text")
             if isinstance(text, str) and text:
                 return text
         return None
+
+    def _needs_system_instruction_refresh(self, thread_id: str) -> bool:
+        events, compaction = self.thread_store.read_after_latest_compaction(thread_id)
+        if compaction is None:
+            return False
+        return not any(event.get("type") == "item.system_instructions" for event in events)
 
     def _level_uses_responses_api(self, level: str | None) -> bool:
         return self._model_api_for_level(level) == "responses"
@@ -873,12 +1008,8 @@ class AgentEngine:
             return None
 
     def _latest_responses_resume(self, thread_id: str) -> tuple[int, str, list[dict[str, Any]]] | None:
-        events = self.thread_store.read(thread_id)
-        last_compaction_index = max(
-            (index for index, event in enumerate(events) if event.get("type") == "item.compaction"),
-            default=-1,
-        )
-        for index in range(len(events) - 1, last_compaction_index, -1):
+        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+        for index in range(len(events) - 1, -1, -1):
             event = events[index]
             if event.get("type") != "item.model_response":
                 continue
@@ -895,12 +1026,14 @@ class AgentEngine:
 
     def _input_items_after_event(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
+        pending_pre_user: list[dict[str, Any]] = []
         for event in events:
-            if event.get("type") == "item.context_update":
-                text = str(event.get("text") or "")
-                if text:
-                    input_items.append(message_item("user", text))
+            pre_user_item = self._pre_user_event_item(event)
+            if pre_user_item is not None:
+                pending_pre_user.append(pre_user_item)
             elif event.get("type") == "item.user":
+                input_items.extend(pending_pre_user)
+                pending_pre_user.clear()
                 input_items.append(copy.deepcopy(event["item"]))
             elif event.get("type") == "item.tool_output":
                 input_items.append(copy.deepcopy(event["item"]))
@@ -914,13 +1047,9 @@ class AgentEngine:
 
     def _reconstruct_input(self, thread_id: str) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
-        events = self.thread_store.read(thread_id)
-        last_compaction_index = -1
-        for index, event in enumerate(events):
-            if event.get("type") == "item.compaction":
-                last_compaction_index = index
-        if last_compaction_index >= 0:
-            compaction = events[last_compaction_index]
+        pending_pre_user: list[dict[str, Any]] = []
+        events, compaction = self.thread_store.read_after_latest_compaction(thread_id)
+        if compaction is not None:
             replacement_input = compaction.get("replacement_input")
             if isinstance(replacement_input, list):
                 input_items.extend(copy.deepcopy(replacement_input))
@@ -932,15 +1061,17 @@ class AgentEngine:
                             "user",
                             "<conversation_summary>\n"
                             + summary
-                            + "\n</conversation_summary>\nContinue from this compacted context.",
+                            + "\n</conversation_summary>\n"
+                            + COMPACTED_CONTEXT_CONTINUATION,
                         )
                     )
-        for event in events[last_compaction_index + 1 :]:
-            if event.get("type") == "item.context_update":
-                text = str(event.get("text") or "")
-                if text:
-                    input_items.append(message_item("user", text))
+        for event in events:
+            pre_user_item = self._pre_user_event_item(event)
+            if pre_user_item is not None:
+                pending_pre_user.append(pre_user_item)
             elif event.get("type") == "item.user":
+                input_items.extend(pending_pre_user)
+                pending_pre_user.clear()
                 input_items.append(event["item"])
             elif event.get("type") == "item.model_response":
                 input_items.extend(event.get("output") or [])
@@ -953,6 +1084,22 @@ class AgentEngine:
                 if interrupted:
                     input_items.append(message_item("user", interrupted))
         return input_items
+
+    def _pre_user_event_item(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        event_type = event.get("type")
+        if event_type == "item.context_update":
+            text = str(event.get("text") or "")
+        elif event_type == "item.rule_index":
+            text = str(event.get("text") or "")
+        elif event_type == "item.rules_loaded" and event.get("source") == "pre_user":
+            text = str(event.get("text") or "")
+        elif event_type == "item.cwd_notice":
+            text = str(event.get("text") or "")
+        else:
+            return None
+        if not text:
+            return None
+        return message_item("user", text)
 
     def _interrupted_turn_context(self, events: list[dict[str, Any]], turn_id: str) -> str:
         turn_events = [
@@ -992,6 +1139,201 @@ class AgentEngine:
             )
         return [message_item("user", update["text"])]
 
+    def _pre_user_context_items(self, thread_id: str) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for text in self._rule_context_texts(thread_id):
+            items.append(message_item("user", text))
+        items.extend(self._workspace_context_items(thread_id))
+        return items
+
+    def _rule_context_texts(self, thread_id: str) -> list[str]:
+        state = self._rule_state(thread_id)
+        texts: list[str] = []
+        if not state.index_emitted:
+            index_root = state.active_cwd
+            index = discover_workspace_rule_index(index_root)
+            rendered = index.render(label="working directory")
+            if rendered:
+                texts.append(rendered)
+            state.index_emitted = True
+            self.thread_store.append(
+                thread_id,
+                "item.rule_index",
+                text=rendered,
+                root=str(index_root.resolve()),
+                max_depth=index.max_depth,
+                max_entries=index.max_entries,
+                truncated=index.truncated_entries or index.depth_limited,
+                paths=[str(path) for path in index.paths],
+            )
+        cwd_notice = self._active_cwd_notice(thread_id)
+        if cwd_notice:
+            texts.append(cwd_notice)
+        rules = self._load_unseen_rules_for_dir(thread_id, state.active_cwd, source="pre_user")
+        for event in rules:
+            text = str(event.get("text") or "")
+            if text:
+                texts.append(text)
+        return texts
+
+    def _active_cwd_notice(self, thread_id: str) -> str:
+        state = self._rule_state(thread_id)
+        active_cwd = state.active_cwd.resolve()
+        initial_cwd = self.project_root.resolve()
+        if active_cwd == initial_cwd:
+            state.cwd_notice_cwd = None
+            return ""
+        if state.cwd_notice_cwd == active_cwd:
+            return ""
+        text = (
+            "<active_cwd_notice>\n"
+            f"The active working directory for run_python is now {xml_text(self._relative_to_project(active_cwd))}. "
+            f"The thread opened at {xml_text(self._relative_to_project(initial_cwd))}. "
+            "Relative paths and automatic directory rules follow the active working directory.\n"
+            "</active_cwd_notice>"
+        )
+        state.cwd_notice_cwd = active_cwd
+        self.thread_store.append(
+            thread_id,
+            "item.cwd_notice",
+            cwd=str(active_cwd),
+            initial_cwd=str(initial_cwd),
+            text=text,
+        )
+        return text
+
+    def _load_unseen_rules_for_dir(
+        self,
+        thread_id: str,
+        directory: Path,
+        *,
+        source: str,
+    ) -> list[dict[str, Any]]:
+        state = self._rule_state(thread_id)
+        context = load_directory_rules(directory, root=self.project_root)
+        new_rules = [rule for rule in context.rules if rule.path not in state.loaded_rule_paths]
+        if not new_rules:
+            return []
+        for rule in new_rules:
+            state.loaded_rule_paths.add(rule.path)
+        filtered = ProjectRuleContext(
+            rules=new_rules,
+            truncated=context.truncated,
+            omitted_files=context.omitted_files,
+        )
+        text = filtered.render(root=self.project_root, heading="directory_rules_loaded")
+        event = {
+            "kind": "rules_loaded",
+            "cwd": self._relative_to_project(directory),
+            "paths": [self._relative_to_project(rule.path) for rule in new_rules],
+            "text": text,
+        }
+        self.thread_store.append(
+            thread_id,
+            "item.rules_loaded",
+            cwd=str(directory.resolve()),
+            paths=[str(rule.path) for rule in new_rules],
+            text=text,
+            source=source,
+        )
+        return [event]
+
+    def _rule_state(self, thread_id: str) -> RuleRuntimeState:
+        state = self._rule_states.get(thread_id)
+        if state is not None:
+            return state
+        active_cwd = self._latest_active_cwd(thread_id)
+        state = RuleRuntimeState(
+            active_cwd=active_cwd,
+            loaded_rule_paths=self._loaded_rule_paths_in_epoch(thread_id),
+            index_emitted=self._rule_index_already_emitted(thread_id, active_cwd),
+            cwd_notice_cwd=self._latest_cwd_notice_in_epoch(thread_id),
+        )
+        self._rule_states[thread_id] = state
+        return state
+
+    def _latest_active_cwd(self, thread_id: str) -> Path:
+        for event in reversed(self.thread_store.read(thread_id)):
+            if event.get("type") == "thread.cwd_updated":
+                raw_cwd = event.get("cwd")
+                if isinstance(raw_cwd, str) and raw_cwd:
+                    try:
+                        cwd = Path(raw_cwd).resolve()
+                    except OSError:
+                        continue
+                    if self._is_within_project(cwd):
+                        return cwd
+        return self.project_root.resolve()
+
+    def _active_cwd(self, thread_id: str) -> Path:
+        return self._rule_state(thread_id).active_cwd
+
+    def _reset_rule_epoch(self, thread_id: str) -> None:
+        state = self._rule_state(thread_id)
+        state.loaded_rule_paths.clear()
+        state.index_emitted = False
+        state.cwd_notice_cwd = None
+
+    def _loaded_rule_paths_in_epoch(self, thread_id: str) -> set[Path]:
+        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+        loaded: set[Path] = set()
+        for event in events:
+            if event.get("type") != "item.rules_loaded":
+                continue
+            paths = event.get("paths")
+            if not isinstance(paths, list):
+                continue
+            for raw_path in paths:
+                if not isinstance(raw_path, str) or not raw_path:
+                    continue
+                try:
+                    loaded.add(Path(raw_path).resolve())
+                except OSError:
+                    continue
+        return loaded
+
+    def _rule_index_already_emitted(self, thread_id: str, active_cwd: Path) -> bool:
+        del active_cwd
+        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+        for event in events:
+            if event.get("type") == "item.rule_index":
+                return True
+        return False
+
+    def _latest_cwd_notice_in_epoch(self, thread_id: str) -> Path | None:
+        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+        for event in reversed(events):
+            if event.get("type") != "item.cwd_notice":
+                continue
+            raw_cwd = event.get("cwd")
+            if not isinstance(raw_cwd, str) or not raw_cwd:
+                continue
+            try:
+                cwd = Path(raw_cwd).resolve()
+            except OSError:
+                continue
+            if self._is_within_project(cwd):
+                return cwd
+        return None
+
+    def _has_compaction(self, thread_id: str) -> bool:
+        return any(event.get("type") == "item.compaction" for event in self.thread_store.read(thread_id))
+
+    def _is_within_project(self, path: Path) -> bool:
+        try:
+            path.resolve().relative_to(self.project_root.resolve())
+        except ValueError:
+            return False
+        return True
+
+    def _relative_to_project(self, path: Path) -> str:
+        resolved = path.resolve()
+        try:
+            relative = resolved.relative_to(self.project_root.resolve())
+        except ValueError:
+            return str(resolved)
+        return "." if not relative.parts else relative.as_posix()
+
     def _turn_context_update(self, thread_id: str | None) -> dict[str, Any] | None:
         parts = self._turn_context_parts()
         rendered = "\n\n".join(parts.values())
@@ -1013,8 +1355,8 @@ class AgentEngine:
                 "removed": removed or sorted(previous_parts),
                 "text": (
                     "<workspace_context_update>\n"
-                    "Previously available workspace rules, skills, or MCP declarations are no longer present. "
-                    "Do not rely on older appended capability/rule context unless it appears again.\n"
+                    "Previously available skills or MCP declarations are no longer present. "
+                    "Do not rely on older appended capability context unless it appears again.\n"
                     "</workspace_context_update>"
                 ),
             }
@@ -1029,8 +1371,8 @@ class AgentEngine:
             removed_text = ""
         prefix = (
             "<workspace_context_update>\n"
-            "The following workspace rules/capabilities are current. This update replaces any older appended "
-            "workspace rules, skills, or MCP declarations in this thread.\n"
+            "The following workspace capabilities are current. This update replaces any older appended "
+            "skills or MCP declarations in this thread.\n"
             f"fingerprint: {fingerprint}\n"
             + (f"removed: {', '.join(removed)}\n" if removed else "")
             + (f"changed: {', '.join(changed)}\n" if changed else "")
@@ -1046,17 +1388,15 @@ class AgentEngine:
     def _latest_context_state(self, thread_id: str | None) -> dict[str, Any] | None:
         if not thread_id:
             return None
-        for event in reversed(self.thread_store.read(thread_id)):
+        events, compaction = self.thread_store.read_after_latest_compaction(thread_id)
+        if compaction is not None:
+            return None
+        for event in reversed(events):
             if event.get("type") == "item.context_update":
                 state = event.get("context_state")
                 if isinstance(state, dict):
                     return state
                 return {"fingerprint": str(event.get("context_fingerprint") or ""), "parts": {}}
-            if event.get("type") == "item.compaction":
-                state = event.get("context_state")
-                if isinstance(state, dict):
-                    return state
-                return None
         return None
 
     def _turn_context_text(self) -> str:
@@ -1064,10 +1404,6 @@ class AgentEngine:
 
     def _turn_context_parts(self) -> dict[str, str]:
         sections: dict[str, str] = {}
-        rendered_rules = self.project_rule_context().render()
-        if rendered_rules:
-            sections["rules"] = rendered_rules
-
         skills = render_skill_summary(discover_skills(self.project_root))
         if skills != "None discovered.":
             sections["skills"] = (
@@ -1088,7 +1424,7 @@ class AgentEngine:
         return sections
 
     def project_rule_context(self) -> ProjectRuleContext:
-        """Load AGENTS.md context for the active workspace."""
+        """Load AGENTS.md context for status/debug display."""
         return load_project_rules(self.project_root)
 
     def context_percent(self, thread_id: str | None, level: str | None = None) -> int:
@@ -1101,17 +1437,12 @@ class AgentEngine:
         trigger_tokens = int(
             model.context_window_tokens * self.config.runtime.compression.trigger_ratio
         )
-        target_tokens = compact_target_tokens(
-            model.context_window_tokens,
-            target_ratio=self.config.runtime.compression.target_ratio,
-        )
         if not thread_id:
             return ContextStats(
                 used_tokens=0,
                 context_window_tokens=model.context_window_tokens,
                 percent=0,
                 threshold_tokens=trigger_tokens,
-                target_tokens=target_tokens,
                 headroom_tokens=model.context_window_tokens,
                 source="empty",
             )
@@ -1128,17 +1459,21 @@ class AgentEngine:
             context_window_tokens=model.context_window_tokens,
             percent=percent,
             threshold_tokens=trigger_tokens,
-            target_tokens=target_tokens,
             headroom_tokens=max(0, model.context_window_tokens - used),
             source=source,
         )
 
     def _latest_usage_tokens(self, thread_id: str) -> int | None:
         """Return the latest provider-reported token usage when available."""
-        for event in reversed(self.thread_store.read(thread_id)):
-            if event.get("type") not in {"item.model_response", "item.compaction"}:
+        events, compaction = self.thread_store.read_after_latest_compaction(thread_id)
+        for event in reversed(events):
+            if event.get("type") != "item.model_response":
                 continue
             used = usage_token_count(event.get("usage") or {})
+            if used is not None:
+                return used
+        if compaction is not None:
+            used = usage_token_count(compaction.get("usage") or {})
             if used is not None:
                 return used
         return None
@@ -1179,7 +1514,27 @@ def message_item(role: str, text: str) -> dict[str, Any]:
     }
 
 
+def message_item_text(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for content in item.get("content") or []:
+        if content.get("type") in {"input_text", "output_text", "text"}:
+            parts.append(str(content.get("text") or ""))
+    return "\n".join(parts)
+
+
+def truncate_text_to_estimated_tokens(text: str, max_tokens: int) -> str:
+    if max_tokens <= 0:
+        return ""
+    max_chars = max_tokens * 4
+    if len(text) <= max_chars:
+        return text
+    suffix = "\n[truncated during context compaction]"
+    keep = max(0, max_chars - len(suffix))
+    return text[:keep].rstrip() + suffix
+
+
 def assistant_output_item(text: str) -> dict[str, Any]:
+    """Return a Responses-style assistant message item."""
     return {
         "type": "message",
         "role": "assistant",
@@ -1213,6 +1568,7 @@ def function_output(call: dict[str, Any], output: dict[str, Any]) -> dict[str, A
 
 def model_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return the run payload that is safe and useful to feed back to the model."""
+    visible_events = model_visible_events(payload.get("events"))
     visible = {
         "script_id": payload.get("script_id"),
         "run_id": payload.get("run_id"),
@@ -1223,8 +1579,41 @@ def model_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "stdout": strip_structured_event_lines(str(payload.get("stdout") or "")),
         "stderr": payload.get("stderr") or "",
     }
+    if visible_events:
+        visible["events"] = visible_events
+    if payload.get("rules_loaded"):
+        visible["rules_loaded"] = payload["rules_loaded"]
     if payload.get("attachments"):
         visible["attachments"] = payload["attachments"]
+    return visible
+
+
+def model_visible_events(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    visible: list[dict[str, Any]] = []
+    for event in value:
+        if not isinstance(event, dict):
+            continue
+        kind = str(event.get("kind") or "")
+        if kind in {"progress", "cwd"}:
+            continue
+        if kind == "result":
+            visible.append(copy.deepcopy(event))
+        elif kind == "look_at":
+            visible.append({"kind": "look_at", "path": event.get("path"), "note": event.get("note")})
+        elif kind == "subagent.completed":
+            visible.append(
+                {
+                    "kind": "subagent.completed",
+                    "thread_id": event.get("thread_id"),
+                    "summary": event.get("summary"),
+                }
+            )
+        elif kind.startswith("subagent."):
+            continue
+        else:
+            visible.append({"kind": kind})
     return visible
 
 

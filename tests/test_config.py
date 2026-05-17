@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib.metadata import version
 from pathlib import Path
 
 from uv_agent.config import config_paths, editable_config_path, load_config, redact_config
@@ -72,7 +73,8 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert model.reasoning_display.unknown_text_delta_as_reasoning is True
     assert config.runtime.title_generation.enabled is True
     assert config.runtime.title_generation.model_level == "quick"
-    assert config.runner.runtime_dependency == "uv-agent==0.1.4"
+    assert config.runtime.compression.enabled is True
+    assert config.runner.runtime_dependency == f"uv-agent=={version('uv-agent')}"
     assert config.runner.default_uv_args == []
     assert config.runner.max_saved_scripts == 32
 
@@ -197,6 +199,31 @@ def test_default_title_and_compression_levels_do_not_assume_small(tmp_path: Path
     assert config.runtime.default_level == "fast"
     assert config.runtime.title_generation.model_level is None
     assert config.runtime.compression.model_level is None
+    assert config.runtime.compression.enabled is True
+
+
+def test_compression_and_title_prompt_are_not_config_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "compression": {"enabled": False, "prompt": "custom", "target_ratio": 0.1},
+                    "title_generation": {"prompt": "custom"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        load_config(tmp_path, [config_path])
+    except TypeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected prompt/target_ratio config to be rejected")
+
+    assert "prompt" in message or "target_ratio" in message
 
 
 def test_redact_config_masks_sensitive_values() -> None:

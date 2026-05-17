@@ -85,20 +85,17 @@
   },
   "runtime": {
     "default_level": "medium",
-    "auto_compress": true,
     "store_provider_response": false,
     "max_agent_rounds": 100,
     "compression": {
+      "enabled": true,
       "model_level": "small",
-      "prompt": "Summarize the conversation context for future continuation. Keep user intent, decisions, file changes, tool results, and unresolved tasks. Be concise but complete.",
       "trigger_ratio": 0.7,
-      "target_ratio": 0.3,
       "min_tokens": 5000
     },
     "title_generation": {
       "enabled": true,
-      "model_level": "small",
-      "prompt": "Create a concise title for this uv-agent thread from the user's first message. Return only the title, without quotes or punctuation. Prefer the user's language. Keep it under 8 words or 24 CJK characters."
+      "model_level": "small"
     }
   },
   "ui": {

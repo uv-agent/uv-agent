@@ -112,6 +112,7 @@ Available helper groups:
 | `read_text`, `write_text`, `read_json`, `write_json`, `list_files`, `resolve_workspace_path` | Workspace-relative file helpers. |
 | `run_command`, `check_command` | Argv-list subprocess helpers. |
 | `apply_patch` | Unified diff patch helper. |
+| `enter_dir` | Change the active working directory and trigger directory rule loading. |
 | `emit_event`, `emit_progress`, `emit_result` | Structured events rendered by the host. |
 | `look_at` | Attach image context to the conversation. |
 | `saved_scripts` | Inspect recent managed scripts. |
@@ -133,6 +134,31 @@ emit_result(status="ok")
 
 Use structured events for machine-readable progress or results. Regular stdout
 and stderr are still captured.
+
+The host filters internal structured-event lines out of the tool output that is
+fed back to the model. UI/log payloads may keep richer event details, while the
+model-visible payload keeps only events that are useful for reasoning, such as
+explicit results, image references, selected subagent summaries, and newly
+loaded directory rules.
+
+## Directory Rules And Cwd
+
+Managed scripts start in the thread's active cwd, which defaults to the
+workspace root. Use `enter_dir(path)` when switching work to a subdirectory:
+
+```python
+from uv_agent_runtime import enter_dir
+
+enter_dir("src")
+```
+
+`enter_dir` behaves like `os.chdir(path)` for the running script and persists
+that directory as the default cwd for later runs in the same thread. The host may
+load `AGENTS.md` / `AGENTS.*.md` files in the entered directory and returns newly
+loaded rule text in the same Python tool result. Rule files are de-duplicated
+within the current context epoch; after compaction, dynamic context is rebuilt,
+rules are not summarized, a fresh local rule index is generated from the active
+cwd, and active-directory rules are loaded again on demand.
 
 ## Image Context
 

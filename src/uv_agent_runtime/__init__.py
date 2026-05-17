@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .cwd import enter_dir
 from .events import emit_event, emit_progress, emit_result
 from .files import list_files, read_json, read_text, resolve_workspace_path, write_json, write_text
 from .mcp import (
@@ -31,6 +32,7 @@ __all__ = [
     "emit_event",
     "emit_progress",
     "emit_result",
+    "enter_dir",
     "list_declared_servers",
     "list_files",
     "list_thread_digests",

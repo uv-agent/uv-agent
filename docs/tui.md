@@ -69,7 +69,7 @@ and Esc to close.
 `/config` can write only the settings that are safe to edit from the TUI:
 
 - `runtime.default_level`
-- `runtime.auto_compress`
+- `runtime.compression.enabled`
 - `ui.language`
 
 Provider definitions, model definitions, and level-to-model mappings are edited

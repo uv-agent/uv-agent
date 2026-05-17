@@ -11,6 +11,7 @@ from uv_agent.clipboard import ClipboardImage
 from uv_agent.agent import AgentEngine
 from uv_agent.config import (
     AppConfig,
+    CompressionConfig,
     LevelConfig,
     ModelConfig,
     ProviderConfig,
@@ -174,7 +175,7 @@ def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
             "medium": LevelConfig(name="medium", model="default", params={}),
             "large": LevelConfig(name="large", model="default", params={}),
         },
-        runtime=RuntimeConfig(default_level="medium", auto_compress=False),
+        runtime=RuntimeConfig(default_level="medium", compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -1170,7 +1171,7 @@ async def test_tui_models_panel_is_read_only(
                     "medium": {"model": "default"},
                     "large": {"model": "default"},
                 },
-                "runtime": {"default_level": "medium", "auto_compress": False},
+                "runtime": {"default_level": "medium", "compression": {"enabled": False}},
             }
         ),
         encoding="utf-8",

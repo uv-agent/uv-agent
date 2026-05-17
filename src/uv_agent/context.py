@@ -13,7 +13,6 @@ class ContextStats:
     context_window_tokens: int
     percent: int
     threshold_tokens: int
-    target_tokens: int
     headroom_tokens: int
     source: str
 
@@ -45,8 +44,3 @@ def usage_token_count(usage: dict[str, Any]) -> int | None:
                 total += value
                 found = True
     return total if found else None
-
-
-def compact_target_tokens(context_window_tokens: int, *, target_ratio: float = 0.3) -> int:
-    """Return the desired approximate size after compaction."""
-    return max(1, int(context_window_tokens * target_ratio))

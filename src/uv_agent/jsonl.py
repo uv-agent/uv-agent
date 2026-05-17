@@ -27,6 +27,25 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def read_jsonl_after_latest_compaction(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Return events after the latest compaction without retaining older parsed events."""
+    if not path.exists():
+        return [], None
+    events_after: list[dict[str, Any]] = []
+    latest_compaction: dict[str, Any] | None = None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if event.get("type") == "item.compaction":
+                latest_compaction = event
+                events_after = []
+            else:
+                events_after.append(event)
+    return events_after, latest_compaction
+
+
 def append_jsonl(path: Path, events: Iterable[dict[str, Any]]) -> None:
     writer = JsonlWriter(path)
     for event in events:

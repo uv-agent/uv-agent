@@ -4,6 +4,7 @@ import pytest
 
 from uv_agent.config import (
     AppConfig,
+    CompressionConfig,
     EndpointConfig,
     LevelConfig,
     MessagePassthroughConfig,
@@ -313,7 +314,7 @@ async def test_stream_chat_accumulates_passthrough_and_configured_reasoning(
             )
         },
         levels={"medium": LevelConfig(name="medium", model="m", params={})},
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
     )
     client = UnifiedModelClient(config)
@@ -357,7 +358,7 @@ async def test_stream_chat_can_treat_unknown_text_delta_as_reasoning(
             )
         },
         levels={"medium": LevelConfig(name="medium", model="m", params={})},
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
     )
     client = UnifiedModelClient(config)
@@ -399,7 +400,7 @@ async def test_stream_chat_fallback_can_display_passthrough_field_as_reasoning(
             )
         },
         levels={"medium": LevelConfig(name="medium", model="m", params={})},
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
     )
     client = UnifiedModelClient(config)

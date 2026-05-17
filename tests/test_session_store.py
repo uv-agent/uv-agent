@@ -99,6 +99,38 @@ def test_thread_digest_starts_after_latest_compaction_and_hides_tools(tmp_path: 
     ]
 
 
+def test_read_after_latest_compaction_returns_only_needed_suffix(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Compact suffix")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old"}]},
+    )
+    store.append(thread_id, "item.compaction", turn_id="t1", text="summary1")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t2",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "middle"}]},
+    )
+    store.append(thread_id, "item.compaction", turn_id="t2", text="summary2")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t3",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]},
+    )
+
+    events, compaction = store.read_after_latest_compaction(thread_id)
+
+    assert compaction is not None
+    assert compaction["text"] == "summary2"
+    assert [event["type"] for event in events] == ["item.user"]
+    assert events[0]["turn_id"] == "t3"
+
+
 def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     parent = store.create_thread("Parent")

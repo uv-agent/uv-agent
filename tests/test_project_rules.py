@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from uv_agent.project_rules import discover_rule_files, load_project_rules
+from uv_agent.project_rules import (
+    discover_rule_files,
+    discover_workspace_rule_index,
+    load_directory_rules,
+    load_project_rules,
+)
 
 
 def test_discover_rule_files_loads_user_and_project_chain(tmp_path: Path) -> None:
@@ -44,3 +49,49 @@ def test_load_project_rules_caps_total_context(tmp_path: Path) -> None:
     rendered = context.render()
     assert "<workspace_rules>" in rendered
     assert "...[truncated]" in rendered
+
+
+def test_workspace_rule_index_is_bounded_and_reports_limits(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    deep = project / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (project / "AGENTS.md").write_text("root", encoding="utf-8")
+    (project / "a" / "AGENTS.md").write_text("a", encoding="utf-8")
+    (project / "a" / "b" / "AGENTS.md").write_text("b", encoding="utf-8")
+    (deep / "AGENTS.md").write_text("deep", encoding="utf-8")
+
+    index = discover_workspace_rule_index(project, max_depth=1, max_entries=2)
+    rendered = index.render()
+
+    assert [path.name for path in index.paths] == ["AGENTS.md", "AGENTS.md"]
+    assert index.depth_limited is True
+    assert "<workspace_rule_index>" in rendered
+    assert "active workspace" in rendered
+    assert "scan_depth: 1" in rendered
+    assert "max_entries: 2" in rendered
+    assert "truncated: true" in rendered
+    assert "depth_limit_reached" in rendered
+
+
+def test_workspace_rule_index_can_render_active_working_directory_label(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    (project / "AGENTS.md").write_text("root", encoding="utf-8")
+
+    rendered = discover_workspace_rule_index(project).render(label="working directory")
+
+    assert "active working directory" in rendered
+
+
+def test_load_directory_rules_only_loads_current_directory(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    child = project / "child"
+    child.mkdir(parents=True)
+    (project / "AGENTS.md").write_text("root", encoding="utf-8")
+    (child / "AGENTS.md").write_text("child", encoding="utf-8")
+
+    context = load_directory_rules(project, root=project)
+
+    rendered = context.render(root=project, heading="directory_rules_loaded")
+    assert "root" in rendered
+    assert "child" not in rendered

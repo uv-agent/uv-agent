@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,22 @@ RULE_FILE_NAMES = ("AGENTS.md",)
 RULE_FILE_GLOB = "AGENTS.*.md"
 DEFAULT_MAX_CHARS_PER_FILE = 12_000
 DEFAULT_MAX_TOTAL_CHARS = 36_000
+DEFAULT_RULE_INDEX_MAX_DEPTH = 2
+DEFAULT_RULE_INDEX_MAX_ENTRIES = 50
+SKIPPED_RULE_INDEX_DIRS = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".uv-agent",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+}
 
 
 @dataclass(frozen=True)
@@ -32,16 +49,16 @@ class ProjectRuleContext:
     def paths(self) -> list[Path]:
         return [rule.path for rule in self.rules]
 
-    def render(self) -> str:
+    def render(self, *, root: Path | None = None, heading: str = "workspace_rules") -> str:
         """Render loaded rules as a compact context block for model input."""
         if not self.rules:
             return ""
         lines = [
-            "<workspace_rules>",
-            "The following instruction files were loaded for the current workspace. Follow them when relevant; newer user messages still define the immediate task.",
+            f"<{heading}>",
+            "The following directory instruction files were loaded automatically. Follow them when relevant; newer user messages still define the immediate task.",
         ]
         for rule in self.rules:
-            rel = str(rule.path)
+            rel = display_path(rule.path, root=root)
             suffix = " (truncated)" if rule.truncated else ""
             lines.extend(
                 [
@@ -53,7 +70,44 @@ class ProjectRuleContext:
             lines.append(
                 f"\nNote: rule context was capped; {self.omitted_files} file(s) were omitted."
             )
-        lines.append("</workspace_rules>")
+        lines.append(f"</{heading}>")
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class WorkspaceRuleIndex:
+    """A lightweight listing of rule files without their contents."""
+
+    root: Path
+    paths: list[Path]
+    max_depth: int
+    max_entries: int
+    truncated_entries: bool = False
+    depth_limited: bool = False
+
+    def render(self, *, label: str = "workspace") -> str:
+        if not self.paths:
+            return ""
+        lines = [
+            "<workspace_rule_index>",
+            f"Rule files were found under the active {label}. Contents load automatically when entering or working in the matching directory.",
+        ]
+        for path in self.paths:
+            lines.append(f"- {display_path(path, root=self.root)}")
+        truncated = self.truncated_entries or self.depth_limited
+        lines.extend(
+            [
+                "",
+                f"scan_depth: {self.max_depth}",
+                f"max_entries: {self.max_entries}",
+                f"truncated: {str(truncated).lower()}",
+            ]
+        )
+        if self.depth_limited:
+            lines.append("depth_limit_reached: directories below the scan depth may contain additional rule files.")
+        if self.truncated_entries:
+            lines.append("entry_limit_reached: only the first listed rule files are shown.")
+        lines.append("</workspace_rule_index>")
         return "\n".join(lines)
 
 
@@ -102,6 +156,96 @@ def load_project_rules(
         rules.append(ProjectRule(path=resolved, scope=scope, text=clipped, truncated=truncated_file))
 
     return ProjectRuleContext(rules=rules, truncated=truncated_context, omitted_files=omitted)
+
+
+def load_directory_rules(
+    directory: Path,
+    *,
+    root: Path | None = None,
+    max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE,
+    max_total_chars: int = DEFAULT_MAX_TOTAL_CHARS,
+) -> ProjectRuleContext:
+    """Load only rule files located directly in one directory."""
+    resolved_dir = directory.resolve()
+    total = 0
+    omitted = 0
+    truncated_context = False
+    rules: list[ProjectRule] = []
+
+    for path in rule_files_in_dir(resolved_dir):
+        if total >= max_total_chars:
+            omitted += 1
+            truncated_context = True
+            continue
+        try:
+            text = path.resolve().read_text(encoding="utf-8")
+        except OSError:
+            continue
+        remaining = max_total_chars - total
+        limit = min(max_chars_per_file, remaining)
+        truncated_file = len(text) > limit
+        clipped = text[:limit]
+        total += len(clipped)
+        if truncated_file:
+            clipped = clipped.rstrip() + "\n...[truncated]"
+            truncated_context = True
+        rules.append(
+            ProjectRule(
+                path=path.resolve(),
+                scope=display_path(resolved_dir, root=root),
+                text=clipped,
+                truncated=truncated_file,
+            )
+        )
+
+    return ProjectRuleContext(rules=rules, truncated=truncated_context, omitted_files=omitted)
+
+
+def discover_workspace_rule_index(
+    workspace_root: Path,
+    *,
+    max_depth: int = DEFAULT_RULE_INDEX_MAX_DEPTH,
+    max_entries: int = DEFAULT_RULE_INDEX_MAX_ENTRIES,
+) -> WorkspaceRuleIndex:
+    """Return a bounded recursive index of rule files below the workspace."""
+    root = workspace_root.resolve()
+    paths: list[Path] = []
+    truncated_entries = False
+    depth_limited = False
+    queue: deque[tuple[Path, int]] = deque([(root, 0)])
+
+    while queue:
+        directory, depth = queue.popleft()
+        for path in rule_files_in_dir(directory):
+            if len(paths) >= max_entries:
+                truncated_entries = True
+                break
+            paths.append(path.resolve())
+        if truncated_entries:
+            break
+        try:
+            children = sorted(
+                child
+                for child in directory.iterdir()
+                if child.is_dir() and not should_skip_rule_index_dir(child)
+            )
+        except OSError:
+            continue
+        if depth >= max_depth:
+            if children:
+                depth_limited = True
+            continue
+        for child in children:
+            queue.append((child, depth + 1))
+
+    return WorkspaceRuleIndex(
+        root=root,
+        paths=paths,
+        max_depth=max_depth,
+        max_entries=max_entries,
+        truncated_entries=truncated_entries,
+        depth_limited=depth_limited,
+    )
 
 
 def discover_rule_files(project_root: Path, *, home: Path | None = None) -> list[tuple[str, Path]]:
@@ -160,3 +304,22 @@ def rule_files_in_dir(directory: Path) -> list[Path]:
     )
     files.extend(extension_files)
     return files
+
+
+def should_skip_rule_index_dir(path: Path) -> bool:
+    name = path.name
+    if name in SKIPPED_RULE_INDEX_DIRS:
+        return True
+    return name.startswith(".") and name not in {".agents"}
+
+
+def display_path(path: Path, *, root: Path | None = None) -> str:
+    resolved = path.resolve()
+    if root is not None:
+        try:
+            relative = resolved.relative_to(root.resolve())
+        except ValueError:
+            pass
+        else:
+            return "." if not relative.parts else relative.as_posix()
+    return str(resolved)

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from uv_agent.agent import AgentEngine, PYTHON_TOOL, usage_token_count
+from uv_agent.agent import AgentEngine, PYTHON_TOOL, message_item, message_item_text, usage_token_count
 from uv_agent.attachments import image_message_item
 from uv_agent.config import (
     AppConfig,
@@ -93,7 +93,7 @@ def make_test_config(
     project_root: Path,
     *,
     api: str = "responses",
-    auto_compress: bool = False,
+    compression_enabled: bool = False,
     context_window_tokens: int = 100_000,
     compression: CompressionConfig | None = None,
     title_generation: TitleGenerationConfig | None = None,
@@ -117,8 +117,7 @@ def make_test_config(
         },
         runtime=RuntimeConfig(
             default_level=default_level,
-            auto_compress=auto_compress,
-            compression=compression or CompressionConfig(),
+            compression=compression or CompressionConfig(enabled=compression_enabled),
             title_generation=title_generation or TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -154,8 +153,7 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
         },
         runtime=RuntimeConfig(
             default_level="medium",
-            auto_compress=True,
-            compression=CompressionConfig(model_level="small", trigger_ratio=0.1, min_tokens=1),
+            compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.1, min_tokens=1),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -213,6 +211,9 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
     assert client.requests[1]["tools"] == [PYTHON_TOOL]
     assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
     assert "context_compaction_request" in str(client.requests[1]["input"][-1])
+    assert "CONTEXT CHECKPOINT COMPACTION" in str(client.requests[1]["input"][-1])
+    assert "Target length" not in str(client.requests[1]["input"][-1])
+    assert "Continue from this compacted context" in str(compaction["replacement_input"])
 
 
 @pytest.mark.asyncio
@@ -235,8 +236,7 @@ async def test_agent_compaction_falls_back_to_current_level(tmp_path: Path) -> N
         },
         runtime=RuntimeConfig(
             default_level="fast",
-            auto_compress=True,
-            compression=CompressionConfig(trigger_ratio=0.1, min_tokens=1),
+            compression=CompressionConfig(enabled=True, trigger_ratio=0.1, min_tokens=1),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -283,6 +283,49 @@ async def test_agent_compaction_falls_back_to_current_level(tmp_path: Path) -> N
     assert client.requests[1]["level"] == "deep"
 
 
+def test_compaction_replacement_keeps_recent_user_messages_with_budget(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    old_text = "old " * 30_000
+    recent_text = "recent request"
+    input_items = [
+        message_item("user", old_text),
+        message_item("user", "<workspace_rule_index>\nAGENTS.md\n</workspace_rule_index>"),
+        message_item("assistant", "assistant output"),
+        message_item("user", recent_text),
+    ]
+    response = parse_responses_response(
+        {
+            "id": "resp_compact",
+            "output_text": "summary",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "summary"}],
+                }
+            ],
+        }
+    )
+
+    replacement = engine._compaction_replacement_input(input_items, response)
+    text = str(replacement)
+
+    assert recent_text in text
+    assert "workspace_rule_index" not in text
+    assert "assistant output" not in text
+    assert "[truncated during context compaction]" in text
+    assert "The messages above may include several earlier user messages" in text
+
+
 @pytest.mark.asyncio
 async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
@@ -299,7 +342,7 @@ async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path:
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -370,7 +413,7 @@ async def test_agent_generates_title_for_default_new_thread(tmp_path: Path) -> N
             "medium": LevelConfig(name="medium", model="default", params={}),
             "small": LevelConfig(name="small", model="default", params={}),
         },
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -440,7 +483,7 @@ async def test_agent_does_not_replace_manual_thread_title(tmp_path: Path) -> Non
             "small": LevelConfig(name="small", model="default", params={}),
         },
         runtime=RuntimeConfig(
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -499,7 +542,7 @@ async def test_agent_uses_configured_title_generation_level(tmp_path: Path) -> N
             "title": LevelConfig(name="title", model="default", params={}),
         },
         runtime=RuntimeConfig(
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(model_level="title"),
         ),
         runner=RunnerConfig(
@@ -548,6 +591,56 @@ async def test_agent_uses_configured_title_generation_level(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_agent_generates_title_only_for_first_user_message(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root, title_generation=TitleGenerationConfig(enabled=True))
+    client = RoutedModelClient(
+        main={
+            "id": "resp_1",
+            "output_text": "done",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }
+            ],
+        },
+        title={
+            "id": "resp_title",
+            "output_text": "Generated title",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Generated title"}],
+                }
+            ],
+        },
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    first_events = [event async for event in engine.run_turn(user_text="first")]
+    thread_id = str(first_events[-1]["thread_id"])
+    [event async for event in engine.run_turn(user_text="second", thread_id=thread_id)]
+
+    title_requests = [
+        request
+        for request in client.requests
+        if "Generate a short thread title" in str(request.get("instructions") or "")
+    ]
+    assert len(title_requests) == 1
+    assert engine.thread_store.thread_digest(thread_id)["title"] == "Generated title"
+
+
+@pytest.mark.asyncio
 async def test_agent_title_generation_falls_back_to_current_level(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -566,7 +659,7 @@ async def test_agent_title_generation_falls_back_to_current_level(tmp_path: Path
             "fast": LevelConfig(name="fast", model="default", params={}),
             "deep": LevelConfig(name="deep", model="default", params={}),
         },
-        runtime=RuntimeConfig(default_level="fast", auto_compress=False),
+        runtime=RuntimeConfig(default_level="fast", compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -631,7 +724,7 @@ async def test_agent_attaches_user_turn_images(tmp_path: Path) -> None:
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -683,7 +776,7 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
         models=config.models,
         levels=config.levels,
         runtime=RuntimeConfig(
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=config.runner,
@@ -767,7 +860,7 @@ async def test_responses_turn_uses_previous_response_id_for_follow_up(tmp_path: 
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -835,7 +928,7 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -907,6 +1000,119 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_enter_dir_loads_rules_in_tool_result_and_persists_cwd(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    src = project_root / "src"
+    src.mkdir()
+    (src / "AGENTS.md").write_text("Use src rule.", encoding="utf-8")
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(
+            default_level="medium",
+            compression=CompressionConfig(enabled=False),
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    runner = PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner)
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "run_python",
+                        "arguments": json.dumps(
+                            {
+                                "code": (
+                                    "from uv_agent_runtime import enter_dir\n"
+                                    "from pathlib import Path\n"
+                                    "enter_dir('src')\n"
+                                    "print(Path.cwd().name)\n"
+                                )
+                            }
+                        ),
+                    }
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_3",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_2",
+                        "name": "run_python",
+                        "arguments": json.dumps(
+                            {"code": "from pathlib import Path\nprint(Path.cwd().name)\n"}
+                        ),
+                    }
+                ],
+            },
+            {
+                "id": "resp_4",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    first_events = [event async for event in engine.run_turn(user_text="enter")]
+    thread_id = first_events[-1]["thread_id"]
+    first_tool_payload = json.loads(client.requests[1]["input"][-1]["output"])
+
+    assert "rules_loaded" in first_tool_payload
+    assert "Use src rule." in str(first_tool_payload["rules_loaded"])
+    assert "events" not in first_tool_payload
+    assert '"kind": "enter_dir"' not in first_tool_payload["stdout"]
+
+    [event async for event in engine.run_turn(user_text="again", thread_id=thread_id)]
+    second_tool_payload = json.loads(client.requests[3]["input"][-1]["output"])
+
+    assert "rules_loaded" not in second_tool_payload
+    assert second_tool_payload["stdout"].strip() == "src"
+
+
+@pytest.mark.asyncio
 async def test_agent_can_rerun_saved_script_by_id(tmp_path: Path) -> None:
     project_root = Path.cwd()
     config = AppConfig(
@@ -922,7 +1128,7 @@ async def test_agent_can_rerun_saved_script_by_id(tmp_path: Path) -> None:
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -1035,7 +1241,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "list_files" not in prompt
     assert "run_command/check_command" not in prompt
     assert "emit_event" not in prompt
-    assert "Rules, skills, and MCP declarations are appended only when first seen" in prompt
+    assert "Directory rules from AGENTS files are loaded automatically" in prompt
+    assert "Skills and MCP declarations are appended only when first seen" in prompt
+    assert "enter_dir" in prompt
     assert "demo (project)" not in prompt
 
     turn_context = engine._turn_context_text()
@@ -1062,7 +1270,7 @@ def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_p
             "fast": LevelConfig(name="fast", model="default", params={}),
             "deep": LevelConfig(name="deep", model="default", params={}),
         },
-        runtime=RuntimeConfig(default_level="deep", auto_compress=False),
+        runtime=RuntimeConfig(default_level="deep", compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -1110,7 +1318,7 @@ def test_context_percent_prefers_latest_usage(tmp_path: Path) -> None:
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(
             default_level="medium",
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -1143,7 +1351,7 @@ def test_context_percent_prefers_latest_usage(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_records_project_rule_context_update(tmp_path: Path) -> None:
+async def test_agent_loads_project_rules_without_context_update(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "AGENTS.md").write_text("Use the local rule.", encoding="utf-8")
@@ -1161,7 +1369,7 @@ async def test_agent_records_project_rule_context_update(tmp_path: Path) -> None
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(
             default_level="medium",
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -1196,9 +1404,13 @@ async def test_agent_records_project_rule_context_update(tmp_path: Path) -> None
 
     request_text = str(client.requests[0]["input"])
     assert "Use the local rule." in request_text
+    assert "<workspace_rule_index>" in request_text
+    assert "<directory_rules_loaded>" in request_text
     stored_text = str(engine.thread_store.read(events[-1]["thread_id"]))
     assert "Use the local rule." in stored_text
-    assert any(event["type"] == "item.context_update" for event in engine.thread_store.read(events[-1]["thread_id"]))
+    stored = engine.thread_store.read(events[-1]["thread_id"])
+    assert any(event["type"] == "item.rules_loaded" for event in stored)
+    assert not any(event["type"] == "item.context_update" and "Use the local rule." in str(event) for event in stored)
 
 
 @pytest.mark.asyncio
@@ -1223,8 +1435,7 @@ async def test_compaction_request_reuses_main_prefix(tmp_path: Path) -> None:
         },
         runtime=RuntimeConfig(
             default_level="medium",
-            auto_compress=True,
-            compression=CompressionConfig(model_level="small", trigger_ratio=0.1, min_tokens=1),
+            compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.1, min_tokens=1),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -1272,10 +1483,11 @@ async def test_compaction_request_reuses_main_prefix(tmp_path: Path) -> None:
     assert "Never persist this rule." in str(client.requests[0]["input"])
     assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
     assert "context_compaction_request" in str(client.requests[1]["input"][-1])
+    assert "CONTEXT CHECKPOINT COMPACTION" in str(client.requests[1]["input"][-1])
 
 
 @pytest.mark.asyncio
-async def test_dynamic_context_is_reused_as_stable_prefix_until_changed(tmp_path: Path) -> None:
+async def test_project_rules_are_deduped_and_not_reloaded_on_file_change(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     rules = project_root / "AGENTS.md"
@@ -1294,7 +1506,7 @@ async def test_dynamic_context_is_reused_as_stable_prefix_until_changed(tmp_path
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(
             default_level="medium",
-            auto_compress=False,
+            compression=CompressionConfig(enabled=False),
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
@@ -1369,16 +1581,16 @@ async def test_dynamic_context_is_reused_as_stable_prefix_until_changed(tmp_path
     rules.write_text("Rule v2.", encoding="utf-8")
     [event async for event in engine.run_turn(user_text="three", thread_id=first)]
     assert client.requests[2]["previous_response_id"] == "resp_2"
-    assert "Rule v2." in str(client.requests[2]["input"])
+    assert "Rule v2." not in str(client.requests[2]["input"])
 
     rules.unlink()
     [event async for event in engine.run_turn(user_text="four", thread_id=first)]
     assert client.requests[3]["previous_response_id"] == "resp_3"
-    assert "Do not rely on older appended" in str(client.requests[3]["input"])
+    assert "Do not rely on older appended" not in str(client.requests[3]["input"])
 
 
 @pytest.mark.asyncio
-async def test_context_update_reappears_after_compaction(tmp_path: Path) -> None:
+async def test_project_rules_reappear_after_compaction_epoch(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "AGENTS.md").write_text("After compaction rule.", encoding="utf-8")
@@ -1394,7 +1606,7 @@ async def test_context_update_reappears_after_compaction(tmp_path: Path) -> None
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(default_level="medium", auto_compress=False),
+        runtime=RuntimeConfig(default_level="medium", compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -1408,13 +1620,51 @@ async def test_context_update_reappears_after_compaction(tmp_path: Path) -> None
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread()
-    first = engine._workspace_context_items(thread_id)
+    first = engine._pre_user_context_items(thread_id)
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
-    second = engine._workspace_context_items(thread_id)
+    engine._reset_rule_epoch(thread_id)
+    second = engine._pre_user_context_items(thread_id)
 
     assert first
     assert second
     assert "After compaction rule." in str(second)
+    assert "<workspace_rule_index>" in str(second)
+
+
+@pytest.mark.asyncio
+async def test_compaction_epoch_uses_active_cwd_local_index_and_notice(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    child = project_root / "src"
+    nested = child / "pkg"
+    nested.mkdir(parents=True)
+    (project_root / "AGENTS.md").write_text("Root rule.", encoding="utf-8")
+    (child / "AGENTS.md").write_text("Child rule.", encoding="utf-8")
+    (nested / "AGENTS.md").write_text("Nested rule.", encoding="utf-8")
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    state = engine._rule_state(thread_id)
+    state.active_cwd = child.resolve()
+    engine.thread_store.append(thread_id, "thread.cwd_updated", turn_id="t1", cwd=str(child.resolve()))
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    engine._reset_rule_epoch(thread_id)
+
+    items = engine._pre_user_context_items(thread_id)
+    text = str(items)
+
+    assert "<workspace_rule_index>" in text
+    assert "AGENTS.md" in text
+    assert "pkg/AGENTS.md" in text
+    assert "Root rule." not in text
+    assert "Child rule." in text
+    assert "active_cwd_notice" in text
+    assert "src" in text
 
 
 @pytest.mark.asyncio
@@ -1477,14 +1727,86 @@ async def test_system_instructions_are_persisted_before_first_model_request(tmp_
 
 
 @pytest.mark.asyncio
+async def test_system_instructions_refresh_after_compaction(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root, api="chat_completions")
+    client = FakeModelClient(
+        [
+            {
+                "id": "chatcmpl_1",
+                "output_text": "one",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "one"}],
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_2",
+                "output_text": "two",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "two"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    thread_id = str([event async for event in engine.run_turn(user_text="one")][-1]["thread_id"])
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    engine.config = make_test_config(project_root, api="chat_completions", default_level="small")
+    [event async for event in engine.run_turn(user_text="two", thread_id=thread_id)]
+
+    assert "<default>medium</default>" in client.requests[0]["instructions"]
+    assert "<default>small</default>" in client.requests[1]["instructions"]
+    stored = engine.thread_store.read(thread_id)
+    assert sum(1 for event in stored if event["type"] == "item.system_instructions") == 2
+
+
+def test_workspace_context_reappears_after_compaction_epoch(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    skill_dir = project_root / ".agents" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+
+    first = engine._workspace_context_items(thread_id)
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    second = engine._workspace_context_items(thread_id)
+
+    assert "demo (project)" in str(first)
+    assert "demo (project)" in str(second)
+
+
+@pytest.mark.asyncio
 async def test_compaction_uses_persisted_system_instructions(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(
         project_root,
-        auto_compress=True,
         context_window_tokens=20,
-        compression=CompressionConfig(model_level="small", trigger_ratio=0.1, min_tokens=1),
+        compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.1, min_tokens=1),
     )
     client = FakeModelClient(
         [
@@ -1569,7 +1891,7 @@ def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> 
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -1586,7 +1908,16 @@ def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> 
     engine.thread_store.append(thread_id, "item.user", turn_id="t1", item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old"}]})
     replacement = [
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "kept"}]},
-        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "summary"}]},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "<conversation_summary>\nsummary\n</conversation_summary>",
+                }
+            ],
+        },
     ]
     engine.thread_store.append(
         thread_id,
@@ -1623,7 +1954,7 @@ def test_context_update_reconstructs_as_stable_prefix(tmp_path: Path) -> None:
             )
         },
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(auto_compress=False),
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
@@ -1654,6 +1985,188 @@ def test_context_update_reconstructs_as_stable_prefix(tmp_path: Path) -> None:
     assert reconstructed[0]["role"] == "user"
     assert "stable rules" in str(reconstructed[0])
     assert "hello" in str(reconstructed[1])
+
+
+def test_rules_loaded_from_tool_result_is_not_reconstructed_between_tool_call_and_output(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="t1",
+        output=[
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_python",
+                "arguments": "{}",
+            }
+        ],
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.rules_loaded",
+        turn_id="t1",
+        source="tool_result",
+        text="must not become user message",
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.tool_output",
+        turn_id="t1",
+        item={"type": "function_call_output", "call_id": "call_1", "output": "{}"},
+    )
+
+    reconstructed = engine._reconstruct_input(thread_id)
+
+    assert reconstructed[0]["type"] == "function_call"
+    assert reconstructed[1]["type"] == "function_call_output"
+    assert "must not become user message" not in str(reconstructed)
+
+
+def test_context_update_is_reanchored_before_next_user_when_reconstructing(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="t1",
+        output=[
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_python",
+                "arguments": "{}",
+            }
+        ],
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.context_update",
+        turn_id="t1",
+        context_fingerprint="fp",
+        context_state={"fingerprint": "fp", "parts": {"skills": "s"}},
+        text="capability update",
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.tool_output",
+        turn_id="t1",
+        item={"type": "function_call_output", "call_id": "call_1", "output": "{}"},
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id="t2",
+        item=message_item("user", "next"),
+    )
+
+    reconstructed = engine._reconstruct_input(thread_id)
+
+    assert reconstructed[0]["type"] == "function_call"
+    assert reconstructed[1]["type"] == "function_call_output"
+    assert message_item_text(reconstructed[2]) == "capability update"
+    assert message_item_text(reconstructed[3]) == "next"
+
+
+def test_rule_state_restore_uses_local_index_when_active_cwd_is_child(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    child = project_root / "src"
+    child.mkdir(parents=True)
+    nested = child / "pkg"
+    nested.mkdir()
+    (child / "AGENTS.md").write_text("child rule", encoding="utf-8")
+    (nested / "AGENTS.md").write_text("nested rule", encoding="utf-8")
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+    store = ThreadStore(tmp_path / "state")
+    thread_id = store.create_thread()
+    store.append(thread_id, "thread.cwd_updated", turn_id="t1", cwd=str(child))
+
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=store,
+        project_root=project_root,
+    )
+
+    items = engine._pre_user_context_items(thread_id)
+    text = str(items)
+
+    assert "child rule" in text
+    assert "<workspace_rule_index>" in text
+    assert "AGENTS.md" in text
+    assert "pkg/AGENTS.md" in text
+    assert "active_cwd_notice" in text
 
 
 def test_refresh_config_updates_engine_and_runner(tmp_path: Path, monkeypatch) -> None:

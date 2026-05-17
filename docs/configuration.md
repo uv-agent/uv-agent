@@ -177,7 +177,6 @@ level names rather than concrete model names.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `default_level` | string | `"medium"` | Level used when no explicit level is selected. |
-| `auto_compress` | boolean | `true` | Automatically compress thread context near the trigger threshold. |
 | `store_provider_response` | boolean | `false` | Store raw provider responses in thread state. |
 | `max_agent_rounds` | integer | `100` | Maximum model/tool loop rounds for one turn. |
 | `compression` | object | see below | Context compression settings. |
@@ -187,10 +186,9 @@ Compression options:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Automatically compress thread context near the trigger threshold. |
 | `model_level` | string or null | `null` | Optional level used for compression. `null` uses the active/default level. |
-| `prompt` | string | built in | Prompt used to summarize context. |
 | `trigger_ratio` | number | `0.7` | Compress when estimated context usage reaches this ratio. |
-| `target_ratio` | number | `0.3` | Target ratio after compression. |
 | `min_tokens` | integer | `5000` | Do not compress below this estimated token count. |
 
 Title generation options:
@@ -199,7 +197,6 @@ Title generation options:
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Generate a short title for new threads. |
 | `model_level` | string or null | `null` | Optional level used for title generation. |
-| `prompt` | string | built in | Prompt used for title generation. |
 
 ## UI Options
 
@@ -207,8 +204,9 @@ Title generation options:
 | --- | --- | --- | --- |
 | `language` | string | `"auto"` | TUI language. Use `auto`, `en`, or `zh-CN`. |
 
-The `/config` panel can edit `runtime.default_level`, `runtime.auto_compress`,
-and `ui.language`. Model, provider, and level definitions are edited in JSON.
+The `/config` panel can edit `runtime.default_level`,
+`runtime.compression.enabled`, and `ui.language`. Model, provider, and level
+definitions are edited in JSON.
 
 ## Runner Options
 

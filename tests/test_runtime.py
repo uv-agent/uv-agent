@@ -12,6 +12,7 @@ from uv_agent_runtime import (
     connect_declared,
     connect_named,
     connect_stdio,
+    enter_dir,
     list_declared_servers,
     list_files,
     look_at,
@@ -61,6 +62,20 @@ def test_runtime_command_helpers() -> None:
     assert result.returncode == 0
     assert result.stdout.strip() == "ok"
     assert check_command(["python", "-c", "print('checked')"]).stdout.strip() == "checked"
+
+
+def test_runtime_enter_dir_changes_cwd_and_emits_event(tmp_path: Path, capsys) -> None:
+    previous = Path.cwd()
+    try:
+        resolved = enter_dir(tmp_path)
+        out = capsys.readouterr().out
+        event = json.loads(out)
+
+        assert resolved == tmp_path.resolve()
+        assert Path.cwd() == tmp_path.resolve()
+        assert event == {"kind": "enter_dir", "cwd": str(tmp_path.resolve())}
+    finally:
+        os.chdir(previous)
 
 
 def test_runtime_mcp_stdio_client() -> None:

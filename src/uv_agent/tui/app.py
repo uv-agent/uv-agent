@@ -2612,8 +2612,8 @@ class UvAgentApp(App[None]):
                 f"{escape(stats.source)})"
             )
             compress_line = (
+                f"{'on' if self.engine.config.runtime.compression.enabled else 'off'} · "
                 f"trigger {format_tokens(stats.threshold_tokens)} · "
-                f"target {format_tokens(stats.target_tokens)} · "
                 f"headroom {format_tokens(stats.headroom_tokens)}"
             )
         except ConfigError as exc:
@@ -2684,10 +2684,10 @@ class UvAgentApp(App[None]):
                 meta=self._text("config_language_hint"),
             ),
             PickerItem(
-                id="auto_compress",
-                title=self._text("config_auto_compress"),
-                description="on" if self.engine.config.runtime.auto_compress else "off",
-                meta=self._text("config_auto_compress_hint"),
+                id="compression",
+                title=self._text("config_compression"),
+                description="on" if self.engine.config.runtime.compression.enabled else "off",
+                meta=self._text("config_compression_hint"),
             ),
             PickerItem(
                 id="sources",
@@ -2718,8 +2718,8 @@ class UvAgentApp(App[None]):
             self._open_default_level_panel()
         elif item_id == "language":
             self._open_language_panel()
-        elif item_id == "auto_compress":
-            self._toggle_auto_compress()
+        elif item_id == "compression":
+            self._toggle_compression()
         elif item_id == "sources":
             self._open_config_sources_panel()
         elif item_id == "raw":
@@ -2778,11 +2778,11 @@ class UvAgentApp(App[None]):
             subtitle=self._text("config_write_hint"),
         )
 
-    def _toggle_auto_compress(self) -> None:
-        current = self.engine.config.runtime.auto_compress
-        self._write_user_config_patch({"runtime": {"auto_compress": not current}})
+    def _toggle_compression(self) -> None:
+        current = self.engine.config.runtime.compression.enabled
+        self._write_user_config_patch({"runtime": {"compression": {"enabled": not current}}})
         self._flash(
-            f"{self._text('config_auto_compress')}: {'on' if not current else 'off'}",
+            f"{self._text('config_compression')}: {'on' if not current else 'off'}",
         )
         self._open_config_panel()
 

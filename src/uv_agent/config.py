@@ -100,13 +100,9 @@ class LevelConfig:
 
 @dataclass(frozen=True)
 class CompressionConfig:
+    enabled: bool = True
     model_level: str | None = None
-    prompt: str = (
-        "Summarize the conversation context for future continuation. Keep user intent, "
-        "decisions, file changes, tool results, and unresolved tasks. Be concise but complete."
-    )
     trigger_ratio: float = 0.7
-    target_ratio: float = 0.3
     min_tokens: int = 5_000
 
 
@@ -114,17 +110,11 @@ class CompressionConfig:
 class TitleGenerationConfig:
     enabled: bool = True
     model_level: str | None = None
-    prompt: str = (
-        "Create a concise title for this uv-agent thread from the user's first message. "
-        "Return only the title, without quotes or punctuation. Prefer the user's language. "
-        "Keep it under 8 words or 24 CJK characters."
-    )
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
     default_level: str = "medium"
-    auto_compress: bool = True
     store_provider_response: bool = False
     max_agent_rounds: int = 100
     compression: CompressionConfig = field(default_factory=CompressionConfig)
@@ -207,18 +197,15 @@ def default_config(project_root: Path) -> dict[str, Any]:
         },
         "runtime": {
             "default_level": "medium",
-            "auto_compress": True,
             "store_provider_response": False,
             "max_agent_rounds": 100,
             "compression": {
-                "prompt": CompressionConfig().prompt,
+                "enabled": True,
                 "trigger_ratio": 0.7,
-                "target_ratio": 0.3,
                 "min_tokens": 5_000,
             },
             "title_generation": {
                 "enabled": True,
-                "prompt": TitleGenerationConfig().prompt,
             },
         },
         "ui": {
@@ -342,14 +329,13 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         level_value.pop("reasoning", None)
         levels[name] = LevelConfig(name=name, **level_value)
     runtime_raw = raw.get("runtime", {})
-    compression = CompressionConfig(**runtime_raw.get("compression", {}))
-    title_generation = TitleGenerationConfig(**runtime_raw.get("title_generation", {}))
+    compression = CompressionConfig(**dict(runtime_raw.get("compression", {})))
+    title_generation = TitleGenerationConfig(**dict(runtime_raw.get("title_generation", {})))
     default_level = runtime_raw.get("default_level", "medium")
     if default_level not in levels and levels:
         default_level = next(iter(levels))
     runtime = RuntimeConfig(
         default_level=default_level,
-        auto_compress=runtime_raw.get("auto_compress", True),
         store_provider_response=runtime_raw.get("store_provider_response", False),
         max_agent_rounds=runtime_raw.get("max_agent_rounds", 100),
         compression=compression,

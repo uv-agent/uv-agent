@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from uv_agent.ids import new_id
-from uv_agent.jsonl import JsonlWriter, read_jsonl
+from uv_agent.jsonl import JsonlWriter, read_jsonl, read_jsonl_after_latest_compaction
 from uv_agent.time import utc_now_iso
 
 
@@ -76,6 +76,9 @@ class ThreadStore:
 
     def read(self, thread_id: str) -> list[dict[str, Any]]:
         return read_jsonl(self.path(thread_id))
+
+    def read_after_latest_compaction(self, thread_id: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        return read_jsonl_after_latest_compaction(self.path(thread_id))
 
     def list_threads(self) -> list[dict[str, Any]]:
         return self._list_from_dir(self.threads_dir)
