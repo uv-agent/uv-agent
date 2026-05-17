@@ -53,7 +53,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert model.params["reasoning"]["effort"] == "high"
     assert config.runtime.title_generation.enabled is True
     assert config.runtime.title_generation.model_level == "quick"
-    assert config.runner.runtime_dependency == "uv-agent==0.1.3"
+    assert config.runner.runtime_dependency == "uv-agent==0.1.4"
     assert config.runner.default_uv_args == []
     assert config.runner.max_saved_scripts == 32
 
