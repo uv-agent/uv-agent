@@ -19,7 +19,7 @@ from uv_agent.config import (
     RuntimeConfig,
     UiConfig,
 )
-from uv_agent.model_client import FakeModelClient, ToolCallDelta, parse_responses_response
+from uv_agent.model_client import FakeModelClient, ModelResponse, ToolCallDelta, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
 from uv_agent.tui.app import (
@@ -28,6 +28,7 @@ from uv_agent.tui.app import (
     FullscreenPanel,
     ImageAttachmentCell,
     ImagePreviewPanel,
+    TranscriptCell,
     TranscriptScroll,
     ToolDetailsPanel,
     UvAgentApp,
@@ -130,6 +131,131 @@ class ImageCaptureEngine(AgentEngine):
         self.thread_store.append(thread_id, "item.assistant", turn_id=turn_id, text=text)
         self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text=text)
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": text}
+
+
+class StableRoundEngine(AgentEngine):
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        thread_id = thread_id or self.thread_store.create_thread("Stable round")
+        turn_id = "turn_stable"
+        output = [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will inspect first."}],
+                "reasoning_content": "provider reasoning",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_python",
+                "arguments": '{"code":"print(1)"}',
+            },
+        ]
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        )
+        yield {"type": "assistant.reasoning_delta", "thread_id": thread_id, "turn_id": turn_id, "text": "provider "}
+        yield {"type": "assistant.reasoning_delta", "thread_id": thread_id, "turn_id": turn_id, "text": "reasoning"}
+        yield {
+            "type": "assistant.delta",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "text": "I will inspect first.",
+        }
+        response = ModelResponse(
+            id="resp_1",
+            output=output,
+            output_text="I will inspect first.",
+            raw={"id": "resp_1", "output": output},
+            usage={},
+            reasoning_text="provider reasoning",
+        )
+        self.thread_store.append(
+            thread_id,
+            "item.model_response",
+            turn_id=turn_id,
+            response_id=response.id,
+            output=response.output,
+            usage=response.usage,
+            reasoning_text=response.reasoning_text,
+        )
+        yield {"type": "model.response", "thread_id": thread_id, "turn_id": turn_id, "response": response}
+        yield {
+            "type": "tool.started",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "call": output[1],
+            "tool_call_index": 0,
+        }
+        payload = {
+            "script_id": "scr_1",
+            "run_id": "run_1",
+            "returncode": 0,
+            "timed_out": False,
+            "interrupted": False,
+            "truncated": False,
+            "stdout": "ok\n",
+            "stderr": "",
+            "events": [],
+            "run_log_path": "",
+        }
+        self.thread_store.append(
+            thread_id,
+            "item.runner_result",
+            turn_id=turn_id,
+            call_id="call_1",
+            result=payload,
+        )
+        tool_output = {"type": "function_call_output", "call_id": "call_1", "output": "{}"}
+        self.thread_store.append(thread_id, "item.tool_output", turn_id=turn_id, item=tool_output)
+        yield {
+            "type": "tool.output",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "call": output[1],
+            "tool_call_index": 0,
+            "output": tool_output,
+        }
+        yield {"type": "assistant.delta", "thread_id": thread_id, "turn_id": turn_id, "text": "Done."}
+        final_response = ModelResponse(
+            id="resp_2",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done."}],
+                }
+            ],
+            output_text="Done.",
+            raw={"id": "resp_2"},
+            usage={},
+        )
+        self.thread_store.append(
+            thread_id,
+            "item.model_response",
+            turn_id=turn_id,
+            response_id=final_response.id,
+            output=final_response.output,
+            usage={},
+            reasoning_text="",
+        )
+        yield {"type": "model.response", "thread_id": thread_id, "turn_id": turn_id, "response": final_response}
+        self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text="Done.")
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": "Done."}
 
 
 class RoutedModelClient(FakeModelClient):
@@ -686,18 +812,8 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
                 "arguments": "{\"code\":\"print('ok')\"}",
             },
         ],
+        reasoning_text="thinking first",
         usage={},
-    )
-    engine.thread_store.append(
-        thread_id,
-        "item.tool_call",
-        turn_id="turn_1",
-        item={
-            "type": "function_call",
-            "call_id": "call_1",
-            "name": "run_python",
-            "arguments": "{\"code\":\"print('ok')\"}",
-        },
     )
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
     app = UvAgentApp(project_root=project_root)
@@ -706,12 +822,100 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
         app._resume_thread(thread_id)
         await pilot.pause()
 
-        transcript_text = "\n".join(
-            str(getattr(child, "copy_text", None) or "")
-            for child in app.query_one("#transcript", TranscriptScroll).children
+        children = list(app.query_one("#transcript", TranscriptScroll).children)
+        reasoning_index = next(
+            index
+            for index, child in enumerate(children)
+            if isinstance(child, ExpandableTranscriptCell) and child.detail_title == "reasoning_details"
         )
-        assert "I will inspect first." in transcript_text
-        assert "run_python" in transcript_text
+        assistant_index = next(
+            index
+            for index, child in enumerate(children)
+            if isinstance(child, TranscriptCell) and child.has_class("assistant")
+        )
+        tool_index = next(
+            index
+            for index, child in enumerate(children)
+            if isinstance(child, TranscriptCell) and "run_python" in str(child.render())
+        )
+        assert reasoning_index < assistant_index < tool_index
+        assert children[assistant_index].copy_text == "I will inspect first."
+
+
+@pytest.mark.asyncio
+async def test_tui_live_rounds_do_not_duplicate_reasoning_or_merge_final_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = StableRoundEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app._start_turn("go")
+        await pilot.pause()
+        await pilot.pause()
+
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        children = list(transcript.children)
+        reasoning_cells = [
+            child
+            for child in children
+            if isinstance(child, ExpandableTranscriptCell) and child.detail_title == "reasoning_details"
+        ]
+        assistant_cells = [
+            child
+            for child in children
+            if isinstance(child, TranscriptCell) and child.has_class("assistant")
+        ]
+        tool_cells = [
+            child
+            for child in children
+            if isinstance(child, (TranscriptCell, ExpandableTranscriptCell)) and "python" in str(child.render())
+        ]
+
+        assert len(reasoning_cells) == 1
+        assert reasoning_cells[0].details.count("provider reasoning") == 1
+        assert [cell.copy_text for cell in assistant_cells] == ["I will inspect first.", "Done."]
+        assert children.index(reasoning_cells[0]) < children.index(assistant_cells[0]) < children.index(tool_cells[0])
+        assert children.index(tool_cells[-1]) < children.index(assistant_cells[1])
+
+        stored = engine.thread_store.read(str(app.thread_id))
+        assert [event["type"] for event in stored].count("item.model_response") == 2
+        assert not any(event["type"] == "item.tool_call" for event in stored)
+
+
+@pytest.mark.asyncio
+async def test_tui_clears_initial_thinking_when_response_has_no_reasoning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        run_state = app._run_state_for_thread("thread_1")
+        app.thread_id = "thread_1"
+        app._reasoning_cell = app._append_cell("[dim]thinking...[/dim]", "event")
+        app._sync_run_state_from_active(run_state)
+
+        await app._handle_thread_event(
+            "thread_1",
+            "assistant.reasoning_absent",
+            {},
+            run_state,
+        )
+        await pilot.pause()
+
+        assert app._reasoning_cell is None
+        assert "thinking" not in "\n".join(str(child.render()) for child in app.query_one("#transcript", TranscriptScroll).children)
 
 
 @pytest.mark.asyncio

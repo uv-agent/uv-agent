@@ -1606,12 +1606,31 @@ class UvAgentApp(App[None]):
                     await self._handle_thread_event(item_thread_id, "tool.delta", item, run_state)
                 elif event_type == "model.response":
                     response = item.get("response")
-                    reasoning_text = str(getattr(response, "reasoning_text", "") or "")
+                    reasoning_text = str(
+                        item.get("reasoning_text")
+                        or getattr(response, "reasoning_text", "")
+                        or ""
+                    )
                     if reasoning_text:
                         await self._handle_thread_event(
                             item_thread_id,
                             "assistant.reasoning_completed",
                             {"text": reasoning_text},
+                            run_state,
+                        )
+                    else:
+                        await self._handle_thread_event(
+                            item_thread_id,
+                            "assistant.reasoning_absent",
+                            {},
+                            run_state,
+                        )
+                    output = list(getattr(response, "output", []) or [])
+                    if any(entry.get("type") == "function_call" for entry in output):
+                        await self._handle_thread_event(
+                            item_thread_id,
+                            "assistant.response_with_tools",
+                            {},
                             run_state,
                         )
                     run_state.status = self._text("reading")
@@ -1809,9 +1828,14 @@ class UvAgentApp(App[None]):
                 if stripped:
                     run_state.reasoning_buffer = (run_state.reasoning_buffer + " " + stripped).strip()
             elif event_type == "assistant.reasoning_completed":
-                stripped = str(item.get("text") or "").strip()
-                if stripped:
-                    run_state.reasoning_buffer = stripped
+                run_state.reasoning_buffer = ""
+                run_state.reasoning_cell = None
+            elif event_type == "assistant.reasoning_absent":
+                run_state.reasoning_buffer = ""
+                run_state.reasoning_cell = None
+            elif event_type == "assistant.response_with_tools":
+                run_state.assistant_buffer = ""
+                run_state.assistant_cell = None
             elif event_type == "tool.delta":
                 run_state.status = self._text("running_python")
             return
@@ -1821,15 +1845,18 @@ class UvAgentApp(App[None]):
         elif event_type == "assistant.reasoning_delta":
             self._append_reasoning_delta(str(item.get("text") or ""))
         elif event_type == "assistant.reasoning_completed":
-            self._append_reasoning_history(str(item.get("text") or ""))
-            self._reasoning_cell = None
-            self._reasoning_buffer = ""
+            self._finalize_reasoning(str(item.get("text") or ""))
+        elif event_type == "assistant.reasoning_absent":
+            self._clear_pending_reasoning()
         elif event_type == "image.attachment":
             attachment = item.get("attachment") or {}
             self._append_image_attachment_cell(attachment)
         elif event_type == "tool.delta":
             self._append_tool_delta(item)
+        elif event_type == "assistant.response_with_tools":
+            self._seal_assistant_round()
         elif event_type == "tool.started":
+            self._seal_assistant_round()
             self._append_tool_started(item)
         elif event_type == "tool.output":
             self._append_tool_output(item)
@@ -2224,6 +2251,10 @@ class UvAgentApp(App[None]):
         self._assistant_cell.update(Markdown(self._assistant_buffer), copy_text=self._assistant_buffer)
         self._scroll_end()
 
+    def _seal_assistant_round(self) -> None:
+        self._assistant_buffer = ""
+        self._assistant_cell = None
+
     def _append_reasoning_delta(self, text: str) -> None:
         stripped = text.strip()
         if not stripped:
@@ -2242,10 +2273,8 @@ class UvAgentApp(App[None]):
             self._reasoning_cell.update(markup)
             self._scroll_end()
 
-    def _append_reasoning_history(self, text: str, *, before: object | None = None) -> None:
+    def _reasoning_markup(self, text: str) -> tuple[str, str]:
         stripped = text.strip()
-        if not stripped:
-            return
         first = stripped.splitlines()[0]
         if len(first) > 120:
             first = first[:117].rstrip() + "..."
@@ -2253,7 +2282,34 @@ class UvAgentApp(App[None]):
             f"[dim italic]{escape(self._text('thinking'))}[/dim italic]  "
             f"[italic #a3b1c2]{escape(first)}[/italic #a3b1c2]"
         )
-        self._append_reasoning_cell(summary, escape(stripped), before=before)
+        return summary, escape(stripped)
+
+    def _finalize_reasoning(self, text: str) -> None:
+        stripped = text.strip()
+        if not stripped:
+            return
+        summary, details = self._reasoning_markup(stripped)
+        if isinstance(self._reasoning_cell, ExpandableTranscriptCell):
+            self._reasoning_cell.set_details(summary, details)
+        elif self._reasoning_cell is not None:
+            self._replace_with_reasoning_cell(self._reasoning_cell, summary, details)
+        else:
+            self._append_reasoning_cell(summary, details)
+        self._reasoning_cell = None
+        self._reasoning_buffer = ""
+
+    def _clear_pending_reasoning(self) -> None:
+        if self._reasoning_cell is not None and not isinstance(self._reasoning_cell, ExpandableTranscriptCell):
+            self._reasoning_cell.remove()
+        self._reasoning_cell = None
+        self._reasoning_buffer = ""
+
+    def _append_reasoning_history(self, text: str, *, before: object | None = None) -> None:
+        stripped = text.strip()
+        if not stripped:
+            return
+        summary, details = self._reasoning_markup(stripped)
+        self._append_reasoning_cell(summary, details, before=before)
 
     def _append_tool_output(self, item: dict[str, Any]) -> None:
         payload = parse_tool_payload(item.get("output", {}))
@@ -2377,17 +2433,14 @@ class UvAgentApp(App[None]):
             self._append_user_from_history(event.get("item") or {}, before=before)
         elif event_type == "item.model_response":
             self._append_reasoning_history(str(event.get("reasoning_text") or ""), before=before)
-            text = self._model_response_text(event.get("output") or [])
-            if text:
-                self._append_cell(Markdown(text), "assistant", before=before, copy_text=text)
-        elif event_type == "item.tool_call":
-            item = event.get("item") or {}
-            name = str(item.get("name") or "python")
-            self._append_cell(
-                f"[cyan]{escape(name)}[/cyan] [dim]{escape(self._text('python_called'))}[/dim]",
-                "event",
-                before=before,
-            )
+            for item in event.get("output") or []:
+                item_type = item.get("type")
+                if item_type == "message":
+                    text = self._message_item_text(item)
+                    if text:
+                        self._append_cell(Markdown(text), "assistant", before=before, copy_text=text)
+                elif item_type == "function_call":
+                    self._append_tool_call_history(item, before=before)
         elif event_type == "item.runner_result":
             result = event.get("result") or {}
             self._last_tool_payload = result
@@ -2404,6 +2457,15 @@ class UvAgentApp(App[None]):
             self._append_reasoning_history(str(event.get("text") or ""), before=before)
         elif event_type == "item.compaction":
             self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event", before=before)
+
+    def _append_tool_call_history(self, item: dict[str, Any], *, before: object | None = None) -> None:
+        name = str(item.get("name") or "python")
+        detail = self._tool_call_preview(item)
+        self._append_cell(
+            f"[cyan]{escape(name)}[/cyan] [dim]{escape(self._text('python_called'))}[/dim]{detail}",
+            "event",
+            before=before,
+        )
 
     def _tool_call_preview(self, call: dict[str, Any]) -> str:
         raw_args = call.get("arguments") or ""
@@ -2477,6 +2539,24 @@ class UvAgentApp(App[None]):
         classes: str,
     ) -> ExpandableTranscriptCell:
         cell = ExpandableTranscriptCell(summary, details, classes=classes, markup=True)
+        self.query_one("#transcript", VerticalScroll).mount(cell, before=old_cell)
+        old_cell.remove()
+        return cell
+
+    def _replace_with_reasoning_cell(
+        self,
+        old_cell: TranscriptCell,
+        summary: str,
+        details: str,
+    ) -> ExpandableTranscriptCell:
+        cell = ExpandableTranscriptCell(
+            summary,
+            details,
+            detail_title="reasoning_details",
+            detail_hint="reasoning_details_hint",
+            classes="reasoning",
+            markup=True,
+        )
         self.query_one("#transcript", VerticalScroll).mount(cell, before=old_cell)
         old_cell.remove()
         return cell
@@ -3212,9 +3292,16 @@ class UvAgentApp(App[None]):
         for item in output:
             if item.get("type") != "message":
                 continue
-            for content in item.get("content") or []:
-                if content.get("type") in {"output_text", "text", "refusal"}:
-                    parts.append(str(content.get("text") or ""))
+            text = self._message_item_text(item)
+            if text:
+                parts.append(text)
+        return "".join(parts)
+
+    def _message_item_text(self, item: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for content in item.get("content") or []:
+            if content.get("type") in {"output_text", "text", "refusal"}:
+                parts.append(str(content.get("text") or ""))
         return "".join(parts)
 
     def _open_fullscreen_panel(self, title: str, markup: str, *, subtitle: str = "") -> None:

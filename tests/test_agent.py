@@ -854,6 +854,7 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     thread_id = events[-1]["thread_id"]
     stored_events = engine.thread_store.read(thread_id)
     assert any(event["type"] == "item.tool_output" for event in stored_events)
+    assert not any(event["type"] == "item.tool_call" for event in stored_events)
     assert not any(event["type"] == "item.assistant_delta" for event in stored_events)
     assert not any(event["type"] == "item.reasoning_delta" for event in stored_events)
 
@@ -923,6 +924,7 @@ async def test_agent_displays_and_reconstructs_mixed_text_tool_response(tmp_path
     assert event_types.index("assistant.delta") < event_types.index("tool.started")
     assert stored_response["output"][0]["type"] == "message"
     assert stored_response["output"][1]["type"] == "function_call"
+    assert not any(event["type"] == "item.tool_call" for event in engine.thread_store.read(thread_id))
     reconstructed_message_index = reconstructed.index(stored_response["output"][0])
     assert reconstructed[reconstructed_message_index + 1] == stored_response["output"][1]
     assert reconstructed[reconstructed_message_index + 2]["type"] == "function_call_output"

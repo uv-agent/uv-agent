@@ -176,7 +176,7 @@ def _digest_items(events: list[dict[str, Any]], *, include_tools: bool) -> list[
                 items.append({"role": "assistant", "text": text})
         elif event_type == "turn.interrupted":
             items.append({"role": "system", "text": f"turn interrupted: {event.get('reason') or 'user_interrupt'}"})
-        elif include_tools and event_type in {"item.tool_call", "item.runner_result", "item.tool_output"}:
+        elif include_tools and event_type in {"item.runner_result", "item.tool_output"}:
             items.append({"role": "tool", "text": _tool_event_text(event)})
     return items
 
@@ -201,9 +201,6 @@ def _model_response_text(output: list[dict[str, Any]]) -> str:
 
 def _tool_event_text(event: dict[str, Any]) -> str:
     event_type = event.get("type")
-    if event_type == "item.tool_call":
-        item = event.get("item") or {}
-        return f"{item.get('name') or 'tool'} called"
     if event_type == "item.runner_result":
         result = event.get("result") or {}
         return f"run_python rc={result.get('returncode')} run={result.get('run_id') or ''}".strip()

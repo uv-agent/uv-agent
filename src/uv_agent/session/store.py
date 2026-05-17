@@ -21,7 +21,6 @@ VISIBLE_HISTORY_EVENT_TYPES = {
     "item.model_response",
     "item.assistant",
     "item.assistant_partial",
-    "item.tool_call",
     "item.runner_result",
     "item.image_attachment",
     "item.reasoning_delta",
@@ -338,7 +337,7 @@ def digest_items(events: list[dict[str, Any]], *, include_tools: bool = False) -
                     "text": f"turn interrupted: {event.get('reason') or 'user_interrupt'}",
                 }
             )
-        elif include_tools and event_type in {"item.tool_call", "item.runner_result", "item.tool_output"}:
+        elif include_tools and event_type in {"item.runner_result", "item.tool_output"}:
             items.append({"role": "tool", "text": tool_event_text(event)})
     return items
 
@@ -353,9 +352,6 @@ def model_response_text(output: list[dict[str, Any]]) -> str:
 
 def tool_event_text(event: dict[str, Any]) -> str:
     event_type = event.get("type")
-    if event_type == "item.tool_call":
-        item = event.get("item") or {}
-        return f"{item.get('name') or 'tool'} called"
     if event_type == "item.runner_result":
         result = event.get("result") or {}
         return (

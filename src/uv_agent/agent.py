@@ -434,6 +434,7 @@ class AgentEngine:
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "response": response,
+                    "reasoning_text": reasoning_text,
                 }
                 input_items.extend(response.output)
                 turn_input.previous_response_id = response.id
@@ -452,12 +453,6 @@ class AgentEngine:
 
                 for call_index, call in enumerate(tool_calls):
                     self._raise_if_cancelled(cancel_event)
-                    self.thread_store.append(
-                        thread_id,
-                        "item.tool_call",
-                        turn_id=turn_id,
-                        item=call,
-                    )
                     yield {
                         "type": "tool.started",
                         "thread_id": thread_id,
