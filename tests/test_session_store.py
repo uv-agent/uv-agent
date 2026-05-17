@@ -131,6 +131,34 @@ def test_read_after_latest_compaction_returns_only_needed_suffix(tmp_path: Path)
     assert events[0]["turn_id"] == "t3"
 
 
+def test_compaction_offset_reads_suffix_without_parsing_old_events(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Compact offset")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old"}]},
+    )
+    store.append(thread_id, "item.compaction", turn_id="t1", text="summary")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t2",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]},
+    )
+    path = store.path(thread_id)
+    original = path.read_bytes()
+    first_newline = original.index(b"\n")
+    path.write_bytes(b"{" + (b" " * (first_newline - 1)) + original[first_newline:])
+
+    events, compaction = store.read_after_latest_compaction(thread_id)
+
+    assert compaction is not None
+    assert compaction["text"] == "summary"
+    assert [event["turn_id"] for event in events] == ["t2"]
+
+
 def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     parent = store.create_thread("Parent")

@@ -16,27 +16,25 @@ def thread_digest(
 ) -> dict[str, Any]:
     """Return a compact human/assistant digest for one stored thread."""
     base = _state_dir(state_dir)
-    events = _read_jsonl(_thread_path(base, thread_id, kind=kind))
-    created = next((event for event in events if event.get("type") == "thread.created"), {})
-    title = _latest_thread_title(events)
-    start_index = _latest_compaction_index(events) if since_last_compaction else -1
-    compaction = events[start_index] if start_index >= 0 else None
+    metadata = _read_metadata(base, thread_id, kind=kind)
+    if since_last_compaction:
+        events, compaction = _read_after_latest_compaction(
+            _thread_path(base, thread_id, kind=metadata.get("kind") or kind),
+            _int_or_none(metadata.get("latest_compaction_offset")),
+        )
+    else:
+        events = _read_jsonl(_thread_path(base, thread_id, kind=metadata.get("kind") or kind))
+        compaction = None
     return {
         "thread_id": thread_id,
-        "title": title or created.get("title") or "New thread",
-        "created_at": created.get("created_at"),
-        "updated_at": events[-1].get("created_at") if events else None,
-        "last_text": _latest_thread_text(events),
-        "turn_count": sum(1 for event in events if event.get("type") == "turn.completed"),
-        "interrupted_turn_count": sum(1 for event in events if event.get("type") == "turn.interrupted"),
-        "latest_compaction": None
-        if compaction is None
-        else {
-            "created_at": compaction.get("created_at"),
-            "turn_id": compaction.get("turn_id"),
-            "text": compaction.get("text") or "",
-        },
-        "items": _digest_items(events[start_index + 1 :], include_tools=include_tools),
+        "title": metadata.get("title") or "New thread",
+        "created_at": metadata.get("created_at"),
+        "updated_at": metadata.get("updated_at"),
+        "last_text": metadata.get("last_text") or "",
+        "turn_count": int(metadata.get("turn_count") or 0),
+        "interrupted_turn_count": int(metadata.get("interrupted_turn_count") or 0),
+        "latest_compaction": _compaction_summary(compaction or metadata.get("latest_compaction")),
+        "items": _digest_items(events, include_tools=include_tools),
     }
 
 
@@ -51,21 +49,18 @@ def list_thread_digests(
 ) -> list[dict[str, Any]]:
     """Return compact digests for recent stored threads."""
     base = _state_dir(state_dir)
+    metadata_dir = base / ("subthread_metadata" if kind == "subagent" else "thread_metadata")
     summaries: list[dict[str, Any]] = []
-    directory = base / ("subthreads" if kind == "subagent" else "threads")
-    for path in directory.glob("*.jsonl"):
-        events = _read_jsonl(path)
-        if not events:
+    for path in metadata_dir.glob("*.json"):
+        try:
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
             continue
-        created = next((event for event in events if event.get("type") == "thread.created"), {})
-        if parent_thread_id is not None and created.get("parent_thread_id") != parent_thread_id:
+        if not isinstance(metadata, dict):
             continue
-        summaries.append(
-            {
-                "thread_id": path.stem,
-                "updated_at": events[-1].get("created_at") or "",
-            }
-        )
+        if parent_thread_id is not None and metadata.get("parent_thread_id") != parent_thread_id:
+            continue
+        summaries.append(metadata)
     summaries.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     return [
         thread_digest(
@@ -91,7 +86,53 @@ def _state_dir(state_dir: str | Path | None) -> Path:
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    events: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                events.append(json.loads(line))
+    return events
+
+
+def _read_after_latest_compaction(
+    path: Path,
+    compaction_offset: int | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if compaction_offset is None:
+        return _read_jsonl(path), None
+    events: list[dict[str, Any]] = []
+    with path.open("rb") as handle:
+        handle.seek(compaction_offset)
+        for line in handle:
+            if line.strip():
+                events.append(json.loads(line.decode("utf-8")))
+    if not events:
+        return [], None
+    return events[1:], events[0]
+
+
+def _metadata_path(base: Path, thread_id: str, *, kind: str | None) -> Path:
+    if kind == "subagent":
+        return base / "subthread_metadata" / f"{thread_id}.json"
+    if kind == "thread":
+        return base / "thread_metadata" / f"{thread_id}.json"
+    thread_path = base / "thread_metadata" / f"{thread_id}.json"
+    if thread_path.exists():
+        return thread_path
+    subthread_path = base / "subthread_metadata" / f"{thread_id}.json"
+    if subthread_path.exists():
+        return subthread_path
+    return thread_path
+
+
+def _read_metadata(base: Path, thread_id: str, *, kind: str | None) -> dict[str, Any]:
+    path = _metadata_path(base, thread_id, kind=kind)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing thread metadata for {thread_id}: {path}")
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Invalid thread metadata: {path}")
+    return metadata
 
 
 def _thread_path(base: Path, thread_id: str, *, kind: str | None) -> Path:
@@ -106,36 +147,6 @@ def _thread_path(base: Path, thread_id: str, *, kind: str | None) -> Path:
     if subthread_path.exists():
         return subthread_path
     return thread_path
-
-
-def _latest_compaction_index(events: list[dict[str, Any]]) -> int:
-    for index in range(len(events) - 1, -1, -1):
-        if events[index].get("type") == "item.compaction":
-            return index
-    return -1
-
-
-def _latest_thread_title(events: list[dict[str, Any]]) -> str:
-    for event in reversed(events):
-        if event.get("type") == "thread.title_updated":
-            title = str(event.get("title") or "").strip()
-            if title:
-                return title
-    created = next((event for event in events if event.get("type") == "thread.created"), {})
-    return str(created.get("title") or "").strip()
-
-
-def _latest_thread_text(events: list[dict[str, Any]]) -> str:
-    for event in reversed(events):
-        if event.get("type") in {"item.assistant", "item.assistant_partial"}:
-            return str(event.get("text") or "")
-        if event.get("type") == "item.model_response":
-            text = _model_response_text(event.get("output") or [])
-            if text:
-                return text
-        if event.get("type") == "item.user":
-            return _item_text(event.get("item") or {})
-    return ""
 
 
 def _digest_items(events: list[dict[str, Any]], *, include_tools: bool) -> list[dict[str, Any]]:
@@ -197,3 +208,18 @@ def _tool_event_text(event: dict[str, Any]) -> str:
         result = event.get("result") or {}
         return f"run_python rc={result.get('returncode')} run={result.get('run_id') or ''}".strip()
     return event_type or "tool"
+
+
+def _compaction_summary(compaction: Any) -> dict[str, Any] | None:
+    if not isinstance(compaction, dict):
+        return None
+    return {
+        "created_at": compaction.get("created_at"),
+        "turn_id": compaction.get("turn_id"),
+        "text": compaction.get("text") or "",
+    }
+
+
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) else None
+

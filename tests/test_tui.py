@@ -659,6 +659,54 @@ async def test_tui_thread_picker_resumes_and_renders_history(
 
 
 @pytest.mark.asyncio
+async def test_tui_thread_resume_pages_older_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    state = tmp_path / "state"
+    engine = fake_engine(project_root, state)
+    thread_id = engine.thread_store.create_thread("Long work")
+    for index in range(105):
+        engine.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=f"turn_{index}",
+            item={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": f"message {index}"}],
+            },
+        )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app._resume_thread(thread_id)
+        await pilot.pause()
+
+        transcript_text = "\n".join(
+            str(getattr(child, "copy_text", None) or "")
+            for child in app.query_one("#transcript", TranscriptScroll).children
+        )
+        assert "message 0" not in transcript_text
+        assert "message 5" in transcript_text
+        assert "message 104" in transcript_text
+        assert app._history_has_more is True
+
+        app._load_older_thread_history()
+        await pilot.pause()
+
+        transcript_text = "\n".join(
+            str(getattr(child, "copy_text", None) or "")
+            for child in app.query_one("#transcript", TranscriptScroll).children
+        )
+        assert "message 0" in transcript_text
+        assert app._history_has_more is False
+
+
+@pytest.mark.asyncio
 async def test_tui_renders_tool_delta_before_tool_started(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

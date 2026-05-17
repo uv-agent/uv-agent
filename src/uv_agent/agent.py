@@ -27,7 +27,7 @@ from uv_agent.project_rules import (
     load_project_rules,
 )
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
-from uv_agent.session.store import ThreadStore, digest_items
+from uv_agent.session.store import ThreadSnapshot, ThreadStore, digest_items
 from uv_agent.skills import discover_skills, render_skill_summary
 
 
@@ -549,16 +549,15 @@ class AgentEngine:
     def _should_generate_title(self, thread_id: str) -> bool:
         if not self.config.runtime.title_generation.enabled:
             return False
-        events = self.thread_store.read(thread_id)
-        if any(event.get("type") == "item.user" for event in events):
+        metadata = self.thread_store.snapshot(thread_id).metadata
+        if int(metadata.get("user_message_count") or 0) > 0:
             return False
-        return self._thread_title_is_pending(events)
+        return self._thread_title_is_pending(metadata)
 
-    def _thread_title_is_pending(self, events: list[dict[str, Any]]) -> bool:
-        if any(event.get("type") == "thread.title_updated" for event in events):
+    def _thread_title_is_pending(self, metadata: dict[str, Any]) -> bool:
+        if metadata.get("title_updated_at"):
             return False
-        created = next((event for event in events if event.get("type") == "thread.created"), {})
-        return is_default_thread_title(str(created.get("title") or ""))
+        return is_default_thread_title(str(metadata.get("title") or ""))
 
     def _start_title_generation_task(
         self,
@@ -594,7 +593,7 @@ class AgentEngine:
             title = await self._generate_thread_title(user_text, level=level)
         except Exception:
             return None
-        if not title or not self._thread_title_is_pending(self.thread_store.read(thread_id)):
+        if not title or not self._thread_title_is_pending(self.thread_store.snapshot(thread_id).metadata):
             return None
         self.thread_store.update_title(thread_id, title, source="generated")
         return title
@@ -949,11 +948,12 @@ class AgentEngine:
         return cwd
 
     def _prepare_turn_input(self, thread_id: str, *, level: str | None) -> TurnInputState:
-        input_items = self._reconstruct_input(thread_id)
+        snapshot = self.thread_store.snapshot(thread_id)
+        input_items = self._reconstruct_input(thread_id, snapshot=snapshot)
         if not self._level_uses_responses_api(level):
             return TurnInputState(input_items=input_items)
 
-        resume = self._latest_responses_resume(thread_id)
+        resume = self._latest_responses_resume(thread_id, snapshot=snapshot)
         if resume is None:
             return TurnInputState(input_items=input_items)
 
@@ -966,8 +966,9 @@ class AgentEngine:
         )
 
     def _system_instructions_for_turn(self, thread_id: str) -> str:
-        existing = self._thread_system_instructions(thread_id)
-        if existing is not None and not self._needs_system_instruction_refresh(thread_id):
+        snapshot = self.thread_store.snapshot(thread_id)
+        existing = self._thread_system_instructions(thread_id, snapshot=snapshot)
+        if existing is not None and not self._needs_system_instruction_refresh(thread_id, snapshot=snapshot):
             return existing
         instructions = self.system_instructions()
         self.thread_store.append(
@@ -975,15 +976,15 @@ class AgentEngine:
             "item.system_instructions",
             text=instructions,
             fingerprint=context_fingerprint(instructions),
-            after_compaction=self._has_compaction(thread_id),
+            after_compaction=self._has_compaction(thread_id, snapshot=snapshot),
         )
         return instructions
 
     def _ensure_system_instructions(self, thread_id: str) -> str:
         return self._system_instructions_for_turn(thread_id)
 
-    def _thread_system_instructions(self, thread_id: str) -> str | None:
-        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+    def _thread_system_instructions(self, thread_id: str, *, snapshot: ThreadSnapshot | None = None) -> str | None:
+        events = (snapshot or self.thread_store.snapshot(thread_id)).events_after_compaction
         for event in reversed(events):
             if event.get("type") != "item.system_instructions":
                 continue
@@ -992,8 +993,10 @@ class AgentEngine:
                 return text
         return None
 
-    def _needs_system_instruction_refresh(self, thread_id: str) -> bool:
-        events, compaction = self.thread_store.read_after_latest_compaction(thread_id)
+    def _needs_system_instruction_refresh(self, thread_id: str, *, snapshot: ThreadSnapshot | None = None) -> bool:
+        snap = snapshot or self.thread_store.snapshot(thread_id)
+        events = snap.events_after_compaction
+        compaction = snap.latest_compaction
         if compaction is None:
             return False
         return not any(event.get("type") == "item.system_instructions" for event in events)
@@ -1007,8 +1010,13 @@ class AgentEngine:
         except Exception:
             return None
 
-    def _latest_responses_resume(self, thread_id: str) -> tuple[int, str, list[dict[str, Any]]] | None:
-        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+    def _latest_responses_resume(
+        self,
+        thread_id: str,
+        *,
+        snapshot: ThreadSnapshot | None = None,
+    ) -> tuple[int, str, list[dict[str, Any]]] | None:
+        events = (snapshot or self.thread_store.snapshot(thread_id)).events_after_compaction
         for index in range(len(events) - 1, -1, -1):
             event = events[index]
             if event.get("type") != "item.model_response":
@@ -1045,10 +1053,17 @@ class AgentEngine:
                     input_items.append(message_item("user", interrupted))
         return input_items
 
-    def _reconstruct_input(self, thread_id: str) -> list[dict[str, Any]]:
+    def _reconstruct_input(
+        self,
+        thread_id: str,
+        *,
+        snapshot: ThreadSnapshot | None = None,
+    ) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
         pending_pre_user: list[dict[str, Any]] = []
-        events, compaction = self.thread_store.read_after_latest_compaction(thread_id)
+        snap = snapshot or self.thread_store.snapshot(thread_id)
+        events = snap.events_after_compaction
+        compaction = snap.latest_compaction
         if compaction is not None:
             replacement_input = compaction.get("replacement_input")
             if isinstance(replacement_input, list):
@@ -1253,16 +1268,14 @@ class AgentEngine:
         return state
 
     def _latest_active_cwd(self, thread_id: str) -> Path:
-        for event in reversed(self.thread_store.read(thread_id)):
-            if event.get("type") == "thread.cwd_updated":
-                raw_cwd = event.get("cwd")
-                if isinstance(raw_cwd, str) and raw_cwd:
-                    try:
-                        cwd = Path(raw_cwd).resolve()
-                    except OSError:
-                        continue
-                    if self._is_within_project(cwd):
-                        return cwd
+        raw_cwd = self.thread_store.snapshot(thread_id).metadata.get("latest_cwd")
+        if isinstance(raw_cwd, str) and raw_cwd:
+            try:
+                cwd = Path(raw_cwd).resolve()
+            except OSError:
+                return self.project_root.resolve()
+            if self._is_within_project(cwd):
+                return cwd
         return self.project_root.resolve()
 
     def _active_cwd(self, thread_id: str) -> Path:
@@ -1275,7 +1288,7 @@ class AgentEngine:
         state.cwd_notice_cwd = None
 
     def _loaded_rule_paths_in_epoch(self, thread_id: str) -> set[Path]:
-        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+        events = self.thread_store.snapshot(thread_id).events_after_compaction
         loaded: set[Path] = set()
         for event in events:
             if event.get("type") != "item.rules_loaded":
@@ -1294,14 +1307,14 @@ class AgentEngine:
 
     def _rule_index_already_emitted(self, thread_id: str, active_cwd: Path) -> bool:
         del active_cwd
-        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+        events = self.thread_store.snapshot(thread_id).events_after_compaction
         for event in events:
             if event.get("type") == "item.rule_index":
                 return True
         return False
 
     def _latest_cwd_notice_in_epoch(self, thread_id: str) -> Path | None:
-        events, _ = self.thread_store.read_after_latest_compaction(thread_id)
+        events = self.thread_store.snapshot(thread_id).events_after_compaction
         for event in reversed(events):
             if event.get("type") != "item.cwd_notice":
                 continue
@@ -1316,8 +1329,8 @@ class AgentEngine:
                 return cwd
         return None
 
-    def _has_compaction(self, thread_id: str) -> bool:
-        return any(event.get("type") == "item.compaction" for event in self.thread_store.read(thread_id))
+    def _has_compaction(self, thread_id: str, *, snapshot: ThreadSnapshot | None = None) -> bool:
+        return (snapshot or self.thread_store.snapshot(thread_id)).latest_compaction is not None
 
     def _is_within_project(self, path: Path) -> bool:
         try:
@@ -1388,7 +1401,9 @@ class AgentEngine:
     def _latest_context_state(self, thread_id: str | None) -> dict[str, Any] | None:
         if not thread_id:
             return None
-        events, compaction = self.thread_store.read_after_latest_compaction(thread_id)
+        snap = self.thread_store.snapshot(thread_id)
+        events = snap.events_after_compaction
+        compaction = snap.latest_compaction
         if compaction is not None:
             return None
         for event in reversed(events):
@@ -1446,12 +1461,23 @@ class AgentEngine:
                 headroom_tokens=model.context_window_tokens,
                 source="empty",
             )
-        used = self._latest_usage_tokens(thread_id)
+        try:
+            snapshot = self.thread_store.snapshot(thread_id)
+        except FileNotFoundError:
+            return ContextStats(
+                used_tokens=0,
+                context_window_tokens=model.context_window_tokens,
+                percent=0,
+                threshold_tokens=trigger_tokens,
+                headroom_tokens=model.context_window_tokens,
+                source="empty",
+            )
+        used = self._latest_usage_tokens(thread_id, snapshot=snapshot)
         source = "provider"
         if used is None:
             update = self._turn_context_update(thread_id)
             context_items = [message_item("user", update["text"])] if update else []
-            used = estimate_tokens(self._reconstruct_input(thread_id) + context_items)
+            used = estimate_tokens(self._reconstruct_input(thread_id, snapshot=snapshot) + context_items)
             source = "estimate"
         percent = min(100, max(0, round(used * 100 / model.context_window_tokens)))
         return ContextStats(
@@ -1463,9 +1489,14 @@ class AgentEngine:
             source=source,
         )
 
-    def _latest_usage_tokens(self, thread_id: str) -> int | None:
+    def _latest_usage_tokens(self, thread_id: str, *, snapshot: ThreadSnapshot | None = None) -> int | None:
         """Return the latest provider-reported token usage when available."""
-        events, compaction = self.thread_store.read_after_latest_compaction(thread_id)
+        snap = snapshot or self.thread_store.snapshot(thread_id)
+        metadata_usage = snap.metadata.get("latest_usage_tokens")
+        if isinstance(metadata_usage, int):
+            return metadata_usage
+        events = snap.events_after_compaction
+        compaction = snap.latest_compaction
         for event in reversed(events):
             if event.get("type") != "item.model_response":
                 continue

@@ -25,6 +25,7 @@ from uv_agent_runtime import (
     write_text,
 )
 from uv_agent_runtime.subagent import _extract_subagent_thread_id
+from uv_agent.session import ThreadStore
 
 
 def test_runtime_file_helpers(tmp_path: Path) -> None:
@@ -211,30 +212,20 @@ def test_runtime_saved_scripts_reads_state_dir(tmp_path: Path) -> None:
 
 
 def test_runtime_thread_digest_reads_state_dir(tmp_path: Path) -> None:
-    thread_dir = tmp_path / "threads"
-    thread_dir.mkdir()
-    thread_id = "thr_test"
-    events = [
-        {"type": "thread.created", "created_at": "1", "thread_id": thread_id, "title": "Thread"},
-        {
-            "type": "item.user",
-            "created_at": "2",
-            "thread_id": thread_id,
-            "turn_id": "t1",
-            "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
-        },
-        {"type": "item.compaction", "created_at": "3", "thread_id": thread_id, "turn_id": "t1", "text": "summary"},
-        {
-            "type": "item.user",
-            "created_at": "4",
-            "thread_id": thread_id,
-            "turn_id": "t2",
-            "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "after"}]},
-        },
-    ]
-    (thread_dir / f"{thread_id}.jsonl").write_text(
-        "\n".join(json.dumps(event) for event in events) + "\n",
-        encoding="utf-8",
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Thread")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    )
+    store.append(thread_id, "item.compaction", turn_id="t1", text="summary")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t2",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "after"}]},
     )
 
     digest = thread_digest(thread_id, state_dir=tmp_path)

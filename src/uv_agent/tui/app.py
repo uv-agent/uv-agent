@@ -43,6 +43,7 @@ from uv_agent.errors import error_markup, format_error
 from uv_agent.i18n import command_description, tr
 from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.paths import project_state_dir, uv_agent_home
+from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
 from uv_agent.tui.formatting import (
     format_elapsed,
@@ -60,6 +61,7 @@ COMPOSER_BOTTOM_RESERVED_ROWS = 2
 QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
+THREAD_HISTORY_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -761,6 +763,13 @@ def save_composer_history(items: list[str]) -> None:
     tmp_path.replace(path)
 
 
+def _event_offset(event: dict[str, Any] | None) -> int | None:
+    if not event:
+        return None
+    value = event.get("_jsonl_offset")
+    return value if isinstance(value, int) else None
+
+
 class TranscriptCell(Static):
     """Small transcript block used by the Textual chat timeline."""
 
@@ -982,6 +991,35 @@ class ImageAttachmentCell(TranscriptCell, can_focus=True):
         app = self.app
         if hasattr(app, "_open_image_preview_for_cell"):
             app._open_image_preview_for_cell(self)
+
+
+class LoadOlderHistoryCell(TranscriptCell, can_focus=True):
+    """Transcript cell that pages in older events for the active thread."""
+
+    def __init__(self, *, has_more: bool, **kwargs: Any) -> None:
+        self.has_more = has_more
+        super().__init__("", **kwargs)
+
+    def on_mount(self) -> None:
+        self._refresh_content()
+
+    def _refresh_content(self) -> None:
+        text = getattr(self.app, "_text", lambda key: key)
+        label = text("load_older_history") if self.has_more else text("history_start")
+        self.update(f"[dim]{escape(label)}[/dim]")
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.load_more()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"enter", "space"}:
+            event.stop()
+            self.load_more()
+
+    def load_more(self) -> None:
+        if self.has_more and hasattr(self.app, "_load_older_thread_history"):
+            self.app._load_older_thread_history()
 
 
 class ToolDetailsPanel(FullscreenPanel):
@@ -1327,6 +1365,9 @@ class UvAgentApp(App[None]):
         self._current_worker: Worker[None] | None = None
         self._current_cancel_event: asyncio.Event | None = None
         self._thread_runs: dict[str, ThreadRunState] = {}
+        self._history_before_offset: int | None = None
+        self._history_has_more = False
+        self._history_more_cell: LoadOlderHistoryCell | None = None
         self._selection_copy_timer: Any | None = None
         self._pending_selection_copy = ""
         self._last_auto_copied_selection = ""
@@ -1962,11 +2003,21 @@ class UvAgentApp(App[None]):
         if not self.thread_id:
             return []
         attachments: list[dict[str, Any]] = []
-        for event in self.engine.thread_store.read(self.thread_id):
-            if event.get("type") == "item.image_attachment":
+        before_offset: int | None = None
+        while True:
+            events, has_more = self.engine.thread_store.read_recent_events(
+                self.thread_id,
+                limit=THREAD_HISTORY_PAGE_SIZE,
+                before_offset=before_offset,
+                event_types={"item.image_attachment"},
+            )
+            for event in events:
                 attachment = event.get("attachment")
                 if isinstance(attachment, dict):
                     attachments.append(attachment)
+            if not has_more or not events:
+                break
+            before_offset = _event_offset(events[0])
         return attachments
 
     def action_help(self) -> None:
@@ -2155,12 +2206,13 @@ class UvAgentApp(App[None]):
             )
         self._append_cell("\n".join(lines), "event")
 
-    def _append_user(self, text: str) -> None:
+    def _append_user(self, text: str, *, before: object | None = None) -> None:
         label = "你" if self.language.is_chinese else "you"
         # Codex-style "› " prefix keeps user turns easy to spot.
         self._append_cell(
             f"[bold #7dd3fc]› {label}[/bold #7dd3fc]\n{escape(text)}",
             "user",
+            before=before,
         )
 
     async def _append_assistant_delta(self, text: str) -> None:
@@ -2190,7 +2242,7 @@ class UvAgentApp(App[None]):
             self._reasoning_cell.update(markup)
             self._scroll_end()
 
-    def _append_reasoning_history(self, text: str) -> None:
+    def _append_reasoning_history(self, text: str, *, before: object | None = None) -> None:
         stripped = text.strip()
         if not stripped:
             return
@@ -2201,7 +2253,7 @@ class UvAgentApp(App[None]):
             f"[dim italic]{escape(self._text('thinking'))}[/dim italic]  "
             f"[italic #a3b1c2]{escape(first)}[/italic #a3b1c2]"
         )
-        self._append_reasoning_cell(summary, escape(stripped))
+        self._append_reasoning_cell(summary, escape(stripped), before=before)
 
     def _append_tool_output(self, item: dict[str, Any]) -> None:
         payload = parse_tool_payload(item.get("output", {}))
@@ -2279,12 +2331,79 @@ class UvAgentApp(App[None]):
             f"[dim]{escape(self._text('python_running'))}[/dim]{detail}"
         )
 
-    def _append_image_attachment_cell(self, attachment: dict[str, Any]) -> ImageAttachmentCell:
+    def _append_image_attachment_cell(
+        self,
+        attachment: dict[str, Any],
+        *,
+        before: object | None = None,
+    ) -> ImageAttachmentCell:
         self._mark_transcript_content()
         cell = ImageAttachmentCell(attachment, classes="event", markup=True)
-        self.query_one("#transcript", VerticalScroll).mount(cell)
+        self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
         return cell
+
+    def _prepend_history_cells(self, events: list[dict[str, Any]], *, has_more: bool) -> None:
+        transcript = self.query_one("#transcript", VerticalScroll)
+        insert_before: object | None = transcript.children[0] if transcript.children else None
+        if self._history_more_cell is not None:
+            children = list(transcript.children)
+            try:
+                marker_index = children.index(self._history_more_cell)
+            except ValueError:
+                marker_index = -1
+            insert_before = children[marker_index + 1] if marker_index >= 0 and marker_index + 1 < len(children) else None
+            self._history_more_cell.remove()
+            self._history_more_cell = None
+        self._history_has_more = has_more
+        if events:
+            self._history_before_offset = _event_offset(events[0])
+        if has_more or events:
+            marker = LoadOlderHistoryCell(has_more=has_more, classes="event", markup=True)
+            transcript.mount(marker, before=insert_before)
+            self._history_more_cell = marker
+        for event in events:
+            self._mount_history_event(event, before=insert_before)
+        self._mark_transcript_content()
+
+    def _mount_history_event(
+        self,
+        event: dict[str, Any],
+        *,
+        before: object | None = None,
+    ) -> None:
+        event_type = event.get("type")
+        if event_type == "item.user":
+            self._append_user_from_history(event.get("item") or {}, before=before)
+        elif event_type == "item.model_response":
+            self._append_reasoning_history(str(event.get("reasoning_text") or ""), before=before)
+            text = self._model_response_text(event.get("output") or [])
+            if text:
+                self._append_cell(Markdown(text), "assistant", before=before)
+        elif event_type == "item.tool_call":
+            item = event.get("item") or {}
+            name = str(item.get("name") or "python")
+            self._append_cell(
+                f"[cyan]{escape(name)}[/cyan] [dim]{escape(self._text('python_called'))}[/dim]",
+                "event",
+                before=before,
+            )
+        elif event_type == "item.runner_result":
+            result = event.get("result") or {}
+            self._last_tool_payload = result
+            self._append_expandable_cell(
+                tool_timeline_markup(result),
+                tool_detail_markup(result),
+                "event",
+                before=before,
+            )
+        elif event_type == "item.image_attachment":
+            attachment = event.get("attachment") or {}
+            self._append_image_attachment_cell(attachment, before=before)
+        elif event_type in {"item.reasoning_delta", "item.reasoning_partial"}:
+            self._append_reasoning_history(str(event.get("text") or ""), before=before)
+        elif event_type == "item.compaction":
+            self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event", before=before)
 
     def _tool_call_preview(self, call: dict[str, Any]) -> str:
         raw_args = call.get("arguments") or ""
@@ -2302,21 +2421,40 @@ class UvAgentApp(App[None]):
             first = first[:69].rstrip() + "..."
         return f"\n[dim]{escape(first)}[/dim]"
 
-    def _append_cell(self, content: object, classes: str) -> TranscriptCell:
+    def _append_cell(
+        self,
+        content: object,
+        classes: str,
+        *,
+        before: object | None = None,
+    ) -> TranscriptCell:
         self._mark_transcript_content()
         cell = TranscriptCell(content, classes=classes, markup=True)
-        self.query_one("#transcript", VerticalScroll).mount(cell)
+        self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
         return cell
 
-    def _append_expandable_cell(self, summary: str, details: str, classes: str) -> ExpandableTranscriptCell:
+    def _append_expandable_cell(
+        self,
+        summary: str,
+        details: str,
+        classes: str,
+        *,
+        before: object | None = None,
+    ) -> ExpandableTranscriptCell:
         self._mark_transcript_content()
         cell = ExpandableTranscriptCell(summary, details, classes=classes, markup=True)
-        self.query_one("#transcript", VerticalScroll).mount(cell)
+        self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
         return cell
 
-    def _append_reasoning_cell(self, summary: str, details: str) -> ExpandableTranscriptCell:
+    def _append_reasoning_cell(
+        self,
+        summary: str,
+        details: str,
+        *,
+        before: object | None = None,
+    ) -> ExpandableTranscriptCell:
         self._mark_transcript_content()
         cell = ExpandableTranscriptCell(
             summary,
@@ -2326,7 +2464,7 @@ class UvAgentApp(App[None]):
             classes="reasoning",
             markup=True,
         )
-        self.query_one("#transcript", VerticalScroll).mount(cell)
+        self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
         return cell
 
@@ -2353,6 +2491,9 @@ class UvAgentApp(App[None]):
         transcript = self.query_one("#transcript", TranscriptScroll)
         transcript.query("*").remove()
         self._transcript_has_content = False
+        self._history_before_offset = None
+        self._history_has_more = False
+        self._history_more_cell = None
         # Brand new transcript: re-engage auto-follow so the first incoming
         # delta isn't stranded above the fold.
         transcript.follow_tail = True
@@ -3028,32 +3169,33 @@ class UvAgentApp(App[None]):
         self._refresh_status(self._text("resumed"))
 
     def _render_thread_history(self, thread_id: str) -> None:
-        for event in self.engine.thread_store.read(thread_id):
-            event_type = event.get("type")
-            if event_type == "item.user":
-                self._append_user_from_history(event.get("item") or {})
-            elif event_type == "item.model_response":
-                self._append_reasoning_history(str(event.get("reasoning_text") or ""))
-                text = self._model_response_text(event.get("output") or [])
-                if text:
-                    self._append_cell(Markdown(text), "assistant")
-            elif event_type == "item.tool_call":
-                item = event.get("item") or {}
-                name = str(item.get("name") or "python")
-                self._append_cell(f"[cyan]{escape(name)}[/cyan] [dim]{escape(self._text('python_called'))}[/dim]", "event")
-            elif event_type == "item.runner_result":
-                result = event.get("result") or {}
-                self._last_tool_payload = result
-                self._append_expandable_cell(tool_timeline_markup(result), tool_detail_markup(result), "event")
-            elif event_type == "item.image_attachment":
-                attachment = event.get("attachment") or {}
-                self._append_image_attachment_cell(attachment)
-            elif event_type in {"item.reasoning_delta", "item.reasoning_partial"}:
-                self._append_reasoning_history(str(event.get("text") or ""))
-            elif event_type == "item.compaction":
-                self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
+        events, has_more = self.engine.thread_store.read_recent_events(
+            thread_id,
+            limit=THREAD_HISTORY_PAGE_SIZE,
+            event_types=VISIBLE_HISTORY_EVENT_TYPES,
+        )
+        self._history_has_more = has_more
+        self._history_before_offset = _event_offset(events[0]) if events else None
+        if has_more:
+            transcript = self.query_one("#transcript", VerticalScroll)
+            marker = LoadOlderHistoryCell(has_more=True, classes="event", markup=True)
+            transcript.mount(marker)
+            self._history_more_cell = marker
+        for event in events:
+            self._mount_history_event(event)
 
-    def _append_user_from_history(self, item: dict[str, Any]) -> None:
+    def _load_older_thread_history(self) -> None:
+        if not self.thread_id or self._history_before_offset is None:
+            return
+        events, has_more = self.engine.thread_store.read_recent_events(
+            self.thread_id,
+            limit=THREAD_HISTORY_PAGE_SIZE,
+            before_offset=self._history_before_offset,
+            event_types=VISIBLE_HISTORY_EVENT_TYPES,
+        )
+        self._prepend_history_cells(events, has_more=has_more)
+
+    def _append_user_from_history(self, item: dict[str, Any], *, before: object | None = None) -> None:
         self._reasoning_cell = None
         self._reasoning_buffer = ""
         parts = []
@@ -3061,7 +3203,7 @@ class UvAgentApp(App[None]):
             if content.get("type") in {"input_text", "text"}:
                 parts.append(str(content.get("text") or ""))
         if parts:
-            self._append_user("\n".join(parts))
+            self._append_user("\n".join(parts), before=before)
 
     def _model_response_text(self, output: list[dict[str, Any]]) -> str:
         parts: list[str] = []
