@@ -26,6 +26,7 @@ class ToolCallDelta:
     index: int
     call_id: str | None = None
     name: str | None = None
+    arguments: str = ""
     arguments_delta: str = ""
 
 
@@ -45,6 +46,7 @@ class ModelClient(Protocol):
         level: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         instructions: str | None = None,
+        previous_response_id: str | None = None,
     ) -> ModelResponse:
         ...
 
@@ -55,6 +57,7 @@ class ModelClient(Protocol):
         level: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         instructions: str | None = None,
+        previous_response_id: str | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         ...
 
@@ -73,6 +76,7 @@ class UnifiedModelClient:
         level: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         instructions: str | None = None,
+        previous_response_id: str | None = None,
     ) -> ModelResponse:
         model = self.config.model_for_level(level)
         provider = self.config.provider_for_model(model)
@@ -98,6 +102,7 @@ class UnifiedModelClient:
             input_items=input_items,
             tools=tools or [],
             instructions=instructions,
+            previous_response_id=previous_response_id,
         )
 
     async def stream_response(
@@ -107,6 +112,7 @@ class UnifiedModelClient:
         level: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         instructions: str | None = None,
+        previous_response_id: str | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         model = self.config.model_for_level(level)
         provider = self.config.provider_for_model(model)
@@ -136,6 +142,7 @@ class UnifiedModelClient:
             input_items=input_items,
             tools=tools or [],
             instructions=instructions,
+            previous_response_id=previous_response_id,
         ):
             yield event
 
@@ -147,8 +154,17 @@ class UnifiedModelClient:
         input_items: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         instructions: str | None,
+        previous_response_id: str | None,
     ) -> ModelResponse:
-        payload = responses_payload(provider, model, input_items, tools, instructions, stream=False)
+        payload = responses_payload(
+            provider,
+            model,
+            input_items,
+            tools,
+            instructions,
+            stream=False,
+            previous_response_id=previous_response_id,
+        )
         data = await post_json(provider, model.api, payload)
         return parse_responses_response(data)
 
@@ -186,8 +202,17 @@ class UnifiedModelClient:
         input_items: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         instructions: str | None,
+        previous_response_id: str | None,
     ) -> AsyncIterator[ModelStreamEvent]:
-        payload = responses_payload(provider, model, input_items, tools, instructions, stream=True)
+        payload = responses_payload(
+            provider,
+            model,
+            input_items,
+            tools,
+            instructions,
+            stream=True,
+            previous_response_id=previous_response_id,
+        )
         text_parts: list[str] = []
         output: list[dict[str, Any]] = []
         async for data in stream_sse(provider, model.api, payload):
@@ -267,6 +292,7 @@ class UnifiedModelClient:
                             index=index,
                             call_id=existing.get("call_id"),
                             name=existing.get("name"),
+                            arguments=existing.get("arguments", ""),
                             arguments_delta=function.get("arguments", ""),
                         ),
                     )
@@ -428,6 +454,7 @@ def responses_payload(
     instructions: str | None,
     *,
     stream: bool,
+    previous_response_id: str | None = None,
 ) -> dict[str, Any]:
     endpoint = provider.endpoint_for_api("responses")
     payload: dict[str, Any] = {
@@ -441,6 +468,8 @@ def responses_payload(
     }
     if instructions:
         payload["instructions"] = instructions
+    if previous_response_id:
+        payload["previous_response_id"] = previous_response_id
     if stream:
         payload["stream"] = True
     return payload
@@ -765,6 +794,7 @@ class FakeModelClient:
         level: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         instructions: str | None = None,
+        previous_response_id: str | None = None,
     ) -> ModelResponse:
         self.requests.append(
             copy.deepcopy(
@@ -774,6 +804,7 @@ class FakeModelClient:
                     "tools": tools or [],
                     "instructions": instructions,
                     "stream": False,
+                    "previous_response_id": previous_response_id,
                 }
             )
         )
@@ -788,12 +819,14 @@ class FakeModelClient:
         level: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         instructions: str | None = None,
+        previous_response_id: str | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         response = await self.create_response(
             input_items=input_items,
             level=level,
             tools=tools,
             instructions=instructions,
+            previous_response_id=previous_response_id,
         )
         if response.output_text:
             yield ModelStreamEvent(type="text_delta", text=response.output_text)

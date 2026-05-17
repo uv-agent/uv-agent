@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from html import escape as xml_escape
 from pathlib import Path
 from time import monotonic
@@ -212,6 +213,19 @@ Raw MCP requests are also available with client.request(method, params) and noti
 """
 
 
+@dataclass
+class TurnInputState:
+    input_items: list[dict[str, Any]]
+    previous_response_id: str | None = None
+    use_previous_response_id: bool = False
+    pending_items: list[dict[str, Any]] = field(default_factory=list)
+
+    def request_input_items(self) -> list[dict[str, Any]]:
+        if self.use_previous_response_id and self.previous_response_id:
+            return list(self.pending_items)
+        return list(self.input_items)
+
+
 class AgentEngine:
     def __init__(
         self,
@@ -259,7 +273,9 @@ class AgentEngine:
         thread_id = thread_id or self.thread_store.create_thread("New thread")
         turn_id = new_id("turn")
         should_generate_title = self._should_generate_title(thread_id)
-        input_items = self._reconstruct_input(thread_id)
+        turn_input = self._prepare_turn_input(thread_id, level=level)
+        input_items = turn_input.input_items
+        request_input_items = turn_input.request_input_items()
         context_items = self._workspace_context_items(thread_id)
         self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
         user_item = message_item("user", user_text)
@@ -271,7 +287,11 @@ class AgentEngine:
             level=level,
         )
         input_items.extend(context_items)
+        request_input_items.extend(context_items)
+        turn_input.pending_items.extend(context_items)
         input_items.append(user_item)
+        request_input_items.append(user_item)
+        turn_input.pending_items.append(user_item)
         for image_path in image_paths or []:
             attachment = self.attachments.register_image(
                 image_path,
@@ -288,6 +308,8 @@ class AgentEngine:
             )
             image_item = image_message_item(payload)
             input_items.append(image_item)
+            request_input_items.append(image_item)
+            turn_input.pending_items.append(image_item)
             yield {
                 "type": "image.attachment",
                 "thread_id": thread_id,
@@ -303,9 +325,10 @@ class AgentEngine:
                 self._raise_if_cancelled(cancel_event)
                 response: ModelResponse | None = None
                 async for stream_event in self._stream_response_until_cancelled(
-                    input_items=input_items,
+                    input_items=request_input_items,
                     level=level,
                     cancel_event=cancel_event,
+                    previous_response_id=turn_input.previous_response_id,
                 ):
                     self._raise_if_cancelled(cancel_event)
                     if stream_event.type == "text_delta" and stream_event.text:
@@ -340,6 +363,7 @@ class AgentEngine:
                     thread_id,
                     "item.model_response",
                     turn_id=turn_id,
+                    model_api=self._model_api_for_level(level),
                     response_id=response.id,
                     output=response.output,
                     usage=response.usage,
@@ -351,6 +375,12 @@ class AgentEngine:
                     "response": response,
                 }
                 input_items.extend(response.output)
+                turn_input.previous_response_id = response.id
+                turn_input.use_previous_response_id = bool(
+                    response.id and self._level_uses_responses_api(level)
+                )
+                turn_input.pending_items.clear()
+                request_input_items = turn_input.request_input_items()
                 assistant_parts.clear()
                 reasoning_parts.clear()
 
@@ -359,7 +389,7 @@ class AgentEngine:
                     final_text = response.output_text
                     break
 
-                for call in tool_calls:
+                for call_index, call in enumerate(tool_calls):
                     self._raise_if_cancelled(cancel_event)
                     self.thread_store.append(
                         thread_id,
@@ -372,6 +402,7 @@ class AgentEngine:
                         "thread_id": thread_id,
                         "turn_id": turn_id,
                         "call": call,
+                        "tool_call_index": call_index,
                     }
                     tool_output, attachments, display_output = await self._handle_tool_call(
                         call,
@@ -386,14 +417,19 @@ class AgentEngine:
                         item=tool_output,
                     )
                     input_items.append(tool_output)
+                    request_input_items.append(tool_output)
+                    turn_input.pending_items.append(tool_output)
                     for attachment in attachments:
                         image_item = image_message_item(attachment)
                         input_items.append(image_item)
+                        turn_input.pending_items.append(image_item)
+                        request_input_items.append(image_item)
                     yield {
                         "type": "tool.output",
                         "thread_id": thread_id,
                         "turn_id": turn_id,
                         "call": call,
+                        "tool_call_index": call_index,
                         "output": display_output,
                     }
             else:
@@ -704,12 +740,14 @@ class AgentEngine:
         input_items: list[dict[str, Any]],
         level: str | None,
         cancel_event: asyncio.Event | None,
+        previous_response_id: str | None = None,
     ) -> AsyncIterator[Any]:
         stream = self.model_client.stream_response(
             input_items=input_items,
             level=level,
             tools=[PYTHON_TOOL],
             instructions=self.system_instructions(),
+            previous_response_id=previous_response_id,
         )
         iterator = stream.__aiter__()
         cancel_task: asyncio.Task[bool] | None = None
@@ -773,6 +811,72 @@ class AgentEngine:
             )
             attachments.append(payload)
         return attachments
+
+    def _prepare_turn_input(self, thread_id: str, *, level: str | None) -> TurnInputState:
+        input_items = self._reconstruct_input(thread_id)
+        if not self._level_uses_responses_api(level):
+            return TurnInputState(input_items=input_items)
+
+        resume = self._latest_responses_resume(thread_id)
+        if resume is None:
+            return TurnInputState(input_items=input_items)
+
+        _, previous_response_id, pending_items = resume
+        return TurnInputState(
+            input_items=input_items,
+            previous_response_id=previous_response_id,
+            use_previous_response_id=True,
+            pending_items=pending_items,
+        )
+
+    def _level_uses_responses_api(self, level: str | None) -> bool:
+        return self._model_api_for_level(level) == "responses"
+
+    def _model_api_for_level(self, level: str | None) -> str | None:
+        try:
+            return self.config.model_for_level(level).api
+        except Exception:
+            return None
+
+    def _latest_responses_resume(self, thread_id: str) -> tuple[int, str, list[dict[str, Any]]] | None:
+        events = self.thread_store.read(thread_id)
+        last_compaction_index = max(
+            (index for index, event in enumerate(events) if event.get("type") == "item.compaction"),
+            default=-1,
+        )
+        for index in range(len(events) - 1, last_compaction_index, -1):
+            event = events[index]
+            if event.get("type") != "item.model_response":
+                continue
+            if event.get("model_api") not in {"responses", None}:
+                continue
+            response_id = str(event.get("response_id") or "")
+            if not response_id:
+                continue
+            if event.get("model_api") is None and not response_id.startswith("resp"):
+                continue
+            pending_items = self._input_items_after_event(events[index + 1 :])
+            return index, response_id, pending_items
+        return None
+
+    def _input_items_after_event(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        input_items: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("type") == "item.context_update":
+                text = str(event.get("text") or "")
+                if text:
+                    input_items.append(message_item("user", text))
+            elif event.get("type") == "item.user":
+                input_items.append(copy.deepcopy(event["item"]))
+            elif event.get("type") == "item.tool_output":
+                input_items.append(copy.deepcopy(event["item"]))
+            elif event.get("type") == "item.image_attachment":
+                input_items.append(image_message_item(event["attachment"]))
+            elif event.get("type") == "turn.interrupted":
+                interrupted = self._interrupted_turn_context(events, str(event.get("turn_id") or ""))
+                if interrupted:
+                    input_items.append(message_item("user", interrupted))
+        return input_items
 
     def _reconstruct_input(self, thread_id: str) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []

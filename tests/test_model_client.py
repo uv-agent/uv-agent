@@ -11,6 +11,7 @@ from uv_agent.model_client import (
     parse_anthropic_response,
     parse_chat_response,
     parse_sse_event,
+    responses_payload,
 )
 
 
@@ -58,6 +59,25 @@ def test_chat_payload_uses_chat_endpoint_shape() -> None:
     assert payload["stream"] is True
     assert payload["temperature"] == 0
     assert "tools" not in payload
+
+
+def test_responses_payload_supports_previous_response_id() -> None:
+    provider = ProviderConfig(name="p", base_url="https://example.com")
+    model = ModelConfig(name="m", provider="p", model="remote", api="responses")
+
+    payload = responses_payload(
+        provider,
+        model,
+        [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}]}],
+        [],
+        "system",
+        stream=True,
+        previous_response_id="resp_1",
+    )
+
+    assert payload["previous_response_id"] == "resp_1"
+    assert payload["input"][0]["content"][0]["text"] == "next"
+    assert payload["stream"] is True
 
 
 def test_parse_chat_response_maps_tool_calls() -> None:

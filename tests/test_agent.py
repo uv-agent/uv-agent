@@ -670,6 +670,7 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     assert any(event["type"] == "tool.started" for event in events)
     assert len(client.requests) == 2
     assert client.requests[0]["tools"] == [PYTHON_TOOL]
+    assert client.requests[1]["previous_response_id"] == "resp_1"
     tool_output = client.requests[1]["input"][-1]
     assert tool_output["type"] == "function_call_output"
     assert "observed" in tool_output["output"]
@@ -678,6 +679,75 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     assert any(event["type"] == "item.tool_output" for event in stored_events)
     assert not any(event["type"] == "item.assistant_delta" for event in stored_events)
     assert not any(event["type"] == "item.reasoning_delta" for event in stored_events)
+
+
+@pytest.mark.asyncio
+async def test_responses_turn_uses_previous_response_id_for_follow_up(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                context_window_tokens=100_000,
+                params={},
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="default", params={})},
+        runtime=RuntimeConfig(
+            auto_compress=False,
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+        ),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "one",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "one"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "two",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "two"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    thread_id = [event async for event in engine.run_turn(user_text="one")][-1]["thread_id"]
+    [event async for event in engine.run_turn(user_text="two", thread_id=thread_id)]
+
+    assert client.requests[0]["previous_response_id"] is None
+    assert client.requests[1]["previous_response_id"] == "resp_1"
+    assert "one" not in str(client.requests[1]["input"])
+    assert "two" in str(client.requests[1]["input"])
 
 
 @pytest.mark.asyncio
@@ -1224,16 +1294,17 @@ async def test_dynamic_context_is_reused_as_stable_prefix_until_changed(tmp_path
     requests_text = [str(request["input"]) for request in client.requests[:2]]
 
     assert "Rule v1." in requests_text[0]
-    assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
+    assert client.requests[1]["previous_response_id"] == "resp_1"
+    assert "Rule v1." not in requests_text[1]
 
     rules.write_text("Rule v2.", encoding="utf-8")
     [event async for event in engine.run_turn(user_text="three", thread_id=first)]
-    assert client.requests[1]["input"] == client.requests[2]["input"][: len(client.requests[1]["input"])]
+    assert client.requests[2]["previous_response_id"] == "resp_2"
     assert "Rule v2." in str(client.requests[2]["input"])
 
     rules.unlink()
     [event async for event in engine.run_turn(user_text="four", thread_id=first)]
-    assert client.requests[2]["input"] == client.requests[3]["input"][: len(client.requests[2]["input"])]
+    assert client.requests[3]["previous_response_id"] == "resp_3"
     assert "Do not rely on older appended" in str(client.requests[3]["input"])
 
 

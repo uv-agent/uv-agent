@@ -18,7 +18,7 @@ from uv_agent.config import (
     RuntimeConfig,
     UiConfig,
 )
-from uv_agent.model_client import FakeModelClient, parse_responses_response
+from uv_agent.model_client import FakeModelClient, ToolCallDelta, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
 from uv_agent.tui.app import (
@@ -585,6 +585,60 @@ async def test_tui_thread_picker_resumes_and_renders_history(
         assert app._transcript_has_content is True
         assert app._reasoning_buffer == "checking files"
         assert not app.query(EmptyState)
+
+
+@pytest.mark.asyncio
+async def test_tui_renders_tool_delta_before_tool_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        run_state = app._run_state_for_thread("thread_1")
+        app.thread_id = "thread_1"
+
+        await app._handle_thread_event(
+            "thread_1",
+            "tool.delta",
+            {
+                "tool_call": ToolCallDelta(
+                    index=0,
+                    call_id="call_1",
+                    name="run_python",
+                    arguments='{"code":"print(1)"}',
+                )
+            },
+            run_state,
+        )
+        await pilot.pause()
+
+        pending = app.query(".tool_pending").nodes
+        assert len(pending) == 1
+        assert "print(1)" in str(pending[0].render())
+
+        await app._handle_thread_event(
+            "thread_1",
+            "tool.started",
+            {
+                "call": {
+                    "call_id": "call_1",
+                    "name": "run_python",
+                    "arguments": '{"code":"print(1)"}',
+                },
+                "tool_call_index": 0,
+            },
+            run_state,
+        )
+        await pilot.pause()
+
+        assert len(app.query(".tool_pending").nodes) == 1
 
 
 @pytest.mark.asyncio

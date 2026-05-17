@@ -529,6 +529,7 @@ class ThreadRunState:
     reasoning_buffer: str = ""
     reasoning_cell: TranscriptCell | None = None
     tool_cells: dict[str, TranscriptCell] = field(default_factory=dict)
+    tool_delta_cells: dict[int, TranscriptCell] = field(default_factory=dict)
 
 
 class TranscriptScroll(VerticalScroll):
@@ -1299,6 +1300,7 @@ class UvAgentApp(App[None]):
         self._assistant_buffer = ""
         self._assistant_cell: TranscriptCell | None = None
         self._tool_cells: dict[str, TranscriptCell] = {}
+        self._tool_delta_cells: dict[int, TranscriptCell] = {}
         self._last_status = tr(self.language, "idle")
         self._spinner_index = 0
         self._busy_started_at: float | None = None
@@ -1499,6 +1501,7 @@ class UvAgentApp(App[None]):
             self._reasoning_cell = None
             self._reasoning_buffer = ""
             self._tool_cells.clear()
+            self._tool_delta_cells.clear()
             self._interrupt_armed = False
             self._append_user(prompt)
             for image_path in image_paths or []:
@@ -1545,9 +1548,7 @@ class UvAgentApp(App[None]):
                 elif event_type == "assistant.reasoning_delta":
                     await self._handle_thread_event(item_thread_id, "assistant.reasoning_delta", item, run_state)
                 elif event_type == "tool.delta":
-                    run_state.status = self._text("running_python")
-                    if self._is_active_thread(item_thread_id):
-                        self._refresh_status(self._text("running_python"))
+                    await self._handle_thread_event(item_thread_id, "tool.delta", item, run_state)
                 elif event_type == "model.response":
                     run_state.status = self._text("reading")
                     if self._is_active_thread(item_thread_id):
@@ -1719,6 +1720,7 @@ class UvAgentApp(App[None]):
         run_state.reasoning_buffer = self._reasoning_buffer
         run_state.reasoning_cell = self._reasoning_cell
         run_state.tool_cells = dict(self._tool_cells)
+        run_state.tool_delta_cells = dict(self._tool_delta_cells)
 
     def _sync_active_from_run_state(self, run_state: ThreadRunState) -> None:
         self._assistant_buffer = run_state.assistant_buffer
@@ -1726,6 +1728,7 @@ class UvAgentApp(App[None]):
         self._reasoning_buffer = run_state.reasoning_buffer
         self._reasoning_cell = run_state.reasoning_cell
         self._tool_cells = dict(run_state.tool_cells)
+        self._tool_delta_cells = dict(run_state.tool_delta_cells)
 
     async def _handle_thread_event(
         self,
@@ -1741,6 +1744,8 @@ class UvAgentApp(App[None]):
                 stripped = str(item.get("text") or "").strip()
                 if stripped:
                     run_state.reasoning_buffer = (run_state.reasoning_buffer + " " + stripped).strip()
+            elif event_type == "tool.delta":
+                run_state.status = self._text("running_python")
             return
         self._sync_active_from_run_state(run_state)
         if event_type == "assistant.delta":
@@ -1750,6 +1755,8 @@ class UvAgentApp(App[None]):
         elif event_type == "image.attachment":
             attachment = item.get("attachment") or {}
             self._append_image_attachment_cell(attachment)
+        elif event_type == "tool.delta":
+            self._append_tool_delta(item)
         elif event_type == "tool.started":
             self._append_tool_started(item)
         elif event_type == "tool.output":
@@ -2011,6 +2018,7 @@ class UvAgentApp(App[None]):
             self._assistant_buffer = ""
             self._assistant_cell = None
             self._tool_cells.clear()
+            self._tool_delta_cells.clear()
             self._pending_images.clear()
             active_run = self._active_run_state()
             if active_run is not None:
@@ -2036,6 +2044,7 @@ class UvAgentApp(App[None]):
             self._reasoning_cell = None
             self._reasoning_buffer = ""
             self._tool_cells.clear()
+            self._tool_delta_cells.clear()
             self._pending_images.clear()
             self._reset_transcript()
             self._refresh_pending_images()
@@ -2152,17 +2161,26 @@ class UvAgentApp(App[None]):
 
     def _append_tool_output(self, item: dict[str, Any]) -> None:
         payload = parse_tool_payload(item.get("output", {}))
+        delta_index = item.get("tool_call_index")
         if payload is None:
-            self._append_cell(
-                f"[dim]{escape(self._text('python'))} {escape(self._text('python_completed'))}[/dim]",
-                "event",
+            markup = f"[dim]{escape(self._text('python'))} {escape(self._text('python_completed'))}[/dim]"
+            cell = (
+                self._tool_delta_cells.pop(delta_index, None)
+                if isinstance(delta_index, int)
+                else None
             )
+            if cell is None:
+                self._append_cell(markup, "event")
+            else:
+                cell.update(markup)
             return
 
         self._last_tool_payload = payload
         markup = tool_timeline_markup(payload)
         details = tool_detail_markup(payload)
         cell = self._tool_cells.pop(str(item.get("call", {}).get("call_id") or ""), None)
+        if cell is None and isinstance(delta_index, int):
+            cell = self._tool_delta_cells.pop(delta_index, None)
         if cell is None:
             self._append_expandable_cell(markup, details, "event")
         else:
@@ -2175,17 +2193,47 @@ class UvAgentApp(App[None]):
 
     def _append_tool_started(self, item: dict[str, Any]) -> None:
         call = item.get("call") or {}
+        delta_index = item.get("tool_call_index")
         call_id = str(call.get("call_id") or "")
         name = str(call.get("name") or "python")
         detail = self._tool_call_preview(call)
-        cell = self._append_cell(
-            f"[#7dd3fc]⠿[/#7dd3fc] [bold]{escape(name)}[/bold] "
-            f"[dim]{escape(self._text('python_running'))}[/dim]{detail}",
-            "tool_pending",
+        markup = self._tool_pending_markup(name, detail)
+        cell = (
+            self._tool_delta_cells.pop(delta_index, None)
+            if isinstance(delta_index, int)
+            else None
         )
+        if cell is None and len(self._tool_delta_cells) == 1:
+            _, cell = self._tool_delta_cells.popitem()
+        if cell is None:
+            cell = self._append_cell(markup, "tool_pending")
+        else:
+            cell.update(markup)
         if call_id:
             self._tool_cells[call_id] = cell
         self._refresh_status(self._text("running_python"))
+
+    def _append_tool_delta(self, item: dict[str, Any]) -> None:
+        delta = item.get("tool_call")
+        index = int(getattr(delta, "index", 0))
+        name = str(getattr(delta, "name", None) or "python")
+        call = {
+            "arguments": getattr(delta, "arguments", "") or getattr(delta, "arguments_delta", ""),
+        }
+        detail = self._tool_call_preview(call)
+        markup = self._tool_pending_markup(name, detail)
+        cell = self._tool_delta_cells.get(index)
+        if cell is None:
+            self._tool_delta_cells[index] = self._append_cell(markup, "tool_pending")
+        else:
+            cell.update(markup)
+        self._refresh_status(self._text("running_python"))
+
+    def _tool_pending_markup(self, name: str, detail: str) -> str:
+        return (
+            f"[#7dd3fc]⠿[/#7dd3fc] [bold]{escape(name)}[/bold] "
+            f"[dim]{escape(self._text('python_running'))}[/dim]{detail}"
+        )
 
     def _append_image_attachment_cell(self, attachment: dict[str, Any]) -> ImageAttachmentCell:
         self._mark_transcript_content()
@@ -2891,6 +2939,7 @@ class UvAgentApp(App[None]):
         self._reasoning_cell = None
         self._reasoning_buffer = ""
         self._tool_cells.clear()
+        self._tool_delta_cells.clear()
         self._reset_transcript(show_empty=False)
         self._render_thread_history(thread_id)
         run_state = self._thread_runs.get(thread_id)
