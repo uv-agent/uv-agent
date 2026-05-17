@@ -392,6 +392,75 @@ async def test_tui_user_scroll_disables_auto_follow(
 
 
 @pytest.mark.asyncio
+async def test_tui_scrolling_back_to_bottom_reengages_auto_follow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(80, 12)) as pilot:
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        for index in range(30):
+            app._append_cell(f"line {index}\nextra text", "event")
+        await pilot.pause(0.2)
+        transcript.engage_follow_tail()
+        await pilot.pause(0.2)
+        transcript.action_page_up()
+        await pilot.pause()
+
+        assert transcript.follow_tail is False
+        assert transcript.near_bottom is False
+
+        transcript.scroll_to(y=transcript.max_scroll_y, animate=False)
+        await pilot.pause()
+
+        assert transcript.near_bottom is True
+        assert transcript.follow_tail is True
+
+
+@pytest.mark.asyncio
+async def test_tui_submit_from_bottom_reengages_auto_follow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(80, 12)) as pilot:
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        for index in range(30):
+            app._append_cell(f"line {index}\nextra text", "event")
+        await pilot.pause(0.2)
+        transcript.engage_follow_tail()
+        await pilot.pause(0.2)
+        transcript.follow_tail = False
+        transcript.scroll_y = transcript.max_scroll_y
+        await pilot.pause()
+
+        assert transcript.near_bottom is True
+        assert transcript.follow_tail is False
+
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("continue")
+        await pilot.press("ctrl+j")
+        await pilot.pause(0.2)
+
+        assert transcript.follow_tail is True
+        assert transcript.scroll_y == transcript.max_scroll_y
+
+
+@pytest.mark.asyncio
 async def test_tui_command_picker_supports_keyboard_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

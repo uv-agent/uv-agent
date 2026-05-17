@@ -538,9 +538,8 @@ class TranscriptScroll(VerticalScroll):
     The streaming SSE renderer used to call `scroll_end` on every delta, which
     fought the user when they were dragging the scrollbar to read history. As
     soon as the user moves the scroll position themselves we drop the
-    `follow_tail` flag and never re-enable it on our own — the user has to
-    click the "back to bottom" button (or trigger `engage_follow_tail`) to
-    resume auto-follow.
+    `follow_tail` flag. Returning to the bottom or submitting from the bottom
+    resumes auto-follow; the bottom button still explicitly resumes it too.
     """
 
     follow_tail = reactive(True)
@@ -580,17 +579,22 @@ class TranscriptScroll(VerticalScroll):
         if self.validate_scroll_y(target_y) != self.scroll_y:
             self._disengage_follow_tail()
 
-    def _recompute_near_bottom(self) -> None:
+    def _recompute_near_bottom(self, *, restore_follow: bool = False) -> None:
         # When there's nothing to scroll, the bottom is trivially "right here"
         # so the button stays hidden.
         if self.max_scroll_y <= 0:
             self.near_bottom = True
+            if restore_follow:
+                self.follow_tail = True
             return
-        self.near_bottom = (self.max_scroll_y - self.scroll_y) <= self._BOTTOM_THRESHOLD
+        near_bottom = (self.max_scroll_y - self.scroll_y) <= self._BOTTOM_THRESHOLD
+        self.near_bottom = near_bottom
+        if near_bottom and restore_follow:
+            self.follow_tail = True
 
     def watch_scroll_y(self, old: float, new: float) -> None:
         super().watch_scroll_y(old, new)
-        self._recompute_near_bottom()
+        self._recompute_near_bottom(restore_follow=True)
 
     def watch_virtual_size(self, old: Any, new: Any) -> None:
         # Content height changed (new cells appended, expand/collapse, etc.)
@@ -1449,6 +1453,12 @@ class UvAgentApp(App[None]):
         if not prompt and not pending_images:
             self._flash(self._text("write_first"))
             return
+        try:
+            transcript = self.query_one("#transcript", TranscriptScroll)
+        except NoMatches:
+            transcript = None
+        if transcript is not None and transcript.near_bottom:
+            transcript.follow_tail = True
         if prompt:
             self._remember_composer_input(prompt)
         self._reset_composer_history_navigation()
