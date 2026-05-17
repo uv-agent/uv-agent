@@ -103,7 +103,7 @@ PYTHON_TOOL = {
             "timeout_s": {
                 "type": "number",
                 "description": "Execution timeout in seconds.",
-                "default": 60,
+                "default": 7200,
             },
         },
         "required": [],

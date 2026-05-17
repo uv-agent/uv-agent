@@ -131,7 +131,7 @@ class RunnerConfig:
     runtime_dependency: str
     runtime_package_name: str = "uv-agent"
     default_uv_args: list[str] = field(default_factory=list)
-    default_timeout_s: float = 60.0
+    default_timeout_s: float = 7200.0
     max_output_bytes: int = 1_000_000
     max_saved_scripts: int = 32
 
@@ -215,7 +215,7 @@ def default_config(project_root: Path) -> dict[str, Any]:
         "runner": {
             "runtime_dependency": runtime_dependency,
             "runtime_package_name": DEFAULT_PACKAGE_NAME,
-            "default_timeout_s": 60,
+            "default_timeout_s": 7200,
             "max_output_bytes": 1_000_000,
             "max_saved_scripts": 32,
         },
@@ -356,7 +356,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         runtime_dependency=runner_dependency,
         runtime_package_name=runner_package_name,
         default_uv_args=runner_uv_args,
-        default_timeout_s=float(runner_raw.get("default_timeout_s", 60)),
+        default_timeout_s=float(runner_raw.get("default_timeout_s", 7200)),
         max_output_bytes=int(runner_raw.get("max_output_bytes", 1_000_000)),
         max_saved_scripts=int(runner_raw.get("max_saved_scripts", 32)),
     )

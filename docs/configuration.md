@@ -217,7 +217,7 @@ Runner settings control managed Python script execution.
 | `runtime_dependency` | string | installed `uv-agent` package | Dependency spec injected into managed scripts so they can import `uv_agent_runtime`. |
 | `runtime_package_name` | string | `"uv-agent"` | Package name used when deriving default runner behavior. |
 | `default_uv_args` | array | `[]` or local reinstall args | Extra args passed to `uv run` for every managed script. |
-| `default_timeout_s` | number | `60` | Default script timeout in seconds. |
+| `default_timeout_s` | number | `7200` | Default script timeout in seconds. |
 | `max_output_bytes` | integer | `1000000` | Maximum captured output bytes per run. |
 | `max_saved_scripts` | integer | `32` | Number of recently used managed scripts kept per project. |
 

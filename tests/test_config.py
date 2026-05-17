@@ -76,6 +76,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert config.runtime.compression.enabled is True
     assert config.runner.runtime_dependency == f"uv-agent=={version('uv-agent')}"
     assert config.runner.default_uv_args == []
+    assert config.runner.default_timeout_s == 7200
     assert config.runner.max_saved_scripts == 32
 
 

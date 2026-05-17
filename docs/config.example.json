@@ -105,7 +105,7 @@
     "runtime_dependency": "uv-agent",
     "runtime_package_name": "uv-agent",
     "default_uv_args": [],
-    "default_timeout_s": 60,
+    "default_timeout_s": 7200,
     "max_output_bytes": 1000000,
     "max_saved_scripts": 32
   }
