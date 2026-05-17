@@ -26,6 +26,7 @@ from uv_agent.model_client import (
     parse_anthropic_response,
     parse_chat_response,
     parse_chat_response_for_model,
+    parse_responses_response,
     parse_sse_event,
     responses_payload,
 )
@@ -58,6 +59,89 @@ def test_chat_messages_convert_responses_items() -> None:
     assert messages[1] == {"role": "user", "content": "hi"}
     assert messages[2]["tool_calls"][0]["function"]["name"] == "run_python"
     assert messages[3]["role"] == "tool"
+
+
+def test_chat_messages_keep_assistant_text_and_tool_calls_together() -> None:
+    messages = chat_messages(
+        [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will inspect the files."}],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_python",
+                "arguments": "{\"code\":\"print('ok')\"}",
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "{\"ok\":true}"},
+        ],
+        None,
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": "I will inspect the files.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "run_python",
+                        "arguments": "{\"code\":\"print('ok')\"}",
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "{\"ok\":true}"},
+    ]
+
+
+def test_chat_messages_keep_assistant_tool_calls_together_across_unknown_items() -> None:
+    messages = chat_messages(
+        [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will inspect the files."}],
+            },
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_python",
+                "arguments": "{}",
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "{\"ok\":true}"},
+        ],
+        None,
+    )
+
+    assert len(messages) == 2
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["content"] == "I will inspect the files."
+    assert messages[0]["tool_calls"][0]["id"] == "call_1"
+    assert messages[1]["role"] == "tool"
+
+
+def test_responses_refusal_content_is_treated_as_visible_text() -> None:
+    response = parse_responses_response(
+        {
+            "id": "resp_1",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "refusal", "text": "I cannot help with that."}],
+                }
+            ],
+        }
+    )
+
+    assert response.output_text == "I cannot help with that."
+    assert chat_message_content(response.output[0]) == "I cannot help with that."
 
 
 def test_chat_payload_uses_chat_endpoint_shape() -> None:

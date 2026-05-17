@@ -89,6 +89,21 @@ class ReasoningStreamClient(FakeModelClient):
         )
 
 
+class CompletedOnlyStreamClient(FakeModelClient):
+    async def stream_response(self, **kwargs):
+        self.requests.append(
+            {
+                "input": kwargs.get("input_items", []),
+                "level": kwargs.get("level"),
+                "tools": kwargs.get("tools") or [],
+                "instructions": kwargs.get("instructions"),
+                "stream": True,
+                "previous_response_id": kwargs.get("previous_response_id"),
+            }
+        )
+        yield ModelStreamEvent(type="completed", response=parse_responses_response(self.responses.pop(0)))
+
+
 def make_test_config(
     project_root: Path,
     *,
@@ -841,6 +856,77 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     assert any(event["type"] == "item.tool_output" for event in stored_events)
     assert not any(event["type"] == "item.assistant_delta" for event in stored_events)
     assert not any(event["type"] == "item.reasoning_delta" for event in stored_events)
+
+
+@pytest.mark.asyncio
+async def test_agent_displays_and_reconstructs_mixed_text_tool_response(tmp_path: Path) -> None:
+    project_root = Path.cwd()
+    config = make_test_config(project_root)
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+        ),
+    )
+    client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "I will run Python now.",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "I will run Python now."}],
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "run_python",
+                        "arguments": "{\"code\":\"print('mixed')\\n\"}",
+                    },
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,
+        thread_store=ThreadStore(tmp_path / ".uv-agent"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="run it")]
+    event_types = [event["type"] for event in events]
+    thread_id = events[-1]["thread_id"]
+    stored_response = next(
+        event for event in engine.thread_store.read(thread_id) if event["type"] == "item.model_response"
+    )
+    reconstructed = engine._reconstruct_input(thread_id)
+
+    assert events[event_types.index("assistant.delta")]["text"] == "I will run Python now."
+    assert event_types.index("assistant.delta") < event_types.index("tool.started")
+    assert stored_response["output"][0]["type"] == "message"
+    assert stored_response["output"][1]["type"] == "function_call"
+    reconstructed_message_index = reconstructed.index(stored_response["output"][0])
+    assert reconstructed[reconstructed_message_index + 1] == stored_response["output"][1]
+    assert reconstructed[reconstructed_message_index + 2]["type"] == "function_call_output"
+    assert "mixed" in reconstructed[reconstructed_message_index + 2]["output"]
 
 
 @pytest.mark.asyncio

@@ -406,6 +406,18 @@ class AgentEngine:
                 self._raise_if_cancelled(cancel_event)
                 if response is None:
                     raise RuntimeError("Model stream ended without completion")
+                completed_text_delta = completion_text_delta(
+                    response.output_text,
+                    "".join(assistant_parts),
+                )
+                if completed_text_delta:
+                    assistant_parts.append(completed_text_delta)
+                    yield {
+                        "type": "assistant.delta",
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "text": completed_text_delta,
+                    }
                 reasoning_text = response.reasoning_text or "".join(reasoning_parts).strip()
                 self.thread_store.append(
                     thread_id,
@@ -1549,7 +1561,7 @@ def message_item(role: str, text: str) -> dict[str, Any]:
 def message_item_text(item: dict[str, Any]) -> str:
     parts: list[str] = []
     for content in item.get("content") or []:
-        if content.get("type") in {"input_text", "output_text", "text"}:
+        if content.get("type") in {"input_text", "output_text", "text", "refusal"}:
             parts.append(str(content.get("text") or ""))
     return "\n".join(parts)
 
@@ -1588,6 +1600,16 @@ def clean_thread_title(text: str) -> str | None:
     if len(title) > 80:
         title = title[:77].rstrip() + "..."
     return title
+
+
+def completion_text_delta(output_text: str, emitted_text: str) -> str:
+    if not output_text:
+        return ""
+    if not emitted_text:
+        return output_text
+    if output_text.startswith(emitted_text):
+        return output_text[len(emitted_text) :]
+    return ""
 
 
 def function_output(call: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:

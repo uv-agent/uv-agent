@@ -620,7 +620,7 @@ def extract_responses_text(output: list[dict[str, Any]]) -> str:
         if item.get("type") != "message":
             continue
         for content in item.get("content") or []:
-            if content.get("type") == "output_text":
+            if content.get("type") in {"output_text", "refusal"}:
                 parts.append(content.get("text", ""))
     return "".join(parts)
 
@@ -633,33 +633,34 @@ def chat_messages(
     messages: list[dict[str, Any]] = []
     if instructions:
         messages.append({"role": "system", "content": instructions})
+    pending_assistant: dict[str, Any] | None = None
+
+    def flush_pending_assistant() -> None:
+        nonlocal pending_assistant
+        if pending_assistant is not None:
+            messages.append(pending_assistant)
+            pending_assistant = None
+
     for item in input_items:
         item_type = item.get("type")
         if item_type == "message":
+            flush_pending_assistant()
             role = item.get("role", "user")
             message = {"role": role, "content": chat_message_content(item)}
             if model is not None:
                 for field in model.message_passthrough.fields_for_role(str(role)):
                     if field in item:
                         message[field] = copy.deepcopy(item[field])
-            messages.append(message)
+            if role == "assistant":
+                pending_assistant = message
+            else:
+                messages.append(message)
         elif item_type == "function_call":
-            messages.append(
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": item.get("call_id"),
-                            "type": "function",
-                            "function": {
-                                "name": item.get("name"),
-                                "arguments": item.get("arguments") or "{}",
-                            },
-                        }
-                    ],
-                }
-            )
+            if pending_assistant is None:
+                pending_assistant = {"role": "assistant", "content": ""}
+            pending_assistant.setdefault("tool_calls", []).append(chat_tool_call_message(item))
         elif item_type == "function_call_output":
+            flush_pending_assistant()
             messages.append(
                 {
                     "role": "tool",
@@ -667,7 +668,19 @@ def chat_messages(
                     "content": item.get("output", ""),
                 }
             )
+    flush_pending_assistant()
     return messages
+
+
+def chat_tool_call_message(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("call_id"),
+        "type": "function",
+        "function": {
+            "name": item.get("name"),
+            "arguments": item.get("arguments") or "{}",
+        },
+    }
 
 
 def anthropic_messages(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -716,7 +729,7 @@ def anthropic_messages(input_items: list[dict[str, Any]]) -> list[dict[str, Any]
 def message_text(item: dict[str, Any]) -> str:
     parts: list[str] = []
     for content in item.get("content") or []:
-        if content.get("type") in {"input_text", "output_text", "text"}:
+        if content.get("type") in {"input_text", "output_text", "text", "refusal"}:
             parts.append(content.get("text", ""))
     return "\n".join(parts)
 
@@ -727,7 +740,7 @@ def chat_message_content(item: dict[str, Any]) -> str | list[dict[str, Any]]:
     has_image = False
     for content in item.get("content") or []:
         content_type = content.get("type")
-        if content_type in {"input_text", "output_text", "text"}:
+        if content_type in {"input_text", "output_text", "text", "refusal"}:
             parts.append({"type": "text", "text": content.get("text", "")})
         elif content_type == "input_image":
             image_url = content.get("image_url") or content.get("url")
@@ -745,7 +758,7 @@ def anthropic_message_content(item: dict[str, Any]) -> str | list[dict[str, Any]
     has_image = False
     for content in item.get("content") or []:
         content_type = content.get("type")
-        if content_type in {"input_text", "output_text", "text"}:
+        if content_type in {"input_text", "output_text", "text", "refusal"}:
             parts.append({"type": "text", "text": content.get("text", "")})
         elif content_type == "input_image":
             image_url = content.get("image_url") or content.get("url")

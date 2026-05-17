@@ -659,6 +659,62 @@ async def test_tui_thread_picker_resumes_and_renders_history(
 
 
 @pytest.mark.asyncio
+async def test_tui_thread_resume_renders_mixed_text_tool_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    state = tmp_path / "state"
+    engine = fake_engine(project_root, state)
+    thread_id = engine.thread_store.create_thread("Mixed response")
+    engine.thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="turn_1",
+        response_id="resp_1",
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will inspect first."}],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_python",
+                "arguments": "{\"code\":\"print('ok')\"}",
+            },
+        ],
+        usage={},
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.tool_call",
+        turn_id="turn_1",
+        item={
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "run_python",
+            "arguments": "{\"code\":\"print('ok')\"}",
+        },
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app._resume_thread(thread_id)
+        await pilot.pause()
+
+        transcript_text = "\n".join(
+            str(getattr(child, "copy_text", None) or "")
+            for child in app.query_one("#transcript", TranscriptScroll).children
+        )
+        assert "I will inspect first." in transcript_text
+        assert "run_python" in transcript_text
+
+
+@pytest.mark.asyncio
 async def test_tui_thread_resume_pages_older_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

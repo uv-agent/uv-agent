@@ -368,7 +368,7 @@ def tool_event_text(event: dict[str, Any]) -> str:
 def item_text(item: dict[str, Any]) -> str:
     parts: list[str] = []
     for content in item.get("content") or []:
-        if content.get("type") in {"input_text", "output_text", "text"}:
+        if content.get("type") in {"input_text", "output_text", "text", "refusal"}:
             parts.append(str(content.get("text") or ""))
     return "\n".join(parts)
 

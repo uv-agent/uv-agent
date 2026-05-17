@@ -184,7 +184,7 @@ def _digest_items(events: list[dict[str, Any]], *, include_tools: bool) -> list[
 def _item_text(item: dict[str, Any]) -> str:
     parts: list[str] = []
     for content in item.get("content") or []:
-        if content.get("type") in {"input_text", "output_text", "text"}:
+        if content.get("type") in {"input_text", "output_text", "text", "refusal"}:
             parts.append(str(content.get("text") or ""))
     return "\n".join(parts)
 
@@ -222,4 +222,3 @@ def _compaction_summary(compaction: Any) -> dict[str, Any] | None:
 
 def _int_or_none(value: Any) -> int | None:
     return value if isinstance(value, int) else None
-

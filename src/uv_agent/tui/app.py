@@ -2379,7 +2379,7 @@ class UvAgentApp(App[None]):
             self._append_reasoning_history(str(event.get("reasoning_text") or ""), before=before)
             text = self._model_response_text(event.get("output") or [])
             if text:
-                self._append_cell(Markdown(text), "assistant", before=before)
+                self._append_cell(Markdown(text), "assistant", before=before, copy_text=text)
         elif event_type == "item.tool_call":
             item = event.get("item") or {}
             name = str(item.get("name") or "python")
@@ -2427,9 +2427,10 @@ class UvAgentApp(App[None]):
         classes: str,
         *,
         before: object | None = None,
+        copy_text: str | None = None,
     ) -> TranscriptCell:
         self._mark_transcript_content()
-        cell = TranscriptCell(content, classes=classes, markup=True)
+        cell = TranscriptCell(content, classes=classes, markup=True, copy_text=copy_text)
         self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
         return cell
@@ -3212,7 +3213,7 @@ class UvAgentApp(App[None]):
             if item.get("type") != "message":
                 continue
             for content in item.get("content") or []:
-                if content.get("type") in {"output_text", "text"}:
+                if content.get("type") in {"output_text", "text", "refusal"}:
                     parts.append(str(content.get("text") or ""))
         return "".join(parts)
 
