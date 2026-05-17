@@ -18,6 +18,15 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                         "api_key": "secret",
                         "responses": {"path": "/v1/responses"},
                         "chat_completions": {"path": "/v1/chat/completions"},
+                        "message_passthrough": {
+                            "assistant": ["reasoning_content"],
+                            "user": ["vendor_user"],
+                        },
+                        "reasoning_display": {
+                            "assistant_message_fields": ["provider_reasoning"],
+                            "stream_delta_fields": ["reasoning_content"],
+                            "unknown_text_delta_as_reasoning": True,
+                        },
                     }
                 },
                 "models": {
@@ -27,6 +36,10 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                         "api": "chat_completions",
                         "supports_images": False,
                         "params": {"reasoning": {"effort": "low"}},
+                        "message_passthrough": {"assistant": ["model_reasoning"]},
+                        "reasoning_display": {
+                            "assistant_message_fields": ["model_reasoning"],
+                        },
                     }
                 },
                 "levels": {
@@ -51,6 +64,12 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert model.api == "chat_completions"
     assert model.supports_images is False
     assert model.params["reasoning"]["effort"] == "high"
+    assert model.message_passthrough.assistant == ["model_reasoning"]
+    assert model.message_passthrough.user == ["vendor_user"]
+    assert provider.message_passthrough.assistant == ["reasoning_content"]
+    assert model.reasoning_display.assistant_message_fields == ["model_reasoning"]
+    assert model.reasoning_display.stream_delta_fields == ["reasoning_content"]
+    assert model.reasoning_display.unknown_text_delta_as_reasoning is True
     assert config.runtime.title_generation.enabled is True
     assert config.runtime.title_generation.model_level == "quick"
     assert config.runner.runtime_dependency == "uv-agent==0.1.4"
@@ -102,6 +121,36 @@ def test_legacy_reasoning_option_fields_are_ignored(tmp_path: Path) -> None:
     config = load_config(tmp_path, [config_path])
 
     assert config.model_for_level("medium").params == {"temperature": 0}
+
+
+def test_model_inherits_provider_passthrough_and_reasoning_display(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "p": {
+                        "base_url": "https://example.com",
+                        "message_passthrough": {"assistant": ["reasoning_content"]},
+                        "reasoning_display": {
+                            "stream_delta_fields": ["reasoning_content"],
+                            "unknown_text_delta_as_reasoning": True,
+                        },
+                    }
+                },
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {"medium": {"model": "m"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+    model = config.model_for_level("medium")
+
+    assert model.message_passthrough.assistant == ["reasoning_content"]
+    assert model.reasoning_display.stream_delta_fields == ["reasoning_content"]
+    assert model.reasoning_display.unknown_text_delta_as_reasoning is True
 
 
 def test_configured_levels_replace_default_level_template(tmp_path: Path) -> None:

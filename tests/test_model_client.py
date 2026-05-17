@@ -1,7 +1,21 @@
 from __future__ import annotations
 
-from uv_agent.config import EndpointConfig, ModelConfig, ProviderConfig
+import pytest
+
+from uv_agent.config import (
+    AppConfig,
+    EndpointConfig,
+    LevelConfig,
+    MessagePassthroughConfig,
+    ModelConfig,
+    ProviderConfig,
+    ReasoningDisplayConfig,
+    RunnerConfig,
+    RuntimeConfig,
+)
 from uv_agent.model_client import (
+    ModelStreamEvent,
+    UnifiedModelClient,
     anthropic_image_source,
     anthropic_messages,
     anthropic_payload,
@@ -10,6 +24,7 @@ from uv_agent.model_client import (
     chat_payload,
     parse_anthropic_response,
     parse_chat_response,
+    parse_chat_response_for_model,
     parse_sse_event,
     responses_payload,
 )
@@ -61,6 +76,37 @@ def test_chat_payload_uses_chat_endpoint_shape() -> None:
     assert "tools" not in payload
 
 
+def test_chat_messages_replay_configured_message_passthrough_fields() -> None:
+    model = ModelConfig(
+        name="m",
+        provider="p",
+        model="remote",
+        api="chat_completions",
+        message_passthrough=MessagePassthroughConfig(assistant=["reasoning_content"]),
+    )
+
+    messages = chat_messages(
+        [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hello! I am MiMo."}],
+                "reasoning_content": "I should introduce myself.",
+            }
+        ],
+        None,
+        model,
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": "Hello! I am MiMo.",
+            "reasoning_content": "I should introduce myself.",
+        }
+    ]
+
+
 def test_responses_payload_supports_previous_response_id() -> None:
     provider = ProviderConfig(name="p", base_url="https://example.com")
     model = ModelConfig(name="m", provider="p", model="remote", api="responses")
@@ -107,6 +153,36 @@ def test_parse_chat_response_maps_tool_calls() -> None:
 
     assert response.output[0]["type"] == "function_call"
     assert response.output[0]["call_id"] == "call_1"
+
+
+def test_parse_chat_response_preserves_passthrough_and_reasoning_fields() -> None:
+    model = ModelConfig(
+        name="m",
+        provider="p",
+        model="remote",
+        api="chat_completions",
+        message_passthrough=MessagePassthroughConfig(assistant=["reasoning_content"]),
+        reasoning_display=ReasoningDisplayConfig(assistant_message_fields=["reasoning_content"]),
+    )
+
+    response = parse_chat_response_for_model(
+        {
+            "id": "chat_1",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hello! I am MiMo.",
+                        "reasoning_content": "I should introduce myself.",
+                    }
+                }
+            ],
+        },
+        model,
+    )
+
+    assert response.output[0]["reasoning_content"] == "I should introduce myself."
+    assert response.reasoning_text == "I should introduce myself."
 
 
 def test_parse_sse_event_handles_done_and_json() -> None:
@@ -191,3 +267,155 @@ def test_image_parts_convert_for_chat_and_anthropic() -> None:
     assert isinstance(anthropic, list)
     assert anthropic[1]["source"]["media_type"] == "image/png"
     assert anthropic_image_source("https://example.com/image.png") is None
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_accumulates_passthrough_and_configured_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_stream_sse(provider, api, payload):
+        yield {
+            "id": "chat_1",
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": "think ",
+                    }
+                }
+            ],
+        }
+        yield {
+            "id": "chat_1",
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": "more",
+                        "content": "done",
+                    }
+                }
+            ],
+        }
+
+    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "m": ModelConfig(
+                name="m",
+                provider="p",
+                model="remote",
+                api="chat_completions",
+                message_passthrough=MessagePassthroughConfig(assistant=["reasoning_content"]),
+                reasoning_display=ReasoningDisplayConfig(
+                    stream_delta_fields=["reasoning_content"],
+                    assistant_message_fields=["reasoning_content"],
+                ),
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="m", params={})},
+        runtime=RuntimeConfig(auto_compress=False),
+        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
+    )
+    client = UnifiedModelClient(config)
+
+    events = [
+        event
+        async for event in client.stream_response(
+            input_items=[],
+            level="medium",
+            tools=[],
+            instructions=None,
+        )
+    ]
+    reasoning = [event.text for event in events if event.type == "reasoning_delta"]
+    completed = next(event for event in events if event.type == "completed")
+
+    assert reasoning == ["think ", "more"]
+    assert isinstance(completed, ModelStreamEvent)
+    assert completed.response is not None
+    assert completed.response.output[0]["reasoning_content"] == "think more"
+    assert completed.response.reasoning_text == "think more"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_can_treat_unknown_text_delta_as_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_stream_sse(provider, api, payload):
+        yield {"id": "chat_1", "choices": [{"delta": {"vendor_thought": "hidden-ish"}}]}
+
+    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "m": ModelConfig(
+                name="m",
+                provider="p",
+                model="remote",
+                api="chat_completions",
+                reasoning_display=ReasoningDisplayConfig(unknown_text_delta_as_reasoning=True),
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="m", params={})},
+        runtime=RuntimeConfig(auto_compress=False),
+        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
+    )
+    client = UnifiedModelClient(config)
+
+    events = [
+        event
+        async for event in client.stream_response(
+            input_items=[],
+            level="medium",
+            tools=[],
+            instructions=None,
+        )
+    ]
+
+    assert [event.text for event in events if event.type == "reasoning_delta"] == ["hidden-ish"]
+    completed = next(event for event in events if event.type == "completed")
+    assert completed.response is not None
+    assert completed.response.reasoning_text == "hidden-ish"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_fallback_can_display_passthrough_field_as_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_stream_sse(provider, api, payload):
+        yield {"id": "chat_1", "choices": [{"delta": {"reasoning_content": "think"}}]}
+
+    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "m": ModelConfig(
+                name="m",
+                provider="p",
+                model="remote",
+                api="chat_completions",
+                message_passthrough=MessagePassthroughConfig(assistant=["reasoning_content"]),
+                reasoning_display=ReasoningDisplayConfig(unknown_text_delta_as_reasoning=True),
+            )
+        },
+        levels={"medium": LevelConfig(name="medium", model="m", params={})},
+        runtime=RuntimeConfig(auto_compress=False),
+        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
+    )
+    client = UnifiedModelClient(config)
+
+    events = [
+        event
+        async for event in client.stream_response(
+            input_items=[],
+            level="medium",
+            tools=[],
+            instructions=None,
+        )
+    ]
+
+    assert [event.text for event in events if event.type == "reasoning_delta"] == ["think"]
+    completed = next(event for event in events if event.type == "completed")
+    assert completed.response is not None
+    assert completed.response.output[0]["reasoning_content"] == "think"
+    assert completed.response.reasoning_text == "think"

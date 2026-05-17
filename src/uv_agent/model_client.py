@@ -11,6 +11,14 @@ import httpx
 
 from uv_agent.config import AppConfig, ModelConfig, ProviderConfig
 
+CHAT_DELTA_CONTROL_FIELDS = {
+    "role",
+    "content",
+    "tool_calls",
+    "function_call",
+    "refusal",
+}
+
 
 @dataclass(frozen=True)
 class ModelResponse:
@@ -19,6 +27,7 @@ class ModelResponse:
     output_text: str
     raw: dict[str, Any]
     usage: dict[str, Any]
+    reasoning_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -179,7 +188,7 @@ class UnifiedModelClient:
     ) -> ModelResponse:
         payload = chat_payload(provider, model, input_items, tools, instructions, stream=False)
         data = await post_json(provider, model.api, payload)
-        return parse_chat_response(data)
+        return parse_chat_response_for_model(data, model)
 
     async def _create_anthropic(
         self,
@@ -256,9 +265,13 @@ class UnifiedModelClient:
     ) -> AsyncIterator[ModelStreamEvent]:
         payload = chat_payload(provider, model, input_items, tools, instructions, stream=True)
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        passthrough_acc: dict[str, str] = {}
         tool_acc: dict[int, dict[str, Any]] = {}
         response_id: str | None = None
         usage: dict[str, Any] = {}
+        passthrough_fields = set(model.message_passthrough.fields_for_role("assistant"))
+        reasoning_fields = set(model.reasoning_display.stream_delta_fields)
         async for data in stream_sse(provider, model.api, payload):
             if not data:
                 continue
@@ -267,15 +280,28 @@ class UnifiedModelClient:
                 usage = data["usage"]
             for choice in data.get("choices", []):
                 delta = choice.get("delta") or {}
+                reasoning_fields_seen: set[str] = set()
                 if delta.get("content"):
                     text = delta["content"]
                     text_parts.append(text)
                     yield ModelStreamEvent(type="text_delta", text=text)
-                if delta.get("reasoning_content"):
-                    yield ModelStreamEvent(
-                        type="reasoning_delta",
-                        text=str(delta.get("reasoning_content") or ""),
-                    )
+                for field in passthrough_fields:
+                    value = delta.get(field)
+                    if isinstance(value, str) and value:
+                        passthrough_acc[field] = passthrough_acc.get(field, "") + value
+                for field in reasoning_fields:
+                    value = delta.get(field)
+                    if isinstance(value, str) and value:
+                        reasoning_fields_seen.add(field)
+                        reasoning_parts.append(value)
+                        yield ModelStreamEvent(type="reasoning_delta", text=value)
+                if model.reasoning_display.unknown_text_delta_as_reasoning:
+                    for field, value in delta.items():
+                        if field in reasoning_fields_seen or field in CHAT_DELTA_CONTROL_FIELDS:
+                            continue
+                        if isinstance(value, str) and value:
+                            reasoning_parts.append(value)
+                            yield ModelStreamEvent(type="reasoning_delta", text=value)
                 for tool_call in delta.get("tool_calls") or []:
                     index = int(tool_call.get("index", 0))
                     existing = tool_acc.setdefault(index, {"arguments": ""})
@@ -298,7 +324,8 @@ class UnifiedModelClient:
                     )
 
         output_text = "".join(text_parts)
-        output = chat_output_items(output_text, tool_acc)
+        reasoning_text = "".join(reasoning_parts)
+        output = chat_output_items(output_text, tool_acc, passthrough=passthrough_acc)
         yield ModelStreamEvent(
             type="completed",
             response=ModelResponse(
@@ -307,6 +334,7 @@ class UnifiedModelClient:
                 output_text=output_text,
                 raw={"id": response_id, "output": output},
                 usage=usage,
+                reasoning_text=reasoning_text,
             ),
         )
 
@@ -487,7 +515,7 @@ def chat_payload(
     endpoint = provider.endpoint_for_api("chat_completions")
     payload: dict[str, Any] = {
         "model": model.model,
-        "messages": chat_messages(input_items, instructions),
+        "messages": chat_messages(input_items, instructions, model),
         "tools": [chat_tool(tool) for tool in tools],
         "tool_choice": "auto" if tools else "none",
         **provider.params,
@@ -543,16 +571,23 @@ def parse_responses_response(data: dict[str, Any]) -> ModelResponse:
 
 
 def parse_chat_response(data: dict[str, Any]) -> ModelResponse:
+    return parse_chat_response_for_model(data, None)
+
+
+def parse_chat_response_for_model(data: dict[str, Any], model: ModelConfig | None) -> ModelResponse:
     choice = (data.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     text = message.get("content") or ""
-    output = chat_output_items(text, chat_tool_acc_from_message(message))
+    passthrough = chat_message_passthrough(message, model) if model is not None else {}
+    reasoning_text = chat_message_reasoning_text(message, model) if model is not None else ""
+    output = chat_output_items(text, chat_tool_acc_from_message(message), passthrough=passthrough)
     return ModelResponse(
         id=data.get("id"),
         output=output,
         output_text=text,
         raw=data,
         usage=data.get("usage") or {},
+        reasoning_text=reasoning_text,
     )
 
 
@@ -590,7 +625,11 @@ def extract_responses_text(output: list[dict[str, Any]]) -> str:
     return "".join(parts)
 
 
-def chat_messages(input_items: list[dict[str, Any]], instructions: str | None) -> list[dict[str, Any]]:
+def chat_messages(
+    input_items: list[dict[str, Any]],
+    instructions: str | None,
+    model: ModelConfig | None = None,
+) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     if instructions:
         messages.append({"role": "system", "content": instructions})
@@ -598,7 +637,12 @@ def chat_messages(input_items: list[dict[str, Any]], instructions: str | None) -
         item_type = item.get("type")
         if item_type == "message":
             role = item.get("role", "user")
-            messages.append({"role": role, "content": chat_message_content(item)})
+            message = {"role": role, "content": chat_message_content(item)}
+            if model is not None:
+                for field in model.message_passthrough.fields_for_role(str(role)):
+                    if field in item:
+                        message[field] = copy.deepcopy(item[field])
+            messages.append(message)
         elif item_type == "function_call":
             messages.append(
                 {
@@ -759,16 +803,43 @@ def chat_tool_acc_from_message(message: dict[str, Any]) -> dict[int, dict[str, A
     return acc
 
 
-def chat_output_items(output_text: str, tool_acc: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+def chat_message_passthrough(message: dict[str, Any], model: ModelConfig | None) -> dict[str, Any]:
+    if model is None:
+        return {}
+    return {
+        field: copy.deepcopy(message[field])
+        for field in model.message_passthrough.fields_for_role("assistant")
+        if field in message
+    }
+
+
+def chat_message_reasoning_text(message: dict[str, Any], model: ModelConfig | None) -> str:
+    if model is None:
+        return ""
+    parts = [
+        str(message[field])
+        for field in model.reasoning_display.assistant_message_fields
+        if isinstance(message.get(field), str) and message.get(field)
+    ]
+    return "".join(parts)
+
+
+def chat_output_items(
+    output_text: str,
+    tool_acc: dict[int, dict[str, Any]],
+    *,
+    passthrough: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
-    if output_text:
-        output.append(
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": output_text}],
-            }
-        )
+    passthrough = passthrough or {}
+    if output_text or passthrough:
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": output_text}],
+        }
+        message.update(copy.deepcopy(passthrough))
+        output.append(message)
     for index in sorted(tool_acc):
         call = tool_acc[index]
         output.append(

@@ -33,6 +33,8 @@ class ProviderConfig:
     api_key_env: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
+    message_passthrough: MessagePassthroughConfig = field(default_factory=lambda: MessagePassthroughConfig())
+    reasoning_display: ReasoningDisplayConfig = field(default_factory=lambda: ReasoningDisplayConfig())
     responses: EndpointConfig = field(default_factory=lambda: EndpointConfig(path="/responses"))
     chat_completions: EndpointConfig = field(
         default_factory=lambda: EndpointConfig(path="/chat/completions")
@@ -59,6 +61,24 @@ class ProviderConfig:
 
 
 @dataclass(frozen=True)
+class MessagePassthroughConfig:
+    assistant: list[str] = field(default_factory=list)
+    user: list[str] = field(default_factory=list)
+    system: list[str] = field(default_factory=list)
+    tool: list[str] = field(default_factory=list)
+
+    def fields_for_role(self, role: str) -> list[str]:
+        return list(getattr(self, role, []))
+
+
+@dataclass(frozen=True)
+class ReasoningDisplayConfig:
+    assistant_message_fields: list[str] = field(default_factory=list)
+    stream_delta_fields: list[str] = field(default_factory=list)
+    unknown_text_delta_as_reasoning: bool = False
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     name: str
     provider: str
@@ -67,6 +87,8 @@ class ModelConfig:
     context_window_tokens: int = 128_000
     supports_images: bool | None = None
     params: dict[str, Any] = field(default_factory=dict)
+    message_passthrough: MessagePassthroughConfig = field(default_factory=MessagePassthroughConfig)
+    reasoning_display: ReasoningDisplayConfig = field(default_factory=ReasoningDisplayConfig)
 
 
 @dataclass(frozen=True)
@@ -163,6 +185,8 @@ class AppConfig:
             context_window_tokens=model.context_window_tokens,
             supports_images=model.supports_images,
             params=merged_params,
+            message_passthrough=model.message_passthrough,
+            reasoning_display=model.reasoning_display,
         )
 
     def provider_for_model(self, model: ModelConfig) -> ProviderConfig:
@@ -266,6 +290,12 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         chat_raw = provider_value.pop("chat_completions", None)
         anthropic_raw = provider_value.pop("anthropic_messages", None)
         provider_value.pop("reasoning_options", None)
+        provider_value["message_passthrough"] = parse_message_passthrough(
+            provider_value.pop("message_passthrough", {})
+        )
+        provider_value["reasoning_display"] = parse_reasoning_display(
+            provider_value.pop("reasoning_display", {})
+        )
         if responses_raw is None:
             responses_raw = {"path": legacy_endpoint or "/responses"}
         if chat_raw is None:
@@ -284,6 +314,27 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         model_value = dict(value)
         model_value.setdefault("api", model_value.pop("api_format", "responses"))
         model_value.pop("reasoning_options", None)
+        provider_defaults = providers.get(str(model_value.get("provider") or ""))
+        provider_message_passthrough = (
+            provider_defaults.message_passthrough
+            if provider_defaults is not None
+            else MessagePassthroughConfig()
+        )
+        provider_reasoning_display = (
+            provider_defaults.reasoning_display
+            if provider_defaults is not None
+            else ReasoningDisplayConfig()
+        )
+        model_message_passthrough = model_value.pop("message_passthrough", None)
+        model_reasoning_display = model_value.pop("reasoning_display", None)
+        model_value["message_passthrough"] = merge_message_passthrough(
+            provider_message_passthrough,
+            model_message_passthrough,
+        )
+        model_value["reasoning_display"] = merge_reasoning_display(
+            provider_reasoning_display,
+            model_reasoning_display,
+        )
         models[name] = ModelConfig(name=name, **model_value)
     levels = {}
     for name, value in raw.get("levels", {}).items():
@@ -342,6 +393,74 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
         else:
             result[key] = copy.deepcopy(value)
     return result
+
+
+def parse_message_passthrough(value: object) -> MessagePassthroughConfig:
+    if isinstance(value, list):
+        return MessagePassthroughConfig(assistant=[str(field) for field in value])
+    if not isinstance(value, dict):
+        return MessagePassthroughConfig()
+    return MessagePassthroughConfig(
+        assistant=string_list(value.get("assistant")),
+        user=string_list(value.get("user")),
+        system=string_list(value.get("system")),
+        tool=string_list(value.get("tool")),
+    )
+
+
+def parse_reasoning_display(value: object) -> ReasoningDisplayConfig:
+    if not isinstance(value, dict):
+        return ReasoningDisplayConfig()
+    return ReasoningDisplayConfig(
+        assistant_message_fields=string_list(value.get("assistant_message_fields")),
+        stream_delta_fields=string_list(value.get("stream_delta_fields")),
+        unknown_text_delta_as_reasoning=bool(value.get("unknown_text_delta_as_reasoning", False)),
+    )
+
+
+def merge_message_passthrough(
+    base: MessagePassthroughConfig,
+    override: object,
+) -> MessagePassthroughConfig:
+    if override is None:
+        return base
+    if isinstance(override, list):
+        return MessagePassthroughConfig(assistant=[str(field) for field in override])
+    if not isinstance(override, dict):
+        return base
+    return MessagePassthroughConfig(
+        assistant=string_list(override["assistant"]) if "assistant" in override else base.assistant,
+        user=string_list(override["user"]) if "user" in override else base.user,
+        system=string_list(override["system"]) if "system" in override else base.system,
+        tool=string_list(override["tool"]) if "tool" in override else base.tool,
+    )
+
+
+def merge_reasoning_display(
+    base: ReasoningDisplayConfig,
+    override: object,
+) -> ReasoningDisplayConfig:
+    if override is None or not isinstance(override, dict):
+        return base
+    return ReasoningDisplayConfig(
+        assistant_message_fields=string_list(override["assistant_message_fields"])
+        if "assistant_message_fields" in override
+        else base.assistant_message_fields,
+        stream_delta_fields=string_list(override["stream_delta_fields"])
+        if "stream_delta_fields" in override
+        else base.stream_delta_fields,
+        unknown_text_delta_as_reasoning=bool(override["unknown_text_delta_as_reasoning"])
+        if "unknown_text_delta_as_reasoning" in override
+        else base.unknown_text_delta_as_reasoning,
+    )
+
+
+def string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
 
 
 def merge_config_layer(
