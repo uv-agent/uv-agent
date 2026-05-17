@@ -1217,6 +1217,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<host>" in prompt
     assert "<user_language>" in prompt
     assert "<model_levels>" in prompt
+    assert "<response_style>" in prompt
+    assert "reply concisely and with a friendly, approachable tone" in prompt
     assert "<default>medium</default>" in prompt
     assert "<level>small</level>" in prompt
     assert "<level>medium</level>" in prompt
