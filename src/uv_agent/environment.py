@@ -5,6 +5,7 @@ import os
 import platform
 import sys
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 
@@ -77,3 +78,11 @@ def host_environment_line(metadata: dict[str, Any] | None = None) -> str:
         f"{data['os']} {data['os_release']} ({data['platform']}, {data['architecture']}), "
         f"Python {data['python']}, shell={data['shell']}, path_separator={data['path_separator']!r}"
     )
+
+
+def application_version(package_name: str = "uv-agent") -> str:
+    """Return the installed application version for status/debug surfaces."""
+    try:
+        return version(package_name)
+    except PackageNotFoundError:
+        return "unknown"

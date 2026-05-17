@@ -38,7 +38,7 @@ from uv_agent.config import (
     load_raw_config,
     redact_config,
 )
-from uv_agent.environment import detect_user_language, host_environment_line
+from uv_agent.environment import application_version, detect_user_language, host_environment_line
 from uv_agent.errors import error_markup, format_error
 from uv_agent.i18n import command_description, tr
 from uv_agent.mcp_config import discover_mcp_servers
@@ -2784,6 +2784,7 @@ class UvAgentApp(App[None]):
         )
         lines = [
             f"- state: [cyan]{escape(self._last_status)}[/cyan]",
+            f"- version: [cyan]{escape(application_version())}[/cyan]",
             f"- level: [cyan]{escape(level_name)}[/cyan]",
             f"- model: {model_line}",
             f"- provider/api: {provider_line}",

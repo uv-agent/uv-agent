@@ -1360,6 +1360,7 @@ async def test_tui_status_summarizes_context_rules_and_scripts(
         thread_id=None,
         turn_id=None,
     )
+    monkeypatch.setattr("uv_agent.tui.app.application_version", lambda: "9.8.7")
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
     app = UvAgentApp(project_root=project_root)
 
@@ -1370,6 +1371,7 @@ async def test_tui_status_summarizes_context_rules_and_scripts(
         assert isinstance(panel, FullscreenPanel)
         assert panel.panel_title == app._text("status")
         assert panel.picker_mode is False
+        assert "- version: [cyan]9.8.7[/cyan]" in panel.body
         assert "258K" in panel.body
         assert "AGENTS.md" in panel.body
         assert "Use local rules" not in panel.body
