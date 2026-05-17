@@ -23,7 +23,7 @@ from uv_agent.config import (
 from uv_agent.model_client import FakeModelClient, ModelStreamEvent, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.runner.models import PythonRunRequest
-from uv_agent.session import ThreadStore
+from uv_agent.session import ThreadLockedError, ThreadStore
 
 
 class BlockingModelClient(FakeModelClient):
@@ -407,6 +407,53 @@ async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path:
 
     assert follow_up[-1]["type"] == "turn.completed"
     assert "interrupted" in str(follow_client.requests[0]["input"])
+
+
+@pytest.mark.asyncio
+async def test_agent_locks_thread_while_turn_is_running(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    state_dir = tmp_path / "state"
+    blocking_client = BlockingModelClient()
+    engine = AgentEngine(
+        config=config,
+        model_client=blocking_client,
+        runner=PythonRunner(project_root=project_root, data_dir=state_dir, config=config.runner),
+        thread_store=ThreadStore(state_dir),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread("Locked run")
+    cancel_event = asyncio.Event()
+
+    async def collect() -> list[dict[str, object]]:
+        return [
+            event
+            async for event in engine.run_turn(
+                user_text="hold lock",
+                thread_id=thread_id,
+                cancel_event=cancel_event,
+            )
+        ]
+
+    task = asyncio.create_task(collect())
+    await blocking_client.started.wait()
+    other = ThreadStore(state_dir)
+
+    assert engine.thread_store.lock_path(thread_id).exists()
+    with pytest.raises(ThreadLockedError):
+        other.append(
+            thread_id,
+            "item.user",
+            turn_id="other",
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "other"}]},
+        )
+
+    cancel_event.set()
+    events = await asyncio.wait_for(task, timeout=5)
+
+    assert events[-1]["type"] == "turn.interrupted"
+    assert not engine.thread_store.lock_path(thread_id).exists()
 
 
 @pytest.mark.asyncio

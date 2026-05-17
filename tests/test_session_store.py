@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from uv_agent.session.store import ThreadStore
+import pytest
+
+from uv_agent.session.store import ThreadLockedError, ThreadStore
 
 
 def test_list_threads_returns_latest_first_with_snippet(tmp_path: Path) -> None:
@@ -157,6 +159,104 @@ def test_compaction_offset_reads_suffix_without_parsing_old_events(tmp_path: Pat
     assert compaction is not None
     assert compaction["text"] == "summary"
     assert [event["turn_id"] for event in events] == ["t2"]
+
+
+def test_history_segment_starts_at_latest_compaction_and_pages_to_previous_compaction(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Segmented history")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old"}]},
+    )
+    first_compaction = store.append(thread_id, "item.compaction", turn_id="t1", text="summary1")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t2",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "middle"}]},
+    )
+    second_compaction = store.append(thread_id, "item.compaction", turn_id="t2", text="summary2")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t3",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]},
+    )
+
+    latest = store.read_history_segment(thread_id)
+    previous = store.read_history_segment(thread_id, before_offset=latest.start_offset)
+
+    assert latest.start_offset == second_compaction["_jsonl_offset"]
+    assert [event["turn_id"] for event in latest.events] == ["t2", "t3"]
+    assert latest.events[0]["type"] == "item.compaction"
+    assert latest.has_more is True
+    assert previous.start_offset == first_compaction["_jsonl_offset"]
+    assert [event["turn_id"] for event in previous.events] == ["t1", "t2"]
+    assert previous.has_more is True
+
+
+def test_history_segment_reads_from_start_when_no_previous_compaction(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("History start")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old"}]},
+    )
+    compaction = store.append(thread_id, "item.compaction", turn_id="t1", text="summary")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t2",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]},
+    )
+
+    event_types = {"item.user", "item.compaction"}
+    latest = store.read_history_segment(thread_id, event_types=event_types)
+    oldest = store.read_history_segment(
+        thread_id,
+        before_offset=latest.start_offset,
+        event_types=event_types,
+    )
+
+    assert latest.start_offset == compaction["_jsonl_offset"]
+    assert latest.has_more is True
+    assert oldest.start_offset == 0
+    assert [event["turn_id"] for event in oldest.events] == ["t1"]
+    assert oldest.has_more is False
+
+
+def test_thread_lock_blocks_other_store_writes_and_allows_owner_writes(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Locked")
+    other = ThreadStore(tmp_path)
+
+    with store.lock_thread(thread_id):
+        store.append(
+            thread_id,
+            "item.user",
+            turn_id="t1",
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "owner"}]},
+        )
+        with pytest.raises(ThreadLockedError):
+            other.append(
+                thread_id,
+                "item.user",
+                turn_id="t2",
+                item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "other"}]},
+            )
+        assert store.lock_path(thread_id).exists()
+
+    assert not store.lock_path(thread_id).exists()
+    other.append(
+        thread_id,
+        "item.user",
+        turn_id="t3",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "after"}]},
+    )
 
 
 def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -> None:

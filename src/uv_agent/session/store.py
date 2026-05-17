@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,8 +12,11 @@ from uv_agent.context import usage_token_count
 from uv_agent.ids import new_id
 from uv_agent.jsonl import (
     JsonlWriter,
+    has_jsonl_event_before,
+    latest_jsonl_event_before,
     read_jsonl,
     read_jsonl_after_latest_compaction,
+    read_jsonl_range,
     read_jsonl_tail,
 )
 from uv_agent.time import utc_now_iso
@@ -37,6 +43,29 @@ class ThreadSnapshot:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ThreadHistorySegment:
+    events: list[dict[str, Any]]
+    start_offset: int
+    end_offset: int
+    has_more: bool
+
+
+class ThreadLockedError(RuntimeError):
+    def __init__(self, thread_id: str, lock_path: Path, owner: dict[str, Any] | None = None) -> None:
+        owner_text = ""
+        if owner:
+            pid = owner.get("pid")
+            created_at = owner.get("created_at")
+            owner_text = f" by pid {pid}" if pid else ""
+            if created_at:
+                owner_text += f" since {created_at}"
+        super().__init__(f"Thread {thread_id} is locked{owner_text}: {lock_path}")
+        self.thread_id = thread_id
+        self.lock_path = lock_path
+        self.owner = owner or {}
+
+
 class ThreadStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
@@ -44,6 +73,10 @@ class ThreadStore:
         self.subthreads_dir = data_dir / "subthreads"
         self.thread_metadata_dir = data_dir / "thread_metadata"
         self.subthread_metadata_dir = data_dir / "subthread_metadata"
+        self._lock_owner_id = new_id("owner")
+        self._held_thread_locks: dict[str, str] = {}
+        self._held_thread_lock_depth: dict[str, int] = {}
+        self._history_segment_cache: dict[tuple[Any, ...], ThreadHistorySegment] = {}
         self.threads_dir.mkdir(parents=True, exist_ok=True)
         self.subthreads_dir.mkdir(parents=True, exist_ok=True)
         self.thread_metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -107,6 +140,28 @@ class ThreadStore:
             return subthread_path
         return self.thread_metadata_dir / f"{thread_id}.json"
 
+    def lock_path(self, thread_id: str, *, kind: str | None = None) -> Path:
+        return self.path(thread_id, kind=kind).with_suffix(".lock")
+
+    @contextmanager
+    def lock_thread(self, thread_id: str, *, kind: str | None = None) -> Iterator[None]:
+        resolved_kind = kind or self._kind_for_thread(thread_id)
+        token = self._held_thread_locks.get(thread_id)
+        if token is not None:
+            self._held_thread_lock_depth[thread_id] = self._held_thread_lock_depth.get(thread_id, 1) + 1
+            try:
+                yield
+            finally:
+                self._release_thread_lock(thread_id, token=token, kind=resolved_kind)
+            return
+
+        token = new_id("lock")
+        self._acquire_thread_lock(thread_id, token=token, kind=resolved_kind)
+        try:
+            yield
+        finally:
+            self._release_thread_lock(thread_id, token=token, kind=resolved_kind)
+
     def append(self, thread_id: str, event_type: str, **data: Any) -> dict[str, Any]:
         event = {
             "type": event_type,
@@ -121,6 +176,18 @@ class ThreadStore:
 
     def read(self, thread_id: str) -> list[dict[str, Any]]:
         return read_jsonl(self.path(thread_id))
+
+    def read_events(
+        self,
+        thread_id: str,
+        *,
+        event_types: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        metadata = self._read_metadata(thread_id)
+        events = read_jsonl(self.path(thread_id, kind=metadata.get("kind")))
+        if event_types is None:
+            return events
+        return [event for event in events if event.get("type") in event_types]
 
     def snapshot(self, thread_id: str) -> ThreadSnapshot:
         metadata = self._read_metadata(thread_id)
@@ -153,6 +220,62 @@ class ThreadStore:
             limit=limit,
             before_offset=before_offset,
             event_types=event_types,
+        )
+
+    def read_history_segment(
+        self,
+        thread_id: str,
+        *,
+        before_offset: int | None = None,
+        event_types: set[str] | None = None,
+    ) -> ThreadHistorySegment:
+        metadata = self._read_metadata(thread_id)
+        kind = str(metadata.get("kind") or "thread")
+        path = self.path(thread_id, kind=kind)
+        file_size = path.stat().st_size if path.exists() else 0
+        event_type_key = tuple(sorted(event_types)) if event_types is not None else None
+        cache_key = (thread_id, kind, before_offset, event_type_key, file_size)
+        cached = self._history_segment_cache.get(cache_key)
+        if cached is not None:
+            return ThreadHistorySegment(
+                events=list(cached.events),
+                start_offset=cached.start_offset,
+                end_offset=cached.end_offset,
+                has_more=cached.has_more,
+            )
+
+        if before_offset is None:
+            start_offset = _int_or_none(metadata.get("latest_compaction_offset")) or 0
+            end_offset = file_size
+        else:
+            end_offset = max(0, min(before_offset, file_size))
+            compaction = latest_jsonl_event_before(
+                path,
+                before_offset=end_offset,
+                event_type="item.compaction",
+            )
+            start_offset = _event_offset(compaction) if compaction is not None else 0
+        start_offset = max(0, min(start_offset, end_offset))
+        events = read_jsonl_range(path, start_offset=start_offset, end_offset=end_offset)
+        if event_types is not None:
+            events = [event for event in events if event.get("type") in event_types]
+        has_more = start_offset > 0 and has_jsonl_event_before(
+            path,
+            before_offset=start_offset,
+            event_types=event_types,
+        )
+        segment = ThreadHistorySegment(
+            events=events,
+            start_offset=start_offset,
+            end_offset=end_offset,
+            has_more=has_more,
+        )
+        self._history_segment_cache[cache_key] = segment
+        return ThreadHistorySegment(
+            events=list(segment.events),
+            start_offset=segment.start_offset,
+            end_offset=segment.end_offset,
+            has_more=segment.has_more,
         )
 
     def latest_event(
@@ -219,15 +342,71 @@ class ThreadStore:
 
     def _write_event(self, thread_id: str, event: dict[str, Any], *, kind: str | None = None) -> dict[str, Any]:
         resolved_kind = kind or self._kind_for_thread(thread_id)
+        self._assert_thread_write_allowed(thread_id, kind=resolved_kind)
         stored = self.writer(thread_id, kind=resolved_kind).write(event)
         event_kind = resolved_kind or stored.get("kind")
         self._update_metadata(thread_id, stored, kind=str(event_kind or "thread"))
+        self._history_segment_cache.clear()
         return stored
 
     def _kind_for_thread(self, thread_id: str) -> str:
         if (self.subthreads_dir / f"{thread_id}.jsonl").exists():
             return "subagent"
         return "thread"
+
+    def _acquire_thread_lock(self, thread_id: str, *, token: str, kind: str) -> None:
+        path = self.lock_path(thread_id, kind=kind)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "thread_id": thread_id,
+            "kind": kind,
+            "owner_id": self._lock_owner_id,
+            "token": token,
+            "pid": os.getpid(),
+            "created_at": utc_now_iso(),
+        }
+        try:
+            with path.open("x", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+        except FileExistsError as exc:
+            raise ThreadLockedError(thread_id, path, self._read_lock_owner(path)) from exc
+        self._held_thread_locks[thread_id] = token
+        self._held_thread_lock_depth[thread_id] = 1
+
+    def _release_thread_lock(self, thread_id: str, *, token: str, kind: str) -> None:
+        depth = self._held_thread_lock_depth.get(thread_id, 0)
+        if depth > 1:
+            self._held_thread_lock_depth[thread_id] = depth - 1
+            return
+        self._held_thread_lock_depth.pop(thread_id, None)
+        self._held_thread_locks.pop(thread_id, None)
+        path = self.lock_path(thread_id, kind=kind)
+        owner = self._read_lock_owner(path)
+        if owner.get("owner_id") != self._lock_owner_id or owner.get("token") != token:
+            return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _assert_thread_write_allowed(self, thread_id: str, *, kind: str) -> None:
+        path = self.lock_path(thread_id, kind=kind)
+        if not path.exists():
+            return
+        owner = self._read_lock_owner(path)
+        token = self._held_thread_locks.get(thread_id)
+        if owner.get("owner_id") == self._lock_owner_id and owner.get("token") == token:
+            return
+        raise ThreadLockedError(thread_id, path, owner)
+
+    @staticmethod
+    def _read_lock_owner(path: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _read_metadata(self, thread_id: str, *, kind: str | None = None) -> dict[str, Any]:
         path = self.metadata_path(thread_id, kind=kind)
@@ -300,6 +479,10 @@ def latest_compaction_index(events: list[dict[str, Any]]) -> int:
         if events[index].get("type") == "item.compaction":
             return index
     return -1
+
+
+def _event_offset(event: dict[str, Any]) -> int:
+    return _int_or_none(event.get("_jsonl_offset")) or 0
 
 
 def digest_items(events: list[dict[str, Any]], *, include_tools: bool = False) -> list[dict[str, Any]]:

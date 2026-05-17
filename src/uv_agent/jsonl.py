@@ -46,6 +46,24 @@ def read_jsonl_from_offset(path: Path, offset: int) -> list[dict[str, Any]]:
     return events
 
 
+def read_jsonl_range(path: Path, *, start_offset: int = 0, end_offset: int | None = None) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    with path.open("rb") as handle:
+        file_end = handle.seek(0, os.SEEK_END)
+        start = max(0, min(start_offset, file_end))
+        end = file_end if end_offset is None else max(start, min(end_offset, file_end))
+        handle.seek(start)
+        while handle.tell() < end:
+            line = handle.readline()
+            if not line:
+                break
+            if line.strip():
+                events.append(json.loads(line.decode("utf-8")))
+    return events
+
+
 def read_jsonl_after_latest_compaction(
     path: Path,
     compaction_offset: int | None,
@@ -108,6 +126,30 @@ def read_jsonl_tail(
         selected.append(event)
     selected.reverse()
     return selected, has_more
+
+
+def latest_jsonl_event_before(
+    path: Path,
+    *,
+    before_offset: int,
+    event_type: str,
+) -> dict[str, Any] | None:
+    for event in iter_jsonl_reverse(path, before_offset=before_offset):
+        if event.get("type") == event_type:
+            return event
+    return None
+
+
+def has_jsonl_event_before(
+    path: Path,
+    *,
+    before_offset: int,
+    event_types: set[str] | None = None,
+) -> bool:
+    for event in iter_jsonl_reverse(path, before_offset=before_offset):
+        if event_types is None or event.get("type") in event_types:
+            return True
+    return False
 
 
 def append_jsonl(path: Path, events: Iterable[dict[str, Any]]) -> None:
