@@ -64,16 +64,20 @@ def test_chat_payload_uses_chat_endpoint_shape() -> None:
 def test_responses_payload_supports_previous_response_id() -> None:
     provider = ProviderConfig(name="p", base_url="https://example.com")
     model = ModelConfig(name="m", provider="p", model="remote", api="responses")
+    input_items = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}]}
+    ]
 
     payload = responses_payload(
         provider,
         model,
-        [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}]}],
+        input_items,
         [],
         "system",
         stream=True,
         previous_response_id="resp_1",
     )
+    input_items[0]["content"][0]["text"] = "mutated"
 
     assert payload["previous_response_id"] == "resp_1"
     assert payload["input"][0]["content"][0]["text"] == "next"

@@ -222,8 +222,8 @@ class TurnInputState:
 
     def request_input_items(self) -> list[dict[str, Any]]:
         if self.use_previous_response_id and self.previous_response_id:
-            return list(self.pending_items)
-        return list(self.input_items)
+            return copy.deepcopy(self.pending_items)
+        return copy.deepcopy(self.input_items)
 
 
 class AgentEngine:
@@ -271,6 +271,7 @@ class AgentEngine:
     ) -> AsyncIterator[dict[str, Any]]:
         self.refresh_config(force=True)
         thread_id = thread_id or self.thread_store.create_thread("New thread")
+        system_instructions = self._ensure_system_instructions(thread_id)
         turn_id = new_id("turn")
         should_generate_title = self._should_generate_title(thread_id)
         turn_input = self._prepare_turn_input(thread_id, level=level)
@@ -325,8 +326,9 @@ class AgentEngine:
                 self._raise_if_cancelled(cancel_event)
                 response: ModelResponse | None = None
                 async for stream_event in self._stream_response_until_cancelled(
-                    input_items=request_input_items,
+                    input_items=copy.deepcopy(request_input_items),
                     level=level,
+                    instructions=system_instructions,
                     cancel_event=cancel_event,
                     previous_response_id=turn_input.previous_response_id,
                 ):
@@ -473,7 +475,13 @@ class AgentEngine:
             turn_id=turn_id,
             final_text=final_text,
         )
-        compacted = await self._maybe_compact(thread_id, turn_id, input_items, level=level)
+        compacted = await self._maybe_compact(
+            thread_id,
+            turn_id,
+            input_items,
+            level=level,
+            instructions=system_instructions,
+        )
         if compacted:
             yield {
                 "type": "compaction.completed",
@@ -573,6 +581,7 @@ class AgentEngine:
         input_items: list[dict[str, Any]],
         *,
         level: str | None,
+        instructions: str,
     ) -> bool:
         if not self.config.runtime.auto_compress:
             return False
@@ -591,13 +600,13 @@ class AgentEngine:
             model.context_window_tokens,
             target_ratio=self.config.runtime.compression.target_ratio,
         )
-        compact_input = list(input_items)
+        compact_input = copy.deepcopy(input_items)
         compact_input.append(self._compaction_trigger_item(target_tokens))
         response = await self.model_client.create_response(
             input_items=compact_input,
             level=compact_level,
             tools=[PYTHON_TOOL],
-            instructions=self.system_instructions(),
+            instructions=instructions,
         )
         replacement_input = self._compaction_replacement_input(input_items, response)
         context_state = self._latest_context_state(thread_id)
@@ -739,6 +748,7 @@ class AgentEngine:
         *,
         input_items: list[dict[str, Any]],
         level: str | None,
+        instructions: str,
         cancel_event: asyncio.Event | None,
         previous_response_id: str | None = None,
     ) -> AsyncIterator[Any]:
@@ -746,7 +756,7 @@ class AgentEngine:
             input_items=input_items,
             level=level,
             tools=[PYTHON_TOOL],
-            instructions=self.system_instructions(),
+            instructions=instructions,
             previous_response_id=previous_response_id,
         )
         iterator = stream.__aiter__()
@@ -828,6 +838,28 @@ class AgentEngine:
             use_previous_response_id=True,
             pending_items=pending_items,
         )
+
+    def _ensure_system_instructions(self, thread_id: str) -> str:
+        existing = self._thread_system_instructions(thread_id)
+        if existing is not None:
+            return existing
+        instructions = self.system_instructions()
+        self.thread_store.append(
+            thread_id,
+            "item.system_instructions",
+            text=instructions,
+            fingerprint=context_fingerprint(instructions),
+        )
+        return instructions
+
+    def _thread_system_instructions(self, thread_id: str) -> str | None:
+        for event in self.thread_store.read(thread_id):
+            if event.get("type") != "item.system_instructions":
+                continue
+            text = event.get("text")
+            if isinstance(text, str) and text:
+                return text
+        return None
 
     def _level_uses_responses_api(self, level: str | None) -> bool:
         return self._model_api_for_level(level) == "responses"

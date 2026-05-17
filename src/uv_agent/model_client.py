@@ -459,8 +459,8 @@ def responses_payload(
     endpoint = provider.endpoint_for_api("responses")
     payload: dict[str, Any] = {
         "model": model.model,
-        "input": input_items,
-        "tools": tools,
+        "input": copy.deepcopy(input_items),
+        "tools": copy.deepcopy(tools),
         "tool_choice": "auto" if tools else "none",
         **provider.params,
         **endpoint.params,

@@ -59,6 +59,45 @@ class RoutedModelClient(FakeModelClient):
         return parse_responses_response(self.main)
 
 
+def make_test_config(
+    project_root: Path,
+    *,
+    api: str = "responses",
+    auto_compress: bool = False,
+    context_window_tokens: int = 100_000,
+    compression: CompressionConfig | None = None,
+    title_generation: TitleGenerationConfig | None = None,
+    default_level: str = "medium",
+) -> AppConfig:
+    return AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "default": ModelConfig(
+                name="default",
+                provider="p",
+                model="fake",
+                api=api,
+                context_window_tokens=context_window_tokens,
+                params={},
+            )
+        },
+        levels={
+            "medium": LevelConfig(name="medium", model="default", params={}),
+            "small": LevelConfig(name="small", model="default", params={}),
+        },
+        runtime=RuntimeConfig(
+            default_level=default_level,
+            auto_compress=auto_compress,
+            compression=compression or CompressionConfig(),
+            title_generation=title_generation or TitleGenerationConfig(enabled=False),
+        ),
+        runner=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+        ),
+    )
+
+
 def test_agent_exposes_only_python_runner_tool() -> None:
     assert PYTHON_TOOL["name"] == "run_python"
     assert PYTHON_TOOL["type"] == "function"
@@ -1346,6 +1385,121 @@ async def test_context_update_reappears_after_compaction(tmp_path: Path) -> None
     assert first
     assert second
     assert "After compaction rule." in str(second)
+
+
+@pytest.mark.asyncio
+async def test_system_instructions_are_persisted_before_first_model_request(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root, api="chat_completions")
+    client = FakeModelClient(
+        [
+            {
+                "id": "chatcmpl_1",
+                "output_text": "one",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "one"}],
+                    }
+                ],
+            },
+            {
+                "id": "chatcmpl_2",
+                "output_text": "two",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "two"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    thread_id = str([event async for event in engine.run_turn(user_text="one")][-1]["thread_id"])
+    stored = engine.thread_store.read(thread_id)
+    system_index = next(
+        index for index, event in enumerate(stored) if event["type"] == "item.system_instructions"
+    )
+    turn_index = next(index for index, event in enumerate(stored) if event["type"] == "turn.started")
+    frozen = stored[system_index]["text"]
+    assert system_index < turn_index
+    assert client.requests[0]["instructions"] == frozen
+
+    engine.config = make_test_config(project_root, api="chat_completions", default_level="small")
+    [event async for event in engine.run_turn(user_text="two", thread_id=thread_id)]
+
+    stored_after = engine.thread_store.read(thread_id)
+    assert sum(1 for event in stored_after if event["type"] == "item.system_instructions") == 1
+    assert client.requests[1]["instructions"] == frozen
+    assert "<default>medium</default>" in client.requests[1]["instructions"]
+    assert "<default>small</default>" not in client.requests[1]["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_uses_persisted_system_instructions(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        auto_compress=True,
+        context_window_tokens=20,
+        compression=CompressionConfig(model_level="small", trigger_ratio=0.1, min_tokens=1),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "ok",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "summary",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "summary"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    thread_id = str([event async for event in engine.run_turn(user_text="hello")][-1]["thread_id"])
+    frozen = next(
+        event["text"]
+        for event in engine.thread_store.read(thread_id)
+        if event["type"] == "item.system_instructions"
+    )
+
+    assert client.requests[0]["instructions"] == frozen
+    assert client.requests[1]["instructions"] == frozen
+    assert client.requests[0]["instructions"] == client.requests[1]["instructions"]
 
 
 def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> None:
