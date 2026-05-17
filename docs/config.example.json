@@ -5,6 +5,14 @@
       "api_key_env": "UV_AGENT_PRIMARY_API_KEY",
       "headers": {},
       "params": {},
+      "message_passthrough": {
+        "assistant": []
+      },
+      "reasoning_display": {
+        "assistant_message_fields": [],
+        "stream_delta_fields": [],
+        "unknown_text_delta_as_reasoning": false
+      },
       "responses": {
         "path": "/responses",
         "params": {}
@@ -38,6 +46,20 @@
       "api": "chat_completions",
       "context_window_tokens": 64000,
       "supports_images": false,
+      "message_passthrough": {
+        "assistant": [
+          "reasoning_content"
+        ]
+      },
+      "reasoning_display": {
+        "assistant_message_fields": [
+          "reasoning_content"
+        ],
+        "stream_delta_fields": [
+          "reasoning_content"
+        ],
+        "unknown_text_delta_as_reasoning": false
+      },
       "params": {
         "temperature": 0.2
       }

@@ -90,7 +90,7 @@ The transcript renders model output and runtime activity as compact timeline
 items:
 
 - user and assistant messages
-- model reasoning summaries
+- configured provider reasoning fields, shown as expandable reasoning details
 - Python run start/result events
 - stdout/stderr summaries and truncation markers
 - structured runtime events such as `progress`, `result`, `look_at`,
