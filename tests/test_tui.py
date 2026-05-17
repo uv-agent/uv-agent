@@ -25,6 +25,7 @@ from uv_agent.session import ThreadStore
 from uv_agent.tui.app import (
     EmptyState,
     ExpandableTranscriptCell,
+    FoldedProcessCell,
     FullscreenPanel,
     ImageAttachmentCell,
     ImagePreviewPanel,
@@ -228,7 +229,7 @@ class StableRoundEngine(AgentEngine):
             "turn_id": turn_id,
             "call": output[1],
             "tool_call_index": 0,
-            "output": tool_output,
+            "output": {"type": "function_call_output", "call_id": "call_1", "output": __import__("json").dumps(payload)},
         }
         yield {"type": "assistant.delta", "thread_id": thread_id, "turn_id": turn_id, "text": "Done."}
         final_response = ModelResponse(
@@ -796,6 +797,12 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
     thread_id = engine.thread_store.create_thread("Mixed response")
     engine.thread_store.append(
         thread_id,
+        "item.user",
+        turn_id="turn_1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+    )
+    engine.thread_store.append(
+        thread_id,
         "item.model_response",
         turn_id="turn_1",
         response_id="resp_1",
@@ -815,6 +822,24 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
         reasoning_text="thinking first",
         usage={},
     )
+    engine.thread_store.append(
+        thread_id,
+        "item.runner_result",
+        turn_id="turn_1",
+        call_id="call_1",
+        result={
+            "script_id": "scr_1",
+            "run_id": "run_1",
+            "returncode": 0,
+            "timed_out": False,
+            "interrupted": False,
+            "truncated": False,
+            "stdout": "ok\n",
+            "stderr": "",
+            "events": [],
+            "run_log_path": "",
+        },
+    )
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
     app = UvAgentApp(project_root=project_root)
 
@@ -823,23 +848,165 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
         await pilot.pause()
 
         children = list(app.query_one("#transcript", TranscriptScroll).children)
-        reasoning_index = next(
+        fold_index = next(
             index
             for index, child in enumerate(children)
-            if isinstance(child, ExpandableTranscriptCell) and child.detail_title == "reasoning_details"
+            if isinstance(child, FoldedProcessCell)
         )
         assistant_index = next(
             index
             for index, child in enumerate(children)
             if isinstance(child, TranscriptCell) and child.has_class("assistant")
         )
-        tool_index = next(
+        result_index = next(
             index
             for index, child in enumerate(children)
-            if isinstance(child, TranscriptCell) and "run_python" in str(child.render())
+            if (
+                isinstance(child, ExpandableTranscriptCell)
+                and "run_1" in child.details
+                and index > assistant_index
+            )
         )
-        assert reasoning_index < assistant_index < tool_index
+        fold_cell = children[fold_index]
+        assert isinstance(fold_cell, FoldedProcessCell)
+        assert fold_cell.collapsed is True
+        assert len(fold_cell.cells) == 4
+        user_index = next(
+            index
+            for index, child in enumerate(children)
+            if isinstance(child, TranscriptCell) and child.has_class("user")
+        )
+        assert fold_index == user_index + 1
+        assert any(
+            isinstance(cell, ExpandableTranscriptCell)
+            and cell.detail_title == "reasoning_details"
+            and "thinking first" in cell.details
+            for cell in fold_cell.cells
+        )
+        assert any(
+            isinstance(cell, ExpandableTranscriptCell) and "print('ok')" in cell.details
+            for cell in fold_cell.cells
+        )
+        assert any(
+            isinstance(cell, TranscriptCell)
+            and cell.has_class("assistant")
+            and cell.copy_text == "I will inspect first."
+            for cell in fold_cell.cells
+        )
+        result_cell = children[result_index]
+        assert isinstance(result_cell, ExpandableTranscriptCell)
+        assert "print('ok')" not in result_cell.details
+        assert fold_index < assistant_index < result_index
         assert children[assistant_index].copy_text == "I will inspect first."
+
+
+@pytest.mark.asyncio
+async def test_tui_live_tool_call_and_result_are_separate_cells(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+    payload = {
+        "script_id": "scr_live",
+        "run_id": "run_live",
+        "returncode": 0,
+        "timed_out": False,
+        "interrupted": False,
+        "truncated": False,
+        "stdout": "ok\n",
+        "stderr": "",
+        "events": [],
+        "run_log_path": "",
+    }
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app._append_tool_started(
+            {
+                "call": {
+                    "call_id": "call_live",
+                    "name": "run_python",
+                    "arguments": '{"code":"print(42)\\nprint(43)"}',
+                },
+                "tool_call_index": 0,
+            }
+        )
+        app._append_tool_output(
+            {
+                "call": {
+                    "call_id": "call_live",
+                    "name": "run_python",
+                    "arguments": '{"code":"print(42)\\nprint(43)"}',
+                },
+                "output": {"output": __import__("json").dumps(payload)},
+            }
+        )
+        await pilot.pause()
+
+        call_cell, result_cell = app.query(ExpandableTranscriptCell).nodes
+        assert "print(42)" in str(call_cell.render())
+        assert "print(43)" in call_cell.details
+        assert "run_live" in result_cell.details
+        assert "ok" in result_cell.details
+        assert "print(42)" not in str(result_cell.render())
+        assert "print(43)" not in result_cell.details
+
+
+@pytest.mark.asyncio
+async def test_tui_live_multiple_tool_calls_keep_call_result_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        for index in range(2):
+            call = {
+                "call_id": f"call_{index}",
+                "name": "run_python",
+                "arguments": f'{{"code":"print({index})"}}',
+            }
+            payload = {
+                "script_id": f"scr_{index}",
+                "run_id": f"run_{index}",
+                "returncode": 0,
+                "timed_out": False,
+                "interrupted": False,
+                "truncated": False,
+                "stdout": f"out {index}\n",
+                "stderr": "",
+                "events": [],
+                "run_log_path": "",
+            }
+            app._append_tool_started({"call": call, "tool_call_index": index})
+            app._append_tool_output(
+                {
+                    "call": call,
+                    "tool_call_index": index,
+                    "output": {"output": __import__("json").dumps(payload)},
+                }
+            )
+        await pilot.pause()
+
+        cells = app.query(ExpandableTranscriptCell).nodes
+        assert len(cells) == 4
+        assert "print(0)" in cells[0].details
+        assert "run_0" in cells[1].details
+        assert "print(0)" not in cells[1].details
+        assert "print(1)" in cells[2].details
+        assert "run_1" in cells[3].details
+        assert "print(1)" not in cells[3].details
 
 
 @pytest.mark.asyncio
@@ -865,26 +1032,101 @@ async def test_tui_live_rounds_do_not_duplicate_reasoning_or_merge_final_text(
             for child in children
             if isinstance(child, ExpandableTranscriptCell) and child.detail_title == "reasoning_details"
         ]
+        fold_cells = [
+            child
+            for child in children
+            if isinstance(child, FoldedProcessCell)
+        ]
         assistant_cells = [
             child
             for child in children
             if isinstance(child, TranscriptCell) and child.has_class("assistant")
         ]
-        tool_cells = [
-            child
-            for child in children
-            if isinstance(child, (TranscriptCell, ExpandableTranscriptCell)) and "python" in str(child.render())
-        ]
-
         assert len(reasoning_cells) == 1
+        assert len(fold_cells) == 1
+        assert fold_cells[0].collapsed is True
         assert reasoning_cells[0].details.count("provider reasoning") == 1
+        assert reasoning_cells[0].has_class("process_fold_hidden")
+        assert assistant_cells[0].has_class("process_fold_hidden")
+        assert any(
+            isinstance(cell, ExpandableTranscriptCell)
+            and "print(1)" in str(cell.render())
+            and cell.has_class("process_fold_hidden")
+            for cell in fold_cells[0].cells
+        )
         assert [cell.copy_text for cell in assistant_cells] == ["I will inspect first.", "Done."]
-        assert children.index(reasoning_cells[0]) < children.index(assistant_cells[0]) < children.index(tool_cells[0])
-        assert children.index(tool_cells[-1]) < children.index(assistant_cells[1])
+        user_cell = next(child for child in children if isinstance(child, TranscriptCell) and child.has_class("user"))
+        assert children.index(fold_cells[0]) == children.index(user_cell) + 1
+        assert children.index(fold_cells[0]) < children.index(assistant_cells[0])
+        assert children.index(fold_cells[0]) < children.index(assistant_cells[1])
 
         stored = engine.thread_store.read(str(app.thread_id))
         assert [event["type"] for event in stored].count("item.model_response") == 2
         assert not any(event["type"] == "item.tool_call" for event in stored)
+
+
+@pytest.mark.asyncio
+async def test_tui_process_fold_expands_original_cells(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = StableRoundEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app._start_turn("go")
+        await pilot.pause()
+        await pilot.pause()
+
+        fold_cell = next(
+            child
+            for child in app.query_one("#transcript", TranscriptScroll).children
+            if isinstance(child, FoldedProcessCell)
+        )
+        assert all(cell.has_class("process_fold_hidden") for cell in fold_cell.cells)
+
+        await pilot.click(fold_cell)
+        await pilot.pause()
+
+        assert fold_cell.collapsed is False
+        assert all(not cell.has_class("process_fold_hidden") for cell in fold_cell.cells)
+        assert any(
+            isinstance(cell, ExpandableTranscriptCell)
+            and cell.detail_title == "reasoning_details"
+            and "provider reasoning" in cell.details
+            for cell in fold_cell.cells
+        )
+        assert any(
+            isinstance(cell, ExpandableTranscriptCell)
+            and "print(1)" in str(cell.render())
+            for cell in fold_cell.cells
+        )
+        assert any(
+            isinstance(cell, ExpandableTranscriptCell)
+            and "run_1" in cell.details
+            for cell in fold_cell.cells
+        )
+        assert any(
+            isinstance(cell, TranscriptCell)
+            and cell.has_class("assistant")
+            and cell.copy_text == "I will inspect first."
+            for cell in fold_cell.cells
+        )
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+
+        assert fold_cell.collapsed is True
+        assert all(cell.has_class("process_fold_hidden") for cell in fold_cell.cells)
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+
+        assert fold_cell.collapsed is False
+        assert all(not cell.has_class("process_fold_hidden") for cell in fold_cell.cells)
 
 
 @pytest.mark.asyncio
@@ -1018,6 +1260,8 @@ async def test_tui_renders_tool_delta_before_tool_started(
         await pilot.pause()
 
         assert len(app.query(".tool_pending").nodes) == 1
+        cell = app.query_one(ExpandableTranscriptCell)
+        assert "print(1)" in cell.details
 
 
 @pytest.mark.asyncio

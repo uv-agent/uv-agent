@@ -33,6 +33,76 @@ def parse_tool_payload(output_item: dict[str, Any]) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def tool_call_args(call: dict[str, Any]) -> dict[str, Any]:
+    """Decode a run_python function call's JSON arguments."""
+    raw_args = call.get("arguments") or ""
+    if not isinstance(raw_args, str) or not raw_args:
+        return {}
+    try:
+        args = json.loads(raw_args)
+    except json.JSONDecodeError:
+        return {}
+    return args if isinstance(args, dict) else {}
+
+
+def tool_call_code(call: dict[str, Any] | None) -> str:
+    """Return the full Python source embedded in a run_python call."""
+    if not isinstance(call, dict):
+        return ""
+    return str(tool_call_args(call).get("code") or "").strip()
+
+
+def tool_call_preview_line(call: dict[str, Any] | None, *, max_chars: int = 90) -> str:
+    """Return the first meaningful Python source line for compact summaries."""
+    code = tool_call_code(call)
+    if not code:
+        return ""
+    first = next((line.strip() for line in code.splitlines() if line.strip()), "")
+    if len(first) > max_chars:
+        first = first[: max_chars - 3].rstrip() + "..."
+    return first
+
+
+def tool_call_summary_markup(call: dict[str, Any]) -> str:
+    """Render a run_python call before a result is available."""
+    name = str(call.get("name") or "python")
+    running = str(call.get("_status_label") or "running")
+    preview = tool_call_preview_line(call)
+    lines = [
+        f"[#7dd3fc]{GLYPH_RUNNING}[/#7dd3fc] [bold]{escape(name)}[/bold] [dim]{escape(running)}[/dim]"
+    ]
+    if preview:
+        lines.append(f"  [dim]{GLYPH_NESTED} script[/dim] {escape(preview)}")
+    return "\n".join(lines)
+
+
+def tool_call_detail_markup(call: dict[str, Any]) -> str:
+    """Render hidden details for a run_python call, including full source."""
+    args = tool_call_args(call)
+    lines = [
+        "[dim]call[/dim]",
+        f"name: {escape(str(call.get('name') or 'python'))}",
+    ]
+    call_id = str(call.get("call_id") or "")
+    if call_id:
+        lines.append(f"call_id: {escape(call_id)}")
+    code = str(args.get("code") or "").strip()
+    if code:
+        lines.append("[dim]script[/dim]")
+        lines.append(escape(code))
+    if args:
+        remainder = {key: value for key, value in args.items() if key != "code"}
+        if remainder:
+            lines.append("[dim]arguments[/dim]")
+            lines.append(escape(json.dumps(remainder, ensure_ascii=False, indent=2)))
+    else:
+        raw_args = str(call.get("arguments") or "").strip()
+        if raw_args:
+            lines.append("[dim]arguments[/dim]")
+            lines.append(escape(raw_args))
+    return "\n".join(lines)
+
+
 def short_block(value: str, *, max_lines: int = 8, max_chars: int = 1800) -> str:
     """Return a terminal-friendly preview of stdout or stderr."""
     value = value.strip()

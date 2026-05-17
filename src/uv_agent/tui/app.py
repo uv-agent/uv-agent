@@ -50,6 +50,9 @@ from uv_agent.tui.formatting import (
     format_tokens,
     parse_tool_payload,
     short_thread,
+    tool_call_detail_markup,
+    tool_call_preview_line,
+    tool_call_summary_markup,
     tool_detail_markup,
     tool_result_markup,
     tool_timeline_markup,
@@ -532,6 +535,11 @@ class ThreadRunState:
     reasoning_cell: TranscriptCell | None = None
     tool_cells: dict[str, TranscriptCell] = field(default_factory=dict)
     tool_delta_cells: dict[int, TranscriptCell] = field(default_factory=dict)
+    tool_delta_calls: dict[int, dict[str, Any]] = field(default_factory=dict)
+    process_cells: list[TranscriptCell] = field(default_factory=list)
+    process_fold_cell: TranscriptCell | None = None
+    process_collapsed: bool = False
+    process_anchor_cell: TranscriptCell | None = None
 
 
 class TranscriptScroll(VerticalScroll):
@@ -803,6 +811,15 @@ class TranscriptCell(Static):
         text-style: italic;
     }
 
+    TranscriptCell.process_fold {
+        background: #0c1219;
+        color: #aeb7c4;
+    }
+
+    TranscriptCell.process_fold_hidden {
+        display: none;
+    }
+
     TranscriptCell.tool_pending {
         background: #0e141b;
         color: #c8d2e0;
@@ -951,7 +968,79 @@ class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
             app._open_tool_details_panel(self)
 
     def _content(self) -> str:
-        return f"{self.summary}\n[dim][details][/dim]"
+        lines = self.summary.splitlines() or [""]
+        lines[0] = f"{lines[0]} [dim][details][/dim]"
+        return "\n".join(lines)
+
+
+class FoldedProcessCell(TranscriptCell, can_focus=True):
+    """A transcript-level fold that reveals the original in-between cells."""
+
+    def __init__(
+        self,
+        cells: list[TranscriptCell],
+        *,
+        collapsed: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        self.cells = list(cells)
+        self.collapsed = collapsed
+        super().__init__("", **kwargs)
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.toggle()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape" and hasattr(self.app, "action_focus_composer"):
+            event.stop()
+            self.app.action_focus_composer()
+
+    def set_cells(self, cells: list[TranscriptCell]) -> None:
+        self.cells = list(cells)
+        self._apply_visibility()
+        self._refresh()
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self.collapsed = collapsed
+        self._apply_visibility()
+        self._refresh()
+        try:
+            self.app._process_fold_toggled(self, collapsed)
+        except Exception:
+            pass
+
+    def toggle(self) -> None:
+        self.set_collapsed(not self.collapsed)
+
+    def on_mount(self) -> None:
+        self._apply_visibility()
+        self._refresh()
+
+    def _apply_visibility(self) -> None:
+        for cell in self.cells:
+            try:
+                if self.collapsed:
+                    cell.add_class("process_fold_hidden")
+                else:
+                    cell.remove_class("process_fold_hidden")
+            except Exception:
+                continue
+
+    def _refresh(self) -> None:
+        try:
+            text = getattr(self.app, "_text", lambda key: key)
+        except Exception:
+            text = lambda key: key
+        count = len(self.cells)
+        key = "process_fold_collapsed" if self.collapsed else "process_fold_expanded"
+        state = text(key)
+        step_label = text("process_fold_step" if count == 1 else "process_fold_steps")
+        hint = text("process_fold_expand_hint" if self.collapsed else "process_fold_collapse_hint")
+        self.update(
+            f"[dim]{escape(state)} · {count} {escape(step_label)}[/dim] "
+            f"[dim]{escape(hint)}[/dim]"
+        )
 
 
 class ImageAttachmentCell(TranscriptCell, can_focus=True):
@@ -1294,6 +1383,7 @@ class UvAgentApp(App[None]):
     BINDINGS = [
         Binding("ctrl+enter", "submit_composer", "Send", priority=True),
         Binding("ctrl+j", "submit_composer", "Send", priority=True),
+        Binding("ctrl+g", "toggle_visible_process_folds", "Process", priority=True),
         Binding("tab", "toggle_composer_height", "Height", priority=True),
         Binding("ctrl+s", "toggle_status_panel", "Status", priority=True),
         Binding("ctrl+o", "open_threads", "Threads", priority=True),
@@ -1323,6 +1413,8 @@ class UvAgentApp(App[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "toggle_tool_details":
+            return self.is_mounted and self.screen is self.default_screen
+        if action == "toggle_visible_process_folds":
             return self.is_mounted and self.screen is self.default_screen
         if action in {"attach_clipboard_image", "preview_images"}:
             return self.is_mounted and self.screen is self.default_screen
@@ -1359,6 +1451,10 @@ class UvAgentApp(App[None]):
         self._transcript_has_content = False
         self._reasoning_cell: TranscriptCell | None = None
         self._reasoning_buffer = ""
+        self._process_cells: list[TranscriptCell] = []
+        self._process_fold_cell: FoldedProcessCell | None = None
+        self._process_collapsed = False
+        self._process_anchor_cell: TranscriptCell | None = None
         self._last_composer_text = ""
         self._interrupt_armed = False
         self._last_interrupt_request_at = 0.0
@@ -1374,6 +1470,7 @@ class UvAgentApp(App[None]):
         self._composer_height_override: str | None = None
         self._composer_expanded = False
         self._pending_images: list[PendingImage] = []
+        self._tool_delta_calls: dict[int, dict[str, Any]] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -1557,8 +1654,13 @@ class UvAgentApp(App[None]):
             self._reasoning_buffer = ""
             self._tool_cells.clear()
             self._tool_delta_cells.clear()
+            self._tool_delta_calls.clear()
+            self._process_cells = []
+            self._process_fold_cell = None
+            self._process_collapsed = False
+            self._process_anchor_cell = None
             self._interrupt_armed = False
-            self._append_user(prompt)
+            self._process_anchor_cell = self._append_user(prompt)
             for image_path in image_paths or []:
                 self._append_cell(
                     f"[dim]{escape(self._text('image_pending_sent'))}[/dim] "
@@ -1626,10 +1728,18 @@ class UvAgentApp(App[None]):
                             run_state,
                         )
                     output = list(getattr(response, "output", []) or [])
-                    if any(entry.get("type") == "function_call" for entry in output):
+                    has_tool_call = any(entry.get("type") == "function_call" for entry in output)
+                    if has_tool_call:
                         await self._handle_thread_event(
                             item_thread_id,
                             "assistant.response_with_tools",
+                            {},
+                            run_state,
+                        )
+                    else:
+                        await self._handle_thread_event(
+                            item_thread_id,
+                            "assistant.final_response_started",
                             {},
                             run_state,
                         )
@@ -1804,6 +1914,11 @@ class UvAgentApp(App[None]):
         run_state.reasoning_cell = self._reasoning_cell
         run_state.tool_cells = dict(self._tool_cells)
         run_state.tool_delta_cells = dict(self._tool_delta_cells)
+        run_state.tool_delta_calls = dict(self._tool_delta_calls)
+        run_state.process_cells = list(self._process_cells)
+        run_state.process_fold_cell = self._process_fold_cell
+        run_state.process_collapsed = self._process_collapsed
+        run_state.process_anchor_cell = self._process_anchor_cell
 
     def _sync_active_from_run_state(self, run_state: ThreadRunState) -> None:
         self._assistant_buffer = run_state.assistant_buffer
@@ -1812,6 +1927,15 @@ class UvAgentApp(App[None]):
         self._reasoning_cell = run_state.reasoning_cell
         self._tool_cells = dict(run_state.tool_cells)
         self._tool_delta_cells = dict(run_state.tool_delta_cells)
+        self._tool_delta_calls = dict(run_state.tool_delta_calls)
+        self._process_cells = list(run_state.process_cells)
+        self._process_fold_cell = (
+            run_state.process_fold_cell
+            if isinstance(run_state.process_fold_cell, FoldedProcessCell)
+            else None
+        )
+        self._process_collapsed = run_state.process_collapsed
+        self._process_anchor_cell = run_state.process_anchor_cell
 
     async def _handle_thread_event(
         self,
@@ -1838,6 +1962,11 @@ class UvAgentApp(App[None]):
                 run_state.assistant_cell = None
             elif event_type == "tool.delta":
                 run_state.status = self._text("running_python")
+            elif event_type == "tool.started":
+                run_state.reasoning_buffer = ""
+                run_state.reasoning_cell = None
+            elif event_type == "assistant.final_response_started" and run_state.process_cells:
+                run_state.process_collapsed = True
             return
         self._sync_active_from_run_state(run_state)
         if event_type == "assistant.delta":
@@ -1854,8 +1983,12 @@ class UvAgentApp(App[None]):
         elif event_type == "tool.delta":
             self._append_tool_delta(item)
         elif event_type == "assistant.response_with_tools":
+            self._track_current_assistant_cell_as_process()
             self._seal_assistant_round()
+        elif event_type == "assistant.final_response_started":
+            self._collapse_process_cells()
         elif event_type == "tool.started":
+            self._clear_pending_reasoning()
             self._seal_assistant_round()
             self._append_tool_started(item)
         elif event_type == "tool.output":
@@ -1925,6 +2058,14 @@ class UvAgentApp(App[None]):
             return
         self._open_tool_details_panel(cell)
 
+    def action_toggle_visible_process_folds(self) -> None:
+        folds = self._visible_process_fold_cells()
+        if not folds:
+            return
+        collapse = all(not fold.collapsed for fold in folds)
+        for fold in folds:
+            fold.set_collapsed(collapse)
+
     def action_attach_clipboard_image(self) -> None:
         try:
             model = self.engine.config.model_for_level(self.level)
@@ -1962,7 +2103,24 @@ class UvAgentApp(App[None]):
             child
             for child in transcript.children
             if isinstance(child, ExpandableTranscriptCell)
+            and not child.has_class("process_fold_hidden")
         ]
+
+    def _visible_process_fold_cells(self) -> list[FoldedProcessCell]:
+        try:
+            transcript = self.query_one("#transcript", TranscriptScroll)
+        except NoMatches:
+            return []
+        viewport_top = transcript.scroll_y
+        viewport_bottom = viewport_top + transcript.scrollable_content_region.height
+        folds: list[FoldedProcessCell] = []
+        for child in transcript.children:
+            if not isinstance(child, FoldedProcessCell):
+                continue
+            region = child.virtual_region
+            if region.y < viewport_bottom and region.y + region.height > viewport_top:
+                folds.append(child)
+        return folds
 
     def _latest_expandable_cell(self) -> ExpandableTranscriptCell | None:
         cells = self._expandable_cells()
@@ -2233,10 +2391,10 @@ class UvAgentApp(App[None]):
             )
         self._append_cell("\n".join(lines), "event")
 
-    def _append_user(self, text: str, *, before: object | None = None) -> None:
+    def _append_user(self, text: str, *, before: object | None = None) -> TranscriptCell:
         label = "你" if self.language.is_chinese else "you"
         # Codex-style "› " prefix keeps user turns easy to spot.
-        self._append_cell(
+        return self._append_cell(
             f"[bold #7dd3fc]› {label}[/bold #7dd3fc]\n{escape(text)}",
             "user",
             before=before,
@@ -2291,10 +2449,12 @@ class UvAgentApp(App[None]):
         summary, details = self._reasoning_markup(stripped)
         if isinstance(self._reasoning_cell, ExpandableTranscriptCell):
             self._reasoning_cell.set_details(summary, details)
+            cell = self._reasoning_cell
         elif self._reasoning_cell is not None:
-            self._replace_with_reasoning_cell(self._reasoning_cell, summary, details)
+            cell = self._replace_with_reasoning_cell(self._reasoning_cell, summary, details)
         else:
-            self._append_reasoning_cell(summary, details)
+            cell = self._append_reasoning_cell(summary, details)
+        self._track_process_cell(cell)
         self._reasoning_cell = None
         self._reasoning_buffer = ""
 
@@ -2304,43 +2464,124 @@ class UvAgentApp(App[None]):
         self._reasoning_cell = None
         self._reasoning_buffer = ""
 
-    def _append_reasoning_history(self, text: str, *, before: object | None = None) -> None:
+    def _append_reasoning_history(
+        self,
+        text: str,
+        *,
+        before: object | None = None,
+    ) -> ExpandableTranscriptCell | None:
         stripped = text.strip()
         if not stripped:
-            return
+            return None
         summary, details = self._reasoning_markup(stripped)
-        self._append_reasoning_cell(summary, details, before=before)
+        return self._append_reasoning_cell(summary, details, before=before)
+
+    def _track_process_cell(self, cell: TranscriptCell | None) -> None:
+        if cell is None or isinstance(cell, FoldedProcessCell):
+            return
+        if cell not in self._process_cells:
+            self._process_cells.append(cell)
+        if self._process_fold_cell is not None:
+            self._process_fold_cell.set_cells(self._process_cells)
+
+    def _process_fold_toggled(self, cell: FoldedProcessCell, collapsed: bool) -> None:
+        if cell is self._process_fold_cell:
+            self._process_collapsed = collapsed
+            run_state = self._active_run_state()
+            if run_state is not None:
+                run_state.process_collapsed = collapsed
+
+    def _replace_process_cell(self, old_cell: TranscriptCell, new_cell: TranscriptCell) -> None:
+        self._process_cells = [
+            new_cell if cell is old_cell else cell
+            for cell in self._process_cells
+        ]
+        if self._process_fold_cell is not None:
+            self._process_fold_cell.set_cells(self._process_cells)
+
+    def _collapse_process_cells(self) -> None:
+        if self._process_collapsed or not self._process_cells:
+            return
+        self._append_process_fold_cell(
+            self._process_cells,
+            collapsed=True,
+            after=self._process_anchor_cell,
+        )
+        self._process_collapsed = True
+
+    def _track_current_assistant_cell_as_process(self) -> None:
+        if self._assistant_cell is not None:
+            self._track_process_cell(self._assistant_cell)
+
+    def _append_process_fold_cell(
+        self,
+        cells: list[TranscriptCell],
+        *,
+        collapsed: bool = True,
+        before: object | None = None,
+        after: TranscriptCell | None = None,
+    ) -> FoldedProcessCell:
+        self._mark_transcript_content()
+        insert_before = before
+        if insert_before is None and after is not None:
+            insert_before = self._cell_after(after)
+        if insert_before is None:
+            insert_before = cells[0] if cells else None
+        cell = FoldedProcessCell(
+            cells,
+            collapsed=collapsed,
+            classes="process_fold",
+            markup=True,
+        )
+        self.query_one("#transcript", VerticalScroll).mount(cell, before=insert_before)
+        self._process_fold_cell = cell
+        self._scroll_end()
+        return cell
+
+    def _cell_after(self, cell: TranscriptCell) -> object | None:
+        try:
+            children = list(self.query_one("#transcript", VerticalScroll).children)
+            index = children.index(cell)
+        except (NoMatches, ValueError):
+            return None
+        return children[index + 1] if index + 1 < len(children) else None
 
     def _append_tool_output(self, item: dict[str, Any]) -> None:
         payload = parse_tool_payload(item.get("output", {}))
+        call = item.get("call") if isinstance(item.get("call"), dict) else None
         delta_index = item.get("tool_call_index")
+        if (call is None or not tool_call_preview_line(call)) and isinstance(delta_index, int):
+            call = self._tool_delta_calls.pop(delta_index, None) or call
+        call_id = str((call or {}).get("call_id") or item.get("call", {}).get("call_id") or "")
+        pending_cell = self._tool_cells.pop(call_id, None) if call_id else None
+        if pending_cell is None and isinstance(delta_index, int):
+            pending_cell = self._tool_delta_cells.pop(delta_index, None)
+            self._tool_delta_calls.pop(delta_index, None)
+        if pending_cell is not None and call is not None:
+            markup = self._tool_pending_markup(
+                str(call.get("name") or "python"),
+                "",
+                call={**call, "_status_label": self._text("python_called")},
+            )
+            details = tool_call_detail_markup(call)
+            if isinstance(pending_cell, ExpandableTranscriptCell):
+                pending_cell.set_details(markup, details)
+            elif tool_call_preview_line(call):
+                new_cell = self._replace_with_expandable_cell(pending_cell, markup, details, "tool_pending")
+                self._replace_process_cell(pending_cell, new_cell)
+            else:
+                pending_cell.update(markup)
         if payload is None:
             markup = f"[dim]{escape(self._text('python'))} {escape(self._text('python_completed'))}[/dim]"
-            cell = (
-                self._tool_delta_cells.pop(delta_index, None)
-                if isinstance(delta_index, int)
-                else None
-            )
-            if cell is None:
-                self._append_cell(markup, "event")
-            else:
-                cell.update(markup)
+            cell = self._append_cell(markup, "event")
+            self._track_process_cell(cell)
             return
 
         self._last_tool_payload = payload
         markup = tool_timeline_markup(payload)
         details = tool_detail_markup(payload)
-        cell = self._tool_cells.pop(str(item.get("call", {}).get("call_id") or ""), None)
-        if cell is None and isinstance(delta_index, int):
-            cell = self._tool_delta_cells.pop(delta_index, None)
-        if cell is None:
-            self._append_expandable_cell(markup, details, "event")
-        else:
-            if isinstance(cell, ExpandableTranscriptCell):
-                cell.set_details(markup, details)
-            else:
-                self._replace_with_expandable_cell(cell, markup, details, "event")
-            self._scroll_end()
+        cell = self._append_expandable_cell(markup, details, "event")
+        self._track_process_cell(cell)
         self._refresh_status(self._text("working"))
 
     def _append_tool_started(self, item: dict[str, Any]) -> None:
@@ -2349,7 +2590,7 @@ class UvAgentApp(App[None]):
         call_id = str(call.get("call_id") or "")
         name = str(call.get("name") or "python")
         detail = self._tool_call_preview(call)
-        markup = self._tool_pending_markup(name, detail)
+        markup = self._tool_pending_markup(name, detail, call=call)
         cell = (
             self._tool_delta_cells.pop(delta_index, None)
             if isinstance(delta_index, int)
@@ -2357,12 +2598,21 @@ class UvAgentApp(App[None]):
         )
         if cell is None and len(self._tool_delta_cells) == 1:
             _, cell = self._tool_delta_cells.popitem()
+        details = tool_call_detail_markup(call)
         if cell is None:
-            cell = self._append_cell(markup, "tool_pending")
+            if tool_call_preview_line(call):
+                cell = self._append_expandable_cell(markup, details, "tool_pending")
+            else:
+                cell = self._append_cell(markup, "tool_pending")
+        elif isinstance(cell, ExpandableTranscriptCell):
+            cell.set_details(markup, details)
         else:
-            cell.update(markup)
+            old_cell = cell
+            cell = self._replace_with_expandable_cell(cell, markup, details, "tool_pending")
+            self._replace_process_cell(old_cell, cell)
         if call_id:
             self._tool_cells[call_id] = cell
+        self._track_process_cell(cell)
         self._refresh_status(self._text("running_python"))
 
     def _append_tool_delta(self, item: dict[str, Any]) -> None:
@@ -2370,21 +2620,56 @@ class UvAgentApp(App[None]):
         index = int(getattr(delta, "index", 0))
         name = str(getattr(delta, "name", None) or "python")
         call = {
+            "call_id": getattr(delta, "call_id", "") or "",
+            "name": name,
             "arguments": getattr(delta, "arguments", "") or getattr(delta, "arguments_delta", ""),
         }
+        self._tool_delta_calls[index] = call
         detail = self._tool_call_preview(call)
-        markup = self._tool_pending_markup(name, detail)
+        markup = self._tool_pending_markup(name, detail, call=call)
         cell = self._tool_delta_cells.get(index)
         if cell is None:
-            self._tool_delta_cells[index] = self._append_cell(markup, "tool_pending")
+            if tool_call_preview_line(call):
+                cell = self._append_expandable_cell(
+                    markup,
+                    tool_call_detail_markup(call),
+                    "tool_pending",
+                )
+            else:
+                cell = self._append_cell(markup, "tool_pending")
+            self._tool_delta_cells[index] = cell
+        elif isinstance(cell, ExpandableTranscriptCell):
+            cell.set_details(markup, tool_call_detail_markup(call))
+        elif tool_call_preview_line(call):
+            old_cell = cell
+            cell = self._replace_with_expandable_cell(
+                cell,
+                markup,
+                tool_call_detail_markup(call),
+                "tool_pending",
+            )
+            self._replace_process_cell(old_cell, cell)
+            self._tool_delta_cells[index] = cell
         else:
             cell.update(markup)
+        self._track_process_cell(cell)
         self._refresh_status(self._text("running_python"))
 
-    def _tool_pending_markup(self, name: str, detail: str) -> str:
+    def _tool_pending_markup(
+        self,
+        name: str,
+        detail: str,
+        *,
+        call: dict[str, Any] | None = None,
+    ) -> str:
+        if call is not None and tool_call_preview_line(call):
+            return tool_call_summary_markup(
+                {**call, "_status_label": call.get("_status_label") or self._text("python_running")}
+            )
+        status = str((call or {}).get("_status_label") or self._text("python_running"))
         return (
             f"[#7dd3fc]⠿[/#7dd3fc] [bold]{escape(name)}[/bold] "
-            f"[dim]{escape(self._text('python_running'))}[/dim]{detail}"
+            f"[dim]{escape(status)}[/dim]{detail}"
         )
 
     def _append_image_attachment_cell(
@@ -2418,69 +2703,132 @@ class UvAgentApp(App[None]):
             marker = LoadOlderHistoryCell(has_more=has_more, classes="event", markup=True)
             transcript.mount(marker, before=insert_before)
             self._history_more_cell = marker
-        for event in events:
-            self._mount_history_event(event, before=insert_before)
+        self._mount_history_events(events, before=insert_before)
         self._mark_transcript_content()
+
+    def _mount_history_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        before: object | None = None,
+    ) -> None:
+        index = 0
+        while index < len(events):
+            event = events[index]
+            turn_id = str(event.get("turn_id") or "")
+            if not turn_id:
+                self._mount_history_event(event, before=before)
+                index += 1
+                continue
+
+            turn_events: list[dict[str, Any]] = []
+            while index < len(events):
+                next_event = events[index]
+                if str(next_event.get("turn_id") or "") == turn_id:
+                    turn_events.append(next_event)
+                    index += 1
+                    continue
+                break
+            self._mount_history_turn_events(turn_events, before=before)
+
+    def _mount_history_turn_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        before: object | None = None,
+    ) -> None:
+        process_cells: list[TranscriptCell] = []
+        anchor_cell: TranscriptCell | None = None
+        for event in events:
+            for cell in self._mount_history_event(event, before=before) or []:
+                if event.get("type") == "item.user":
+                    anchor_cell = cell
+                if self._history_cell_is_process(event, cell):
+                    process_cells.append(cell)
+        if process_cells:
+            self._append_process_fold_cell(
+                process_cells,
+                collapsed=True,
+                before=before,
+                after=anchor_cell,
+            )
+
+    def _history_cell_is_process(self, event: dict[str, Any], cell: TranscriptCell) -> bool:
+        event_type = event.get("type")
+        if event_type in {"item.runner_result", "item.reasoning_delta", "item.reasoning_partial"}:
+            return True
+        if event_type != "item.model_response":
+            return False
+        has_tool_call = any(
+            isinstance(item, dict) and item.get("type") == "function_call"
+            for item in event.get("output") or []
+        )
+        if has_tool_call:
+            return True
+        if cell.has_class("assistant"):
+            return False
+        if str(event.get("reasoning_text") or "").strip():
+            return True
+        return False
 
     def _mount_history_event(
         self,
         event: dict[str, Any],
         *,
         before: object | None = None,
-    ) -> None:
+    ) -> list[TranscriptCell]:
+        mounted: list[TranscriptCell] = []
         event_type = event.get("type")
         if event_type == "item.user":
-            self._append_user_from_history(event.get("item") or {}, before=before)
+            cell = self._append_user_from_history(event.get("item") or {}, before=before)
+            if cell is not None:
+                mounted.append(cell)
         elif event_type == "item.model_response":
-            self._append_reasoning_history(str(event.get("reasoning_text") or ""), before=before)
+            reasoning_cell = self._append_reasoning_history(str(event.get("reasoning_text") or ""), before=before)
+            if reasoning_cell is not None:
+                mounted.append(reasoning_cell)
             for item in event.get("output") or []:
                 item_type = item.get("type")
                 if item_type == "message":
                     text = self._message_item_text(item)
                     if text:
-                        self._append_cell(Markdown(text), "assistant", before=before, copy_text=text)
+                        mounted.append(self._append_cell(Markdown(text), "assistant", before=before, copy_text=text))
                 elif item_type == "function_call":
-                    self._append_tool_call_history(item, before=before)
+                    mounted.append(self._append_tool_call_history(item, before=before))
         elif event_type == "item.runner_result":
             result = event.get("result") or {}
             self._last_tool_payload = result
-            self._append_expandable_cell(
-                tool_timeline_markup(result),
-                tool_detail_markup(result),
-                "event",
-                before=before,
+            mounted.append(
+                self._append_expandable_cell(
+                    tool_timeline_markup(result),
+                    tool_detail_markup(result),
+                    "event",
+                    before=before,
+                )
             )
         elif event_type == "item.image_attachment":
             attachment = event.get("attachment") or {}
-            self._append_image_attachment_cell(attachment, before=before)
+            mounted.append(self._append_image_attachment_cell(attachment, before=before))
         elif event_type in {"item.reasoning_delta", "item.reasoning_partial"}:
-            self._append_reasoning_history(str(event.get("text") or ""), before=before)
+            cell = self._append_reasoning_history(str(event.get("text") or ""), before=before)
+            if cell is not None:
+                mounted.append(cell)
         elif event_type == "item.compaction":
-            self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event", before=before)
+            mounted.append(self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event", before=before))
+        return mounted
 
-    def _append_tool_call_history(self, item: dict[str, Any], *, before: object | None = None) -> None:
-        name = str(item.get("name") or "python")
-        detail = self._tool_call_preview(item)
-        self._append_cell(
-            f"[cyan]{escape(name)}[/cyan] [dim]{escape(self._text('python_called'))}[/dim]{detail}",
+    def _append_tool_call_history(self, item: dict[str, Any], *, before: object | None = None) -> ExpandableTranscriptCell:
+        return self._append_expandable_cell(
+            tool_call_summary_markup({**item, "_status_label": self._text("python_called")}),
+            tool_call_detail_markup(item),
             "event",
             before=before,
         )
 
     def _tool_call_preview(self, call: dict[str, Any]) -> str:
-        raw_args = call.get("arguments") or ""
-        try:
-            import json
-
-            args = json.loads(raw_args)
-        except Exception:
+        first = tool_call_preview_line(call, max_chars=72)
+        if not first:
             return ""
-        code = str(args.get("code") or "").strip()
-        if not code:
-            return ""
-        first = next((line.strip() for line in code.splitlines() if line.strip()), "")
-        if len(first) > 72:
-            first = first[:69].rstrip() + "..."
         return f"\n[dim]{escape(first)}[/dim]"
 
     def _append_cell(
@@ -2582,7 +2930,6 @@ class UvAgentApp(App[None]):
             empty_state = EmptyState()
             transcript.mount(empty_state)
             self.call_after_refresh(empty_state.tick)
-
     def _open_threads_panel(self) -> None:
         threads = self.engine.thread_store.list_threads()
         if not threads:
@@ -3221,20 +3568,39 @@ class UvAgentApp(App[None]):
         self._reasoning_buffer = ""
         self._tool_cells.clear()
         self._tool_delta_cells.clear()
+        self._tool_delta_calls.clear()
+        self._process_cells = []
+        self._process_fold_cell = None
+        self._process_collapsed = False
+        self._process_anchor_cell = None
         self._reset_transcript(show_empty=False)
         self._render_thread_history(thread_id)
         run_state = self._thread_runs.get(thread_id)
         if run_state is not None:
             if run_state.worker is not None:
+                if run_state.process_cells:
+                    self._process_cells = list(run_state.process_cells)
+                    self._process_collapsed = run_state.process_collapsed
+                    if run_state.process_collapsed and run_state.process_fold_cell is None:
+                        self._process_fold_cell = self._append_process_fold_cell(
+                            self._process_cells,
+                            collapsed=True,
+                            after=run_state.process_anchor_cell,
+                        )
+                        run_state.process_fold_cell = self._process_fold_cell
+                    elif isinstance(run_state.process_fold_cell, FoldedProcessCell):
+                        self._process_fold_cell = run_state.process_fold_cell
+                        self._process_fold_cell.set_cells(self._process_cells)
                 if run_state.reasoning_buffer:
                     first = run_state.reasoning_buffer.splitlines()[0]
                     if len(first) > 120:
                         first = first[:117].rstrip() + "..."
-                    self._reasoning_cell = self._append_cell(
-                        f"[dim]{escape(self._text('thinking'))}[/dim] [italic]{escape(first)}[/italic]",
-                        "event",
-                    )
-                    run_state.reasoning_cell = self._reasoning_cell
+                    if run_state.reasoning_cell is None:
+                        self._reasoning_cell = self._append_cell(
+                            f"[dim]{escape(self._text('thinking'))}[/dim] [italic]{escape(first)}[/italic]",
+                            "event",
+                        )
+                        run_state.reasoning_cell = self._reasoning_cell
                 if run_state.assistant_buffer:
                     self._assistant_buffer = run_state.assistant_buffer
                     self._assistant_cell = self._append_cell(
@@ -3263,8 +3629,7 @@ class UvAgentApp(App[None]):
             marker = LoadOlderHistoryCell(has_more=True, classes="event", markup=True)
             transcript.mount(marker)
             self._history_more_cell = marker
-        for event in events:
-            self._mount_history_event(event)
+        self._mount_history_events(events)
 
     def _load_older_thread_history(self) -> None:
         if not self.thread_id or self._history_before_offset is None:
@@ -3277,7 +3642,7 @@ class UvAgentApp(App[None]):
         )
         self._prepend_history_cells(events, has_more=has_more)
 
-    def _append_user_from_history(self, item: dict[str, Any], *, before: object | None = None) -> None:
+    def _append_user_from_history(self, item: dict[str, Any], *, before: object | None = None) -> TranscriptCell | None:
         self._reasoning_cell = None
         self._reasoning_buffer = ""
         parts = []
@@ -3285,7 +3650,8 @@ class UvAgentApp(App[None]):
             if content.get("type") in {"input_text", "text"}:
                 parts.append(str(content.get("text") or ""))
         if parts:
-            self._append_user("\n".join(parts), before=before)
+            return self._append_user("\n".join(parts), before=before)
+        return None
 
     def _model_response_text(self, output: list[dict[str, Any]]) -> str:
         parts: list[str] = []
