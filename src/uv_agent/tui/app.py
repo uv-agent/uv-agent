@@ -62,6 +62,7 @@ from uv_agent.tui.formatting import (
 
 
 COMPOSER_COLLAPSED_HEIGHT = 5
+COMPOSER_AUTO_EXPAND_LINES = 3
 COMPOSER_BOTTOM_RESERVED_ROWS = 2
 QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 MAX_COMPOSER_HISTORY = 50
@@ -1696,6 +1697,7 @@ class UvAgentApp(App[None]):
 
     def on_resize(self) -> None:
         self._refresh_status()
+        self.call_after_refresh(self._resize_composer)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id != "composer":
@@ -1705,17 +1707,17 @@ class UvAgentApp(App[None]):
         if self._composer_history_index is not None and current != self._composer_history_text():
             self._reset_composer_history_navigation()
         self._last_composer_text = current
-        self._resize_composer(current)
+        self._resize_composer()
         self._refresh_status()
         if current == "/" and previous == "":
             event.text_area.load_text("")
             self._last_composer_text = ""
-            self._resize_composer("")
+            self._resize_composer()
             self._open_command_palette()
         elif current in {"?", "？"} and previous == "":
             event.text_area.load_text("")
             self._last_composer_text = ""
-            self._resize_composer("")
+            self._resize_composer()
             self._open_help_panel()
         else:
             self._maybe_open_mention_picker(event.text_area, previous=previous, current=current)
@@ -1775,7 +1777,7 @@ class UvAgentApp(App[None]):
         composer.load_text("")
         self._last_composer_text = ""
         self._composer_height_override = None
-        self._resize_composer("")
+        self._resize_composer()
         if not prompt:
             prompt = self._text("image_only_prompt")
         if "\n" not in prompt and self._handle_command(prompt):
@@ -1978,7 +1980,7 @@ class UvAgentApp(App[None]):
             composer.load_text("")
             self._last_composer_text = ""
             self._composer_height_override = None
-            self._resize_composer("")
+            self._resize_composer()
             return
 
     def _remember_composer_input(self, text: str) -> None:
@@ -2031,7 +2033,7 @@ class UvAgentApp(App[None]):
         composer.load_text(text)
         composer.cursor_location = composer.document.end
         self._last_composer_text = text
-        self._resize_composer(text)
+        self._resize_composer()
         self._refresh_status()
 
     def _reset_composer_history_navigation(self) -> None:
@@ -2218,7 +2220,7 @@ class UvAgentApp(App[None]):
 
     def action_toggle_composer_height(self) -> None:
         self._composer_height_override = "collapsed" if self._composer_expanded else "expanded"
-        self._resize_composer(self.query_one("#composer", TextArea).text)
+        self._resize_composer()
 
     def action_focus_composer(self) -> None:
         composer = self.query_one("#composer", TextArea)
@@ -3541,7 +3543,7 @@ class UvAgentApp(App[None]):
             else:
                 composer.insert(replacement)
         self._last_composer_text = composer.text
-        self._resize_composer(composer.text)
+        self._resize_composer()
         composer.focus()
 
     def _open_status_panel(self) -> None:
@@ -4148,19 +4150,29 @@ class UvAgentApp(App[None]):
         self._open_fullscreen_panel(panel_title, markup, subtitle=self._text("panel_closes"))
         self._refresh_status()
 
-    def _resize_composer(self, text: str) -> None:
-        line_count = max(1, text.count("\n") + 1)
-        if line_count <= 4 and self._composer_height_override == "collapsed":
+    def _resize_composer(self) -> None:
+        try:
+            composer = self.query_one("#composer", TextArea)
+        except NoMatches:
+            return
+        line_count = self._composer_visual_line_count(composer)
+        if line_count < COMPOSER_AUTO_EXPAND_LINES and self._composer_height_override == "collapsed":
             self._composer_height_override = None
         if self._composer_height_override == "expanded":
             expanded = True
         elif self._composer_height_override == "collapsed":
             expanded = False
         else:
-            expanded = line_count > 4
+            expanded = line_count >= COMPOSER_AUTO_EXPAND_LINES
         self._composer_expanded = expanded
         height = self._expanded_composer_height() if expanded else COMPOSER_COLLAPSED_HEIGHT
-        self.query_one("#composer", TextArea).styles.height = height
+        composer.styles.height = height
+
+    def _composer_visual_line_count(self, composer: TextArea) -> int:
+        if composer.soft_wrap:
+            composer.wrapped_document.wrap(composer.wrap_width, tab_width=composer.indent_width)
+            return max(1, composer.wrapped_document.height)
+        return max(1, composer.document.line_count)
 
     def _expanded_composer_height(self) -> int:
         return max(

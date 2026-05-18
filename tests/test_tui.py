@@ -1698,7 +1698,7 @@ async def test_tui_composer_expands_and_collapses_with_tab_without_button(
         assert not app.query("#composer-toggle")
         assert str(footer.content)
 
-        composer.insert("1\n2\n3\n4\n5")
+        composer.insert("1\n2\n3")
         await pilot.pause()
 
         assert app._composer_expanded is True
@@ -1711,6 +1711,30 @@ async def test_tui_composer_expands_and_collapses_with_tab_without_button(
         assert app._composer_expanded is False
         assert composer.styles.height.value == 5
         assert str(footer.content)
+
+
+@pytest.mark.asyncio
+async def test_tui_composer_expands_on_three_visual_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(40, 30)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+
+        composer.insert("x" * (composer.wrap_width * 2 + 1))
+        await pilot.pause()
+
+        assert app._composer_visual_line_count(composer) == 3
+        assert app._composer_expanded is True
+        assert composer.styles.height.value == 13
 
 
 @pytest.mark.asyncio
