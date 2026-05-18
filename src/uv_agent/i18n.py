@@ -147,6 +147,8 @@ TEXT = {
         "status_scripts_saved": "scripts saved",
         "truncated": "truncated",
         "back_to_bottom": "Back to bottom",
+        "background_active": "background active",
+        "active_threads": "active threads",
     },
     "zh": {
         "idle": "空闲",
@@ -291,6 +293,8 @@ TEXT = {
         "status_scripts_saved": "个脚本已保存",
         "truncated": "已截断",
         "back_to_bottom": "回到底部",
+        "background_active": "后台活跃",
+        "active_threads": "活跃线程",
     },
 }
 

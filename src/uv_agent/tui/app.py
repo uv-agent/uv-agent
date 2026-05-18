@@ -85,6 +85,7 @@ class PanelPage:
     mention_kind: str | None = None
     mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None
     select_callback: Callable[[str], None] | None = None
+    close_on_select: bool = False
 
 
 class PickerOptionList(OptionList):
@@ -203,6 +204,7 @@ class FullscreenPanel(ModalScreen[str | None]):
         mention_kind: str | None = None,
         mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None,
         select_callback: Callable[[str], None] | None = None,
+        close_on_select: bool = False,
         navigation_enabled: bool = False,
     ) -> None:
         super().__init__()
@@ -218,6 +220,7 @@ class FullscreenPanel(ModalScreen[str | None]):
         self._filtered = list(self.items)
         self._option_ids: dict[str, str] = {}
         self._select_callback = select_callback
+        self._close_on_select = close_on_select
         self.can_navigate = navigation_enabled
         self._page_stack: list[PanelPage] = []
 
@@ -376,6 +379,7 @@ class FullscreenPanel(ModalScreen[str | None]):
         callback: Callable[[str], None],
         subtitle: str = "",
         initial_filter: str = "",
+        close_on_select: bool = False,
     ) -> None:
         self._page_stack.append(self._snapshot_page())
         self._load_page(
@@ -385,6 +389,7 @@ class FullscreenPanel(ModalScreen[str | None]):
                 subtitle=subtitle,
                 filter_value=initial_filter,
                 select_callback=callback,
+                close_on_select=close_on_select,
             )
         )
 
@@ -398,7 +403,10 @@ class FullscreenPanel(ModalScreen[str | None]):
 
     def _select_value(self, value: str) -> None:
         if self._select_callback is not None:
+            close_on_select = self._close_on_select
             self._select_callback(value)
+            if close_on_select:
+                self.close_navigation()
             return
         self.dismiss(value)
 
@@ -421,6 +429,7 @@ class FullscreenPanel(ModalScreen[str | None]):
             mention_kind=self.mention_kind,
             mention_items=self.mention_items,
             select_callback=self._select_callback,
+            close_on_select=self._close_on_select,
         )
 
     def _restore_previous_page(self) -> None:
@@ -435,6 +444,7 @@ class FullscreenPanel(ModalScreen[str | None]):
         self.mention_kind = page.mention_kind
         self.mention_items = page.mention_items
         self._select_callback = page.select_callback
+        self._close_on_select = page.close_on_select
         self._filtered = list(self.items)
         self._render_page(filter_value=page.filter_value, highlighted=page.highlighted)
 
@@ -1975,6 +1985,13 @@ class UvAgentApp(App[None]):
         run_state = self._active_run_state()
         return len(run_state.queue) if run_state is not None else 0
 
+    def _background_run_states(self) -> list[ThreadRunState]:
+        return [
+            run_state
+            for thread_id, run_state in self._thread_runs.items()
+            if not self._is_active_thread(thread_id)
+        ]
+
     def _run_state_for_thread(self, thread_id: str | None) -> ThreadRunState:
         if thread_id is None:
             thread_id = self.engine.thread_store.create_thread()
@@ -2373,6 +2390,7 @@ class UvAgentApp(App[None]):
     def _handle_command(self, prompt: str) -> bool:
         command, _, rest = prompt.partition(" ")
         if command == "/clear":
+            self._close_active_panel()
             self.thread_id = None
             self._assistant_buffer = ""
             self._assistant_cell = None
@@ -3303,6 +3321,19 @@ class UvAgentApp(App[None]):
             f"- host: {escape(host_environment_line())}",
             f"- language: {escape(self.language.name)}",
         ]
+        background_runs = self._background_run_states()
+        if background_runs:
+            lines.append(
+                f"- background: [cyan]{len(background_runs)} {escape(self._text('active_threads'))}[/cyan]"
+            )
+            for run_state in background_runs[:6]:
+                queue = f" · q{len(run_state.queue)}" if run_state.queue else ""
+                lines.append(
+                    f"  - {escape(short_thread(run_state.thread_id))}: "
+                    f"{escape(run_state.status)}{queue}"
+                )
+            if len(background_runs) > 6:
+                lines.append(f"  - ... {len(background_runs) - 6} more")
         if rules.rules:
             lines.append("")
             lines.append(f"[bold]{escape(self._text('rules'))}[/bold]")
@@ -3599,6 +3630,11 @@ class UvAgentApp(App[None]):
 
     def _open_mcp_panel(self) -> None:
         self.engine.refresh_config()
+        panel = self._active_fullscreen_panel()
+        if panel is not None and panel.can_navigate:
+            panel.close_navigation()
+            self.call_after_refresh(self._open_mcp_panel)
+            return
         self._open_picker(
             self._text("mcp"),
             self._mcp_mention_items(),
@@ -3608,6 +3644,11 @@ class UvAgentApp(App[None]):
 
     def _open_skills_panel(self) -> None:
         self.engine.refresh_config()
+        panel = self._active_fullscreen_panel()
+        if panel is not None and panel.can_navigate:
+            panel.close_navigation()
+            self.call_after_refresh(self._open_skills_panel)
+            return
         self._open_picker(
             self._text("skills"),
             self._skill_mention_items(),
@@ -3777,6 +3818,7 @@ class UvAgentApp(App[None]):
         mention_kind: str | None = None,
         mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None,
         navigate: bool = False,
+        close_on_select: bool = False,
     ) -> None:
         panel = self._active_fullscreen_panel()
         if panel is not None and panel.can_navigate:
@@ -3786,6 +3828,7 @@ class UvAgentApp(App[None]):
                 callback=callback,
                 subtitle=subtitle,
                 initial_filter=initial_filter,
+                close_on_select=close_on_select,
             )
             return
         panel = FullscreenPanel(
@@ -3796,6 +3839,7 @@ class UvAgentApp(App[None]):
             mention_kind=mention_kind,
             mention_items=mention_items,
             select_callback=callback if navigate else None,
+            close_on_select=close_on_select,
             navigation_enabled=navigate,
         )
 
@@ -3890,6 +3934,12 @@ class UvAgentApp(App[None]):
             footer = (
                 f"[dim]{escape(level_name)} · {escape(compact_context)} · "
                 f"{escape(short_thread(self.thread_id))}{queued}[/dim]"
+            )
+        background_count = len(self._background_run_states())
+        if background_count:
+            footer += (
+                f" [dim]·[/dim] [cyan]{background_count} "
+                f"{escape(self._text('background_active'))}[/cyan]"
             )
         self.query_one("#composer-footer", Static).update(footer)
         self._refresh_pending_images()

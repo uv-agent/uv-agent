@@ -843,6 +843,62 @@ async def test_tui_command_palette_thread_selection_closes_panel(
 
 
 @pytest.mark.asyncio
+async def test_tui_command_palette_clear_closes_panel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Current work")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app.thread_id = thread_id
+        await pilot.press("ctrl+p")
+        await pilot.press("c", "l")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.thread_id is None
+        assert not isinstance(app.screen_stack[-1], FullscreenPanel)
+
+
+@pytest.mark.asyncio
+async def test_tui_command_palette_skills_opens_leaf_picker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    skill_dir = project_root / ".agents" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\ndescription: demo skill\n---\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.press("s", "k")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("skills")
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        composer = app.query_one("#composer", TextArea)
+        assert composer.text == "@skill:demo "
+        assert not isinstance(app.screen_stack[-1], FullscreenPanel)
+
+
+@pytest.mark.asyncio
 async def test_tui_thread_picker_resumes_and_renders_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2336,6 +2392,17 @@ async def test_tui_clear_while_current_thread_runs_keeps_old_thread_backgrounded
         assert app.thread_id is None
         assert old_thread in app._thread_runs
         assert app.busy is False
+        footer = app.query_one("#composer-footer", Static)
+        assert app._text("background_active") in str(footer.content)
+
+        app._open_status_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert app._text("active_threads") in panel.body
+        assert old_thread[-8:] in panel.body
+        await pilot.press("escape")
+        await pilot.pause()
 
         composer.insert("new work")
         await pilot.press("ctrl+enter")
