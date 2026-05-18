@@ -3365,9 +3365,8 @@ class UvAgentApp(App[None]):
         try:
             items = self._thread_mention_items()
         finally:
-            if generation != self._mention_thread_cache.generation:
-                return
-            self.call_from_thread(self._apply_thread_mention_scan_update, generation, items)
+            if generation == self._mention_thread_cache.generation:
+                self.call_from_thread(self._apply_thread_mention_scan_update, generation, items)
 
     def _apply_thread_mention_scan_update(self, generation: int, items: list[PickerItem]) -> None:
         cache = self._mention_thread_cache
