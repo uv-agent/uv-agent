@@ -33,6 +33,7 @@ from uv_agent.skills import discover_skills, render_skill_summary
 
 DEFAULT_THREAD_TITLES = {"New thread", "new thread", "新会话"}
 COMPACTION_USER_MESSAGE_MAX_TOKENS = 20_000
+RUNTIME_EVENT_RUN_ID_KEY = "_uv_agent_run_id"
 COMPACTION_SUMMARIZATION_PROMPT = (
     "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for "
     "another LLM that will resume the task.\n\n"
@@ -757,6 +758,7 @@ class AgentEngine:
             tool_output = function_output(call, output)
             return tool_output, [], tool_output
 
+        thread_kind = str(self.thread_store.snapshot(thread_id).metadata.get("kind") or "thread")
         if args.get("script_id") or args.get("run_id"):
             result = await self.runner.rerun(
                 RerunRequest(
@@ -768,6 +770,7 @@ class AgentEngine:
                     timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
                     cwd=self._active_cwd(thread_id),
                     thread_id=thread_id,
+                    thread_kind=thread_kind,
                     turn_id=turn_id,
                     cancel_event=cancel_event,
                 )
@@ -786,6 +789,7 @@ class AgentEngine:
                     timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
                     cwd=self._active_cwd(thread_id),
                     thread_id=thread_id,
+                    thread_kind=thread_kind,
                     turn_id=turn_id,
                     cancel_event=cancel_event,
                 )
@@ -1626,7 +1630,10 @@ def model_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "timed_out": payload.get("timed_out"),
         "interrupted": payload.get("interrupted"),
         "truncated": payload.get("truncated"),
-        "stdout": strip_structured_event_lines(str(payload.get("stdout") or "")),
+        "stdout": strip_structured_event_lines(
+            str(payload.get("stdout") or ""),
+            run_id=str(payload.get("run_id") or ""),
+        ),
         "stderr": payload.get("stderr") or "",
     }
     if visible_events:
@@ -1646,6 +1653,11 @@ def model_visible_events(value: object) -> list[dict[str, Any]]:
         if not isinstance(event, dict):
             continue
         kind = str(event.get("kind") or "")
+        event = {
+            key: copy.deepcopy(data)
+            for key, data in event.items()
+            if key != RUNTIME_EVENT_RUN_ID_KEY
+        }
         if kind in {"progress", "cwd"}:
             continue
         if kind == "result":
@@ -1667,16 +1679,16 @@ def model_visible_events(value: object) -> list[dict[str, Any]]:
     return visible
 
 
-def strip_structured_event_lines(text: str) -> str:
+def strip_structured_event_lines(text: str, *, run_id: str | None = None) -> str:
     lines: list[str] = []
     for line in text.splitlines(keepends=True):
-        if _is_structured_event_line(line):
+        if _is_structured_event_line(line, run_id=run_id):
             continue
         lines.append(line)
     return "".join(lines)
 
 
-def _is_structured_event_line(line: str) -> bool:
+def _is_structured_event_line(line: str, *, run_id: str | None = None) -> bool:
     stripped = line.strip()
     if not stripped.startswith("{"):
         return False
@@ -1684,7 +1696,12 @@ def _is_structured_event_line(line: str) -> bool:
         value = json.loads(stripped)
     except json.JSONDecodeError:
         return False
-    return isinstance(value, dict) and "kind" in value
+    if not isinstance(value, dict) or "kind" not in value:
+        return False
+    event_run_id = value.get(RUNTIME_EVENT_RUN_ID_KEY)
+    if not isinstance(event_run_id, str) or not event_run_id:
+        return False
+    return not run_id or event_run_id == run_id
 
 
 def context_fingerprint(text: str) -> str:

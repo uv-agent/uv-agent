@@ -120,10 +120,22 @@ async def test_runner_interrupts_script_when_cancelled(tmp_path: Path) -> None:
 
 
 def test_parse_structured_event_reads_runtime_json_line() -> None:
-    assert parse_structured_event('{"kind":"look_at","path":"image.png"}\n') == {
+    assert parse_structured_event(
+        '{"kind":"look_at","path":"image.png","_uv_agent_run_id":"run_1"}\n',
+        run_id="run_1",
+    ) == {
         "kind": "look_at",
         "path": "image.png",
+        "_uv_agent_run_id": "run_1",
     }
+    assert parse_structured_event('{"kind":"look_at","path":"image.png"}\n', run_id="run_1") is None
+    assert (
+        parse_structured_event(
+            '{"kind":"look_at","path":"image.png","_uv_agent_run_id":"run_other"}\n',
+            run_id="run_1",
+        )
+        is None
+    )
     assert parse_structured_event("plain text\n") is None
 
 

@@ -67,6 +67,7 @@ class PythonRunner:
             cwd=request.cwd,
             timeout_s=timeout_s,
             thread_id=request.thread_id,
+            thread_kind=request.thread_kind,
             turn_id=request.turn_id,
             cancel_event=request.cancel_event,
         ):
@@ -123,6 +124,7 @@ class PythonRunner:
             cwd=cwd,
             timeout_s=float(timeout_s),
             thread_id=request.thread_id,
+            thread_kind=request.thread_kind,
             turn_id=request.turn_id,
             cancel_event=request.cancel_event,
             rerun_of=request.run_id,
@@ -140,6 +142,7 @@ class PythonRunner:
         cwd: Path | None,
         timeout_s: float,
         thread_id: str | None,
+        thread_kind: str | None,
         turn_id: str | None,
         cancel_event: asyncio.Event | None,
         rerun_of: str | None = None,
@@ -160,6 +163,8 @@ class PythonRunner:
         env["UV_AGENT_STATE_DIR"] = str(self.store.data_dir)
         if thread_id:
             env["UV_AGENT_THREAD_ID"] = thread_id
+        if thread_kind:
+            env["UV_AGENT_THREAD_KIND"] = thread_kind
         if turn_id:
             env["UV_AGENT_TURN_ID"] = turn_id
         env["UV_AGENT_RUN_ID"] = run_id
@@ -336,7 +341,7 @@ class PythonRunner:
                 continue
             sink.append(text)
             if stream_name == "stdout":
-                parsed = parse_structured_event(text)
+                parsed = parse_structured_event(text, run_id=run_id)
                 if parsed is not None:
                     structured_events.append(parsed)
             writer.write(
@@ -373,7 +378,10 @@ def has_uv_log_level_arg(args: list[str]) -> bool:
     return False
 
 
-def parse_structured_event(text: str) -> dict[str, Any] | None:
+RUNTIME_EVENT_RUN_ID_KEY = "_uv_agent_run_id"
+
+
+def parse_structured_event(text: str, *, run_id: str | None = None) -> dict[str, Any] | None:
     """Parse one uv_agent_runtime.emit_event JSON line if present."""
     stripped = text.strip()
     if not stripped.startswith("{"):
@@ -383,5 +391,10 @@ def parse_structured_event(text: str) -> dict[str, Any] | None:
     except Exception:
         return None
     if not isinstance(value, dict) or "kind" not in value:
+        return None
+    event_run_id = value.get(RUNTIME_EVENT_RUN_ID_KEY)
+    if not isinstance(event_run_id, str) or not event_run_id:
+        return None
+    if run_id is not None and event_run_id != run_id:
         return None
     return value

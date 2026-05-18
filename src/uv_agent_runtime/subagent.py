@@ -9,6 +9,13 @@ from typing import Mapping
 from .events import emit_event
 from .process import run_command
 
+NESTED_ASK_BLOCKED_MESSAGE = (
+    "ask is unavailable inside a subagent thread. This project only permits one "
+    "level of ask delegation so nested subagents do not grow unbounded or require "
+    "tree-shaped UI tracking. Complete the task yourself with the current context "
+    "and available runtime helpers instead of delegating again."
+)
+
 
 @dataclass(frozen=True)
 class SubagentResult:
@@ -50,6 +57,19 @@ def ask(
     This intentionally uses a subprocess from inside the Python runner, so the
     outer agent still has exactly one external action surface: run_python.
     """
+    if os.environ.get("UV_AGENT_THREAD_KIND") == "subagent":
+        emit_event("subagent.blocked", prompt=prompt, reason="nested_ask_disabled")
+        result = SubagentResult(
+            prompt=prompt,
+            level=model_level or level,
+            returncode=2,
+            stdout="",
+            stderr=NESTED_ASK_BLOCKED_MESSAGE,
+            thread_id=None,
+        )
+        if check:
+            result.raise_for_error()
+        return result
     selected_level = model_level or level
     args = list(executable or ["uv", "run", "uv-agent"])
     if selected_level:

@@ -15,6 +15,7 @@ class PythonRunRequest:
     cwd: Path | None = None
     timeout_s: float | None = None
     thread_id: str | None = None
+    thread_kind: str | None = None
     turn_id: str | None = None
     cancel_event: asyncio.Event | None = None
 
@@ -29,6 +30,7 @@ class RerunRequest:
     cwd: Path | None = None
     timeout_s: float | None = None
     thread_id: str | None = None
+    thread_kind: str | None = None
     turn_id: str | None = None
     cancel_event: asyncio.Event | None = None
 

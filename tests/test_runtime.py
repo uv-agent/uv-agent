@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 from uv_agent_runtime import (
     apply_patch,
     ask,
@@ -24,7 +26,7 @@ from uv_agent_runtime import (
     write_json,
     write_text,
 )
-from uv_agent_runtime.subagent import _extract_subagent_thread_id
+from uv_agent_runtime.subagent import NESTED_ASK_BLOCKED_MESSAGE, _extract_subagent_thread_id
 from uv_agent.session import ThreadStore
 
 
@@ -183,6 +185,21 @@ def test_runtime_subagent_ask_retains_project_state_when_host_state_is_available
 
     assert result.text == str(tmp_path)
     assert result.thread_id == "thr_child"
+
+
+def test_runtime_subagent_ask_blocks_nested_subagent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UV_AGENT_THREAD_KIND", "subagent")
+    monkeypatch.setenv("UV_AGENT_RUN_ID", "run_child")
+
+    result = ask(
+        "delegate again",
+        executable=[sys.executable, "-c", "raise SystemExit('should not run')"],
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.thread_id is None
+    assert result.stderr == NESTED_ASK_BLOCKED_MESSAGE
 
 
 def test_extract_subagent_thread_id_from_stderr() -> None:

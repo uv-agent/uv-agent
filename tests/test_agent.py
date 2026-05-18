@@ -7,7 +7,14 @@ from typing import Any
 
 import pytest
 
-from uv_agent.agent import AgentEngine, PYTHON_TOOL, message_item, message_item_text, usage_token_count
+from uv_agent.agent import (
+    AgentEngine,
+    PYTHON_TOOL,
+    message_item,
+    message_item_text,
+    model_tool_payload,
+    usage_token_count,
+)
 from uv_agent.attachments import image_message_item
 from uv_agent.config import (
     AppConfig,
@@ -146,6 +153,32 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert PYTHON_TOOL["name"] == "run_python"
     assert PYTHON_TOOL["type"] == "function"
     assert "script_id" in PYTHON_TOOL["parameters"]["properties"]
+
+
+def test_model_tool_payload_filters_only_tagged_runtime_event_lines() -> None:
+    payload = {
+        "script_id": "scr_1",
+        "run_id": "run_1",
+        "returncode": 0,
+        "timed_out": False,
+        "interrupted": False,
+        "truncated": False,
+        "stdout": (
+            '{"kind":"user_json"}\n'
+            '{"kind":"progress","_uv_agent_run_id":"run_1"}\n'
+            '{"kind":"progress","_uv_agent_run_id":"run_other"}\n'
+        ),
+        "stderr": "",
+        "events": [{"kind": "progress", "message": "working", "_uv_agent_run_id": "run_1"}],
+    }
+
+    visible = model_tool_payload(payload)
+
+    assert visible["stdout"] == (
+        '{"kind":"user_json"}\n'
+        '{"kind":"progress","_uv_agent_run_id":"run_other"}\n'
+    )
+    assert "events" not in visible
 
 
 @pytest.mark.asyncio
@@ -1126,12 +1159,16 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
     display_payload = json.loads(
         next(event for event in events if event["type"] == "tool.output")["output"]["output"]
     )
-    assert display_payload["events"] == [{"kind": "progress", "message": "internal progress"}]
+    assert display_payload["events"][0]["kind"] == "progress"
+    assert display_payload["events"][0]["message"] == "internal progress"
+    assert display_payload["events"][0]["_uv_agent_run_id"] == display_payload["run_id"]
     assert '"kind": "progress"' in display_payload["stdout"]
 
     stored = engine.thread_store.read(events[-1]["thread_id"])
     runner_result = next(event["result"] for event in stored if event["type"] == "item.runner_result")
-    assert runner_result["events"] == [{"kind": "progress", "message": "internal progress"}]
+    assert runner_result["events"][0]["kind"] == "progress"
+    assert runner_result["events"][0]["message"] == "internal progress"
+    assert runner_result["events"][0]["_uv_agent_run_id"] == runner_result["run_id"]
 
 
 @pytest.mark.asyncio
