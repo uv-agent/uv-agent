@@ -102,9 +102,8 @@
     "language": "auto",
     "completion_notification": {
       "enabled": true,
-      "toast": true,
-      "desktop": true,
-      "bell": false
+      "terminal": true,
+      "bell": true
     }
   },
   "runner": {

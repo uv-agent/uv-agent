@@ -46,7 +46,7 @@ from uv_agent.environment import application_version, detect_user_language, host
 from uv_agent.errors import error_markup, format_error
 from uv_agent.i18n import command_description, tr
 from uv_agent.mcp_config import discover_mcp_servers
-from uv_agent.notifications import send_desktop_completion_notification
+from uv_agent.notifications import play_completion_sound
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
@@ -1976,9 +1976,10 @@ class UvAgentApp(App[None]):
                     if text and self._is_active_thread(item_thread_id) and self._assistant_cell is None:
                         await self._append_assistant_delta(text)
                         self._sync_run_state_from_active(run_state)
+                    was_active_thread = self._is_active_thread(item_thread_id)
                     run_state.status = self._text("idle")
-                    self._notify_turn_completed(item_thread_id, text)
-                    if self._is_active_thread(item_thread_id):
+                    self._notify_turn_completed(item_thread_id, text, active_thread=was_active_thread)
+                    if was_active_thread:
                         self._refresh_status(self._text("idle"))
                 elif event_type == "turn.interrupted":
                     run_state.status = self._text("interrupted")
@@ -4245,27 +4246,27 @@ class UvAgentApp(App[None]):
         self._last_status = message
         self._refresh_status()
 
-    def _notify_turn_completed(self, thread_id: str, final_text: str) -> None:
+    def _notify_turn_completed(self, thread_id: str, final_text: str, *, active_thread: bool) -> None:
         config = self.engine.config.ui.completion_notification
         if not config.enabled:
             return
-        title = self._text("turn_completed_title")
-        message = self._completion_notification_message(thread_id, final_text)
-        if config.toast:
-            self.notify(message, title=title, timeout=4.0)
+        if config.terminal and not active_thread:
+            self._append_turn_completion_event(thread_id)
         if config.bell:
             self.bell()
-        if config.desktop:
-            send_desktop_completion_notification(title, message)
+            play_completion_sound()
 
-    def _completion_notification_message(self, thread_id: str, final_text: str) -> str:
-        summary = " ".join(final_text.split())
-        if len(summary) > 120:
-            summary = summary[:117].rstrip() + "..."
-        base = self._text("turn_completed_message")
-        if summary:
-            return f"{base}: {summary}"
-        return f"{base} ({short_thread(thread_id)})"
+    def _append_turn_completion_event(self, thread_id: str) -> None:
+        digest = self.engine.thread_store.thread_digest(thread_id)
+        title = str(digest.get("title") or self._text("new_thread")).strip()
+        if len(title) > 48:
+            title = title[:45].rstrip() + "..."
+        markup = (
+            f"[dim]{escape(self._text('background_thread_completed'))}[/dim] "
+            f"[cyan]{escape(title or self._text('new_thread'))}[/cyan] "
+            f"[dim]{escape(short_thread(thread_id))}[/dim]"
+        )
+        self._append_cell(markup, "event")
 
     def _refresh_status(self, state: str | None = None) -> None:
         if state is not None:

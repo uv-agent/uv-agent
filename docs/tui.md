@@ -84,8 +84,10 @@ Language choices are:
 
 See [configuration](configuration.md) for config file locations and schema.
 
-Completion notifications can show a TUI toast, ring the terminal bell, and on
-Windows attempt a best-effort desktop notification.
+Completion notifications can add a short transcript event for background
+threads and play a completion sound. Windows uses the system notification sound;
+other platforms use the terminal bell. The active thread does not add an extra
+terminal event when it finishes.
 
 ## Transcript Events
 

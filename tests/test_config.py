@@ -263,8 +263,7 @@ def test_ui_completion_notification_config(tmp_path: Path) -> None:
                 "ui": {
                     "completion_notification": {
                         "enabled": True,
-                        "toast": False,
-                        "desktop": True,
+                        "terminal": False,
                         "bell": True,
                     }
                 }
@@ -276,8 +275,7 @@ def test_ui_completion_notification_config(tmp_path: Path) -> None:
     config = load_config(tmp_path, [config_path])
 
     assert config.ui.completion_notification.enabled is True
-    assert config.ui.completion_notification.toast is False
-    assert config.ui.completion_notification.desktop is True
+    assert config.ui.completion_notification.terminal is False
     assert config.ui.completion_notification.bell is True
 
 

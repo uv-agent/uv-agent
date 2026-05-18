@@ -24,6 +24,7 @@ from uv_agent.config import (
 from uv_agent.model_client import FakeModelClient, ModelResponse, ToolCallDelta, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
+from uv_agent.tui.formatting import short_thread
 from uv_agent.tui.app import (
     EmptyState,
     ExpandableTranscriptCell,
@@ -2381,25 +2382,19 @@ async def test_tui_turn_completion_notification_uses_configured_channels(
             language="en",
             completion_notification=CompletionNotificationConfig(
                 enabled=True,
-                toast=True,
-                desktop=True,
+                terminal=True,
                 bell=True,
             ),
         ),
     )
-    desktop_calls: list[tuple[str, str]] = []
     bell_count = 0
-
-    def fake_desktop_notification(title: str, message: str) -> bool:
-        desktop_calls.append((title, message))
-        return True
 
     def fake_bell(app: UvAgentApp) -> None:
         nonlocal bell_count
         bell_count += 1
 
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
-    monkeypatch.setattr("uv_agent.tui.app.send_desktop_completion_notification", fake_desktop_notification)
+    monkeypatch.setattr("uv_agent.tui.app.play_completion_sound", lambda: True)
     monkeypatch.setattr(UvAgentApp, "bell", fake_bell)
     app = UvAgentApp(project_root=project_root)
 
@@ -2409,10 +2404,80 @@ async def test_tui_turn_completion_notification_uses_configured_channels(
         await pilot.press("ctrl+enter")
         await pilot.pause(0.2)
 
-        toasts = [str(toast.render()) for toast in app.screen.query("Toast")]
-        assert any("Turn completed" in toast for toast in toasts)
-        assert desktop_calls == [("uv-agent", "Turn completed: done")]
+        assert not list(app.screen.query("Toast"))
         assert bell_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_terminal_completion_event_only_for_background_threads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = ReleasableEngine(fake_engine(project_root, tmp_path / "state"))
+    engine.config = AppConfig(
+        providers=engine.config.providers,
+        models=engine.config.models,
+        levels=engine.config.levels,
+        runtime=engine.config.runtime,
+        runner=engine.config.runner,
+        ui=UiConfig(
+            language="en",
+            completion_notification=CompletionNotificationConfig(
+                enabled=True,
+                terminal=True,
+                bell=False,
+            ),
+        ),
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("old work")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        old_thread = app.thread_id
+        assert old_thread is not None
+        await engine.started[old_thread].wait()
+
+        composer.insert("/clear")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        assert app.thread_id is None
+
+        engine.release[old_thread].set()
+        await pilot.pause(0.2)
+
+        transcript_text = "\n".join(
+            str(child.render())
+            for child in app.query_one("#transcript", TranscriptScroll).children
+            if isinstance(child, TranscriptCell)
+        )
+        assert app._text("background_thread_completed") in transcript_text
+        assert short_thread(old_thread) in transcript_text
+        assert "done old work" not in transcript_text
+
+        composer.insert("current work")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        current_thread = app.thread_id
+        assert current_thread is not None
+        await engine.started[current_thread].wait()
+
+        before_count = transcript_text.count(app._text("background_thread_completed"))
+        engine.release[current_thread].set()
+        await pilot.pause(0.2)
+
+        after_text = "\n".join(
+            str(child.render())
+            for child in app.query_one("#transcript", TranscriptScroll).children
+            if isinstance(child, TranscriptCell)
+        )
+        assert after_text.count(app._text("background_thread_completed")) == before_count
+        assert not list(app.screen.query("Toast"))
 
 
 @pytest.mark.asyncio

@@ -124,9 +124,8 @@ class RuntimeConfig:
 @dataclass(frozen=True)
 class CompletionNotificationConfig:
     enabled: bool = True
-    toast: bool = True
-    desktop: bool = True
-    bell: bool = False
+    terminal: bool = True
+    bell: bool = True
 
 
 @dataclass(frozen=True)
@@ -224,9 +223,8 @@ def default_config(project_root: Path) -> dict[str, Any]:
             "language": "auto",
             "completion_notification": {
                 "enabled": True,
-                "toast": True,
-                "desktop": True,
-                "bell": False,
+                "terminal": True,
+                "bell": True,
             },
         },
         "runner": {
@@ -431,11 +429,11 @@ def parse_completion_notification(value: object) -> CompletionNotificationConfig
         return CompletionNotificationConfig(enabled=value)
     if not isinstance(value, dict):
         return CompletionNotificationConfig()
+    terminal = value.get("terminal", value.get("toast", True))
     return CompletionNotificationConfig(
         enabled=bool(value.get("enabled", True)),
-        toast=bool(value.get("toast", True)),
-        desktop=bool(value.get("desktop", True)),
-        bell=bool(value.get("bell", False)),
+        terminal=bool(terminal),
+        bell=bool(value.get("bell", True)),
     )
 
 

@@ -210,9 +210,8 @@ Completion notification options:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Enable completion notifications. |
-| `toast` | boolean | `true` | Show an in-terminal Textual toast. |
-| `desktop` | boolean | `true` | On Windows, try a best-effort desktop notification. Other platforms ignore this. |
-| `bell` | boolean | `false` | Ring the terminal bell when a turn finishes. |
+| `terminal` | boolean | `true` | Add a short transcript event when a background thread finishes. |
+| `bell` | boolean | `true` | Play a completion sound when a turn finishes. Uses the Windows system notification sound on Windows, otherwise writes a terminal BEL. |
 
 The `/config` panel can edit `runtime.default_level`,
 `runtime.compression.enabled`, `ui.language`, and

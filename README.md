@@ -72,9 +72,8 @@ Minimal shape:
     "language": "auto",
     "completion_notification": {
       "enabled": true,
-      "toast": true,
-      "desktop": true,
-      "bell": false
+      "terminal": true,
+      "bell": true
     }
   }
 }
@@ -82,7 +81,8 @@ Minimal shape:
 
 Use `/config` in the TUI to switch the default level, language, and automatic
 compression. Set `ui.language` to `zh-CN` for a Chinese UI. Completion
-notifications can be configured under `ui.completion_notification`.
+notifications can be configured under `ui.completion_notification`. Non-Windows
+platforms use the terminal bell for completion sound.
 
 See [configuration](docs/configuration.md) for all supported options and
 [config.example.json](docs/config.example.json) for a detailed example.

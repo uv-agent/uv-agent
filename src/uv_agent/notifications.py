@@ -1,45 +1,58 @@
 from __future__ import annotations
 
 import os
-import subprocess
+import sys
 
 
-def send_desktop_completion_notification(title: str, message: str) -> bool:
-    """Best-effort desktop notification for turn completion."""
-    if os.name != "nt":
-        return False
+def play_completion_sound() -> bool:
+    """Play a completion sound, falling back to the terminal bell."""
+    if os.name == "nt" and _play_windows_completion_sound():
+        return True
+    return ring_terminal_bell()
 
-    script = r"""
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$notify = New-Object System.Windows.Forms.NotifyIcon
-$notify.Icon = [System.Drawing.SystemIcons]::Information
-$notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-$notify.BalloonTipTitle = $args[0]
-$notify.BalloonTipText = $args[1]
-$notify.Visible = $true
-$notify.ShowBalloonTip(5000)
-Start-Sleep -Milliseconds 5500
-$notify.Dispose()
-"""
+
+def _play_windows_completion_sound() -> bool:
     try:
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                script,
-                title,
-                message,
-            ],
-            creationflags=flags,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-        )
+        import winsound
+
+        winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
+    except (ImportError, RuntimeError):
+        try:
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except (ImportError, RuntimeError):
+            return False
+    return True
+
+
+def ring_terminal_bell() -> bool:
+    """Write BEL to an interactive terminal when one is available."""
+    if _write_bell(sys.stderr):
+        return True
+    if sys.stdout is not sys.stderr and _write_bell(sys.stdout):
+        return True
+    return _write_bell_to_tty()
+
+
+def _write_bell(stream: object) -> bool:
+    if not hasattr(stream, "write") or not hasattr(stream, "flush"):
+        return False
+    try:
+        if hasattr(stream, "isatty") and not stream.isatty():
+            return False
+        stream.write("\a")  # type: ignore[attr-defined]
+        stream.flush()  # type: ignore[attr-defined]
+    except OSError:
+        return False
+    return True
+
+
+def _write_bell_to_tty() -> bool:
+    try:
+        with open("/dev/tty", "w", encoding="utf-8") as tty:
+            tty.write("\a")
+            tty.flush()
     except OSError:
         return False
     return True
