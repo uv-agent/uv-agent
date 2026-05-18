@@ -493,6 +493,7 @@ def has_uv_log_level_arg(args: list[str]) -> bool:
     return False
 
 
+RUNTIME_EVENT_EVENT_ID_KEY = "_uv_agent_event_id"
 RUNTIME_EVENT_RUN_ID_KEY = "_uv_agent_run_id"
 
 
@@ -554,6 +555,9 @@ def parse_structured_event(text: str, *, run_id: str | None = None) -> dict[str,
     except Exception:
         return None
     if not isinstance(value, dict) or "kind" not in value:
+        return None
+    event_id = value.get(RUNTIME_EVENT_EVENT_ID_KEY)
+    if not isinstance(event_id, str) or not event_id:
         return None
     event_run_id = value.get(RUNTIME_EVENT_RUN_ID_KEY)
     if not isinstance(event_run_id, str) or not event_run_id:

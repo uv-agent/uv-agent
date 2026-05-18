@@ -19,7 +19,6 @@ NESTED_ASK_BLOCKED_MESSAGE = (
 
 @dataclass(frozen=True)
 class SubagentResult:
-    prompt: str
     level: str | None
     returncode: int
     stdout: str
@@ -58,9 +57,8 @@ def ask(
     outer agent still has exactly one external action surface: run_python.
     """
     if os.environ.get("UV_AGENT_RUNTIME_THREAD_KIND") == "subagent":
-        emit_event("subagent.blocked", prompt=prompt, reason="nested_ask_disabled")
+        emit_event("subagent.blocked", reason="nested_ask_disabled")
         result = SubagentResult(
-            prompt=prompt,
             level=model_level or level,
             returncode=2,
             stdout="",
@@ -92,7 +90,6 @@ def ask(
             args.extend(["--parent-script", parent_script_id])
     emit_event(
         "subagent.started",
-        prompt=prompt,
         level=selected_level,
         parent_thread_id=parent_thread_id,
         parent_turn_id=parent_turn_id,
@@ -114,14 +111,12 @@ def ask(
     thread_id = _extract_subagent_thread_id(result.stderr)
     emit_event(
         "subagent.completed",
-        prompt=prompt,
         level=selected_level,
         returncode=result.returncode,
         thread_id=thread_id,
         summary=result.stdout.strip()[:500],
     )
     subagent_result = SubagentResult(
-        prompt=prompt,
         level=selected_level,
         returncode=result.returncode,
         stdout=result.stdout,

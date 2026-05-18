@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from .events import emit_event
 from .files import resolve_workspace_path
 
 
-def look_at(path: str | Path, *, note: str = "") -> Path:
+def look_at(path: str | Path, *, note: str = "") -> dict[str, Any]:
     """Attach an image to the uv-agent conversation context.
 
     The runner records this structured event and the host agent appends the image
@@ -14,5 +15,4 @@ def look_at(path: str | Path, *, note: str = "") -> Path:
     model to reason about the image in the next response.
     """
     resolved = resolve_workspace_path(path)
-    emit_event("look_at", path=str(resolved), note=note)
-    return resolved
+    return emit_event("look_at", path=str(resolved), note=note)

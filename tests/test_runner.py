@@ -169,6 +169,47 @@ async def test_runner_does_not_parse_json_in_middle_of_long_line(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_runner_parses_threaded_runtime_events_without_line_interleaving(
+    tmp_path: Path,
+) -> None:
+    project_root = Path.cwd()
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+        ),
+    )
+
+    result = await runner.run(
+        PythonRunRequest(
+            code=(
+                "import threading\n"
+                "from uv_agent_runtime import emit_event\n"
+                "def emit_many(worker):\n"
+                "    for index in range(25):\n"
+                "        emit_event('threaded', worker=worker, index=index)\n"
+                "threads = [threading.Thread(target=emit_many, args=(worker,)) for worker in range(4)]\n"
+                "for thread in threads:\n"
+                "    thread.start()\n"
+                "for thread in threads:\n"
+                "    thread.join()\n"
+            ),
+            cwd=project_root,
+        )
+    )
+
+    event_ids = [event["_uv_agent_event_id"] for event in result.events]
+    assert result.returncode == 0
+    assert len(result.events) == 100
+    assert all(event["kind"] == "threaded" for event in result.events)
+    assert all(event["_uv_agent_run_id"] == result.run_id for event in result.events)
+    assert len(set(event_ids)) == len(event_ids)
+
+
+@pytest.mark.asyncio
 async def test_runner_interrupts_script_when_cancelled(tmp_path: Path) -> None:
     project_root = Path.cwd()
     runner = PythonRunner(
@@ -202,17 +243,25 @@ async def test_runner_interrupts_script_when_cancelled(tmp_path: Path) -> None:
 
 def test_parse_structured_event_reads_runtime_json_line() -> None:
     assert parse_structured_event(
-        '{"kind":"look_at","path":"image.png","_uv_agent_run_id":"run_1"}\n',
+        '{"kind":"look_at","path":"image.png","_uv_agent_event_id":"evt_1","_uv_agent_run_id":"run_1"}\n',
         run_id="run_1",
     ) == {
         "kind": "look_at",
         "path": "image.png",
+        "_uv_agent_event_id": "evt_1",
         "_uv_agent_run_id": "run_1",
     }
+    assert (
+        parse_structured_event(
+            '{"kind":"look_at","path":"image.png","_uv_agent_run_id":"run_1"}\n',
+            run_id="run_1",
+        )
+        is None
+    )
     assert parse_structured_event('{"kind":"look_at","path":"image.png"}\n', run_id="run_1") is None
     assert (
         parse_structured_event(
-            '{"kind":"look_at","path":"image.png","_uv_agent_run_id":"run_other"}\n',
+            '{"kind":"look_at","path":"image.png","_uv_agent_event_id":"evt_2","_uv_agent_run_id":"run_other"}\n',
             run_id="run_1",
         )
         is None

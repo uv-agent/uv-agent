@@ -33,6 +33,7 @@ from uv_agent.skills import discover_skills, render_skill_summary
 
 DEFAULT_THREAD_TITLES = {"New thread", "new thread", "新会话"}
 COMPACTION_USER_MESSAGE_MAX_TOKENS = 20_000
+RUNTIME_EVENT_EVENT_ID_KEY = "_uv_agent_event_id"
 RUNTIME_EVENT_RUN_ID_KEY = "_uv_agent_run_id"
 COMPACTION_SUMMARIZATION_PROMPT = (
     "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for "
@@ -1630,7 +1631,6 @@ def function_output(call: dict[str, Any], output: dict[str, Any]) -> dict[str, A
 
 def model_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return the run payload that is safe and useful to feed back to the model."""
-    visible_events = model_visible_events(payload.get("events"))
     visible = {
         "script_id": payload.get("script_id"),
         "run_id": payload.get("run_id"),
@@ -1644,46 +1644,8 @@ def model_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         "stderr": payload.get("stderr") or "",
     }
-    if visible_events:
-        visible["events"] = visible_events
     if payload.get("rules_loaded"):
         visible["rules_loaded"] = payload["rules_loaded"]
-    if payload.get("attachments"):
-        visible["attachments"] = payload["attachments"]
-    return visible
-
-
-def model_visible_events(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    visible: list[dict[str, Any]] = []
-    for event in value:
-        if not isinstance(event, dict):
-            continue
-        kind = str(event.get("kind") or "")
-        event = {
-            key: copy.deepcopy(data)
-            for key, data in event.items()
-            if key != RUNTIME_EVENT_RUN_ID_KEY
-        }
-        if kind in {"progress", "cwd"}:
-            continue
-        if kind == "result":
-            visible.append(copy.deepcopy(event))
-        elif kind == "look_at":
-            visible.append({"kind": "look_at", "path": event.get("path"), "note": event.get("note")})
-        elif kind == "subagent.completed":
-            visible.append(
-                {
-                    "kind": "subagent.completed",
-                    "thread_id": event.get("thread_id"),
-                    "summary": event.get("summary"),
-                }
-            )
-        elif kind.startswith("subagent."):
-            continue
-        else:
-            visible.append({"kind": kind})
     return visible
 
 
@@ -1705,6 +1667,9 @@ def _is_structured_event_line(line: str, *, run_id: str | None = None) -> bool:
     except json.JSONDecodeError:
         return False
     if not isinstance(value, dict) or "kind" not in value:
+        return False
+    event_id = value.get(RUNTIME_EVENT_EVENT_ID_KEY)
+    if not isinstance(event_id, str) or not event_id:
         return False
     event_run_id = value.get(RUNTIME_EVENT_RUN_ID_KEY)
     if not isinstance(event_run_id, str) or not event_run_id:

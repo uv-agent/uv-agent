@@ -379,10 +379,7 @@ def structured_event_markup(event: dict[str, Any]) -> str:
     if kind == "look_at":
         return f"{arrow} [cyan]look_at[/cyan] {escape(str(event.get('path') or ''))}"
     if kind == "subagent.started":
-        prompt = str(event.get("prompt") or "").splitlines()[0]
-        if len(prompt) > 90:
-            prompt = prompt[:87].rstrip() + "..."
-        return f"{arrow} [magenta]subagent[/magenta] [dim]started[/dim] {escape(prompt)}"
+        return f"{arrow} [magenta]subagent[/magenta] [dim]started[/dim]"
     if kind == "subagent.completed":
         thread_id = str(event.get("thread_id") or "")
         summary = str(event.get("summary") or "").splitlines()[0]

@@ -113,8 +113,8 @@ Available helper groups:
 | `run_command`, `check_command` | Argv-list subprocess helpers. |
 | `apply_patch` | Codex-style `*** Begin Patch` file edit helper. |
 | `enter_dir` | Change the active working directory and trigger directory rule loading. |
-| `emit_event`, `emit_progress`, `emit_result` | Structured events rendered by the host. |
-| `look_at` | Attach image context to the conversation. |
+| `emit_event`, `emit_progress`, `emit_result` | Structured events rendered by the host; each returns the emitted event dict. |
+| `look_at` | Attach image context to the conversation and return the emitted event dict. |
 | `saved_scripts` | Inspect recent managed scripts. |
 | `thread_digest`, `list_thread_digests` | Read compact thread summaries from project state. |
 | `ask` | Launch a nested `uv-agent ask` subagent. |
@@ -128,18 +128,21 @@ stores them, and the TUI renders common event kinds compactly.
 ```python
 from uv_agent_runtime import emit_progress, emit_result
 
-emit_progress("reading files", count=12)
-emit_result(status="ok")
+progress = emit_progress("reading files", count=12)
+result = emit_result(status="ok")
+print(result["status"])
 ```
 
-Use structured events for machine-readable progress or results. Regular stdout
-and stderr are still captured.
+Use structured events for machine-readable progress or results. Each event gets
+an `_uv_agent_event_id`, and events emitted from managed runs also carry
+`_uv_agent_run_id`. Runtime helpers write each JSON event line atomically within
+the Python process so threaded scripts do not interleave event text. Regular
+stdout and stderr are still captured.
 
 The host filters internal structured-event lines out of the tool output that is
-fed back to the model. UI/log payloads may keep richer event details, while the
-model-visible payload keeps only events that are useful for reasoning, such as
-explicit results, image references, selected subagent summaries, and newly
-loaded directory rules.
+fed back to the model. UI/log payloads may keep richer event details, but the
+model-visible payload does not include runtime events. Print any event fields
+that are needed for later reasoning.
 
 ## Directory Rules And Cwd
 
@@ -168,7 +171,8 @@ inspect in later context:
 ```python
 from uv_agent_runtime import look_at
 
-look_at("screenshot.png", note="inspect the failed layout")
+image = look_at("screenshot.png", note="inspect the failed layout")
+print(image["path"])
 ```
 
 The host copies image metadata into project state and appends the image to later

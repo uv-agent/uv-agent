@@ -4,6 +4,7 @@ import os
 import json
 from pathlib import Path
 import sys
+import threading
 
 import pytest
 
@@ -14,6 +15,9 @@ from uv_agent_runtime import (
     connect_declared,
     connect_named,
     connect_stdio,
+    emit_event,
+    emit_progress,
+    emit_result,
     enter_dir,
     list_declared_servers,
     list_files,
@@ -204,7 +208,9 @@ def test_runtime_enter_dir_changes_cwd_and_emits_event(tmp_path: Path, capsys) -
 
         assert resolved == tmp_path.resolve()
         assert Path.cwd() == tmp_path.resolve()
-        assert event == {"kind": "enter_dir", "cwd": str(tmp_path.resolve())}
+        assert event["kind"] == "enter_dir"
+        assert event["cwd"] == str(tmp_path.resolve())
+        assert event["_uv_agent_event_id"].startswith("evt_")
     finally:
         os.chdir(previous)
 
@@ -330,6 +336,23 @@ def test_runtime_subagent_ask_blocks_nested_subagent(monkeypatch: pytest.MonkeyP
     assert result.stderr == NESTED_ASK_BLOCKED_MESSAGE
 
 
+def test_runtime_subagent_events_do_not_include_prompt(capsys, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UV_AGENT_RUNTIME_RUN_ID", "run_parent")
+
+    result = ask(
+        "secret task text",
+        executable=[sys.executable, "-c", "import sys; print('done'); print('[subagent-thread] thr_child', file=sys.stderr)"],
+        check=True,
+    )
+    out = capsys.readouterr().out
+    events = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+
+    assert result.text == "done"
+    assert result.thread_id == "thr_child"
+    assert [event["kind"] for event in events] == ["subagent.started", "subagent.completed"]
+    assert all("prompt" not in event for event in events)
+
+
 def test_extract_subagent_thread_id_from_stderr() -> None:
     assert _extract_subagent_thread_id("noise\n[subagent-thread] thr_123\n") == "thr_123"
 
@@ -383,9 +406,72 @@ def test_runtime_look_at_emits_structured_event(tmp_path: Path, capsys) -> None:
     image = tmp_path / "sample.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    resolved = look_at(image, note="inspect")
+    event = look_at(image, note="inspect")
     out = capsys.readouterr().out
 
-    assert resolved == image.resolve()
+    assert event["kind"] == "look_at"
+    assert event["path"] == str(image.resolve())
+    assert event["note"] == "inspect"
+    assert event["_uv_agent_event_id"].startswith("evt_")
     assert '"kind": "look_at"' in out
     assert '"note": "inspect"' in out
+
+
+def test_runtime_emit_helpers_return_event_dict(capsys, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UV_AGENT_RUNTIME_RUN_ID", "run_events")
+
+    custom = emit_event("custom", value=1)
+    progress = emit_progress("working", count=2)
+    result = emit_result(ok=True)
+    out = capsys.readouterr().out
+
+    assert custom["kind"] == "custom"
+    assert custom["value"] == 1
+    assert custom["_uv_agent_run_id"] == "run_events"
+    assert custom["_uv_agent_event_id"].startswith("evt_")
+    assert progress["kind"] == "progress"
+    assert progress["message"] == "working"
+    assert progress["count"] == 2
+    assert progress["_uv_agent_run_id"] == "run_events"
+    assert progress["_uv_agent_event_id"].startswith("evt_")
+    assert result["kind"] == "result"
+    assert result["ok"] is True
+    assert result["_uv_agent_run_id"] == "run_events"
+    assert result["_uv_agent_event_id"].startswith("evt_")
+    assert len(
+        {
+            custom["_uv_agent_event_id"],
+            progress["_uv_agent_event_id"],
+            result["_uv_agent_event_id"],
+        }
+    ) == 3
+    assert '"kind": "custom"' in out
+    assert '"kind": "progress"' in out
+    assert '"kind": "result"' in out
+
+
+def test_runtime_emit_event_writes_complete_lines_from_threads(
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UV_AGENT_RUNTIME_RUN_ID", "run_threads")
+
+    def emit_many(worker: int) -> None:
+        for index in range(25):
+            emit_event("threaded", worker=worker, index=index)
+
+    threads = [threading.Thread(target=emit_many, args=(worker,)) for worker in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    lines = capsys.readouterr().out.splitlines()
+    events = [json.loads(line) for line in lines]
+
+    assert len(events) == 100
+    assert all(event["kind"] == "threaded" for event in events)
+    assert all(event["_uv_agent_run_id"] == "run_threads" for event in events)
+    event_ids = [event["_uv_agent_event_id"] for event in events]
+    assert all(event_id.startswith("evt_") for event_id in event_ids)
+    assert len(set(event_ids)) == len(event_ids)
