@@ -54,6 +54,10 @@ COMPACTED_CONTEXT_CONTINUATION = (
     "The messages above may include several earlier user messages preserved for continuity. "
     "Continue from this compacted context."
 )
+TOOL_ATTACHMENT_CONTEXT_BRIDGE = (
+    "Tool execution completed. Additional visual context produced by the tool "
+    "is provided in the next user message."
+)
 
 
 class TurnInterrupted(Exception):
@@ -271,6 +275,11 @@ class TurnInputState:
             return copy.deepcopy(self.pending_items)
         return copy.deepcopy(self.input_items)
 
+    def request_previous_response_id(self) -> str | None:
+        if self.use_previous_response_id and self.previous_response_id:
+            return self.previous_response_id
+        return None
+
 
 @dataclass
 class RuleRuntimeState:
@@ -386,7 +395,7 @@ class AgentEngine:
                         level=level,
                         instructions=system_instructions,
                         cancel_event=cancel_event,
-                        previous_response_id=turn_input.previous_response_id,
+                        previous_response_id=turn_input.request_previous_response_id(),
                     ):
                         self._raise_if_cancelled(cancel_event)
                         if stream_event.type == "text_delta" and stream_event.text:
@@ -462,6 +471,7 @@ class AgentEngine:
                         final_text = response.output_text
                         break
 
+                    round_attachments: list[dict[str, Any]] = []
                     for call_index, call in enumerate(tool_calls):
                         self._raise_if_cancelled(cancel_event)
                         yield {
@@ -486,11 +496,7 @@ class AgentEngine:
                         input_items.append(tool_output)
                         request_input_items.append(tool_output)
                         turn_input.pending_items.append(tool_output)
-                        for attachment in attachments:
-                            image_item = image_message_item(attachment)
-                            input_items.append(image_item)
-                            turn_input.pending_items.append(image_item)
-                            request_input_items.append(image_item)
+                        round_attachments.extend(attachments)
                         yield {
                             "type": "tool.output",
                             "thread_id": thread_id,
@@ -499,6 +505,20 @@ class AgentEngine:
                             "tool_call_index": call_index,
                             "output": display_output,
                         }
+                    if round_attachments:
+                        for attachment in round_attachments:
+                            self.thread_store.append(
+                                thread_id,
+                                "item.image_attachment",
+                                turn_id=turn_id,
+                                source="tool",
+                                attachment=attachment,
+                            )
+                        attachment_items = tool_attachment_context_items(round_attachments)
+                        input_items.extend(attachment_items)
+                        turn_input.pending_items.extend(copy.deepcopy(attachment_items))
+                        turn_input.use_previous_response_id = False
+                        request_input_items = turn_input.request_input_items()
                 else:
                     raise RuntimeError("Agent exceeded max_agent_rounds")
             except (asyncio.CancelledError, TurnInterrupted):
@@ -915,14 +935,7 @@ class AgentEngine:
                 thread_id=thread_id,
                 note=str(event.get("note") or ""),
             )
-            payload = attachment.to_event_payload()
-            self.thread_store.append(
-                thread_id,
-                "item.image_attachment",
-                turn_id=turn_id,
-                attachment=payload,
-            )
-            attachments.append(payload)
+            attachments.append(attachment.to_event_payload())
         return attachments
 
     def _process_runner_events(
@@ -1053,29 +1066,72 @@ class AgentEngine:
                 continue
             if event.get("model_api") is None and not response_id.startswith("resp"):
                 continue
-            pending_items = self._input_items_after_event(events[index + 1 :])
+            expected_tool_outputs = sum(
+                1
+                for item in event.get("output") or []
+                if item.get("type") == "function_call"
+            )
+            pending_items = self._input_items_after_event(
+                events[index + 1 :],
+                expected_tool_outputs=expected_tool_outputs,
+            )
             return index, response_id, pending_items
         return None
 
-    def _input_items_after_event(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _input_items_after_event(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        expected_tool_outputs: int = 0,
+    ) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
         pending_pre_user: list[dict[str, Any]] = []
+        pending_tool_attachments: list[dict[str, Any]] = []
+        pending_legacy_tool_attachments: list[dict[str, Any]] = []
+
+        def flush_tool_attachments() -> None:
+            nonlocal pending_tool_attachments
+            if pending_tool_attachments:
+                input_items.extend(tool_attachment_context_items(pending_tool_attachments))
+                pending_tool_attachments = []
+
         for event in events:
             pre_user_item = self._pre_user_event_item(event)
             if pre_user_item is not None:
+                flush_tool_attachments()
                 pending_pre_user.append(pre_user_item)
             elif event.get("type") == "item.user":
+                flush_tool_attachments()
                 input_items.extend(pending_pre_user)
                 pending_pre_user.clear()
                 input_items.append(copy.deepcopy(event["item"]))
+            elif event.get("type") == "item.model_response":
+                flush_tool_attachments()
+                output = event.get("output") or []
+                expected_tool_outputs += sum(1 for item in output if item.get("type") == "function_call")
+                input_items.extend(copy.deepcopy(output))
             elif event.get("type") == "item.tool_output":
+                flush_tool_attachments()
                 input_items.append(copy.deepcopy(event["item"]))
+                if expected_tool_outputs > 0:
+                    expected_tool_outputs -= 1
+                if pending_legacy_tool_attachments:
+                    pending_tool_attachments.extend(pending_legacy_tool_attachments)
+                    pending_legacy_tool_attachments = []
             elif event.get("type") == "item.image_attachment":
-                input_items.append(image_message_item(event["attachment"]))
+                if event.get("source") == "tool":
+                    pending_tool_attachments.append(copy.deepcopy(event["attachment"]))
+                elif expected_tool_outputs > 0:
+                    pending_legacy_tool_attachments.append(copy.deepcopy(event["attachment"]))
+                else:
+                    flush_tool_attachments()
+                    input_items.append(image_message_item(event["attachment"]))
             elif event.get("type") == "turn.interrupted":
+                flush_tool_attachments()
                 interrupted = self._interrupted_turn_context(events, str(event.get("turn_id") or ""))
                 if interrupted:
                     input_items.append(message_item("user", interrupted))
+        flush_tool_attachments()
         return input_items
 
     def _reconstruct_input(
@@ -1086,6 +1142,16 @@ class AgentEngine:
     ) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = []
         pending_pre_user: list[dict[str, Any]] = []
+        pending_tool_attachments: list[dict[str, Any]] = []
+        pending_legacy_tool_attachments: list[dict[str, Any]] = []
+        expected_tool_outputs = 0
+
+        def flush_tool_attachments() -> None:
+            nonlocal pending_tool_attachments
+            if pending_tool_attachments:
+                input_items.extend(tool_attachment_context_items(pending_tool_attachments))
+                pending_tool_attachments = []
+
         snap = snapshot or self.thread_store.snapshot(thread_id)
         events = snap.events_after_compaction
         compaction = snap.latest_compaction
@@ -1108,21 +1174,40 @@ class AgentEngine:
         for event in events:
             pre_user_item = self._pre_user_event_item(event)
             if pre_user_item is not None:
+                flush_tool_attachments()
                 pending_pre_user.append(pre_user_item)
             elif event.get("type") == "item.user":
+                flush_tool_attachments()
                 input_items.extend(pending_pre_user)
                 pending_pre_user.clear()
                 input_items.append(event["item"])
             elif event.get("type") == "item.model_response":
-                input_items.extend(event.get("output") or [])
+                flush_tool_attachments()
+                output = event.get("output") or []
+                expected_tool_outputs += sum(1 for item in output if item.get("type") == "function_call")
+                input_items.extend(output)
             elif event.get("type") == "item.tool_output":
+                flush_tool_attachments()
                 input_items.append(event["item"])
+                if expected_tool_outputs > 0:
+                    expected_tool_outputs -= 1
+                if pending_legacy_tool_attachments:
+                    pending_tool_attachments.extend(pending_legacy_tool_attachments)
+                    pending_legacy_tool_attachments = []
             elif event.get("type") == "item.image_attachment":
-                input_items.append(image_message_item(event["attachment"]))
+                if event.get("source") == "tool":
+                    pending_tool_attachments.append(event["attachment"])
+                elif expected_tool_outputs > 0:
+                    pending_legacy_tool_attachments.append(event["attachment"])
+                else:
+                    flush_tool_attachments()
+                    input_items.append(image_message_item(event["attachment"]))
             elif event.get("type") == "turn.interrupted":
+                flush_tool_attachments()
                 interrupted = self._interrupted_turn_context(events, str(event.get("turn_id") or ""))
                 if interrupted:
                     input_items.append(message_item("user", interrupted))
+        flush_tool_attachments()
         return input_items
 
     def _pre_user_event_item(self, event: dict[str, Any]) -> dict[str, Any] | None:
@@ -1593,6 +1678,15 @@ def assistant_output_item(text: str) -> dict[str, Any]:
         "role": "assistant",
         "content": [{"type": "output_text", "text": text}],
     }
+
+
+def tool_attachment_context_items(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a neutral assistant bridge followed by tool-produced image context."""
+    if not attachments:
+        return []
+    items = [assistant_output_item(TOOL_ATTACHMENT_CONTEXT_BRIDGE)]
+    items.extend(image_message_item(attachment) for attachment in attachments)
+    return items
 
 
 def is_default_thread_title(title: str) -> bool:

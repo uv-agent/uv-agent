@@ -13,6 +13,7 @@ from uv_agent.agent import (
     message_item,
     message_item_text,
     model_tool_payload,
+    tool_attachment_context_items,
     usage_token_count,
 )
 from uv_agent.config import (
@@ -26,9 +27,15 @@ from uv_agent.config import (
     TitleGenerationConfig,
     load_config,
 )
-from uv_agent.model_client import FakeModelClient, ModelStreamEvent, parse_responses_response
+from uv_agent.model_client import (
+    FakeModelClient,
+    ModelStreamEvent,
+    anthropic_messages,
+    chat_messages,
+    parse_responses_response,
+)
 from uv_agent.runner import PythonRunner
-from uv_agent.runner.models import PythonRunRequest
+from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RerunRequest
 from uv_agent.session import ThreadLockedError, ThreadStore
 
 
@@ -108,6 +115,38 @@ class CompletedOnlyStreamClient(FakeModelClient):
             }
         )
         yield ModelStreamEvent(type="completed", response=parse_responses_response(self.responses.pop(0)))
+
+
+class LookAtRunner:
+    def __init__(self, image_path: Path) -> None:
+        self.image_path = image_path
+
+    async def run(self, request: PythonRunRequest) -> PythonRunResult:
+        self.image_path.parent.mkdir(parents=True, exist_ok=True)
+        self.image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        return PythonRunResult(
+            script_id="scr_look",
+            run_id="run_look",
+            returncode=0,
+            stdout="created image\n",
+            stderr="",
+            timed_out=False,
+            interrupted=False,
+            truncated=False,
+            run_log_path=self.image_path.parent / "run.jsonl",
+            script_path=self.image_path.parent / "script.py",
+            final_script_path=self.image_path.parent / "final.py",
+            events=[
+                {
+                    "kind": "look_at",
+                    "path": str(self.image_path),
+                    "note": "inspect",
+                }
+            ],
+        )
+
+    async def rerun(self, request: RerunRequest) -> PythonRunResult:
+        raise AssertionError("rerun should not be called")
 
 
 def make_test_config(
@@ -873,17 +912,7 @@ async def test_agent_attaches_user_turn_images(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     project_root = Path.cwd()
-    config = load_config(project_root, [])
-    config = AppConfig(
-        providers=config.providers,
-        models=config.models,
-        levels=config.levels,
-        runtime=RuntimeConfig(
-            compression=CompressionConfig(enabled=False),
-            title_generation=TitleGenerationConfig(enabled=False),
-        ),
-        runner=config.runner,
-    )
+    config = make_test_config(project_root)
     runner = PythonRunner(
         project_root=project_root,
         data_dir=tmp_path / ".uv-agent",
@@ -945,6 +974,229 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     assert not any(event["type"] == "item.tool_call" for event in stored_events)
     assert not any(event["type"] == "item.assistant_delta" for event in stored_events)
     assert not any(event["type"] == "item.reasoning_delta" for event in stored_events)
+
+
+@pytest.mark.asyncio
+async def test_tool_look_at_adds_assistant_bridge_before_image_context(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root, api="chat_completions")
+    client = FakeModelClient(
+        [
+            {
+                "id": "chat_1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "from uv_agent_runtime import look_at"}),
+                    }
+                ],
+            },
+            {
+                "id": "chat_2",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    runner = LookAtRunner(tmp_path / "generated.png")
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="make image")]
+    follow_up_input = client.requests[1]["input"]
+
+    assert [item["type"] for item in follow_up_input[-3:]] == [
+        "function_call_output",
+        "message",
+        "message",
+    ]
+    assert follow_up_input[-2]["role"] == "assistant"
+    assert "Additional visual context" in message_item_text(follow_up_input[-2])
+    assert follow_up_input[-1]["role"] == "user"
+    assert any(content.get("type") == "input_image" for content in follow_up_input[-1]["content"])
+
+    messages = chat_messages(follow_up_input, instructions=None, model=config.model_for_level(None))
+    assert messages[-3]["role"] == "tool"
+    assert messages[-2]["role"] == "assistant"
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"][1]["type"] == "image_url"
+
+    stored_events = engine.thread_store.read(events[-1]["thread_id"])
+    tool_index = next(index for index, event in enumerate(stored_events) if event["type"] == "item.tool_output")
+    image_index = next(index for index, event in enumerate(stored_events) if event["type"] == "item.image_attachment")
+    assert image_index > tool_index
+    assert stored_events[image_index]["source"] == "tool"
+    reconstructed = engine._reconstruct_input(events[-1]["thread_id"])
+    assert [item["type"] for item in reconstructed[-4:-1]] == [
+        "function_call_output",
+        "message",
+        "message",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_tool_look_at_resends_full_context_before_resuming_incremental(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "from uv_agent_runtime import look_at"}),
+                    }
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "seen",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "seen"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_3",
+                "output_text": "next",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "next"}],
+                    }
+                ],
+            },
+        ]
+    )
+    runner = LookAtRunner(tmp_path / "responses.png")
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    first_events = [event async for event in engine.run_turn(user_text="make image")]
+    [event async for event in engine.run_turn(user_text="follow up", thread_id=first_events[-1]["thread_id"])]
+
+    assert client.requests[0]["previous_response_id"] is None
+    assert client.requests[1]["previous_response_id"] is None
+    assert any(item.get("call_id") == "call_1" for item in client.requests[1]["input"])
+    assert any(
+        content.get("type") == "input_image"
+        for item in client.requests[1]["input"]
+        for content in item.get("content", [])
+    )
+    assert client.requests[2]["previous_response_id"] == "resp_2"
+    assert "make image" not in str(client.requests[2]["input"])
+    assert "follow up" in str(client.requests[2]["input"])
+
+
+def test_reconstructs_legacy_tool_image_after_tool_output(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    image = tmp_path / "legacy.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    attachment = engine.attachments.register_image(image, cwd=project_root, thread_id=thread_id)
+    engine.thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="t1",
+        output=[
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_python",
+                "arguments": "{}",
+            }
+        ],
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.image_attachment",
+        turn_id="t1",
+        attachment=attachment.to_event_payload(),
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.tool_output",
+        turn_id="t1",
+        item={"type": "function_call_output", "call_id": "call_1", "output": "{}"},
+    )
+
+    reconstructed = engine._reconstruct_input(thread_id)
+    messages = chat_messages(reconstructed, instructions=None, model=config.model_for_level(None))
+
+    assert [message["role"] for message in messages[-3:]] == ["tool", "assistant", "user"]
+    assert messages[-1]["content"][1]["type"] == "image_url"
+
+
+def test_anthropic_tool_image_context_keeps_tool_result_before_bridge(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    image = tmp_path / "anthropic.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    config = make_test_config(project_root, api="anthropic_messages")
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    attachment = engine.attachments.register_image(image, cwd=project_root, thread_id=thread_id)
+    items = [
+        {
+            "type": "function_call",
+            "call_id": "toolu_1",
+            "name": "run_python",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "toolu_1", "output": "{}"},
+        *tool_attachment_context_items([attachment.to_event_payload()]),
+    ]
+
+    messages = anthropic_messages(items)
+
+    assert [message["role"] for message in messages] == ["assistant", "user", "assistant", "user"]
+    assert messages[1]["content"][0]["type"] == "tool_result"
+    assert messages[2]["content"] == "Tool execution completed. Additional visual context produced by the tool is provided in the next user message."
+    assert messages[3]["content"][1]["type"] == "image"
 
 
 @pytest.mark.asyncio
