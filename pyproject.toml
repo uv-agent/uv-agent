@@ -1,6 +1,6 @@
 [project]
 name = "uv-agent"
-version = "0.3.2"
+version = "0.3.3"
 description = "Experimental Python-runner coding agent with a Textual TUI"
 readme = "README.md"
 license = "MIT"
@@ -10,6 +10,7 @@ dependencies = [
     "openai>=2.36.0",
     "pillow>=12.0.0",
     "textual>=6.5.0",
+    "watchfiles>=1.1.1",
 ]
 
 [project.urls]
