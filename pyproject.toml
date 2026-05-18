@@ -1,10 +1,10 @@
 [project]
 name = "uv-agent"
-version = "0.2.10"
+version = "0.3.0"
 description = "Experimental Python-runner coding agent with a Textual TUI"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
     "openai>=2.36.0",
