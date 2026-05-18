@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
+import threading
 
 import pytest
 from textual import events
-from textual.widgets import Static, TextArea
+from textual.widgets import OptionList, Static, TextArea
 
 from uv_agent.clipboard import ClipboardImage
 from uv_agent.agent import AgentEngine
@@ -1736,12 +1737,163 @@ async def test_tui_at_mention_inserts_file_reference_only(
         assert isinstance(panel, FullscreenPanel)
         assert panel.panel_title == app._text("mention_files")
 
+        for _ in range(20):
+            await pilot.pause()
+            if panel.items:
+                break
+        await pilot.press("e")
+        await pilot.press("x")
         await pilot.press("enter")
         await pilot.pause()
 
         assert composer.text == "@src/example.py "
         assert app.thread_id is None
         assert app._transcript_has_content is False
+
+
+@pytest.mark.asyncio
+async def test_tui_file_mention_scan_skips_dot_directories_with_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    source_dir = project_root / "src"
+    dot_dir = project_root / ".hidden"
+    dotted_dir = project_root / "version.1"
+    source_dir.mkdir(parents=True)
+    dot_dir.mkdir(parents=True)
+    dotted_dir.mkdir(parents=True)
+    (source_dir / "example.py").write_text("print('hi')\n", encoding="utf-8")
+    (dot_dir / "secret.py").write_text("print('secret')\n", encoding="utf-8")
+    (dotted_dir / "inside.py").write_text("print('inside')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    items = app._file_mention_items()
+
+    assert any(item.title == ".hidden/" and item.id == ".hidden/" for item in items)
+    assert any(item.title == "version.1/" and item.id == "version.1/" for item in items)
+    assert any(item.title == "version.1/inside.py" for item in items)
+    assert any(item.title == "src/" and item.id == "src/" for item in items)
+    assert any(item.title == "src/example.py" for item in items)
+    assert not any(item.title == ".hidden/secret.py" for item in items)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_picker(
+            app._text("mention_files"),
+            items,
+            app._choose_file_mention,
+            mention_kind="file",
+            mention_items=app._mention_picker_items,
+        )
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        option_list = panel.query_one("#panel-content", OptionList)
+        first_option = option_list.get_option_at_index(0)
+        assert first_option.disabled is False
+        await pilot.press("enter")
+        await pilot.pause()
+
+        composer = app.query_one("#composer", TextArea)
+        assert composer.text == "@.hidden/ "
+
+
+@pytest.mark.asyncio
+async def test_tui_file_mention_opens_before_background_scan_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    source_dir = project_root / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "example.py").write_text("print('hi')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    app = UvAgentApp(project_root=project_root)
+    original_iter = app._iter_file_mention_items
+
+    def slow_iter(root: Path, *, generation: int | None):
+        scan_started.set()
+        release_scan.wait(2)
+        yield from original_iter(root, generation=generation)
+
+    app._iter_file_mention_items = slow_iter  # type: ignore[method-assign]
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("@")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("mention_files")
+        assert app._text("mention_scanning") in panel.subtitle
+        assert panel.items == []
+        assert scan_started.wait(1)
+
+        release_scan.set()
+        for _ in range(20):
+            await pilot.pause()
+            if any(item.title == "src/example.py" for item in panel.items):
+                break
+
+        assert any(item.title == "src/example.py" for item in panel.items)
+        assert app._text("mention_cached") in panel.subtitle
+
+
+@pytest.mark.asyncio
+async def test_tui_file_mention_dirty_cache_rescans_on_next_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    source_dir = project_root / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "old.py").write_text("print('old')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("@")
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        for _ in range(20):
+            await pilot.pause()
+            if app._mention_file_cache.complete:
+                break
+        assert any(item.title == "src/old.py" for item in panel.items)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        composer.load_text("")
+        await pilot.pause()
+        (source_dir / "new.py").write_text("print('new')\n", encoding="utf-8")
+        app._mark_file_mention_cache_dirty()
+
+        composer.insert("@")
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        for _ in range(20):
+            await pilot.pause()
+            if any(item.title == "src/new.py" for item in panel.items):
+                break
+
+        assert any(item.title == "src/new.py" for item in panel.items)
 
 
 @pytest.mark.asyncio
@@ -1771,6 +1923,10 @@ async def test_tui_mention_switches_from_files_to_threads_with_at(
         file_panel = app.screen_stack[-1]
         assert isinstance(file_panel, FullscreenPanel)
         assert file_panel.panel_title == app._text("mention_files")
+        for _ in range(20):
+            await pilot.pause()
+            if file_panel.items:
+                break
 
         await pilot.press("@")
         await pilot.pause()
@@ -1778,6 +1934,10 @@ async def test_tui_mention_switches_from_files_to_threads_with_at(
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
         assert panel.panel_title == app._text("mention_threads")
+        for _ in range(20):
+            await pilot.pause()
+            if panel.items:
+                break
 
         await pilot.press("enter")
         await pilot.pause()
@@ -1806,6 +1966,11 @@ async def test_tui_mention_backspace_returns_from_threads_to_files(
         composer = app.query_one("#composer", TextArea)
         composer.insert("@")
         await pilot.pause()
+        for _ in range(20):
+            await pilot.pause()
+            panel = app.screen_stack[-1]
+            if isinstance(panel, FullscreenPanel) and panel.items:
+                break
         await pilot.press("@")
         await pilot.pause()
         panel = app.screen_stack[-1]
@@ -1816,6 +1981,8 @@ async def test_tui_mention_backspace_returns_from_threads_to_files(
         await pilot.pause()
 
         assert panel.panel_title == app._text("mention_files")
+        await pilot.press("e")
+        await pilot.press("x")
         await pilot.press("enter")
         await pilot.pause()
         assert composer.text == "@src/example.py "

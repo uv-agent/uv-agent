@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import threading
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
@@ -26,6 +29,7 @@ from textual.strip import Strip
 from textual.widgets import Input, OptionList, Static, TextArea
 from textual.worker import Worker
 from textual.widgets._option_list import Option
+from watchfiles import Change, watch
 
 from uv_agent.app_factory import create_engine
 from uv_agent.clipboard import ClipboardImageError, save_clipboard_image
@@ -86,6 +90,14 @@ class PanelPage:
     mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None
     select_callback: Callable[[str], None] | None = None
     close_on_select: bool = False
+
+
+@dataclass
+class MentionScanCache:
+    items: list[PickerItem] = field(default_factory=list)
+    complete: bool = False
+    generation: int = 0
+    worker: Worker[None] | None = None
 
 
 class PickerOptionList(OptionList):
@@ -367,9 +379,9 @@ class FullscreenPanel(ModalScreen[str | None]):
         if highlighted is None or highlighted < 0 or highlighted >= option_list.option_count:
             return
         option = option_list.get_option_at_index(highlighted)
-        if option.id:
+        if option.id and option.id in self._option_ids:
             self._selected_mention_kind = self.mention_kind
-            self._select_value(self._option_ids.get(option.id, option.id))
+            self._select_value(self._option_ids[option.id])
 
     def navigate_picker(
         self,
@@ -473,13 +485,16 @@ class FullscreenPanel(ModalScreen[str | None]):
         options = []
         for index, item in enumerate(self._filtered):
             option_id = f"item_{index}"
-            self._option_ids[option_id] = item.id
+            disabled = not item.id
+            if not disabled:
+                self._option_ids[option_id] = item.id
             options.append(
                 Option(
                     f"[bold cyan]{escape(item.title)}[/bold cyan]"
                     + (f"\n[dim]{escape(item.description)}[/dim]" if item.description else "")
                     + (f"\n[dim]{escape(item.meta)}[/dim]" if item.meta else ""),
                     id=option_id,
+                    disabled=disabled,
                 )
             )
         if not options:
@@ -501,6 +516,22 @@ class FullscreenPanel(ModalScreen[str | None]):
         if options:
             option_list.highlighted = min(previous if previous is not None else 0, len(options) - 1)
 
+    def update_picker_items(self, items: list[PickerItem], *, subtitle: str | None = None) -> None:
+        if not self.picker_mode:
+            return
+        self.items = list(items)
+        if subtitle is not None:
+            self.subtitle = subtitle
+            try:
+                self.query_one("#panel-subtitle", Static).update(subtitle)
+            except NoMatches:
+                return
+        try:
+            filter_value = self.query_one("#panel-filter", Input).value
+        except NoMatches:
+            return
+        self._apply_filter(filter_value)
+
     def _switch_mention_kind(self, kind: str, *, filter_value: str) -> None:
         if self.mention_items is None:
             return
@@ -514,6 +545,9 @@ class FullscreenPanel(ModalScreen[str | None]):
         filter_input = self.query_one("#panel-filter", Input)
         filter_input.value = filter_value
         self._apply_filter(filter_value)
+        handler = getattr(self.app, "_start_mention_scan", None)
+        if callable(handler):
+            handler(kind)
 
 
 COMMAND_SPECS = [
@@ -566,9 +600,26 @@ IGNORED_MENTION_DIRS = {
     ".uv-agent",
     ".venv",
     "__pycache__",
+    "__pypackages__",
+    "build",
+    "coverage",
+    "dist",
+    "env",
+    "htmlcov",
     "node_modules",
+    "out",
+    "site-packages",
+    "target",
+    "tmp",
+    "vendor",
+    "venv",
 }
 MAX_MENTION_ITEMS = 300
+MENTION_SCAN_BATCH_SIZE = 50
+MENTION_SCAN_DIRECTORY_LIMIT = 20000
+MENTION_SCAN_FILE_LIMIT = 100000
+MENTION_WATCH_DEBOUNCE_MS = 1000
+MENTION_WATCH_POLL_DELAY_MS = 2000
 
 
 def image_attachment_markup(attachment: dict[str, Any], *, label: str = "image attached") -> str:
@@ -1581,6 +1632,11 @@ class UvAgentApp(App[None]):
         self._composer_expanded = False
         self._pending_images: list[PendingImage] = []
         self._tool_delta_calls: dict[int, dict[str, Any]] = {}
+        self._mention_file_cache = MentionScanCache()
+        self._mention_thread_cache = MentionScanCache()
+        self._mention_file_cache_dirty = False
+        self._mention_file_watcher_worker: Worker[None] | None = None
+        self._mention_file_watcher_stop = threading.Event()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -1611,6 +1667,11 @@ class UvAgentApp(App[None]):
         self.query_one("#composer", TextArea).focus()
         transcript = self.query_one("#transcript", TranscriptScroll)
         self.watch(transcript, "near_bottom", self._on_near_bottom_changed)
+
+    def on_unmount(self) -> None:
+        self._mention_file_watcher_stop.set()
+        if self._mention_file_watcher_worker is not None:
+            self._mention_file_watcher_worker.cancel()
 
     def _on_near_bottom_changed(self, near: bool) -> None:
         try:
@@ -3107,6 +3168,7 @@ class UvAgentApp(App[None]):
             mention_kind="file",
             mention_items=self._mention_picker_items,
         )
+        self._start_file_mention_scan()
 
     def _open_thread_mention_picker(self) -> None:
         title, items, subtitle = self._mention_picker_items("thread")
@@ -3119,19 +3181,33 @@ class UvAgentApp(App[None]):
             mention_items=self._mention_picker_items,
             initial_filter="@",
         )
+        self._start_thread_mention_scan()
 
     def _mention_picker_items(self, kind: str) -> tuple[str, list[PickerItem], str]:
         if kind == "thread":
             return (
                 self._text("mention_threads"),
-                self._thread_mention_items(),
-                self._text("mention_threads_hint"),
+                self._mention_thread_cache.items,
+                self._mention_cache_subtitle("thread"),
             )
         return (
             self._text("mention_files"),
-            self._file_mention_items(),
-            self._text("mention_files_hint"),
+            self._mention_file_cache.items,
+            self._mention_cache_subtitle("file"),
         )
+
+    def _mention_cache_subtitle(self, kind: str) -> str:
+        if kind == "thread":
+            hint = self._text("mention_threads_hint")
+            cache = self._mention_thread_cache
+        else:
+            hint = self._text("mention_files_hint")
+            cache = self._mention_file_cache
+        if cache.worker is not None and not cache.complete:
+            return f"{hint} · {self._text('mention_scanning')}"
+        if cache.complete:
+            return f"{hint} · {self._text('mention_cached')}"
+        return hint
 
     def _thread_mention_items(self) -> list[PickerItem]:
         threads = self.engine.thread_store.list_threads()
@@ -3154,36 +3230,239 @@ class UvAgentApp(App[None]):
         return items
 
     def _file_mention_items(self) -> list[PickerItem]:
+        return list(self._iter_file_mention_items(self.project_root.resolve(), generation=None))
+
+    def _start_file_mention_scan(self) -> None:
+        cache = self._mention_file_cache
+        if cache.complete and not self._mention_file_cache_dirty:
+            self._refresh_active_mention_panel("file", cache.generation)
+            return
+        if cache.worker is not None and not cache.complete:
+            if not cache.worker.is_finished:
+                return
+            cache.worker = None
+        cache.generation += 1
+        cache.complete = False
+        self._mention_file_cache_dirty = False
+        generation = cache.generation
+        cache.worker = self.run_worker(
+            lambda: self._scan_file_mentions_worker(generation),
+            name="mention-files",
+            group="mention-files",
+            exit_on_error=False,
+            exclusive=True,
+            thread=True,
+        )
+        self._refresh_active_mention_panel("file", generation)
+
+    def _scan_file_mentions_worker(self, generation: int) -> None:
         root = self.project_root.resolve()
         items: list[PickerItem] = []
-        stack = [root]
+        pending: list[PickerItem] = []
+        try:
+            for item in self._iter_file_mention_items(root, generation=generation):
+                if generation != self._mention_file_cache.generation:
+                    return
+                items.append(item)
+                pending.append(item)
+                if len(pending) >= MENTION_SCAN_BATCH_SIZE:
+                    batch = list(items)
+                    self.call_from_thread(self._apply_file_mention_scan_update, generation, batch, False)
+                    pending.clear()
+        finally:
+            self.call_from_thread(self._apply_file_mention_scan_update, generation, items, True)
+
+    def _apply_file_mention_scan_update(self, generation: int, items: list[PickerItem], complete: bool) -> None:
+        cache = self._mention_file_cache
+        if generation != cache.generation:
+            return
+        cache.items = list(items)
+        cache.complete = complete
+        if complete:
+            cache.worker = None
+            self._start_file_mention_watcher()
+        self._refresh_active_mention_panel("file", generation)
+
+    def _start_file_mention_watcher(self) -> None:
+        worker = self._mention_file_watcher_worker
+        if worker is not None and not worker.is_finished:
+            return
+        self._mention_file_watcher_stop.clear()
+        self._mention_file_watcher_worker = self.run_worker(
+            self._watch_file_mentions_worker,
+            name="mention-file-watch",
+            group="mention-file-watch",
+            exit_on_error=False,
+            exclusive=True,
+            thread=True,
+        )
+
+    def _watch_file_mentions_worker(self) -> None:
+        root = self.project_root.resolve()
+        for changes in watch(
+            root,
+            watch_filter=self._mention_watch_filter,
+            debounce=MENTION_WATCH_DEBOUNCE_MS,
+            step=MENTION_WATCH_POLL_DELAY_MS,
+            recursive=True,
+            ignore_permission_denied=True,
+            stop_event=self._mention_file_watcher_stop,
+        ):
+            if not changes:
+                continue
+            self.call_from_thread(self._mark_file_mention_cache_dirty)
+
+    def _mention_watch_filter(self, change: Change, path: str) -> bool:
+        try:
+            relative_parts = Path(path).resolve().relative_to(self.project_root.resolve()).parts
+        except (OSError, ValueError):
+            return False
+        for part in relative_parts[:-1]:
+            if part.startswith(".") or part in IGNORED_MENTION_DIRS:
+                return False
+        name = relative_parts[-1] if relative_parts else ""
+        if name.startswith("."):
+            return True
+        suffix = Path(name).suffix.lower()
+        return not suffix or suffix in CODE_FILE_SUFFIXES
+
+    def _mark_file_mention_cache_dirty(self) -> None:
+        cache = self._mention_file_cache
+        if cache.worker is not None and not cache.worker.is_finished:
+            return
+        self._mention_file_cache_dirty = True
+
+    def _start_thread_mention_scan(self) -> None:
+        cache = self._mention_thread_cache
+        if cache.complete:
+            self._refresh_active_mention_panel("thread", cache.generation)
+            return
+        if cache.worker is not None and not cache.complete:
+            if not cache.worker.is_finished:
+                return
+            cache.worker = None
+        cache.generation += 1
+        cache.complete = False
+        generation = cache.generation
+        cache.worker = self.run_worker(
+            lambda: self._scan_thread_mentions_worker(generation),
+            name="mention-threads",
+            group="mention-threads",
+            exit_on_error=False,
+            exclusive=True,
+            thread=True,
+        )
+        self._refresh_active_mention_panel("thread", generation)
+
+    def _start_mention_scan(self, kind: str) -> None:
+        if kind == "thread":
+            self._start_thread_mention_scan()
+        elif kind == "file":
+            self._start_file_mention_scan()
+
+    def _scan_thread_mentions_worker(self, generation: int) -> None:
+        items: list[PickerItem] = []
+        try:
+            items = self._thread_mention_items()
+        finally:
+            if generation != self._mention_thread_cache.generation:
+                return
+            self.call_from_thread(self._apply_thread_mention_scan_update, generation, items)
+
+    def _apply_thread_mention_scan_update(self, generation: int, items: list[PickerItem]) -> None:
+        cache = self._mention_thread_cache
+        if generation != cache.generation:
+            return
+        cache.items = list(items)
+        cache.complete = True
+        cache.worker = None
+        self._refresh_active_mention_panel("thread", generation)
+
+    def _refresh_active_mention_panel(self, kind: str, generation: int) -> None:
+        cache = self._mention_thread_cache if kind == "thread" else self._mention_file_cache
+        if generation != cache.generation:
+            return
+        panel = self._active_fullscreen_panel()
+        if panel is None or panel.mention_kind != kind:
+            return
+        panel.update_picker_items(cache.items, subtitle=self._mention_cache_subtitle(kind))
+
+    def _iter_file_mention_items(self, root: Path, *, generation: int | None) -> Any:
+        items: list[PickerItem] = []
+        directories_seen = 0
+        files_seen = 0
+        stack = deque([root])
         while stack and len(items) < MAX_MENTION_ITEMS:
-            directory = stack.pop()
+            directory = stack.popleft()
+            if generation is not None and generation != self._mention_file_cache.generation:
+                return
+            if directories_seen >= MENTION_SCAN_DIRECTORY_LIMIT or files_seen >= MENTION_SCAN_FILE_LIMIT:
+                if generation is None:
+                    return
+                yield PickerItem(
+                    id="",
+                    title=self._text("mention_scan_truncated"),
+                    description=self._text("mention_scan_truncated_description"),
+                )
+                return
             try:
-                children = sorted(directory.iterdir(), key=lambda item: (item.is_file(), item.name.casefold()))
+                with os.scandir(directory) as entries:
+                    children = sorted(entries, key=lambda item: (not item.is_dir(follow_symlinks=False), item.name.casefold()))
             except OSError:
                 continue
-            for path in children:
+            directories_seen += 1
+            for entry in children:
+                if generation is not None and generation != self._mention_file_cache.generation:
+                    return
                 if len(items) >= MAX_MENTION_ITEMS:
                     break
-                if path.is_dir():
-                    if path.name not in IGNORED_MENTION_DIRS and not path.name.startswith("."):
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if is_dir:
+                    path = Path(entry.path)
+                    try:
+                        relative = path.relative_to(root)
+                    except ValueError:
+                        continue
+                    mention = relative.as_posix().rstrip("/") + "/"
+                    item = PickerItem(
+                        id=mention,
+                        title=mention,
+                        description=(
+                            self._text("mention_dot_dir_skipped")
+                            if entry.name.startswith(".")
+                            else self._text("mention_directory_description")
+                        ),
+                    )
+                    items.append(item)
+                    yield item
+                    if not entry.name.startswith(".") and entry.name not in IGNORED_MENTION_DIRS:
                         stack.append(path)
                     continue
-                if not path.is_file() or path.suffix.lower() not in CODE_FILE_SUFFIXES:
+                try:
+                    is_file = entry.is_file(follow_symlinks=False)
+                except OSError:
+                    continue
+                files_seen += 1
+                if not is_file:
+                    continue
+                path = Path(entry.path)
+                if path.suffix.lower() not in CODE_FILE_SUFFIXES:
                     continue
                 try:
                     relative = path.relative_to(root)
                 except ValueError:
                     continue
                 mention = relative.as_posix()
-                items.append(
-                    PickerItem(
-                        id=mention,
-                        title=mention,
-                        description=self._text("mention_file_description"),
-                    )
+                item = PickerItem(
+                    id=mention,
+                    title=mention,
+                    description=self._text("mention_file_description"),
                 )
+                items.append(item)
+                yield item
         return items
 
     def _mcp_mention_items(self) -> list[PickerItem]:
