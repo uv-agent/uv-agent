@@ -2,12 +2,14 @@
 
 [简体中文](README.zh-CN.md)
 
-`uv-agent` is an experimental coding agent with a Textual TUI. Its only external
+`uv-agent` is a portable coding agent with a Textual TUI. Its only external
 action surface is `run_python`: the model submits Python scripts to a managed
-`uv run` runner, and those scripts do the actual work.
+`uv run` runner, and those scripts do the actual work. This single-tool design
+keeps agent behavior consistent across platforms—any OS with Python and uv
+behaves the same way.
 
-The project is early and intentionally small. Public APIs, config fields, and
-runtime behavior may still change.
+Public APIs, config fields, and runtime behavior may still change as the
+project evolves.
 
 ## Install And Run
 
