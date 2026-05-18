@@ -203,10 +203,21 @@ Title generation options:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `language` | string | `"auto"` | TUI language. Use `auto`, `en`, or `zh-CN`. |
+| `completion_notification` | object or boolean | see below | Notify when a TUI turn finishes. |
+
+Completion notification options:
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Enable completion notifications. |
+| `toast` | boolean | `true` | Show an in-terminal Textual toast. |
+| `desktop` | boolean | `true` | On Windows, try a best-effort desktop notification. Other platforms ignore this. |
+| `bell` | boolean | `false` | Ring the terminal bell when a turn finishes. |
 
 The `/config` panel can edit `runtime.default_level`,
-`runtime.compression.enabled`, and `ui.language`. Model, provider, and level
-definitions are edited in JSON.
+`runtime.compression.enabled`, `ui.language`, and
+`ui.completion_notification.enabled`. Model, provider, and level definitions are
+edited in JSON.
 
 ## Runner Options
 

@@ -122,8 +122,19 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class CompletionNotificationConfig:
+    enabled: bool = True
+    toast: bool = True
+    desktop: bool = True
+    bell: bool = False
+
+
+@dataclass(frozen=True)
 class UiConfig:
     language: str = "auto"
+    completion_notification: CompletionNotificationConfig = field(
+        default_factory=CompletionNotificationConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -211,6 +222,12 @@ def default_config(project_root: Path) -> dict[str, Any]:
         "ui": {
             "stream": True,
             "language": "auto",
+            "completion_notification": {
+                "enabled": True,
+                "toast": True,
+                "desktop": True,
+                "bell": False,
+            },
         },
         "runner": {
             "runtime_dependency": runtime_dependency,
@@ -367,7 +384,12 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         levels=levels,
         runtime=runtime,
         runner=runner,
-        ui=UiConfig(language=str(ui_raw.get("language", "auto"))),
+        ui=UiConfig(
+            language=str(ui_raw.get("language", "auto")),
+            completion_notification=parse_completion_notification(
+                ui_raw.get("completion_notification", {})
+            ),
+        ),
     )
 
 
@@ -401,6 +423,19 @@ def parse_reasoning_display(value: object) -> ReasoningDisplayConfig:
         assistant_message_fields=string_list(value.get("assistant_message_fields")),
         stream_delta_fields=string_list(value.get("stream_delta_fields")),
         unknown_text_delta_as_reasoning=bool(value.get("unknown_text_delta_as_reasoning", False)),
+    )
+
+
+def parse_completion_notification(value: object) -> CompletionNotificationConfig:
+    if isinstance(value, bool):
+        return CompletionNotificationConfig(enabled=value)
+    if not isinstance(value, dict):
+        return CompletionNotificationConfig()
+    return CompletionNotificationConfig(
+        enabled=bool(value.get("enabled", True)),
+        toast=bool(value.get("toast", True)),
+        desktop=bool(value.get("desktop", True)),
+        bell=bool(value.get("bell", False)),
     )
 
 

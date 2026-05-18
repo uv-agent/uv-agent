@@ -66,13 +66,20 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
     "default_level": "medium"
   },
   "ui": {
-    "language": "auto"
+    "language": "auto",
+    "completion_notification": {
+      "enabled": true,
+      "toast": true,
+      "desktop": true,
+      "bell": false
+    }
   }
 }
 ```
 
 在 TUI 中可以用 `/config` 切换默认 level、界面语言和自动压缩。把 `ui.language`
-设为 `zh-CN` 可使用中文界面。
+设为 `zh-CN` 可使用中文界面。完成通知可通过 `ui.completion_notification`
+配置。
 
 完整字段见 [configuration](docs/configuration.md)，详细示例见
 [config.example.json](docs/config.example.json)。

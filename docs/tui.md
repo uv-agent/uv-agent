@@ -70,6 +70,7 @@ and Esc to close.
 - `runtime.default_level`
 - `runtime.compression.enabled`
 - `ui.language`
+- `ui.completion_notification.enabled`
 
 Provider definitions, model definitions, and level-to-model mappings are edited
 in JSON config files. Use `/models` to inspect configured models and `/level` to
@@ -82,6 +83,9 @@ Language choices are:
 - `zh-CN`
 
 See [configuration](configuration.md) for config file locations and schema.
+
+Completion notifications can show a TUI toast, ring the terminal bell, and on
+Windows attempt a best-effort desktop notification.
 
 ## Transcript Events
 

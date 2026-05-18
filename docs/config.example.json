@@ -99,7 +99,13 @@
     }
   },
   "ui": {
-    "language": "auto"
+    "language": "auto",
+    "completion_notification": {
+      "enabled": true,
+      "toast": true,
+      "desktop": true,
+      "bell": false
+    }
   },
   "runner": {
     "runtime_dependency": "uv-agent",

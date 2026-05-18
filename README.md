@@ -69,13 +69,20 @@ Minimal shape:
     "default_level": "medium"
   },
   "ui": {
-    "language": "auto"
+    "language": "auto",
+    "completion_notification": {
+      "enabled": true,
+      "toast": true,
+      "desktop": true,
+      "bell": false
+    }
   }
 }
 ```
 
 Use `/config` in the TUI to switch the default level, language, and automatic
-compression. Set `ui.language` to `zh-CN` for a Chinese UI.
+compression. Set `ui.language` to `zh-CN` for a Chinese UI. Completion
+notifications can be configured under `ui.completion_notification`.
 
 See [configuration](docs/configuration.md) for all supported options and
 [config.example.json](docs/config.example.json) for a detailed example.

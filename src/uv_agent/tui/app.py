@@ -46,6 +46,7 @@ from uv_agent.environment import application_version, detect_user_language, host
 from uv_agent.errors import error_markup, format_error
 from uv_agent.i18n import command_description, tr
 from uv_agent.mcp_config import discover_mcp_servers
+from uv_agent.notifications import send_desktop_completion_notification
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
@@ -1976,6 +1977,7 @@ class UvAgentApp(App[None]):
                         await self._append_assistant_delta(text)
                         self._sync_run_state_from_active(run_state)
                     run_state.status = self._text("idle")
+                    self._notify_turn_completed(item_thread_id, text)
                     if self._is_active_thread(item_thread_id):
                         self._refresh_status(self._text("idle"))
                 elif event_type == "turn.interrupted":
@@ -3692,6 +3694,14 @@ class UvAgentApp(App[None]):
                 meta=self._text("config_language_hint"),
             ),
             PickerItem(
+                id="completion_notification",
+                title=self._text("config_completion_notification"),
+                description=(
+                    "on" if self.engine.config.ui.completion_notification.enabled else "off"
+                ),
+                meta=self._text("config_completion_notification_hint"),
+            ),
+            PickerItem(
                 id="compression",
                 title=self._text("config_compression"),
                 description="on" if self.engine.config.runtime.compression.enabled else "off",
@@ -3726,6 +3736,8 @@ class UvAgentApp(App[None]):
             self._open_default_level_panel()
         elif item_id == "language":
             self._open_language_panel()
+        elif item_id == "completion_notification":
+            self._toggle_completion_notification()
         elif item_id == "compression":
             self._toggle_compression()
         elif item_id == "sources":
@@ -3796,6 +3808,14 @@ class UvAgentApp(App[None]):
         self._write_user_config_patch({"runtime": {"compression": {"enabled": not current}}})
         self._flash(
             f"{self._text('config_compression')}: {'on' if not current else 'off'}",
+        )
+        self._open_config_panel()
+
+    def _toggle_completion_notification(self) -> None:
+        current = self.engine.config.ui.completion_notification.enabled
+        self._write_user_config_patch({"ui": {"completion_notification": {"enabled": not current}}})
+        self._flash(
+            f"{self._text('config_completion_notification')}: {'on' if not current else 'off'}",
         )
         self._open_config_panel()
 
@@ -4224,6 +4244,28 @@ class UvAgentApp(App[None]):
         self.notify(message, severity=severity, timeout=2.0)
         self._last_status = message
         self._refresh_status()
+
+    def _notify_turn_completed(self, thread_id: str, final_text: str) -> None:
+        config = self.engine.config.ui.completion_notification
+        if not config.enabled:
+            return
+        title = self._text("turn_completed_title")
+        message = self._completion_notification_message(thread_id, final_text)
+        if config.toast:
+            self.notify(message, title=title, timeout=4.0)
+        if config.bell:
+            self.bell()
+        if config.desktop:
+            send_desktop_completion_notification(title, message)
+
+    def _completion_notification_message(self, thread_id: str, final_text: str) -> str:
+        summary = " ".join(final_text.split())
+        if len(summary) > 120:
+            summary = summary[:117].rstrip() + "..."
+        base = self._text("turn_completed_message")
+        if summary:
+            return f"{base}: {summary}"
+        return f"{base} ({short_thread(thread_id)})"
 
     def _refresh_status(self, state: str | None = None) -> None:
         if state is not None:

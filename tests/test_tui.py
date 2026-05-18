@@ -18,6 +18,7 @@ from uv_agent.config import (
     ProviderConfig,
     RunnerConfig,
     RuntimeConfig,
+    CompletionNotificationConfig,
     UiConfig,
 )
 from uv_agent.model_client import FakeModelClient, ModelResponse, ToolCallDelta, parse_responses_response
@@ -308,7 +309,10 @@ def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
             runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
             runtime_package_name="uv-agent",
         ),
-        ui=UiConfig(language="en"),
+        ui=UiConfig(
+            language="en",
+            completion_notification=CompletionNotificationConfig(enabled=False),
+        ),
     )
     return AgentEngine(
         config=config,
@@ -2130,7 +2134,10 @@ async def test_tui_uses_chinese_when_configured(
         levels=engine.config.levels,
         runtime=engine.config.runtime,
         runner=engine.config.runner,
-        ui=UiConfig(language="zh-CN"),
+        ui=UiConfig(
+            language="zh-CN",
+            completion_notification=CompletionNotificationConfig(enabled=False),
+        ),
     )
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
     app = UvAgentApp(project_root=project_root)
@@ -2164,7 +2171,10 @@ async def test_tui_updates_placeholder_after_language_config_refresh(
             levels=engine.config.levels,
             runtime=engine.config.runtime,
             runner=engine.config.runner,
-            ui=UiConfig(language="zh-CN"),
+            ui=UiConfig(
+                language="zh-CN",
+                completion_notification=CompletionNotificationConfig(enabled=False),
+            ),
         )
         app._refresh_status()
 
@@ -2204,6 +2214,38 @@ async def test_tui_config_panel_sets_default_level_and_writes_editable_config(
 
         data = __import__("json").loads(config_path.read_text(encoding="utf-8"))
         assert data["runtime"]["default_level"] == "small"
+
+
+@pytest.mark.asyncio
+async def test_tui_config_panel_toggles_completion_notification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config_path = project_root / ".uv-agent" / "config.json"
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        app._open_config_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        ids = [item.id for item in panel.items]
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index(
+            "completion_notification"
+        )
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        data = __import__("json").loads(config_path.read_text(encoding="utf-8"))
+        assert data["ui"]["completion_notification"]["enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -2319,6 +2361,58 @@ async def test_tui_status_summarizes_context_rules_and_scripts(
         assert "AGENTS.md" in panel.body
         assert "Use local rules" not in panel.body
         assert "print('hi')" in panel.body
+
+
+@pytest.mark.asyncio
+async def test_tui_turn_completion_notification_uses_configured_channels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = ImageCaptureEngine(fake_engine(project_root, tmp_path / "state"))
+    engine.config = AppConfig(
+        providers=engine.config.providers,
+        models=engine.config.models,
+        levels=engine.config.levels,
+        runtime=engine.config.runtime,
+        runner=engine.config.runner,
+        ui=UiConfig(
+            language="en",
+            completion_notification=CompletionNotificationConfig(
+                enabled=True,
+                toast=True,
+                desktop=True,
+                bell=True,
+            ),
+        ),
+    )
+    desktop_calls: list[tuple[str, str]] = []
+    bell_count = 0
+
+    def fake_desktop_notification(title: str, message: str) -> bool:
+        desktop_calls.append((title, message))
+        return True
+
+    def fake_bell(app: UvAgentApp) -> None:
+        nonlocal bell_count
+        bell_count += 1
+
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    monkeypatch.setattr("uv_agent.tui.app.send_desktop_completion_notification", fake_desktop_notification)
+    monkeypatch.setattr(UvAgentApp, "bell", fake_bell)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("inspect")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        toasts = [str(toast.render()) for toast in app.screen.query("Toast")]
+        assert any("Turn completed" in toast for toast in toasts)
+        assert desktop_calls == [("uv-agent", "Turn completed: done")]
+        assert bell_count == 1
 
 
 @pytest.mark.asyncio

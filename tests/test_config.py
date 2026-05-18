@@ -255,6 +255,32 @@ def test_ui_language_config(tmp_path: Path) -> None:
     assert config.ui.language == "zh-CN"
 
 
+def test_ui_completion_notification_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "ui": {
+                    "completion_notification": {
+                        "enabled": True,
+                        "toast": False,
+                        "desktop": True,
+                        "bell": True,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert config.ui.completion_notification.enabled is True
+    assert config.ui.completion_notification.toast is False
+    assert config.ui.completion_notification.desktop is True
+    assert config.ui.completion_notification.bell is True
+
+
 def test_editable_config_prefers_existing_user_config(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
     project_root = tmp_path / "workspace"
