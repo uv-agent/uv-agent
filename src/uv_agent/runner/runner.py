@@ -4,6 +4,8 @@ import asyncio
 import codecs
 import json
 import os
+import signal
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -209,6 +211,7 @@ class PythonRunner:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **_subprocess_group_kwargs(),
             )
             stdout_task = asyncio.create_task(
                 self._pump_stream(
@@ -255,20 +258,26 @@ class PythonRunner:
                     returncode = wait_task.result()
                 elif cancel_task is not None and cancel_task in done:
                     interrupted = True
-                    process.kill()
-                    returncode = await process.wait()
+                    await _kill_process_tree(process)
+                    returncode = await wait_task
                 else:
                     timed_out = True
-                    process.kill()
-                    returncode = await process.wait()
-                for task in pending:
+                    await _kill_process_tree(process)
+                    returncode = await wait_task
+                for task in tasks:
+                    if task is wait_task or task.done():
+                        continue
                     task.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
+                cancellable = [task for task in tasks if task is not wait_task and not task.done()]
+                if cancellable:
+                    await asyncio.gather(*cancellable, return_exceptions=True)
             except TimeoutError:
                 timed_out = True
-                process.kill()
-                returncode = await process.wait()
+                await _kill_process_tree(process)
+                returncode = await wait_task
+            except asyncio.CancelledError:
+                await _kill_process_tree(process)
+                raise
             await asyncio.gather(stdout_task, stderr_task)
         except Exception as exc:
             failed = {
@@ -439,6 +448,40 @@ def uv_run_argv(uv_args: list[str], script_path: Path, script_args: list[str]) -
     if not has_uv_log_level_arg(effective_uv_args):
         effective_uv_args.insert(0, "--quiet")
     return ["uv", "run", *effective_uv_args, str(script_path), *script_args]
+
+
+def _subprocess_group_kwargs() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"start_new_session": True}
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {}
+
+
+async def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+    elif os.name == "nt":
+        try:
+            taskkill = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await taskkill.wait()
+        except OSError:
+            process.kill()
+    else:
+        process.kill()
 
 
 def has_uv_log_level_arg(args: list[str]) -> bool:

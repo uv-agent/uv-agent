@@ -128,6 +128,27 @@ def test_runtime_apply_patch_helper_preserves_existing_context_line_endings(tmp_
     assert path.read_bytes() == b"first\r\nnew\r\nlast\r\n"
 
 
+def test_runtime_apply_patch_helper_preserves_lf_line_endings(tmp_path: Path) -> None:
+    path = tmp_path / "a.txt"
+    path.write_text("first\nold\nlast\n", encoding="utf-8", newline="")
+
+    result = apply_patch(
+        """*** Begin Patch
+*** Update File: a.txt
+@@
+ first
+-old
++new
+ last
+*** End Patch
+""",
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert path.read_bytes() == b"first\nnew\nlast\n"
+
+
 def test_runtime_apply_patch_helper_explains_bare_blank_hunk_line(tmp_path: Path) -> None:
     write_text(tmp_path / "a.txt", "first\n\nlast\n")
 

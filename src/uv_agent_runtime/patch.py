@@ -174,7 +174,7 @@ def _apply_ops(workdir: Path, ops: list[_FileOp]) -> None:
             if text is _MISSING:
                 if not source.exists():
                     raise FileNotFoundError(f"update file does not exist: {op.path}")
-                text = source.read_text(encoding="utf-8")
+                text = source.read_text(encoding="utf-8", newline="")
             for hunk in op.hunks:
                 text = _apply_hunk(text, hunk, op.path)
             if op.move_to is None:
@@ -196,7 +196,7 @@ def _apply_ops(workdir: Path, ops: list[_FileOp]) -> None:
                 _remove_empty_parents(path.parent, workdir)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            path.write_text(text, encoding="utf-8", newline="")
 
 
 def _resolve_patch_path(workdir: Path, path: str) -> Path:
