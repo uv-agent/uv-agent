@@ -10,12 +10,12 @@ from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
 
 
-def create_engine(project_root: Path | None = None) -> AgentEngine:
+def create_engine(project_root: Path | None = None, *, data_dir: Path | None = None) -> AgentEngine:
     root = (project_root or Path.cwd()).resolve()
     config = load_config(root)
-    data_dir = project_state_dir(root)
-    runner = PythonRunner(project_root=root, data_dir=data_dir, config=config.runner)
-    thread_store = ThreadStore(data_dir)
+    state_dir = (data_dir or project_state_dir(root)).resolve()
+    runner = PythonRunner(project_root=root, data_dir=state_dir, config=config.runner)
+    thread_store = ThreadStore(state_dir)
     model_client = UnifiedModelClient(config)
     return AgentEngine(
         config=config,

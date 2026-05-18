@@ -265,7 +265,7 @@ def test_runtime_subagent_accepts_model_level_alias() -> None:
 def test_runtime_subagent_ask_uses_temporary_project_state_without_host_state() -> None:
     code = (
         "import os; from pathlib import Path; "
-        "state = Path(os.environ['UV_AGENT_PROJECT_STATE_DIR']); "
+        "state = Path(os.environ['UV_AGENT_RUNTIME_PROJECT_STATE_DIR']); "
         "(state / 'marker.txt').write_text('temporary', encoding='utf-8'); "
         "print(state)"
     )
@@ -273,7 +273,7 @@ def test_runtime_subagent_ask_uses_temporary_project_state_without_host_state() 
 
     assert result.text
     assert not Path(result.text).exists()
-    assert "UV_AGENT_PROJECT_STATE_DIR" not in os.environ
+    assert "UV_AGENT_RUNTIME_PROJECT_STATE_DIR" not in os.environ
 
 
 def test_runtime_subagent_ask_retains_project_state_when_host_state_is_available(
@@ -282,12 +282,12 @@ def test_runtime_subagent_ask_retains_project_state_when_host_state_is_available
 ) -> None:
     code = (
         "import os; "
-        "print(os.environ['UV_AGENT_PROJECT_STATE_DIR']); "
+        "print(os.environ['UV_AGENT_RUNTIME_PROJECT_STATE_DIR']); "
         "import sys; print('[subagent-thread] thr_child', file=sys.stderr)"
     )
-    monkeypatch.setenv("UV_AGENT_STATE_DIR", str(tmp_path))
-    monkeypatch.setenv("UV_AGENT_THREAD_ID", "thr_parent")
-    monkeypatch.setenv("UV_AGENT_TURN_ID", "turn_parent")
+    monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thr_parent")
+    monkeypatch.setenv("UV_AGENT_RUNTIME_TURN_ID", "turn_parent")
     result = ask("ignored", executable=[sys.executable, "-c", code], check=True)
 
     assert result.text == str(tmp_path)
@@ -295,8 +295,8 @@ def test_runtime_subagent_ask_retains_project_state_when_host_state_is_available
 
 
 def test_runtime_subagent_ask_blocks_nested_subagent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("UV_AGENT_THREAD_KIND", "subagent")
-    monkeypatch.setenv("UV_AGENT_RUN_ID", "run_child")
+    monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_KIND", "subagent")
+    monkeypatch.setenv("UV_AGENT_RUNTIME_RUN_ID", "run_child")
 
     result = ask(
         "delegate again",

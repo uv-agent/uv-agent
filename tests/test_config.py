@@ -246,6 +246,16 @@ def test_default_paths_are_user_level(monkeypatch, tmp_path: Path) -> None:
     assert project_state_dir(project_root).is_relative_to(tmp_path / "home" / "projects")
 
 
+def test_project_state_dir_ignores_runtime_override(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("UV_AGENT_PROJECT_STATE_DIR", str(tmp_path / "old-runtime-state"))
+    project_root = tmp_path / "workspace"
+    project_root.mkdir()
+
+    assert project_state_dir(project_root).is_relative_to(tmp_path / "home" / "projects")
+    assert project_state_dir(project_root) != (tmp_path / "old-runtime-state").resolve()
+
+
 def test_ui_language_config(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"ui": {"language": "zh-CN"}}), encoding="utf-8")

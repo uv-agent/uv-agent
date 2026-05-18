@@ -9,10 +9,10 @@ from typing import Any
 def saved_scripts(limit: int = 32, state_dir: str | os.PathLike[str] | None = None) -> list[dict[str, Any]]:
     """Return recent managed script summaries for this uv-agent project.
 
-    Temporary scripts receive ``UV_AGENT_STATE_DIR`` from the host runner. Passing
+    Temporary scripts receive ``UV_AGENT_RUNTIME_STATE_DIR`` from the host runner. Passing
     ``state_dir`` is mainly useful for tests or external library use.
     """
-    root = Path(state_dir or os.environ.get("UV_AGENT_STATE_DIR") or ".uv-agent")
+    root = Path(state_dir or os.environ.get("UV_AGENT_RUNTIME_STATE_DIR") or ".uv-agent")
     scripts_dir = root / "scripts"
     runs_dir = root / "runs"
     run_counts = _run_counts(runs_dir)

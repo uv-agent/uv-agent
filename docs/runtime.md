@@ -219,11 +219,11 @@ The runner sets useful environment variables for managed scripts:
 
 | Variable | Meaning |
 | --- | --- |
-| `UV_AGENT_STATE_DIR` | Project state directory for scripts, runs, threads, and attachments. |
-| `UV_AGENT_THREAD_ID` | Current parent thread id when available. |
-| `UV_AGENT_TURN_ID` | Current turn id when available. |
-| `UV_AGENT_RUN_ID` | Current run id. |
-| `UV_AGENT_SCRIPT_ID` | Current script id. |
+| `UV_AGENT_RUNTIME_STATE_DIR` | Project state directory for scripts, runs, threads, and attachments. |
+| `UV_AGENT_RUNTIME_THREAD_ID` | Current parent thread id when available. |
+| `UV_AGENT_RUNTIME_TURN_ID` | Current turn id when available. |
+| `UV_AGENT_RUNTIME_RUN_ID` | Current run id. |
+| `UV_AGENT_RUNTIME_SCRIPT_ID` | Current script id. |
 | `PYTHONIOENCODING` | Forced to `utf-8` for child output. |
 | `PYTHONUTF8` | Forced to `1` for child Python UTF-8 behavior. |
 

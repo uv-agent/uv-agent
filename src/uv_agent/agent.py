@@ -19,7 +19,7 @@ from uv_agent.environment import detect_user_language, host_environment, host_en
 from uv_agent.ids import new_id
 from uv_agent.mcp_config import discover_mcp_servers, render_mcp_summary
 from uv_agent.model_client import ModelClient, ModelResponse
-from uv_agent.paths import project_state_dir, uv_agent_home
+from uv_agent.paths import uv_agent_home
 from uv_agent.project_rules import (
     ProjectRuleContext,
     discover_workspace_rule_index,
@@ -1535,7 +1535,7 @@ class AgentEngine:
         return SYSTEM_INSTRUCTIONS_TEMPLATE.format(
             workspace=xml_text(self.project_root),
             user_state=xml_text(uv_agent_home()),
-            project_state=xml_text(project_state_dir(self.project_root)),
+            project_state=xml_text(self.thread_store.data_dir),
             host_environment=xml_text(host_environment_line(self._host_environment)),
             user_language=xml_text(detect_user_language(self.config.ui.language).name),
             model_levels=self._model_levels_context(),

@@ -57,7 +57,7 @@ def ask(
     This intentionally uses a subprocess from inside the Python runner, so the
     outer agent still has exactly one external action surface: run_python.
     """
-    if os.environ.get("UV_AGENT_THREAD_KIND") == "subagent":
+    if os.environ.get("UV_AGENT_RUNTIME_THREAD_KIND") == "subagent":
         emit_event("subagent.blocked", prompt=prompt, reason="nested_ask_disabled")
         result = SubagentResult(
             prompt=prompt,
@@ -74,11 +74,11 @@ def ask(
     args = list(executable or ["uv", "run", "uv-agent"])
     if selected_level:
         args.extend(["--level", selected_level])
-    parent_thread_id = os.environ.get("UV_AGENT_THREAD_ID")
-    parent_turn_id = os.environ.get("UV_AGENT_TURN_ID")
-    parent_run_id = os.environ.get("UV_AGENT_RUN_ID")
-    parent_script_id = os.environ.get("UV_AGENT_SCRIPT_ID")
-    state_dir = os.environ.get("UV_AGENT_STATE_DIR")
+    parent_thread_id = os.environ.get("UV_AGENT_RUNTIME_THREAD_ID")
+    parent_turn_id = os.environ.get("UV_AGENT_RUNTIME_TURN_ID")
+    parent_run_id = os.environ.get("UV_AGENT_RUNTIME_RUN_ID")
+    parent_script_id = os.environ.get("UV_AGENT_RUNTIME_SCRIPT_ID")
+    state_dir = os.environ.get("UV_AGENT_RUNTIME_STATE_DIR")
     using_default_executable = executable is None
     if retain and using_default_executable:
         args.extend(["--thread-kind", "subagent"])
@@ -90,7 +90,6 @@ def ask(
             args.extend(["--parent-run", parent_run_id])
         if parent_script_id:
             args.extend(["--parent-script", parent_script_id])
-    args.extend(["ask", prompt])
     emit_event(
         "subagent.started",
         prompt=prompt,
@@ -100,12 +99,18 @@ def ask(
     )
     subagent_env = dict(env) if env is not None else os.environ.copy()
     if retain and state_dir:
-        subagent_env["UV_AGENT_PROJECT_STATE_DIR"] = state_dir
-        result = run_command(args, cwd=cwd, env=subagent_env, timeout_s=timeout_s)
+        if using_default_executable:
+            args.extend(["--project-state-dir", state_dir])
+        else:
+            subagent_env["UV_AGENT_RUNTIME_PROJECT_STATE_DIR"] = state_dir
+        result = run_command(args + ["ask", prompt], cwd=cwd, env=subagent_env, timeout_s=timeout_s)
     else:
         with tempfile.TemporaryDirectory(prefix="uv-agent-subagent-") as temporary_state_dir:
-            subagent_env["UV_AGENT_PROJECT_STATE_DIR"] = temporary_state_dir
-            result = run_command(args, cwd=cwd, env=subagent_env, timeout_s=timeout_s)
+            if using_default_executable:
+                args.extend(["--project-state-dir", temporary_state_dir])
+            else:
+                subagent_env["UV_AGENT_RUNTIME_PROJECT_STATE_DIR"] = temporary_state_dir
+            result = run_command(args + ["ask", prompt], cwd=cwd, env=subagent_env, timeout_s=timeout_s)
     thread_id = _extract_subagent_thread_id(result.stderr)
     emit_event(
         "subagent.completed",

@@ -10,7 +10,7 @@ RUNTIME_EVENT_RUN_ID_KEY = "_uv_agent_run_id"
 def emit_event(kind: str, **payload: Any) -> None:
     """Emit a structured event on stdout for the runner or user to inspect."""
     event = {"kind": kind, **payload}
-    run_id = os.environ.get("UV_AGENT_RUN_ID")
+    run_id = os.environ.get("UV_AGENT_RUNTIME_RUN_ID")
     if run_id:
         event[RUNTIME_EVENT_RUN_ID_KEY] = run_id
     print(json.dumps(event, ensure_ascii=False), flush=True)

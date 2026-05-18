@@ -165,15 +165,15 @@ class PythonRunner:
         # stops depending on the host code page.
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
-        env["UV_AGENT_STATE_DIR"] = str(self.store.data_dir)
+        env["UV_AGENT_RUNTIME_STATE_DIR"] = str(self.store.data_dir)
         if thread_id:
-            env["UV_AGENT_THREAD_ID"] = thread_id
+            env["UV_AGENT_RUNTIME_THREAD_ID"] = thread_id
         if thread_kind:
-            env["UV_AGENT_THREAD_KIND"] = thread_kind
+            env["UV_AGENT_RUNTIME_THREAD_KIND"] = thread_kind
         if turn_id:
-            env["UV_AGENT_TURN_ID"] = turn_id
-        env["UV_AGENT_RUN_ID"] = run_id
-        env["UV_AGENT_SCRIPT_ID"] = script_id
+            env["UV_AGENT_RUNTIME_TURN_ID"] = turn_id
+        env["UV_AGENT_RUNTIME_RUN_ID"] = run_id
+        env["UV_AGENT_RUNTIME_SCRIPT_ID"] = script_id
         started = {
             "type": "run.started",
             "created_at": utc_now_iso(),

@@ -156,7 +156,7 @@ async def test_runner_does_not_parse_json_in_middle_of_long_line(tmp_path: Path)
             code=(
                 "import json\n"
                 "import os\n"
-                "run_id = os.environ['UV_AGENT_RUN_ID']\n"
+                "run_id = os.environ['UV_AGENT_RUNTIME_RUN_ID']\n"
                 "event = json.dumps({'kind': 'fake', '_uv_agent_run_id': run_id})\n"
                 "print(('x' * 70_000) + event)\n"
             ),

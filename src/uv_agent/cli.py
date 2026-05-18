@@ -30,6 +30,11 @@ def main() -> None:
     parser.add_argument("--parent-turn", default=None, help="Parent turn id for subagent ask mode.")
     parser.add_argument("--parent-run", default=None, help="Parent run id for subagent ask mode.")
     parser.add_argument("--parent-script", default=None, help="Parent script id for subagent ask mode.")
+    parser.add_argument(
+        "--project-state-dir",
+        default=None,
+        help="Project state directory for subagent ask mode.",
+    )
     parser.add_argument("--no-stream", action="store_true", help="Only print the final answer in ask mode.")
     parser.add_argument("prompt", nargs="*", help="Prompt text for ask mode.")
     args = parser.parse_args()
@@ -48,6 +53,7 @@ def main() -> None:
                 parent_turn_id=args.parent_turn,
                 parent_run_id=args.parent_run,
                 parent_script_id=args.parent_script,
+                project_state_dir=Path(args.project_state_dir) if args.project_state_dir else None,
             )
         )
         return
@@ -67,8 +73,9 @@ async def _ask(
     parent_turn_id: str | None = None,
     parent_run_id: str | None = None,
     parent_script_id: str | None = None,
+    project_state_dir: Path | None = None,
 ) -> None:
-    engine = create_engine(Path.cwd())
+    engine = create_engine(Path.cwd(), data_dir=project_state_dir)
     if thread_id is None and thread_kind == "subagent":
         title = prompt.splitlines()[0].strip()
         if len(title) > 80:

@@ -77,9 +77,9 @@ def list_thread_digests(
 def _state_dir(state_dir: str | Path | None) -> Path:
     if state_dir is not None:
         return Path(state_dir).resolve()
-    env = os.environ.get("UV_AGENT_STATE_DIR")
+    env = os.environ.get("UV_AGENT_RUNTIME_STATE_DIR")
     if not env:
-        raise RuntimeError("UV_AGENT_STATE_DIR is not set; pass state_dir explicitly")
+        raise RuntimeError("UV_AGENT_RUNTIME_STATE_DIR is not set; pass state_dir explicitly")
     return Path(env).resolve()
 
 
