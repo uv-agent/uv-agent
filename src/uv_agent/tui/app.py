@@ -22,7 +22,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen
+from textual.geometry import Offset
+from textual.screen import ModalScreen, Screen
 from textual.reactive import reactive
 from textual.selection import Selection
 from textual.strip import Strip
@@ -1432,7 +1433,43 @@ class ImagePreviewPanel(FullscreenPanel):
         return "\n".join(lines)
 
 
+class TranscriptScreen(Screen[None]):
+    """Default screen with tighter transcript selection behavior."""
+
+    def _watch__select_state(self, select_state: Any) -> None:
+        super()._watch__select_state(select_state)
+        self._tighten_transcript_selection()
+
+    def _tighten_transcript_selection(self) -> None:
+        select_state = self._select_state
+        if select_state is None or select_state.end is None:
+            return
+        start_widget = select_state.start.content_widget
+        end_widget = select_state.end.content_widget
+        if not isinstance(start_widget, TranscriptCell) or start_widget is not end_widget:
+            return
+        start_offset = select_state.start.content_offset
+        end_offset = select_state.end.content_offset
+        if start_offset is None or end_offset is None:
+            return
+        if self.selections.get(start_widget) is None:
+            return
+        self.selections = {
+            start_widget: Selection.from_offsets(
+                start_offset,
+                self._inclusive_selection_end(start_offset, end_offset),
+            )
+        }
+
+    def _inclusive_selection_end(self, start: Offset, end: Offset) -> Offset:
+        if end.transpose < start.transpose:
+            return end
+        return end + (1, 0)
+
+
 class UvAgentApp(App[None]):
+    CLICK_CHAIN_TIME_THRESHOLD = 0.25
+
     CSS = """
     Screen {
         layout: horizontal;
@@ -1561,6 +1598,9 @@ class UvAgentApp(App[None]):
     ]
 
     busy = reactive(False)
+
+    def get_default_screen(self) -> Screen:
+        return TranscriptScreen(id="_default")
 
     def watch_busy(self, old: bool, new: bool) -> None:
         # Track when work begins so the status footer can render a live elapsed

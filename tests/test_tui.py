@@ -2489,6 +2489,63 @@ async def test_tui_mouse_drag_selection_tracks_after_intermediate_render(
 
 
 @pytest.mark.asyncio
+async def test_tui_mouse_drag_on_first_line_does_not_select_next_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        cell = app._append_cell(
+            "first line\nsecond line",
+            "event",
+            copy_text="first line\nsecond line",
+        )
+        await pilot.pause(0.2)
+
+        await pilot.mouse_down(cell, offset=(0, 0))
+        await pilot.hover(cell, offset=(40, 0))
+        await pilot.pause()
+
+        assert app.screen.get_selected_text() == "first line"
+
+
+@pytest.mark.asyncio
+async def test_tui_click_chain_threshold_is_stricter_than_textual_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await app._append_assistant_delta("agent reply")
+        assert app._assistant_cell is not None
+        await pilot.pause(0.2)
+
+        await pilot.mouse_down(app._assistant_cell, offset=(1, 0))
+        await pilot.mouse_up(app._assistant_cell, offset=(1, 0))
+        await pilot.pause(0.35)
+        await pilot.mouse_down(app._assistant_cell, offset=(1, 0))
+        await pilot.mouse_up(app._assistant_cell, offset=(1, 0))
+        await pilot.pause()
+
+        assert app._chained_clicks == 1
+        assert app.screen.get_selected_text() is None
+
+
+@pytest.mark.asyncio
 async def test_tui_wide_character_selection_highlight_preserves_edge_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
