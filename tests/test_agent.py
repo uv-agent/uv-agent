@@ -1399,7 +1399,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert '# dependencies = [' in prompt
     assert "plain Python source without a metadata block" in prompt
     assert "not a temporary-script wrapper" in prompt
-    assert "Do not rely on the system to truncate oversized output for you" in prompt
+    assert "The system does not truncate oversized output for you" in prompt
+    assert "filter, limit, or summarize it in your Python code" in prompt
     assert "Call enter_dir proactively whenever the task clearly belongs" in prompt
     assert "including paths discovered during execution" in prompt
     assert "custom patch envelope" in prompt
