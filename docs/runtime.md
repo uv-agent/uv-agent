@@ -111,7 +111,7 @@ Available helper groups:
 | --- | --- |
 | `read_text`, `write_text`, `read_json`, `write_json`, `list_files`, `resolve_workspace_path` | Workspace-relative file helpers. |
 | `run_command`, `check_command` | Argv-list subprocess helpers. |
-| `apply_patch` | Unified diff patch helper. |
+| `apply_patch` | Codex-style `*** Begin Patch` file edit helper. |
 | `enter_dir` | Change the active working directory and trigger directory rule loading. |
 | `emit_event`, `emit_progress`, `emit_result` | Structured events rendered by the host. |
 | `look_at` | Attach image context to the conversation. |

@@ -1400,9 +1400,14 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "plain Python source without a metadata block" in prompt
     assert "not a temporary-script wrapper" in prompt
     assert "Do not rely on the system to truncate oversized output for you" in prompt
+    assert "Call enter_dir proactively whenever the task clearly belongs" in prompt
+    assert "including paths discovered during execution" in prompt
     assert "custom patch envelope" in prompt
     assert "*** Begin Patch" in prompt
     assert "*** Update File: path.txt" in prompt
+    assert "not standard unified diff syntax" in prompt
+    assert "*** Move to: new/path" in prompt
+    assert "without writing partial edits" in prompt
     assert "nested uv-agent subagent" in prompt
     assert "connect_named(\"files\")" in prompt
     assert "client.call_tool" in prompt
@@ -1418,6 +1423,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Directory rules from AGENTS files are loaded automatically" in prompt
     assert "Skills and MCP declarations are appended only when first seen" in prompt
     assert "enter_dir" in prompt
+    assert "instead of repeatedly passing cwd" in prompt
     assert "demo (project)" not in prompt
 
     turn_context = engine._turn_context_text()
