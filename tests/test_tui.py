@@ -2245,8 +2245,62 @@ async def test_tui_config_panel_toggles_completion_notification(
         await pilot.press("enter")
         await pilot.pause()
 
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("config")
+        ids = [item.id for item in panel.items]
+        item = panel.items[ids.index("completion_notification")]
+        assert item.description == "on"
+
         data = __import__("json").loads(config_path.read_text(encoding="utf-8"))
         assert data["ui"]["completion_notification"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_tui_config_toggle_refreshes_without_escape_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        command_palette_title = app._text("command_palette")
+        await pilot.press("ctrl+p")
+        await pilot.press("c")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("config")
+
+        for expected in ("on", "off"):
+            ids = [item.id for item in panel.items]
+            panel.query_one("#panel-content", OptionList).highlighted = ids.index(
+                "completion_notification"
+            )
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app.screen_stack[-1] is panel
+            assert panel.panel_title == app._text("config")
+            ids = [item.id for item in panel.items]
+            item = panel.items[ids.index("completion_notification")]
+            assert item.description == expected
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.screen_stack[-1] is panel
+        assert panel.panel_title == command_palette_title
 
 
 @pytest.mark.asyncio

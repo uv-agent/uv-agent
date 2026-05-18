@@ -406,6 +406,27 @@ class FullscreenPanel(ModalScreen[str | None]):
             )
         )
 
+    def replace_picker(
+        self,
+        *,
+        title: str,
+        items: list[PickerItem],
+        callback: Callable[[str], None],
+        subtitle: str = "",
+        initial_filter: str = "",
+        close_on_select: bool = False,
+    ) -> None:
+        self._load_page(
+            PanelPage(
+                title=title,
+                items=items,
+                subtitle=subtitle,
+                filter_value=initial_filter,
+                select_callback=callback,
+                close_on_select=close_on_select,
+            )
+        )
+
     def navigate_panel(self, *, title: str, body: str, subtitle: str = "") -> None:
         self._page_stack.append(self._snapshot_page())
         self._load_page(PanelPage(title=title, body=body, subtitle=subtitle))
@@ -3678,7 +3699,7 @@ class UvAgentApp(App[None]):
                 )
         return "\n".join(lines)
 
-    def _open_config_panel(self) -> None:
+    def _open_config_panel(self, *, replace_current: bool = False) -> None:
         self.engine.refresh_config()
         default_level = self.engine.config.runtime.default_level
         items = [
@@ -3730,6 +3751,7 @@ class UvAgentApp(App[None]):
             items,
             self._choose_config_item,
             subtitle=subtitle,
+            replace_current=replace_current,
         )
 
     def _choose_config_item(self, item_id: str) -> None:
@@ -3810,7 +3832,7 @@ class UvAgentApp(App[None]):
         self._flash(
             f"{self._text('config_compression')}: {'on' if not current else 'off'}",
         )
-        self._open_config_panel()
+        self._open_config_panel(replace_current=True)
 
     def _toggle_completion_notification(self) -> None:
         current = self.engine.config.ui.completion_notification.enabled
@@ -3818,7 +3840,7 @@ class UvAgentApp(App[None]):
         self._flash(
             f"{self._text('config_completion_notification')}: {'on' if not current else 'off'}",
         )
-        self._open_config_panel()
+        self._open_config_panel(replace_current=True)
 
     def _open_config_sources_panel(self) -> None:
         sources = config_sources(self.project_root)
@@ -4161,8 +4183,19 @@ class UvAgentApp(App[None]):
         mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None,
         navigate: bool = False,
         close_on_select: bool = False,
+        replace_current: bool = False,
     ) -> None:
         panel = self._active_fullscreen_panel()
+        if panel is not None and replace_current:
+            panel.replace_picker(
+                title=title,
+                items=items,
+                callback=callback,
+                subtitle=subtitle,
+                initial_filter=initial_filter,
+                close_on_select=close_on_select,
+            )
+            return
         if panel is not None and panel.can_navigate:
             panel.navigate_picker(
                 title=title,
