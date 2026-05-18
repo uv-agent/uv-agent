@@ -88,6 +88,87 @@ async def test_runner_truncates_large_output(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runner_handles_long_single_line_output(tmp_path: Path) -> None:
+    project_root = Path.cwd()
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+            max_output_bytes=200_000,
+        ),
+    )
+
+    result = await runner.run(PythonRunRequest(code="print('x' * 70_000)\n", cwd=project_root))
+
+    assert result.returncode == 0
+    assert result.truncated is False
+    assert result.stdout.rstrip("\r\n") == "x" * 70_000
+
+
+@pytest.mark.asyncio
+async def test_runner_parses_structured_event_across_read_chunks(tmp_path: Path) -> None:
+    project_root = Path.cwd()
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+            max_output_bytes=200_000,
+        ),
+    )
+
+    result = await runner.run(
+        PythonRunRequest(
+            code=(
+                "from uv_agent_runtime import emit_event\n"
+                "emit_event('big', value='x' * 70_000)\n"
+            ),
+            cwd=project_root,
+        )
+    )
+
+    assert result.returncode == 0
+    assert result.events[0]["kind"] == "big"
+    assert result.events[0]["value"] == "x" * 70_000
+
+
+@pytest.mark.asyncio
+async def test_runner_does_not_parse_json_in_middle_of_long_line(tmp_path: Path) -> None:
+    project_root = Path.cwd()
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+            max_output_bytes=200_000,
+        ),
+    )
+
+    result = await runner.run(
+        PythonRunRequest(
+            code=(
+                "import json\n"
+                "import os\n"
+                "run_id = os.environ['UV_AGENT_RUN_ID']\n"
+                "event = json.dumps({'kind': 'fake', '_uv_agent_run_id': run_id})\n"
+                "print(('x' * 70_000) + event)\n"
+            ),
+            cwd=project_root,
+        )
+    )
+
+    assert result.returncode == 0
+    assert result.events == []
+
+
+@pytest.mark.asyncio
 async def test_runner_interrupts_script_when_cancelled(tmp_path: Path) -> None:
     project_root = Path.cwd()
     runner = PythonRunner(

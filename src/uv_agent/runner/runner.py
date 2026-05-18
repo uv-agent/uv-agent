@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import os
 from collections.abc import AsyncIterator
@@ -14,6 +15,10 @@ from uv_agent.runner.metadata import ensure_dependency
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RerunRequest, RunnerEvent
 from uv_agent.runner.store import ScriptStore
 from uv_agent.time import utc_now_iso
+
+
+STREAM_READ_CHUNK_BYTES = 64 * 1024
+OUTPUT_TRUNCATION_MARKER = "\n[uv-agent runner output truncated]\n"
 
 
 class PythonRunner:
@@ -318,41 +323,108 @@ class PythonRunner:
     ) -> None:
         if stream is None:
             return
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        event_parser = _StructuredEventLineParser(
+            structured_events=structured_events,
+            run_id=run_id,
+        )
         while True:
-            chunk = await stream.readline()
+            chunk = await stream.read(STREAM_READ_CHUNK_BYTES)
             if not chunk:
                 break
-            text = chunk.decode("utf-8", errors="replace")
-            byte_count["value"] += len(chunk)
-            if byte_count["value"] > self.config.max_output_bytes:
-                if not truncated["value"]:
-                    truncated["value"] = True
-                    marker = "\n[uv-agent runner output truncated]\n"
-                    sink.append(marker)
-                    writer.write(
-                        {
-                            "type": "run.output_truncated",
-                            "created_at": utc_now_iso(),
-                            "run_id": run_id,
-                            "script_id": script_id,
-                            "max_output_bytes": self.config.max_output_bytes,
-                        }
-                    )
+            if truncated["value"]:
                 continue
-            sink.append(text)
-            if stream_name == "stdout":
-                parsed = parse_structured_event(text, run_id=run_id)
-                if parsed is not None:
-                    structured_events.append(parsed)
-            writer.write(
-                {
-                    "type": f"run.{stream_name}",
-                    "created_at": utc_now_iso(),
-                    "run_id": run_id,
-                    "script_id": script_id,
-                    "text": text,
-                }
+
+            remaining = self.config.max_output_bytes - byte_count["value"]
+            if len(chunk) > remaining:
+                captured = chunk[: max(0, remaining)]
+                if captured:
+                    text = decoder.decode(captured)
+                    self._record_output_text(
+                        stream_name=stream_name,
+                        text=text,
+                        writer=writer,
+                        sink=sink,
+                        event_parser=event_parser,
+                        run_id=run_id,
+                        script_id=script_id,
+                    )
+                    tail = decoder.decode(b"", final=True)
+                    self._record_output_text(
+                        stream_name=stream_name,
+                        text=tail,
+                        writer=writer,
+                        sink=sink,
+                        event_parser=event_parser,
+                        run_id=run_id,
+                        script_id=script_id,
+                    )
+                byte_count["value"] += len(chunk)
+                truncated["value"] = True
+                sink.append(OUTPUT_TRUNCATION_MARKER)
+                writer.write(
+                    {
+                        "type": "run.output_truncated",
+                        "created_at": utc_now_iso(),
+                        "run_id": run_id,
+                        "script_id": script_id,
+                        "max_output_bytes": self.config.max_output_bytes,
+                    }
+                )
+                continue
+
+            byte_count["value"] += len(chunk)
+            text = decoder.decode(chunk)
+            self._record_output_text(
+                stream_name=stream_name,
+                text=text,
+                writer=writer,
+                sink=sink,
+                event_parser=event_parser,
+                run_id=run_id,
+                script_id=script_id,
             )
+
+        if not truncated["value"]:
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                self._record_output_text(
+                    stream_name=stream_name,
+                    text=tail,
+                    writer=writer,
+                    sink=sink,
+                    event_parser=event_parser,
+                    run_id=run_id,
+                    script_id=script_id,
+                )
+            if stream_name == "stdout":
+                event_parser.finish()
+
+    @staticmethod
+    def _record_output_text(
+        *,
+        stream_name: str,
+        text: str,
+        writer: JsonlWriter,
+        sink: list[str],
+        event_parser: _StructuredEventLineParser,
+        run_id: str,
+        script_id: str,
+    ) -> None:
+        if not text:
+            return
+        sink.append(text)
+        if stream_name == "stdout":
+            event_parser.feed(text)
+        writer.write(
+            {
+                "type": f"run.{stream_name}",
+                "created_at": utc_now_iso(),
+                "run_id": run_id,
+                "script_id": script_id,
+                "text": text,
+            }
+        )
 
     def _merged_uv_args(self, uv_args: list[str]) -> list[str]:
         merged = list(self.config.default_uv_args)
@@ -379,6 +451,54 @@ def has_uv_log_level_arg(args: list[str]) -> bool:
 
 
 RUNTIME_EVENT_RUN_ID_KEY = "_uv_agent_run_id"
+
+
+class _StructuredEventLineParser:
+    """Incrementally parse JSON runtime events without buffering ordinary long lines."""
+
+    def __init__(
+        self,
+        *,
+        structured_events: list[dict[str, Any]],
+        run_id: str | None = None,
+    ) -> None:
+        self._structured_events = structured_events
+        self._run_id = run_id
+        self._candidate: list[str] | None = None
+        self._line_disqualified = False
+
+    def feed(self, text: str) -> None:
+        start = 0
+        while True:
+            newline_index = text.find("\n", start)
+            if newline_index == -1:
+                self._feed_fragment(text[start:])
+                return
+            self._feed_fragment(text[start : newline_index + 1])
+            self.finish()
+            start = newline_index + 1
+
+    def finish(self) -> None:
+        if self._candidate is not None:
+            parsed = parse_structured_event("".join(self._candidate), run_id=self._run_id)
+            if parsed is not None:
+                self._structured_events.append(parsed)
+        self._candidate = None
+        self._line_disqualified = False
+
+    def _feed_fragment(self, text: str) -> None:
+        if not text:
+            return
+        if self._candidate is not None:
+            self._candidate.append(text)
+            return
+        if self._line_disqualified:
+            return
+        stripped = text.lstrip()
+        if stripped.startswith("{"):
+            self._candidate = [stripped]
+        elif stripped:
+            self._line_disqualified = True
 
 
 def parse_structured_event(text: str, *, run_id: str | None = None) -> dict[str, Any] | None:
