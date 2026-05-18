@@ -1406,6 +1406,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "*** Begin Patch" in prompt
     assert "*** Update File: path.txt" in prompt
     assert "not standard unified diff syntax" in prompt
+    assert "Every hunk line must have one of those prefixes, including blank lines" in prompt
     assert "*** Move to: new/path" in prompt
     assert "without writing partial edits" in prompt
     assert "nested uv-agent subagent" in prompt

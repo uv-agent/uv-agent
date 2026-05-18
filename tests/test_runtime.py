@@ -128,6 +128,28 @@ def test_runtime_apply_patch_helper_preserves_existing_context_line_endings(tmp_
     assert path.read_bytes() == b"first\r\nnew\r\nlast\r\n"
 
 
+def test_runtime_apply_patch_helper_explains_bare_blank_hunk_line(tmp_path: Path) -> None:
+    write_text(tmp_path / "a.txt", "first\n\nlast\n")
+
+    result = apply_patch(
+        """*** Begin Patch
+*** Update File: a.txt
+@@
+ first
+
+ last
+*** End Patch
+""",
+        cwd=tmp_path,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "blank hunk line without a diff prefix" in result.stderr
+    assert "Every hunk line must start with a space" in result.stderr
+    assert read_text(tmp_path / "a.txt") == "first\n\nlast\n"
+
+
 def test_runtime_apply_patch_helper_rejects_paths_outside_workdir(tmp_path: Path) -> None:
     result = apply_patch(
         """*** Begin Patch

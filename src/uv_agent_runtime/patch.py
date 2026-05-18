@@ -102,8 +102,19 @@ def _parse_patch(patch: str) -> list[_FileOp]:
                     and not lines[index].startswith("*** ")
                 ):
                     current = lines[index]
-                    if not current or current[0] not in " +-":
-                        raise ValueError(f"update file {path} contains an invalid hunk line: {current!r}")
+                    if not current:
+                        raise ValueError(
+                            f"update file {path} contains a blank hunk line without a diff prefix. "
+                            "Every hunk line must start with a space for context, - for removal, "
+                            "or + for addition; use a single space line for blank context, "
+                            "or + / - by itself to add or remove a blank line."
+                        )
+                    if current[0] not in " +-":
+                        raise ValueError(
+                            f"update file {path} contains an invalid hunk line: {current!r}. "
+                            "Every hunk line must start with a space for context, - for removal, "
+                            "or + for addition."
+                        )
                     hunk.append(current)
                     index += 1
                 if not hunk:

@@ -175,7 +175,7 @@ Applies focused file edits using uv_agent_runtime's custom patch envelope. This 
 - *** Update File: path
 - *** Delete File: path
 
-For update hunks, use @@ or @@ note as the hunk marker, prefix unchanged context lines with a space, removed lines with -, and added lines with +. To rename or move a file, put *** Move to: new/path immediately after *** Update File: old/path. Keep patches small, use paths relative to the current workspace, and do not escape the workspace. If any hunk context is missing, the whole patch fails without writing partial edits.
+For update hunks, use @@ or @@ note as the hunk marker, prefix unchanged context lines with a space, removed lines with -, and added lines with +. Every hunk line must have one of those prefixes, including blank lines. To keep a blank context line, write a line containing a single leading space; to add or remove a blank line, write + or - by itself. To rename or move a file, put *** Move to: new/path immediately after *** Update File: old/path. Keep patches small, use paths relative to the current workspace, and do not escape the workspace. If any hunk context is missing, the whole patch fails without writing partial edits.
 Example:
 apply_patch('''*** Begin Patch
 *** Update File: path.txt
