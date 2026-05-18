@@ -15,7 +15,6 @@ from rich.markup import escape, render as render_markup
 from rich.segment import Segment
 from rich.style import Style
 from rich.cells import cell_len
-from PIL import Image, UnidentifiedImageError
 from textual import events
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
@@ -30,6 +29,7 @@ from textual.strip import Strip
 from textual.widgets import Input, OptionList, Static, TextArea
 from textual.worker import Worker
 from textual.widgets._option_list import Option
+from textual_image.widget import Image as TerminalImage
 from watchfiles import Change, watch
 
 from uv_agent.app_factory import create_engine
@@ -174,6 +174,35 @@ class FullscreenPanel(ModalScreen[str | None]):
         scrollbar-color-hover: #3a4a60;
         scrollbar-color-active: #7dd3fc;
         scrollbar-corner-color: #0a0f15;
+    }
+
+    #image-preview-meta {
+        height: auto;
+        margin: 1 0 0 0;
+        border: tall #1f2b3a;
+        background: #0a0f15;
+        padding: 1 1;
+    }
+
+    #image-preview-scroll {
+        height: 1fr;
+        margin: 1 0 0 0;
+        border: tall #1f2b3a;
+        background: #0a0f15;
+        padding: 1 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-background: #0a0f15;
+        scrollbar-background-hover: #0a0f15;
+        scrollbar-background-active: #0a0f15;
+        scrollbar-color: #2b3542;
+        scrollbar-color-hover: #3a4a60;
+        scrollbar-color-active: #7dd3fc;
+        scrollbar-corner-color: #0a0f15;
+    }
+
+    #image-preview {
+        width: 100%;
+        height: auto;
     }
 
     #panel-footer {
@@ -655,30 +684,6 @@ def image_attachment_markup(attachment: dict[str, Any], *, label: str = "image a
         f"[dim]{escape(size_label)}[/dim]\n"
         "[dim][preview][/dim]"
     )
-
-
-def image_ascii_preview(path: Path, *, width: int = 64, height: int = 36) -> str:
-    try:
-        with Image.open(path) as image:
-            image.thumbnail((width, height), Image.Resampling.LANCZOS)
-            image = image.convert("RGB")
-            rows = []
-            for y in range(0, image.height, 2):
-                segments = []
-                for x in range(image.width):
-                    top_red, top_green, top_blue = image.getpixel((x, y))
-                    if y + 1 < image.height:
-                        bottom_red, bottom_green, bottom_blue = image.getpixel((x, y + 1))
-                    else:
-                        bottom_red, bottom_green, bottom_blue = top_red, top_green, top_blue
-                    segments.append(
-                        f"[#{top_red:02x}{top_green:02x}{top_blue:02x} "
-                        f"on #{bottom_red:02x}{bottom_green:02x}{bottom_blue:02x}]▀[/]"
-                    )
-                rows.append("".join(segments))
-    except (OSError, UnidentifiedImageError, ValueError):
-        return ""
-    return "\n".join(rows)
 
 
 @dataclass(frozen=True)
@@ -1389,10 +1394,22 @@ class ImagePreviewPanel(FullscreenPanel):
         self.index = max(0, min(index, len(attachments) - 1)) if attachments else 0
         super().__init__(title="", body="", subtitle="")
 
+    def compose(self) -> ComposeResult:
+        with Vertical(id="panel-shell"):
+            yield Static(self.panel_title, id="panel-header")
+            yield Static(self.subtitle, id="panel-subtitle")
+            yield Static("", markup=True, id="image-preview-meta")
+            with VerticalScroll(id="image-preview-scroll"):
+                yield TerminalImage(id="image-preview")
+            yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
+
+    def _render_page(self, *, filter_value: str = "", highlighted: int | None = None) -> None:
+        self._refresh_current()
+
     def on_mount(self) -> None:
         self._refresh_current()
         try:
-            self.query_one("#panel-body", VerticalScroll).focus()
+            self.query_one("#image-preview-scroll", VerticalScroll).focus()
         except NoMatches:
             pass
 
@@ -1417,6 +1434,18 @@ class ImagePreviewPanel(FullscreenPanel):
     def action_previous_image(self) -> None:
         self._move(-1)
 
+    def action_cursor_up(self) -> None:
+        self.query_one("#image-preview-scroll", VerticalScroll).action_scroll_up()
+
+    def action_cursor_down(self) -> None:
+        self.query_one("#image-preview-scroll", VerticalScroll).action_scroll_down()
+
+    def action_page_up(self) -> None:
+        self.query_one("#image-preview-scroll", VerticalScroll).action_page_up()
+
+    def action_page_down(self) -> None:
+        self.query_one("#image-preview-scroll", VerticalScroll).action_page_down()
+
     def _move(self, step: int) -> None:
         if not self.attachments:
             return
@@ -1427,20 +1456,27 @@ class ImagePreviewPanel(FullscreenPanel):
         text = getattr(self.app, "_text", lambda key: key)
         self.panel_title = text("image_preview")
         self.subtitle = text("image_preview_hint")
-        self.body = self._attachment_markup()
+        attachment = self._current_attachment()
+        path = Path(str(attachment.get("stored_path") or "")) if attachment else None
         try:
             self.query_one("#panel-header", Static).update(self.panel_title)
             self.query_one("#panel-subtitle", Static).update(self.subtitle)
-            self.query_one("#panel-body-content", Static).update(self.body)
-            self.query_one("#panel-body", VerticalScroll).scroll_to(y=0, animate=False)
+            self.query_one("#image-preview-meta", Static).update(self._attachment_markup())
+            self.query_one("#image-preview", TerminalImage).image = path if path and path.exists() else None
+            self.query_one("#image-preview-scroll", VerticalScroll).scroll_to(y=0, animate=False)
         except NoMatches:
             pass
 
+    def _current_attachment(self) -> dict[str, Any] | None:
+        if not self.attachments:
+            return None
+        return self.attachments[self.index]
+
     def _attachment_markup(self) -> str:
         text = getattr(self.app, "_text", lambda key: key)
-        if not self.attachments:
+        attachment = self._current_attachment()
+        if attachment is None:
             return f"[dim]{escape(text('no_images'))}[/dim]"
-        attachment = self.attachments[self.index]
         path = Path(str(attachment.get("stored_path") or ""))
         source = str(attachment.get("source_path") or "")
         note = str(attachment.get("note") or "").strip()
@@ -1457,9 +1493,6 @@ class ImagePreviewPanel(FullscreenPanel):
             lines.append(f"- {escape(text('image_source'))}: {escape(source)}")
         if note:
             lines.append(f"- {escape(text('image_note'))}: {escape(note)}")
-        preview = image_ascii_preview(path)
-        if preview:
-            lines.extend(["", preview])
         lines.append("")
         lines.append(f"[dim]{escape(text('image_open_hint'))}[/dim]")
         return "\n".join(lines)

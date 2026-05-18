@@ -161,7 +161,7 @@ from uv_agent_runtime import (
     apply_patch,
     enter_dir,
     look_at,
-    ask,
+    ask, # subagent
     saved_scripts,
     thread_digest,
     list_thread_digests,

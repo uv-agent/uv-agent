@@ -4,9 +4,11 @@ from pathlib import Path
 import asyncio
 import threading
 
+from PIL import Image as PILImage
 import pytest
 from textual import events
 from textual.widgets import OptionList, Static, TextArea
+from textual_image.widget import Image as TerminalImage
 
 from uv_agent.clipboard import ClipboardImage
 from uv_agent.agent import AgentEngine
@@ -42,6 +44,11 @@ from uv_agent.tui.app import (
 @pytest.fixture(autouse=True)
 def isolate_uv_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+
+
+def write_png(path: Path, *, color: tuple[int, int, int] = (32, 128, 224)) -> None:
+    image = PILImage.new("RGB", (8, 6), color)
+    image.save(path, format="PNG")
 
 
 class BlockingEngine(AgentEngine):
@@ -3166,7 +3173,7 @@ async def test_tui_f2_attaches_clipboard_image_and_sends_with_turn(
     project_root = tmp_path / "project"
     project_root.mkdir()
     image = tmp_path / "clip.png"
-    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    write_png(image)
     engine = ImageCaptureEngine(fake_engine(project_root, tmp_path / "state"))
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
     monkeypatch.setattr(
@@ -3203,7 +3210,7 @@ async def test_tui_image_preview_panel_switches_sent_images(
     thread_id = engine.thread_store.create_thread("images")
     for index in range(2):
         image = tmp_path / f"image-{index}.png"
-        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        write_png(image, color=(index * 120, 80, 200))
         attachment = engine.attachments.register_image(image, cwd=project_root, thread_id=thread_id)
         engine.thread_store.append(
             thread_id,
@@ -3226,13 +3233,15 @@ async def test_tui_image_preview_panel_switches_sent_images(
         panel = app.screen_stack[-1]
         assert isinstance(panel, ImagePreviewPanel)
         assert panel.index == 1
-        assert "image-1" in str(panel.query_one("#panel-body-content", Static).render())
+        assert "image-1" in str(panel.query_one("#image-preview-meta", Static).render())
+        assert Path(panel.query_one("#image-preview", TerminalImage).image or "").name.startswith("img_")
 
         await pilot.press("k")
         await pilot.pause()
 
         assert panel.index == 0
-        assert "image-0" in str(panel.query_one("#panel-body-content", Static).render())
+        assert "image-0" in str(panel.query_one("#image-preview-meta", Static).render())
+        assert Path(panel.query_one("#image-preview", TerminalImage).image or "").name.startswith("img_")
 
         await pilot.press("f3")
         await pilot.pause()
