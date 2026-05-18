@@ -52,7 +52,6 @@ and Esc to close.
 
 | Command | Action |
 | --- | --- |
-| `/new [title]` | Start a new thread. |
 | `/threads` | Open recent threads and resume history. |
 | `/status` | Show runtime status, model level, context usage, config paths, rules, and saved scripts. |
 | `/config` | Edit user-facing settings and inspect redacted config. |

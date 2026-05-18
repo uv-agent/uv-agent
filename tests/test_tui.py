@@ -375,19 +375,18 @@ async def test_tui_slash_picker_does_not_open_when_deleting_existing_command(
 
     async with app.run_test(size=(90, 24)) as pilot:
         composer = app.query_one("#composer", TextArea)
-        composer.insert("/new")
+        composer.insert("/clear")
         await pilot.pause()
-        await pilot.press("backspace")
-        await pilot.press("backspace")
-        await pilot.press("backspace")
-        await pilot.pause()
+        for _ in range(len("clear")):
+            await pilot.press("backspace")
+            await pilot.pause()
 
         assert not isinstance(app.screen_stack[-1], FullscreenPanel)
         assert composer.text == "/"
 
 
 @pytest.mark.asyncio
-async def test_tui_empty_new_thread_gets_generated_title_from_first_prompt(
+async def test_tui_clear_keeps_next_prompt_title_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -403,16 +402,17 @@ async def test_tui_empty_new_thread_gets_generated_title_from_first_prompt(
 
     async with app.run_test(size=(90, 24)) as pilot:
         composer = app.query_one("#composer", TextArea)
-        composer.insert("/new")
+        composer.insert("/clear")
         await pilot.press("ctrl+enter")
         await pilot.pause()
-        thread_id = app.thread_id
-        assert thread_id is not None
+        assert app.thread_id is None
 
         composer.insert("investigate the startup crash")
         await pilot.press("ctrl+enter")
         await pilot.pause(0.2)
 
+        thread_id = app.thread_id
+        assert thread_id is not None
         assert engine.thread_store.thread_digest(thread_id)["title"] == "Investigate startup crash"
 
 
@@ -605,7 +605,6 @@ async def test_tui_command_picker_supports_keyboard_selection(
         await pilot.pause()
         assert isinstance(app.screen_stack[-1], FullscreenPanel)
 
-        await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause()
 
@@ -643,6 +642,83 @@ async def test_tui_command_picker_opens_level_panel(
         await pilot.pause()
 
         assert app.level == "small"
+
+
+@pytest.mark.asyncio
+async def test_tui_command_picker_escape_returns_from_level_to_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.press("l")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("config_current_level")
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.screen_stack[-1] is panel
+        assert panel.panel_title == app._text("command_palette")
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not isinstance(app.screen_stack[-1], FullscreenPanel)
+
+
+@pytest.mark.asyncio
+async def test_tui_command_picker_escape_returns_through_config_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.press("c")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("config")
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.screen_stack[-1] is panel
+        assert panel.panel_title == app._text("config_default_level")
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.screen_stack[-1] is panel
+        assert panel.panel_title == app._text("config")
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.screen_stack[-1] is panel
+        assert panel.panel_title == app._text("command_palette")
 
 
 @pytest.mark.asyncio
@@ -708,7 +784,7 @@ async def test_tui_command_palette_hides_run_and_skill_name_commands(
 
 
 @pytest.mark.asyncio
-async def test_tui_command_palette_executes_new_without_custom_title(
+async def test_tui_command_palette_starts_with_threads_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -725,10 +801,45 @@ async def test_tui_command_palette_executes_new_without_custom_title(
         await pilot.press("enter")
         await pilot.pause()
 
-        assert app.thread_id is not None
-        assert app.engine.thread_store.thread_digest(app.thread_id)["title"] == app._text("new_thread")
+        assert app.thread_id is None
+        assert isinstance(app.screen_stack[-1], FullscreenPanel)
+        assert app.screen_stack[-1].panel_title == app._text("threads")
         composer = app.query_one("#composer", TextArea)
         assert composer.text == ""
+
+
+@pytest.mark.asyncio
+async def test_tui_command_palette_thread_selection_closes_panel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Saved work")
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id="turn_1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("threads")
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.thread_id == thread_id
+        assert not isinstance(app.screen_stack[-1], FullscreenPanel)
 
 
 @pytest.mark.asyncio
@@ -2199,7 +2310,7 @@ async def test_tui_ctrl_c_twice_interrupts_busy_turn_without_selection(
 
 
 @pytest.mark.asyncio
-async def test_tui_new_thread_while_current_thread_runs_keeps_old_thread_backgrounded(
+async def test_tui_clear_while_current_thread_runs_keeps_old_thread_backgrounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2218,18 +2329,20 @@ async def test_tui_new_thread_while_current_thread_runs_keeps_old_thread_backgro
         assert old_thread is not None
         await engine.started[old_thread].wait()
 
-        composer.insert("/new second")
+        composer.insert("/clear")
         await pilot.press("ctrl+enter")
         await pilot.pause()
-        new_thread = app.thread_id
 
-        assert new_thread != old_thread
+        assert app.thread_id is None
         assert old_thread in app._thread_runs
         assert app.busy is False
 
         composer.insert("new work")
         await pilot.press("ctrl+enter")
         await pilot.pause()
+        new_thread = app.thread_id
+        assert new_thread is not None
+        assert new_thread != old_thread
         assert new_thread in app._thread_runs
 
         engine.release[old_thread].set()

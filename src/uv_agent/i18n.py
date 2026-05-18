@@ -297,7 +297,6 @@ TEXT = {
 
 COMMAND_DESCRIPTIONS = {
     "en": {
-        "/new": "start a new thread",
         "/threads": "show recent threads",
         "/status": "open runtime status",
         "/config": "show config sources",
@@ -310,7 +309,6 @@ COMMAND_DESCRIPTIONS = {
         "/help": "show all commands",
     },
     "zh": {
-        "/new": "新建线程",
         "/threads": "查看最近线程",
         "/status": "打开运行状态",
         "/config": "查看配置来源",
