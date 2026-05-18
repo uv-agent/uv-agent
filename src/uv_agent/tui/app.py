@@ -724,6 +724,16 @@ class ThreadRunState:
     process_collapsed: bool = False
     process_anchor_cell: TranscriptCell | None = None
 
+    def detach_widgets(self) -> None:
+        self.assistant_cell = None
+        self.reasoning_cell = None
+        self.tool_cells.clear()
+        self.tool_delta_cells.clear()
+        self.process_cells = []
+        self.process_fold_cell = None
+        self.process_collapsed = False
+        self.process_anchor_cell = None
+
 
 class TranscriptScroll(VerticalScroll):
     """VerticalScroll that auto-follows tail until the user intervenes.
@@ -1884,17 +1894,7 @@ class UvAgentApp(App[None]):
         self._thread_runs[thread_id] = run_state
         if self._is_active_thread(thread_id):
             self.query_one("#composer-shell", Vertical).add_class("busy")
-            self._assistant_buffer = ""
-            self._assistant_cell = None
-            self._reasoning_cell = None
-            self._reasoning_buffer = ""
-            self._tool_cells.clear()
-            self._tool_delta_cells.clear()
-            self._tool_delta_calls.clear()
-            self._process_cells = []
-            self._process_fold_cell = None
-            self._process_collapsed = False
-            self._process_anchor_cell = None
+            self._reset_live_view_state()
             self._interrupt_armed = False
             self._process_anchor_cell = self._append_user(prompt)
             for image_path in image_paths or []:
@@ -2113,6 +2113,19 @@ class UvAgentApp(App[None]):
         run_state = self._active_run_state()
         return len(run_state.queue) if run_state is not None else 0
 
+    def _reset_live_view_state(self) -> None:
+        self._assistant_buffer = ""
+        self._assistant_cell = None
+        self._reasoning_cell = None
+        self._reasoning_buffer = ""
+        self._tool_cells.clear()
+        self._tool_delta_cells.clear()
+        self._tool_delta_calls.clear()
+        self._process_cells = []
+        self._process_fold_cell = None
+        self._process_collapsed = False
+        self._process_anchor_cell = None
+
     def _background_run_states(self) -> list[ThreadRunState]:
         return [
             run_state
@@ -2206,10 +2219,27 @@ class UvAgentApp(App[None]):
                 run_state.assistant_buffer = ""
                 run_state.assistant_cell = None
             elif event_type == "tool.delta":
+                delta = item.get("tool_call")
+                index = int(getattr(delta, "index", 0))
+                run_state.tool_delta_calls[index] = {
+                    "call_id": getattr(delta, "call_id", "") or "",
+                    "name": str(getattr(delta, "name", None) or "python"),
+                    "arguments": getattr(delta, "arguments", "") or getattr(delta, "arguments_delta", ""),
+                }
                 run_state.status = self._text("running_python")
             elif event_type == "tool.started":
+                delta_index = item.get("tool_call_index")
+                if isinstance(delta_index, int):
+                    call = item.get("call") if isinstance(item.get("call"), dict) else {}
+                    run_state.tool_delta_calls[delta_index] = dict(call)
                 run_state.reasoning_buffer = ""
                 run_state.reasoning_cell = None
+                run_state.status = self._text("running_python")
+            elif event_type == "tool.output":
+                delta_index = item.get("tool_call_index")
+                if isinstance(delta_index, int):
+                    run_state.tool_delta_calls.pop(delta_index, None)
+                run_state.status = self._text("working")
             elif event_type == "assistant.final_response_started" and run_state.process_cells:
                 run_state.process_collapsed = True
             return
@@ -2518,16 +2548,14 @@ class UvAgentApp(App[None]):
     def _handle_command(self, prompt: str) -> bool:
         command, _, rest = prompt.partition(" ")
         if command == "/clear":
-            self._close_active_panel()
-            self.thread_id = None
-            self._assistant_buffer = ""
-            self._assistant_cell = None
-            self._tool_cells.clear()
-            self._tool_delta_cells.clear()
-            self._pending_images.clear()
             active_run = self._active_run_state()
             if active_run is not None:
-                active_run.queue.clear()
+                self._sync_run_state_from_active(active_run)
+                active_run.detach_widgets()
+            self._close_active_panel()
+            self.thread_id = None
+            self._reset_live_view_state()
+            self._pending_images.clear()
             self._reset_transcript()
             self._refresh_pending_images()
             self._refresh_active_run_state()
@@ -2771,6 +2799,9 @@ class UvAgentApp(App[None]):
         if pending_cell is None and isinstance(delta_index, int):
             pending_cell = self._tool_delta_cells.pop(delta_index, None)
             self._tool_delta_calls.pop(delta_index, None)
+        elif isinstance(delta_index, int):
+            self._tool_delta_cells.pop(delta_index, None)
+            self._tool_delta_calls.pop(delta_index, None)
         if pending_cell is not None and call is not None:
             markup = self._tool_pending_markup(
                 str(call.get("name") or "python"),
@@ -2801,6 +2832,8 @@ class UvAgentApp(App[None]):
     def _append_tool_started(self, item: dict[str, Any]) -> None:
         call = item.get("call") or {}
         delta_index = item.get("tool_call_index")
+        if isinstance(delta_index, int):
+            self._tool_delta_calls[delta_index] = dict(call)
         call_id = str(call.get("call_id") or "")
         name = str(call.get("name") or "python")
         detail = self._tool_call_preview(call)
@@ -2828,6 +2861,24 @@ class UvAgentApp(App[None]):
             self._tool_cells[call_id] = cell
         self._track_process_cell(cell)
         self._refresh_status(self._text("running_python"))
+
+    def _append_tool_pending_call(self, index: int, call: dict[str, Any]) -> None:
+        name = str(call.get("name") or "python")
+        detail = self._tool_call_preview(call)
+        markup = self._tool_pending_markup(name, detail, call=call)
+        if tool_call_preview_line(call):
+            cell = self._append_expandable_cell(
+                markup,
+                tool_call_detail_highlight_markup(call),
+                "tool_pending",
+            )
+        else:
+            cell = self._append_cell(markup, "tool_pending")
+        self._tool_delta_cells[index] = cell
+        call_id = str(call.get("call_id") or "")
+        if call_id:
+            self._tool_cells[call_id] = cell
+        self._track_process_cell(cell)
 
     def _append_tool_delta(self, item: dict[str, Any]) -> None:
         delta = item.get("tool_call")
@@ -4051,46 +4102,28 @@ class UvAgentApp(App[None]):
     def _resume_thread(self, thread_id: str) -> None:
         if not thread_id:
             return
+        active_run = self._active_run_state()
+        if active_run is not None:
+            self._sync_run_state_from_active(active_run)
+            active_run.detach_widgets()
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is not None and run_state is not active_run:
+            run_state.detach_widgets()
         self.thread_id = thread_id
-        self._assistant_buffer = ""
-        self._assistant_cell = None
-        self._reasoning_cell = None
-        self._reasoning_buffer = ""
-        self._tool_cells.clear()
-        self._tool_delta_cells.clear()
-        self._tool_delta_calls.clear()
-        self._process_cells = []
-        self._process_fold_cell = None
-        self._process_collapsed = False
-        self._process_anchor_cell = None
+        self._reset_live_view_state()
         self._reset_transcript(show_empty=False)
         self._render_thread_history(thread_id)
-        run_state = self._thread_runs.get(thread_id)
         if run_state is not None:
             if run_state.worker is not None:
-                if run_state.process_cells:
-                    self._process_cells = list(run_state.process_cells)
-                    self._process_collapsed = run_state.process_collapsed
-                    if run_state.process_collapsed and run_state.process_fold_cell is None:
-                        self._process_fold_cell = self._append_process_fold_cell(
-                            self._process_cells,
-                            collapsed=True,
-                            after=run_state.process_anchor_cell,
-                        )
-                        run_state.process_fold_cell = self._process_fold_cell
-                    elif isinstance(run_state.process_fold_cell, FoldedProcessCell):
-                        self._process_fold_cell = run_state.process_fold_cell
-                        self._process_fold_cell.set_cells(self._process_cells)
                 if run_state.reasoning_buffer:
+                    self._reasoning_buffer = run_state.reasoning_buffer
                     first = run_state.reasoning_buffer.splitlines()[0]
                     if len(first) > 120:
                         first = first[:117].rstrip() + "..."
-                    if run_state.reasoning_cell is None:
-                        self._reasoning_cell = self._append_cell(
-                            f"[dim]{escape(self._text('thinking'))}[/dim] [italic]{escape(first)}[/italic]",
-                            "event",
-                        )
-                        run_state.reasoning_cell = self._reasoning_cell
+                    self._reasoning_cell = self._append_cell(
+                        f"[dim]{escape(self._text('thinking'))}[/dim] [italic]{escape(first)}[/italic]",
+                        "event",
+                    )
                 if run_state.assistant_buffer:
                     self._assistant_buffer = run_state.assistant_buffer
                     self._assistant_cell = self._append_cell(
@@ -4098,7 +4131,9 @@ class UvAgentApp(App[None]):
                         "assistant",
                     )
                     self._assistant_cell.copy_text = run_state.assistant_buffer
-                    run_state.assistant_cell = self._assistant_cell
+                for index, call in sorted(run_state.tool_delta_calls.items()):
+                    self._tool_delta_calls[index] = dict(call)
+                    self._append_tool_pending_call(index, call)
                 self._append_cell(f"[dim]{escape(run_state.status)}...[/dim]", "event")
                 self._sync_run_state_from_active(run_state)
         if not self._transcript_has_content:

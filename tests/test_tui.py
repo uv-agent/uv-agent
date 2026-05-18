@@ -2882,6 +2882,86 @@ async def test_tui_clear_while_current_thread_runs_keeps_old_thread_backgrounded
 
 
 @pytest.mark.asyncio
+async def test_tui_resume_running_thread_rebinds_live_cells(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        thread_id = engine.thread_store.create_thread("Running")
+        app.thread_id = thread_id
+        run_state = app._run_state_for_thread(thread_id)
+        run_state.worker = object()  # type: ignore[assignment]
+        app._append_user("inspect")
+        await app._handle_thread_event(
+            thread_id,
+            "assistant.delta",
+            {"text": "I will run "},
+            run_state,
+        )
+        await app._handle_thread_event(
+            thread_id,
+            "tool.delta",
+            {
+                "tool_call": ToolCallDelta(
+                    index=0,
+                    call_id="call_1",
+                    name="run_python",
+                    arguments='{"code":"print(1)"}',
+                )
+            },
+            run_state,
+        )
+        await pilot.pause()
+
+        app._handle_command("/clear")
+        await pilot.pause()
+        assert app.thread_id is None
+        assert run_state.assistant_cell is None
+        assert run_state.tool_delta_cells == {}
+
+        app._resume_thread(thread_id)
+        await pilot.pause()
+        assert app.thread_id == thread_id
+        assert app.query(".assistant").nodes
+        assert app.query(".tool_pending").nodes
+        assert "print(1)" in str(app.query(".tool_pending").nodes[-1].render())
+
+        await app._handle_thread_event(
+            thread_id,
+            "assistant.delta",
+            {"text": "more"},
+            run_state,
+        )
+        await app._handle_thread_event(
+            thread_id,
+            "tool.started",
+            {
+                "call": {
+                    "call_id": "call_1",
+                    "name": "run_python",
+                    "arguments": '{"code":"print(1)"}',
+                },
+                "tool_call_index": 0,
+            },
+            run_state,
+        )
+        await pilot.pause()
+
+        assistant = app.query(".assistant").nodes[-1]
+        assert isinstance(assistant, TranscriptCell)
+        assert assistant.copy_text == "I will run more"
+        assert len(app.query(".tool_pending").nodes) == 1
+        cell = app.query_one(ExpandableTranscriptCell)
+        assert "print(1)" in cell.details
+
+
+@pytest.mark.asyncio
 async def test_tui_tool_result_details_expand_on_click(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
