@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from typing import Any
 
 RUNTIME_EVENT_RUN_ID_KEY = "_uv_agent_run_id"

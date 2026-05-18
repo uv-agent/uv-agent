@@ -15,7 +15,6 @@ from uv_agent.agent import (
     model_tool_payload,
     usage_token_count,
 )
-from uv_agent.attachments import image_message_item
 from uv_agent.config import (
     AppConfig,
     CompressionConfig,

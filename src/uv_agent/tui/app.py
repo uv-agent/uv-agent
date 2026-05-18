@@ -54,11 +54,9 @@ from uv_agent.tui.formatting import (
     parse_tool_payload,
     short_thread,
     tool_call_detail_highlight_markup,
-    tool_call_detail_markup,
     tool_call_preview_line,
     tool_call_summary_markup,
     tool_detail_markup,
-    tool_result_markup,
     tool_timeline_markup,
 )
 
@@ -1189,10 +1187,13 @@ class FoldedProcessCell(TranscriptCell, can_focus=True):
                 continue
 
     def _refresh(self) -> None:
+        def fallback_text(key: str) -> str:
+            return key
+
         try:
-            text = getattr(self.app, "_text", lambda key: key)
+            text = getattr(self.app, "_text", fallback_text)
         except Exception:
-            text = lambda key: key
+            text = fallback_text
         count = len(self.cells)
         key = "process_fold_collapsed" if self.collapsed else "process_fold_expanded"
         state = text(key)
