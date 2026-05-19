@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import threading
 from collections import deque
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -35,6 +36,7 @@ from textual.widgets._option_list import Option
 from textual_image.widget import Image as TerminalImage
 from watchfiles import Change, watch
 
+from uv_agent.agent import DEFAULT_THREAD_TITLES
 from uv_agent.app_factory import create_engine
 from uv_agent.clipboard import ClipboardImageError, save_clipboard_image
 from uv_agent.config import (
@@ -85,6 +87,8 @@ COMPOSER_AUTO_EXPAND_LINES = 3
 QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
+SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+WINDOW_TITLE_MAX_LEN = 60
 
 
 @dataclass(frozen=True)
@@ -1719,6 +1723,8 @@ class UvAgentApp(App[None]):
         self._mention_file_cache_dirty = False
         self._mention_file_watcher_worker: Worker[None] | None = None
         self._mention_file_watcher_stop = threading.Event()
+        self._window_title_thread_title = ""
+        self._last_window_title = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -1835,8 +1841,12 @@ class UvAgentApp(App[None]):
                 self.query_one(EmptyState).tick()
             except NoMatches:
                 pass
+        if self.busy or self._any_thread_running():
+            self._spinner_index += 1
         if self.busy:
             self._refresh_status()
+        else:
+            self._apply_window_title()
 
     def _text(self, key: str) -> str:
         return tr(self.language, key)
@@ -4946,9 +4956,7 @@ class UvAgentApp(App[None]):
         spinner = ""
         elapsed_suffix = ""
         if self.busy:
-            frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-            spinner = frames[self._spinner_index % len(frames)] + " "
-            self._spinner_index += 1
+            spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)] + " "
             elapsed_seconds = _elapsed_between(self._turn_started_at)
             if elapsed_seconds is None and self._busy_started_at is not None:
                 elapsed_seconds = monotonic() - self._busy_started_at
@@ -4973,11 +4981,70 @@ class UvAgentApp(App[None]):
                 f" [dim]·[/dim] [cyan]{background_count} "
                 f"{escape(self._text('background_active'))}[/cyan]"
             )
+        self._refresh_window_title()
         try:
             self.query_one("#composer-footer", Static).update(footer)
         except NoMatches:
             return
         self._refresh_pending_images()
+
+    def _any_thread_running(self) -> bool:
+        return any(
+            run_state.worker is not None
+            for run_state in self._thread_runs.values()
+        )
+
+    def _current_thread_title(self) -> str:
+        fallback = self._text("new_thread")
+        if self.thread_id is None:
+            return fallback
+        try:
+            digest = self.engine.thread_store.thread_digest(self.thread_id)
+        except Exception:
+            return fallback
+        title = str(digest.get("title") or "").strip()
+        # Until the auto-titler renames the thread, the store returns its own
+        # localized default ("New thread" / "新会话"). Treat those placeholders
+        # as "no real title yet" so the window title keeps showing the user's
+        # currently-selected language instead of flipping between locales.
+        if not title or title in DEFAULT_THREAD_TITLES:
+            return fallback
+        return title
+
+    def _refresh_window_title(self) -> None:
+        self._window_title_thread_title = self._current_thread_title()
+        self._apply_window_title()
+
+    def _apply_window_title(self) -> None:
+        title = self._window_title_thread_title or self._text("new_thread")
+        if self.busy or self._any_thread_running():
+            spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
+            title = f"{spinner} {title}"
+        # Sanitize: OSC strings can't contain BEL/ESC/control chars.
+        title = "".join(ch for ch in title if ch >= " " and ch != "\x7f")
+        if len(title) > WINDOW_TITLE_MAX_LEN:
+            title = title[: WINDOW_TITLE_MAX_LEN - 1].rstrip() + "…"
+        if title == self._last_window_title:
+            return
+        self._last_window_title = title
+        # Rich's Console.set_window_title goes through Textual's render pipeline
+        # and never reaches the real terminal while the App is running. Write
+        # the OSC sequence directly to the original stdout (which Textual leaves
+        # untouched at the Python level) so Windows Terminal / xterm-style hosts
+        # actually update their title bar.
+        sequence = f"\x1b]0;{title}\x07"
+        try:
+            stream = sys.__stdout__
+            if stream is not None:
+                stream.write(sequence)
+                stream.flush()
+                return
+        except Exception:
+            pass
+        try:
+            os.write(1, sequence.encode("utf-8", errors="replace"))
+        except Exception:
+            pass
 
     def _scroll_end(self) -> None:
         transcript = self.query_one("#transcript", TranscriptScroll)
