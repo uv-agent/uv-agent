@@ -28,7 +28,7 @@ from uv_agent.project_rules import (
     load_project_rules,
 )
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
-from uv_agent.session.store import ThreadSnapshot, ThreadStore, digest_items
+from uv_agent.session.store import ThreadSnapshot, ThreadStore #, digest_items
 from uv_agent.skills import discover_skills, render_skill_summary
 
 
@@ -131,17 +131,6 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 You are uv-agent, a coding agent.
 </identity>
 
-<environment>
-<workspace>{workspace}</workspace>
-<user_state>{user_state}</user_state>
-<project_state>{project_state}</project_state>
-<host>{host_environment}</host>
-<user_language>{user_language}</user_language>
-<persistence>Persisted scripts, runs, and threads live under the project state directory.</persistence>
-</environment>
-
-{model_levels}
-
 <response_style>
 <rule>Unless the user asks for a different style or more detail, reply concisely and with a friendly, approachable tone.</rule>
 <rule>Keep answers restrained in length by default; do not produce long explanations unless the user explicitly asks for a detailed explanation of specific content.</rule>
@@ -160,6 +149,10 @@ You are uv-agent, a coding agent.
 # ///
 </rule>
 <rule>If no inline metadata is needed, write plain Python source without a metadata block and treat it like normal project code, not a temporary-script wrapper. uv_agent_runtime is injected automatically even if metadata is omitted.</rule>
+<rule>For mature domain problems, prefer proven temporary dependencies over hand-rolled implementations. Use PEP 723 inline metadata when a focused library can make the task safer or faster. Examples: use unidiff for parsing diffs, libcst for Python source transforms, ruamel.yaml for YAML preservation, beautifulsoup4/lxml for HTML/XML, charset-normalizer for unknown encodings, pillow for image metadata or conversion, packaging for version/specifier logic, and pathspec for gitignore-style matching.</rule>
+<rule>Use Python standard library modules such as pathlib, os, json, and subprocess for ordinary files, JSON, traversal, and commands.</rule>
+<rule>When running independent work concurrently inside run_python, use Python standard library facilities such as asyncio, concurrent.futures, threading, and subprocess. Collect results deterministically and keep printed output bounded.</rule>
+<rule>Do not guess helper signatures; inspect uv_agent_runtime implementation when an exact signature matters.</rule>
 <rule>Use uv_args only for exceptional uv behavior such as refresh, reinstall, or debug flags.</rule>
 <rule>The system does not truncate oversized output for you; when output may be large, you must filter, limit, or summarize it in your Python code before printing.</rule>
 <rule>Prefer small inspect-then-change steps, then run focused verification when behavior changes.</rule>
@@ -167,92 +160,12 @@ You are uv-agent, a coding agent.
 <rule>Never print secrets; summarize sensitive config after redaction.</rule>
 </tool_boundary>
 
-<runtime_helpers>
-<imports>
-from uv_agent_runtime import (
-    apply_patch,
-    enter_dir,
-    look_at,
-    ask, # subagent
-    saved_scripts,
-    thread_digest,
-    list_thread_digests,
-    list_declared_servers,
-    connect_declared,
-    connect_named,
-)
-</imports>
-<helper name="apply_patch">
-Applies focused file edits using uv_agent_runtime's custom patch envelope. This is not standard unified diff syntax; do not include diff --git, ---/+++, or line-number headers. The patch must start with *** Begin Patch and end with *** End Patch. Each file operation starts with one of:
-- *** Add File: path
-- *** Update File: path
-- *** Delete File: path
-
-For update hunks, use @@ or @@ note as the hunk marker, prefix unchanged context lines with a space, removed lines with -, and added lines with +. Every hunk line must have one of those prefixes, including blank lines. To keep a blank context line, write a line containing a single leading space; to add or remove a blank line, write + or - by itself. To rename or move a file, put *** Move to: new/path immediately after *** Update File: old/path. Keep patches small, use paths relative to the current workspace, and do not escape the workspace. If any hunk context is missing, the whole patch fails without writing partial edits.
-Example:
-apply_patch('''*** Begin Patch
-*** Update File: path.txt
-@@
- old context
--old value
-+new value
-*** Update File: old_name.txt
-*** Move to: new_name.txt
-@@
--old name
-+new name
-*** End Patch
-''')
-</helper>
-<helper name="enter_dir">
-Changes the script working directory like os.chdir(path), persists that directory for later runs in this thread, and may automatically load AGENTS directory rules for that location.
-Use enter_dir early instead of repeatedly passing cwd when work clearly belongs in another directory.
-Example:
-enter_dir("src")
-</helper>
-<helper name="look_at">
-Attaches an image to future model context.
-Example:
-look_at("screenshots/error.png", note="inspect failing UI")
-</helper>
-<helper name="rerun">
-Rerun saved scripts by passing script_id or run_id to run_python; omit code when rerunning.
-</helper>
-<helper name="ask">
-Invokes a nested uv-agent subagent for isolated, tedious, or parallelizable work. The result has .text, .stdout, .stderr, .thread_id, and .raise_for_error().
-Pass level only when intentionally choosing one of the configured model levels listed in <model_levels>; otherwise omit it.
-Example:
-result = ask("Inspect parser tests", check=True, timeout_s=300)
-print(result.text[:1000])
-</helper>
-<helper name="saved_scripts">
-saved_scripts(limit=32) returns recent managed scripts with script_id, summary, run_count, last_used_at, and paths.
-Example:
-for script in saved_scripts(limit=5):
-    print(script["script_id"], script["summary"])
-</helper>
-<helper name="threads">
-thread_digest(thread_id) and list_thread_digests(limit=10) return compact cross-thread summaries.
-Example:
-threads = list_thread_digests(limit=5)
-if threads:
-    print(threads[0]["thread_id"], threads[0]["last_text"])
-</helper>
-<helper name="mcp">
-MCP helpers connect to declared stdio MCP servers; call MCP through Python, not as model tools. Use list_declared_servers() to discover names, connect_named(name) for project/user declarations, or connect_declared(name, config_path=".agents/mcp.json") for one config file.
-Example:
-print(list_declared_servers())
-with connect_named("files") as client:
-    client.initialize()
-    print(client.list_tools())
-    result = client.call_tool("read_file", {{"path": "README.md"}})
-    print(result.value)
-
-Raw MCP requests are also available with client.request(method, params) and notifications with client.notify(method, params).
-</helper>
-<helper>Use Python standard library modules such as pathlib, os, json, and subprocess for ordinary files, JSON, traversal, and commands.</helper>
-<helper>Do not guess helper signatures; inspect uv_agent_runtime implementation when an exact signature matters.</helper>
-</runtime_helpers>
+<capability_use>
+<rule>Actively use available external capabilities when they reduce steps, time, or risk: runtime helpers, declared skills, declared MCP servers, subprocesses through Python, and focused PEP 723 dependencies.</rule>
+<rule>Prefer existing helpers and declared external capabilities over hand-rolled steps when they fit the task; use simple Python for glue code or very small work, and add a dependency or subagent only when it materially helps.</rule>
+<rule>Use ask for bounded, tedious, or independent investigation that a subagent can handle without blocking the main line of work.</rule>
+<rule>Run independent steps concurrently when it safely reduces elapsed time, including multiple ask calls or subprocesses from Python. Keep coupled work and overlapping file writes sequential.</rule>
+</capability_use>
 
 <mentions>
 <rule>User text may include @file, @thread:id, @mcp:name, or @skill:name references. Mentions are plain-text hints only; they do not attach, load, connect, or call anything automatically.</rule>
@@ -260,14 +173,243 @@ Raw MCP requests are also available with client.request(method, params) and noti
 <rule>When a mentioned skill matters, read its SKILL.md from the available skills context. When a mentioned MCP server matters, use uv_agent_runtime MCP helpers from Python.</rule>
 </mentions>
 
-<dynamic_workspace_context>
-<rule>Directory rules from AGENTS files are loaded automatically for the active working directory. A bounded workspace_rule_index may list rule file locations without loading their full contents.</rule>
-<rule>Skills and MCP declarations are appended only when first seen, changed, removed, or after compaction, and only as context immediately before the current user message.</rule>
-<rule>A removal notice means older appended capability context must not be used unless it appears again.</rule>
-<rule>Interrupted turns may appear in context as summaries of partial work; do not assume unfinished tool calls completed.</rule>
-</dynamic_workspace_context>
+<context_updates>
+<rule>Runtime context is delivered as model-visible user messages wrapped in <context_update id="..."> blocks immediately before user messages.</rule>
+<rule>Treat each context_update as authoritative for the runtime sections it contains or removes. Earlier sections remain in force until a later update for that section replaces or removes them.</rule>
+<rule>A removed context section means older content for that section must not be used unless it appears again.</rule>
+</context_updates>
 </uv_agent_system_prompt>
 """
+
+RUNTIME_HELPERS_CONTEXT = """<runtime_helpers>
+<imports>
+# These helpers are already available in run_python; import and use them directly.
+from uv_agent_runtime import (
+    enter_dir,
+    ask,
+    look_at,
+    workspace_transaction,
+    snapshot_files,
+    restore_snapshot,
+    read_text_lossless,
+    write_text_lossless,
+    compare_text,
+    normalize_text,
+    replace_exact,
+    apply_patch,
+    apply_patch_any,
+    convert_patch,
+    make_unified_diff,
+    path_info,
+    run_process_text,
+    saved_scripts,
+    list_thread_digests,
+    thread_digest,
+    list_declared_servers,
+    connect_named,
+    connect_declared,
+)
+</imports>
+<helper name="enter_dir">
+<description>Use early when the task belongs in a repository, subdirectory, or path discovered during execution. It changes the Python cwd, persists that cwd for later runs in the thread, and may load directory rules.</description>
+<example><![CDATA[
+from uv_agent_runtime import enter_dir
+
+enter_dir("src")
+]]></example>
+</helper>
+<helper name="ask">
+<description>Use for isolated, tedious, or parallelizable investigation through a nested uv-agent subagent. It returns .text, .stdout, .stderr, .thread_id, and .raise_for_error().</description>
+<example><![CDATA[
+from uv_agent_runtime import ask
+
+result = ask("Inspect parser tests and summarize likely failures", check=True, timeout_s=300)
+print(result.text[:2000])
+]]></example>
+</helper>
+<helper name="look_at">
+<description>Use when a script produces or discovers an image that should be visible to the model on future turns. It emits structured image context with an optional note.</description>
+<example><![CDATA[
+from uv_agent_runtime import look_at
+
+look_at("screenshots/failure.png", note="inspect failing UI state")
+]]></example>
+</helper>
+<helper name="workspace_transaction">
+<description>Use around multi-file edits, generated transformations, or risky experiments. It snapshots selected files and restores them automatically if the block raises.</description>
+<example><![CDATA[
+from uv_agent_runtime import apply_patch, workspace_transaction
+
+with workspace_transaction(["src", "tests"]):
+    apply_patch('''*** Begin Patch
+*** Update File: src/app.py
+@@
+-old
++new
+*** End Patch
+''')
+]]></example>
+</helper>
+<helper name="snapshot_files">
+<description>Use before manual experiments when you want an explicit restore point without wrapping a block. It captures file bytes under a root.</description>
+<example><![CDATA[
+from uv_agent_runtime import snapshot_files
+
+snapshot = snapshot_files(["src/app.py", "tests/test_app.py"])
+print(snapshot.files.keys())
+]]></example>
+</helper>
+<helper name="restore_snapshot">
+<description>Use to undo files captured by snapshot_files or inspect what a failed transaction restored. It writes captured bytes back and removes paths recorded as missing.</description>
+<example><![CDATA[
+from uv_agent_runtime import restore_snapshot, snapshot_files
+
+snapshot = snapshot_files(["src/app.py"])
+# ... try an experiment ...
+print(restore_snapshot(snapshot))
+]]></example>
+</helper>
+<helper name="read_text_lossless">
+<description>Use when line endings, BOM, or final newline matter. It reads text plus encoding, newline style, final-newline, and BOM metadata.</description>
+<example><![CDATA[
+from uv_agent_runtime import read_text_lossless
+
+file = read_text_lossless("src/app.py")
+print(file.newline, file.final_newline, file.bom)
+]]></example>
+</helper>
+<helper name="write_text_lossless">
+<description>Use when writing generated text while preserving or explicitly choosing text metadata. Passing like=read_text_lossless(path) preserves encoding, BOM, newline style, and final newline policy.</description>
+<example><![CDATA[
+from uv_agent_runtime import read_text_lossless, write_text_lossless
+
+before = read_text_lossless("src/app.py")
+write_text_lossless("src/app.py", before.text.replace("old", "new"), like=before)
+]]></example>
+</helper>
+<helper name="compare_text">
+<description>Use when a change may be only EOL or final-newline noise. It classifies differences as equal, content, eol, or final_newline.</description>
+<example><![CDATA[
+from uv_agent_runtime import compare_text
+
+comparison = compare_text("a\r\nb\r\n", "a\nb\n", ignore_eol=True)
+print(comparison.kind)
+]]></example>
+</helper>
+<helper name="normalize_text">
+<description>Use when generated text needs a specific EOL or final-newline policy before writing or diffing.</description>
+<example><![CDATA[
+from uv_agent_runtime import normalize_text
+
+text = normalize_text("a\r\nb", eol="lf", final_newline=True)
+]]></example>
+</helper>
+<helper name="replace_exact">
+<description>Use for small exact replacements where preserving file text metadata matters. It rejects empty old text and raises with context when the target text is missing.</description>
+<example><![CDATA[
+from uv_agent_runtime import replace_exact
+
+replace_exact("src/app.py", "old_call()", "new_call()")
+]]></example>
+</helper>
+<helper name="path_info">
+<description>Use before risky filesystem work to inspect a resolved path, existence, kind, size, and whether it stays under a base directory.</description>
+<example><![CDATA[
+from uv_agent_runtime import path_info
+
+info = path_info("../maybe-outside.txt", base=".")
+print(info.kind, info.is_relative_to_base)
+]]></example>
+</helper>
+<helper name="apply_patch">
+<description>Use for focused file edits with uv_agent_runtime's custom patch envelope. It is not standard unified diff syntax; every update hunk line must start with space, -, or +, and the patch fails without partial writes if context is missing.</description>
+<example><![CDATA[
+from uv_agent_runtime import apply_patch
+
+apply_patch('''*** Begin Patch
+*** Update File: src/app.py
+@@
+ old context
+-old value
++new value
+*** End Patch
+''')
+]]></example>
+</helper>
+<helper name="apply_patch_any">
+<description>Use when you have either a uv-agent patch envelope or a unified diff. It auto-detects formats by default and supports dry_run before writing.</description>
+<example><![CDATA[
+from uv_agent_runtime import apply_patch_any, run_process_text
+
+diff = run_process_text(["git", "diff", "--", "src/app.py"]).stdout
+apply_patch_any(diff, format="unified", dry_run=True)
+]]></example>
+</helper>
+<helper name="convert_patch">
+<description>Use when you need to inspect or apply a unified diff through apply_patch. It converts supported unified diffs into the uv-agent patch envelope.</description>
+<example><![CDATA[
+from uv_agent_runtime import convert_patch, make_unified_diff
+
+diff = make_unified_diff("old\n", "new\n", path="src/app.py")
+print(convert_patch(diff, from_format="unified", to_format="apply_patch"))
+]]></example>
+</helper>
+<helper name="make_unified_diff">
+<description>Use to create a reviewable unified diff from before/after text, often before convert_patch or for concise reporting.</description>
+<example><![CDATA[
+from uv_agent_runtime import make_unified_diff
+
+print(make_unified_diff("old\n", "new\n", path="src/app.py"))
+]]></example>
+</helper>
+<helper name="run_process_text">
+<description>Use to run external commands with explicit stdout/stderr decoding, env patching, and timeout control. It avoids relying on terminal default encodings.</description>
+<example><![CDATA[
+from uv_agent_runtime import run_process_text
+
+result = run_process_text(["git", "status", "--short"], encoding="utf-8")
+print(result.stdout)
+]]></example>
+</helper>
+<helper name="rerun">
+<description>Use when a previous run_python script should be rerun or replayed. Omit code and pass script_id or run_id to run_python instead.</description>
+<example><![CDATA[
+# In a run_python tool call:
+# {"script_id": "scr_123", "timeout_s": 300}
+# or {"run_id": "run_123", "rerun_mode": "replay"}
+]]></example>
+</helper>
+<helper name="saved_scripts">
+<description>Use to find recent managed scripts for rerun or inspection. It returns script_id, summary, run_count, last_used_at, and paths.</description>
+<example><![CDATA[
+from uv_agent_runtime import saved_scripts
+
+for script in saved_scripts(limit=5):
+    print(script["script_id"], script["summary"])
+]]></example>
+</helper>
+<helper name="threads">
+<description>Use to inspect compact summaries from this or other threads when the user references @thread:id, asks about prior work, or needs a recent-thread lookup. list_thread_digests lists recent thread ids/titles/last text; thread_digest reads one thread's compact conversation digest. These helpers do not switch the active TUI thread.</description>
+<example><![CDATA[
+from uv_agent_runtime import list_thread_digests, thread_digest
+
+threads = list_thread_digests(limit=5)
+if threads:
+    print(thread_digest(threads[0]["thread_id"]))
+]]></example>
+</helper>
+<helper name="mcp">
+<description>Use to discover and call declared stdio MCP servers from Python. Call list_declared_servers(), connect_named(name), or connect_declared(name, config_path); MCP is not a direct model tool.</description>
+<example><![CDATA[
+from uv_agent_runtime import connect_named, list_declared_servers
+
+print(list_declared_servers())
+with connect_named("server-name") as client:
+    client.initialize()
+    print(client.list_tools())
+]]></example>
+</helper>
+</runtime_helpers>"""
 
 
 @dataclass
@@ -1082,9 +1224,11 @@ class AgentEngine:
             return False
         text = message_item_text(item)
         return not (
-            "<workspace_rules" in text
+            "<runtime_environment>" in text
+            or "<model_levels>" in text
+            or "<runtime_helpers>" in text
+            or "<workspace_rules" in text
             or "<workspace_rule_index>" in text
-            or "<directory_rules_loaded>" in text
             or "<active_cwd_notice>" in text
             or "<conversation_summary>" in text
             or "<available_skills>" in text
@@ -1605,8 +1749,6 @@ class AgentEngine:
             text = str(event.get("text") or "")
         elif event_type == "item.rule_index":
             text = str(event.get("text") or "")
-        elif event_type == "item.rules_loaded" and event.get("source") == "pre_user":
-            text = str(event.get("text") or "")
         elif event_type == "item.cwd_notice":
             text = str(event.get("text") or "")
         else:
@@ -1659,7 +1801,7 @@ class AgentEngine:
                 saw_model_response = True
         return saw_partial and not saw_model_response
 
-    def _workspace_context_items(self, thread_id: str | None = None) -> list[dict[str, Any]]:
+    def _runtime_context_items(self, thread_id: str | None = None) -> list[dict[str, Any]]:
         update = self._turn_context_update(thread_id)
         if update is None:
             return []
@@ -1669,7 +1811,7 @@ class AgentEngine:
                 "item.context_update",
                 context_fingerprint=update["fingerprint"],
                 context_state=update["state"],
-                context_kind="workspace",
+                context_kind="runtime",
                 removed=update["removed"],
                 text=update["text"],
             )
@@ -1679,7 +1821,7 @@ class AgentEngine:
         items: list[dict[str, Any]] = []
         for text in self._rule_context_texts(thread_id):
             items.append(message_item("user", text))
-        items.extend(self._workspace_context_items(thread_id))
+        items.extend(self._runtime_context_items(thread_id))
         return items
 
     def _rule_context_texts(self, thread_id: str) -> list[str]:
@@ -1705,11 +1847,6 @@ class AgentEngine:
         cwd_notice = self._active_cwd_notice(thread_id)
         if cwd_notice:
             texts.append(cwd_notice)
-        rules = self._load_unseen_rules_for_dir(thread_id, state.active_cwd, source="pre_user")
-        for event in rules:
-            text = str(event.get("text") or "")
-            if text:
-                texts.append(text)
         return texts
 
     def _active_cwd_notice(self, thread_id: str) -> str:
@@ -1757,7 +1894,7 @@ class AgentEngine:
             truncated=context.truncated,
             omitted_files=context.omitted_files,
         )
-        text = filtered.render(root=self.project_root, heading="directory_rules_loaded")
+        text = filtered.render(root=self.project_root)
         event = {
             "kind": "rules_loaded",
             "cwd": self._relative_to_project(directory),
@@ -1870,17 +2007,32 @@ class AgentEngine:
 
     def _turn_context_update(self, thread_id: str | None) -> dict[str, Any] | None:
         parts = self._turn_context_parts()
-        rendered = "\n\n".join(parts.values())
-        fingerprint = context_fingerprint(rendered)
+        full_rendered = "\n\n".join(parts.values())
+        fingerprint = context_fingerprint(full_rendered)
         state = {key: context_fingerprint(value) for key, value in parts.items()}
         previous = self._latest_context_state(thread_id) if thread_id else None
         previous_fingerprint = previous.get("fingerprint") if previous else None
         if previous_fingerprint == fingerprint:
             return None
         previous_parts = previous.get("parts", {}) if previous else {}
-        removed = [key for key in previous_parts if key not in state]
-        changed = [key for key in state if previous_parts.get(key) != state[key]]
-        if not rendered:
+        dynamic_kinds = {"skills", "mcp"}
+        initial = previous_fingerprint is None
+        if initial:
+            removed = [key for key in previous_parts if key not in state]
+            changed = [key for key in state if previous_parts.get(key) != state[key]]
+            rendered_parts = parts
+        else:
+            removed = [key for key in previous_parts if key in dynamic_kinds and key not in state]
+            changed = [
+                key
+                for key in parts
+                if key in dynamic_kinds and previous_parts.get(key) != state[key]
+            ]
+            if not changed and not removed:
+                return None
+            rendered_parts = {key: parts[key] for key in changed}
+        rendered = "\n\n".join(rendered_parts.values())
+        if not full_rendered:
             if previous_fingerprint is None:
                 return None
             return {
@@ -1888,35 +2040,35 @@ class AgentEngine:
                 "state": {"fingerprint": fingerprint, "parts": state},
                 "removed": removed or sorted(previous_parts),
                 "text": (
-                    "<workspace_context_update>\n"
-                    "Previously available skills or MCP declarations are no longer present. "
-                    "Do not rely on older appended capability context unless it appears again.\n"
-                    "</workspace_context_update>"
+                    "<context_update id=\"runtime_context\" status=\"removed\">\n"
+                    "Previously available runtime context is no longer present. "
+                    "Do not rely on older runtime context unless it appears again.\n"
+                    "</context_update>"
                 ),
             }
         if removed:
             removed_text = (
-                "\n\n<workspace_context_removed>\n"
+                "\n\n<context_update_removed id=\"runtime_context\">\n"
                 f"Removed context kinds: {', '.join(removed)}. "
                 "Do not rely on older appended content for these kinds unless it appears again.\n"
-                "</workspace_context_removed>"
+                "</context_update_removed>"
             )
         else:
             removed_text = ""
         prefix = (
-            "<workspace_context_update>\n"
-            "The following workspace capabilities are current. This update replaces any older appended "
-            "skills or MCP declarations in this thread.\n"
+            "<context_update id=\"runtime_context\" status=\"current\">\n"
+            "The following runtime context sections are current. This update replaces older content for the listed sections.\n"
             f"fingerprint: {fingerprint}\n"
             + (f"removed: {', '.join(removed)}\n" if removed else "")
             + (f"changed: {', '.join(changed)}\n" if changed else "")
-            + "</workspace_context_update>"
+            + "</context_update>"
         )
+        text = prefix + removed_text + ("\n\n" + rendered if rendered else "")
         return {
             "fingerprint": fingerprint,
             "state": {"fingerprint": fingerprint, "parts": state},
             "removed": removed,
-            "text": prefix + removed_text + "\n\n" + rendered,
+            "text": text,
         }
 
     def _latest_context_state(self, thread_id: str | None) -> dict[str, Any] | None:
@@ -1936,12 +2088,16 @@ class AgentEngine:
         return "\n\n".join(self._turn_context_parts().values())
 
     def _turn_context_parts(self) -> dict[str, str]:
-        sections: dict[str, str] = {}
+        sections: dict[str, str] = {
+            "runtime_environment": self._runtime_environment_context(),
+            "model_levels": self._model_levels_context(),
+            "runtime_helpers": self._runtime_helpers_context(),
+        }
         skills = render_skill_summary(discover_skills(self.project_root))
         if skills != "None discovered.":
             sections["skills"] = (
                 "<available_skills>\n"
-                "Read the listed SKILL.md with Python only when relevant.\n"
+                "Use these skills when one matches the task; read the listed SKILL.md with Python before applying it.\n"
                 f"{skills}\n"
                 "</available_skills>"
             )
@@ -1950,7 +2106,7 @@ class AgentEngine:
         if mcp_servers != "None declared.":
             sections["mcp"] = (
                 "<available_mcp_servers>\n"
-                "Use uv_agent_runtime MCP helpers from Python to inspect or call these servers.\n"
+                "Use these MCP servers when they fit the task; inspect and call them through uv_agent_runtime MCP helpers from Python.\n"
                 f"{mcp_servers}\n"
                 "</available_mcp_servers>"
             )
@@ -2029,13 +2185,20 @@ class AgentEngine:
 
     def system_instructions(self) -> str:
         """Build concise environment-aware system instructions."""
-        return SYSTEM_INSTRUCTIONS_TEMPLATE.format(
-            workspace=xml_text(self.project_root),
-            user_state=xml_text(uv_agent_home()),
-            project_state=xml_text(self.thread_store.data_dir),
-            host_environment=xml_text(host_environment_line(self._host_environment)),
-            user_language=xml_text(detect_user_language(self.config.ui.language).name),
-            model_levels=self._model_levels_context(),
+        return SYSTEM_INSTRUCTIONS_TEMPLATE
+
+    def _runtime_environment_context(self) -> str:
+        return "\n".join(
+            [
+                "<runtime_environment>",
+                f"<workspace>{xml_text(self.project_root)}</workspace>",
+                f"<user_state>{xml_text(uv_agent_home())}</user_state>",
+                f"<project_state>{xml_text(self.thread_store.data_dir)}</project_state>",
+                f"<host>{xml_text(host_environment_line(self._host_environment))}</host>",
+                f"<user_language>{xml_text(detect_user_language(self.config.ui.language).name)}</user_language>",
+                "<persistence>Persisted scripts, runs, and threads live under the project state directory.</persistence>",
+                "</runtime_environment>",
+            ]
         )
 
     def _model_levels_context(self) -> str:
@@ -2054,6 +2217,9 @@ class AgentEngine:
             ]
         )
         return "\n".join(lines)
+
+    def _runtime_helpers_context(self) -> str:
+        return RUNTIME_HELPERS_CONTEXT
 
 def message_item(role: str, text: str) -> dict[str, Any]:
     return {

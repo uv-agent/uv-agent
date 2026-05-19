@@ -1992,58 +1992,109 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
 
     assert "run_python" in prompt
     assert "uv_agent_runtime" in prompt
-    assert str(project_root) in prompt
+    assert str(project_root) not in prompt
     assert prompt.startswith("<uv_agent_system_prompt>")
     assert "</uv_agent_system_prompt>" in prompt
-    assert "<environment>" in prompt
-    assert "<host>" in prompt
-    assert "<user_language>" in prompt
-    assert "<model_levels>" in prompt
     assert "<response_style>" in prompt
     assert "reply concisely and with a friendly, approachable tone" in prompt
     assert "Keep answers restrained in length by default" in prompt
     assert "explicitly asks for a detailed explanation of specific content" in prompt
-    assert "<default>medium</default>" in prompt
-    assert "<level>small</level>" in prompt
-    assert "<level>medium</level>" in prompt
-    assert "</runtime_helpers>" in prompt
     assert 'requires-python = ">=3.12"' in prompt
     assert '# dependencies = [' in prompt
     assert "plain Python source without a metadata block" in prompt
     assert "not a temporary-script wrapper" in prompt
+    assert "For mature domain problems" in prompt
+    assert "unidiff for parsing diffs" in prompt
+    assert "libcst for Python source transforms" in prompt
+    assert "Use Python standard library modules such as pathlib" in prompt
+    assert "When running independent work concurrently inside run_python" in prompt
+    assert "asyncio, concurrent.futures, threading, and subprocess" in prompt
+    assert "Collect results deterministically and keep printed output bounded" in prompt
+    assert "Do not guess helper signatures" in prompt
     assert "The system does not truncate oversized output for you" in prompt
     assert "filter, limit, or summarize it in your Python code" in prompt
     assert "Call enter_dir proactively whenever the task clearly belongs" in prompt
     assert "including paths discovered during execution" in prompt
-    assert "custom patch envelope" in prompt
-    assert "*** Begin Patch" in prompt
-    assert "*** Update File: path.txt" in prompt
-    assert "not standard unified diff syntax" in prompt
-    assert "Every hunk line must have one of those prefixes, including blank lines" in prompt
-    assert "*** Move to: new/path" in prompt
-    assert "without writing partial edits" in prompt
-    assert "nested uv-agent subagent" in prompt
-    assert "connect_named(\"files\")" in prompt
-    assert "client.call_tool" in prompt
-    assert "result = ask(" in prompt
+    assert "<capability_use>" in prompt
+    assert "Actively use available external capabilities" in prompt
+    assert "runtime helpers, declared skills, declared MCP servers" in prompt
+    assert "Prefer existing helpers and declared external capabilities" in prompt
+    assert "use simple Python for glue code or very small work" in prompt
+    assert "only when it materially helps" in prompt
+    assert "Use ask for bounded, tedious, or independent investigation" in prompt
+    assert "Run independent steps concurrently" in prompt
+    assert "multiple ask calls or subprocesses from Python" in prompt
+    assert "overlapping file writes sequential" in prompt
+    assert "Occam's razor" not in prompt
+    assert "capability explanations layered" not in prompt
+    assert "<context_updates>" in prompt
+    assert "model-visible user messages wrapped in <context_update" in prompt
+    assert "Treat each context_update as authoritative for the runtime sections" in prompt
+    assert "Earlier sections remain in force" in prompt
+    assert "A removed context section means older content" in prompt
+    assert "item.context_update is an internal persistence event" not in prompt
+    assert "After compaction, current context updates are re-sent" not in prompt
+    assert "Interrupted turns may appear in context" not in prompt
+    assert "<runtime_environment>" not in prompt
+    assert "<model_levels>" not in prompt
+    assert "</runtime_helpers>" not in prompt
+    assert "custom patch envelope" not in prompt
+    assert "connect_named(\"files\")" not in prompt
+    assert "saved_scripts(limit=32)" not in prompt
+    assert "Directory rules from AGENTS files are loaded automatically" not in prompt
+
+    turn_context = engine._turn_context_text()
+
+    assert "<runtime_environment>" in turn_context
+    assert "<host>" in turn_context
+    assert "<user_language>" in turn_context
+    assert str(project_root) in turn_context
+    assert "<model_levels>" in turn_context
+    assert "<default>medium</default>" in turn_context
+    assert "<level>small</level>" in turn_context
+    assert "<level>medium</level>" in turn_context
+    assert "</runtime_helpers>" in turn_context
+    assert "These helpers are already available in run_python" in turn_context
+    assert "path_info" in turn_context
+    assert "read_text_lossless" in turn_context
+    assert "write_text_lossless" in turn_context
+    assert "compare_text" in turn_context
+    assert "normalize_text" in turn_context
+    assert "replace_exact" in turn_context
+    assert "make_unified_diff" in turn_context
+    assert "apply_patch_any" in turn_context
+    assert "convert_patch" in turn_context
+    assert "workspace_transaction" in turn_context
+    assert "snapshot_files" in turn_context
+    assert "restore_snapshot" in turn_context
+    assert "run_process_text" in turn_context
+    assert "custom patch envelope" in turn_context
+    assert turn_context.count("<description>") >= 18
+    assert turn_context.count("<example><![CDATA[") >= 18
+    assert '<helper name="replace_exact">' in turn_context
+    assert '<helper name="mcp">' in turn_context
+    assert '<helper name="stdlib">' not in turn_context
+    assert '<helper name="inspect_signatures">' not in turn_context
+    assert "These helpers do not switch the active TUI thread" in turn_context
+    assert "*** Begin Patch" in turn_context
+    assert "*** Update File: src/app.py" in turn_context
+    assert "connect_named(\"server-name\")" in turn_context
+    assert "client.initialize()" in turn_context
+    assert "nested uv-agent subagent" in turn_context
     assert 'level="small"' not in prompt
     assert "pathlib" in prompt
     assert "Mentions are plain-text hints only" in prompt
-    assert "saved_scripts(limit=32)" in prompt
     assert "read_text, write_text" not in prompt
     assert "list_files" not in prompt
     assert "run_command/check_command" not in prompt
     assert "emit_event" not in prompt
-    assert "Directory rules from AGENTS files are loaded automatically" in prompt
-    assert "Skills and MCP declarations are appended only when first seen" in prompt
-    assert "enter_dir" in prompt
-    assert "instead of repeatedly passing cwd" in prompt
+    assert "enter_dir" in turn_context
     assert "demo (project)" not in prompt
-
-    turn_context = engine._turn_context_text()
 
     assert "demo (project)" in turn_context
     assert "available_mcp_servers" in turn_context
+    assert "Use these skills when one matches the task" in turn_context
+    assert "Use these MCP servers when they fit the task" in turn_context
 
 
 def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_path: Path) -> None:
@@ -2079,10 +2130,11 @@ def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_p
     )
 
     prompt = engine.system_instructions()
+    turn_context = engine._turn_context_text()
 
-    assert "<default>deep</default>" in prompt
-    assert "<level>fast</level>" in prompt
-    assert "<level>deep</level>" in prompt
+    assert "<default>deep</default>" in turn_context
+    assert "<level>fast</level>" in turn_context
+    assert "<level>deep</level>" in turn_context
     assert 'level="small"' not in prompt
     assert 'model_level="large"' not in prompt
     assert "small/medium/large" not in prompt
@@ -2145,7 +2197,7 @@ def test_context_percent_prefers_latest_usage(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_loads_project_rules_without_context_update(tmp_path: Path) -> None:
+async def test_agent_sends_project_rule_index_without_rule_contents(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "AGENTS.md").write_text("Use the local rule.", encoding="utf-8")
@@ -2197,13 +2249,11 @@ async def test_agent_loads_project_rules_without_context_update(tmp_path: Path) 
     events = [event async for event in engine.run_turn(user_text="hello")]
 
     request_text = str(client.requests[0]["input"])
-    assert "Use the local rule." in request_text
     assert "<workspace_rule_index>" in request_text
-    assert "<directory_rules_loaded>" in request_text
-    stored_text = str(engine.thread_store.read(events[-1]["thread_id"]))
-    assert "Use the local rule." in stored_text
+    assert "AGENTS.md" in request_text
+    assert "Use the local rule." not in request_text
     stored = engine.thread_store.read(events[-1]["thread_id"])
-    assert any(event["type"] == "item.rules_loaded" for event in stored)
+    assert not any(event["type"] == "item.rules_loaded" for event in stored)
     assert not any(event["type"] == "item.context_update" and "Use the local rule." in str(event) for event in stored)
 
 
@@ -2274,7 +2324,9 @@ async def test_compaction_request_reuses_main_prefix(tmp_path: Path) -> None:
     events = [event async for event in engine.run_turn(user_text="hello")]
 
     assert events[-1]["type"] == "turn.completed"
-    assert "Never persist this rule." in str(client.requests[0]["input"])
+    assert "<workspace_rule_index>" in str(client.requests[0]["input"])
+    assert "AGENTS.md" in str(client.requests[0]["input"])
+    assert "Never persist this rule." not in str(client.requests[0]["input"])
     assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
     assert "context_compaction_request" in str(client.requests[1]["input"][-1])
     assert "CONTEXT CHECKPOINT COMPACTION" in str(client.requests[1]["input"][-1])
@@ -2368,7 +2420,8 @@ async def test_project_rules_are_deduped_and_not_reloaded_on_file_change(tmp_pat
     [event async for event in engine.run_turn(user_text="two", thread_id=first)]
     requests_text = [str(request["input"]) for request in client.requests[:2]]
 
-    assert "Rule v1." in requests_text[0]
+    assert "AGENTS.md" in requests_text[0]
+    assert "Rule v1." not in requests_text[0]
     assert client.requests[1]["previous_response_id"] == "resp_1"
     assert "Rule v1." not in requests_text[1]
 
@@ -2421,8 +2474,9 @@ async def test_project_rules_reappear_after_compaction_epoch(tmp_path: Path) -> 
 
     assert first
     assert second
-    assert "After compaction rule." in str(second)
     assert "<workspace_rule_index>" in str(second)
+    assert "AGENTS.md" in str(second)
+    assert "After compaction rule." not in str(second)
 
 
 @pytest.mark.asyncio
@@ -2456,7 +2510,7 @@ async def test_compaction_epoch_uses_active_cwd_local_index_and_notice(tmp_path:
     assert "AGENTS.md" in text
     assert "pkg/AGENTS.md" in text
     assert "Root rule." not in text
-    assert "Child rule." in text
+    assert "Child rule." not in text
     assert "active_cwd_notice" in text
     assert "src" in text
 
@@ -2516,8 +2570,7 @@ async def test_system_instructions_are_persisted_before_first_model_request(tmp_
     stored_after = engine.thread_store.read(thread_id)
     assert sum(1 for event in stored_after if event["type"] == "item.system_instructions") == 1
     assert client.requests[1]["instructions"] == frozen
-    assert "<default>medium</default>" in client.requests[1]["instructions"]
-    assert "<default>small</default>" not in client.requests[1]["instructions"]
+    assert "<model_levels>" not in client.requests[1]["instructions"]
 
 
 @pytest.mark.asyncio
@@ -2564,13 +2617,13 @@ async def test_system_instructions_refresh_after_compaction(tmp_path: Path) -> N
     engine.config = make_test_config(project_root, api="chat_completions", default_level="small")
     [event async for event in engine.run_turn(user_text="two", thread_id=thread_id)]
 
-    assert "<default>medium</default>" in client.requests[0]["instructions"]
-    assert "<default>small</default>" in client.requests[1]["instructions"]
+    assert "<default>medium</default>" in str(client.requests[0]["input"])
+    assert "<default>small</default>" in str(client.requests[1]["input"])
     stored = engine.thread_store.read(thread_id)
     assert sum(1 for event in stored if event["type"] == "item.system_instructions") == 2
 
 
-def test_workspace_context_reappears_after_compaction_epoch(tmp_path: Path) -> None:
+def test_runtime_context_reappears_after_compaction_epoch(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     skill_dir = project_root / ".agents" / "skills" / "demo"
     skill_dir.mkdir(parents=True)
@@ -2585,15 +2638,18 @@ def test_workspace_context_reappears_after_compaction_epoch(tmp_path: Path) -> N
     )
     thread_id = engine.thread_store.create_thread()
 
-    first = engine._workspace_context_items(thread_id)
+    first = engine._runtime_context_items(thread_id)
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
-    second = engine._workspace_context_items(thread_id)
+    second = engine._runtime_context_items(thread_id)
 
     assert "demo (project)" in str(first)
     assert "demo (project)" in str(second)
+    assert "<runtime_environment>" in str(second)
+    assert "<model_levels>" in str(second)
+    assert "<runtime_helpers>" in str(second)
 
 
-def test_workspace_context_is_not_repeated_after_compaction_epoch_update(tmp_path: Path) -> None:
+def test_runtime_context_is_not_repeated_after_compaction_epoch_update(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     skill_dir = project_root / ".agents" / "skills" / "demo"
     skill_dir.mkdir(parents=True)
@@ -2608,13 +2664,104 @@ def test_workspace_context_is_not_repeated_after_compaction_epoch_update(tmp_pat
     )
     thread_id = engine.thread_store.create_thread()
 
-    engine._workspace_context_items(thread_id)
+    engine._runtime_context_items(thread_id)
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
-    after_compaction = engine._workspace_context_items(thread_id)
-    repeated = engine._workspace_context_items(thread_id)
+    after_compaction = engine._runtime_context_items(thread_id)
+    repeated = engine._runtime_context_items(thread_id)
 
     assert "demo (project)" in str(after_compaction)
     assert repeated == []
+
+
+def test_runtime_context_skill_change_sends_incremental_section_only(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+
+    first = engine._runtime_context_items(thread_id)
+    skill_dir = project_root / ".agents" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
+    second = engine._runtime_context_items(thread_id)
+
+    assert "<runtime_environment>" in str(first)
+    assert "<model_levels>" in str(first)
+    assert "<runtime_helpers>" in str(first)
+    text = str(second)
+    assert "changed: skills" in text
+    assert "<available_skills>" in text
+    assert "demo (project)" in text
+    assert "<runtime_environment>" not in text
+    assert "<model_levels>" not in text
+    assert "<runtime_helpers>" not in text
+
+
+def test_runtime_context_mcp_removal_sends_removal_only(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    agents_dir = project_root / ".agents"
+    agents_dir.mkdir(parents=True)
+    mcp_path = agents_dir / "mcp.json"
+    mcp_path.write_text(
+        "{\"servers\":{\"demo\":{\"command\":\"python\",\"description\":\"Demo MCP\"}}}",
+        encoding="utf-8",
+    )
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+
+    first = engine._runtime_context_items(thread_id)
+    mcp_path.unlink()
+    second = engine._runtime_context_items(thread_id)
+
+    assert "<available_mcp_servers>" in str(first)
+    text = str(second)
+    assert "removed: mcp" in text
+    assert "<context_update_removed id=\"runtime_context\">" in text
+    assert "<available_mcp_servers>" not in text
+    assert "<runtime_environment>" not in text
+    assert "<model_levels>" not in text
+    assert "<runtime_helpers>" not in text
+
+
+def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    update = engine._turn_context_update(None)
+
+    assert update is not None
+    text = update["text"]
+    assert text.startswith('<context_update id="runtime_context" status="current">\n')
+    assert text.index("<runtime_environment>") < text.index("<model_levels>")
+    assert text.index("<model_levels>") < text.index("<runtime_helpers>")
+    assert text.index('name="enter_dir"') < text.index('name="ask"')
+    assert text.index('name="ask"') < text.index('name="look_at"')
+    assert text.index('name="look_at"') < text.index('name="workspace_transaction"')
+    assert text.index('name="workspace_transaction"') < text.index('name="read_text_lossless"')
+    assert text.index('name="read_text_lossless"') < text.index('name="apply_patch"')
+    assert text.index('name="apply_patch"') < text.index('name="run_process_text"')
 
 
 @pytest.mark.asyncio
@@ -2792,7 +2939,7 @@ def test_context_update_reconstructs_as_stable_prefix(tmp_path: Path) -> None:
         turn_id="t1",
         context_fingerprint="fp",
         context_state={"fingerprint": "fp", "parts": {"rules": "rules-fp"}},
-        context_kind="workspace",
+        context_kind="runtime",
         removed=[],
         text="stable rules",
     )
@@ -2980,7 +3127,7 @@ def test_rule_state_restore_uses_local_index_when_active_cwd_is_child(tmp_path: 
     items = engine._pre_user_context_items(thread_id)
     text = str(items)
 
-    assert "child rule" in text
+    assert "child rule" not in text
     assert "<workspace_rule_index>" in text
     assert "AGENTS.md" in text
     assert "pkg/AGENTS.md" in text
