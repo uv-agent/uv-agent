@@ -9,13 +9,14 @@
 
 公开 API、配置字段和 runtime 行为可能随项目演进而继续调整。
 
-## 安装与运行
+## 前置要求
 
-> **前置要求**  
-> 系统上需要安装
-> [**uv**](https://docs.astral.sh/uv/getting-started/installation/) 和
-> [**ripgrep**](https://github.com/BurntSushi/ripgrep#installation)。
-> uv 是用于运行 agent 的 Python 包与项目管理器；ripgrep 用于在工作区内快速搜索文件内容。
+系统上需要安装
+[**uv**](https://docs.astral.sh/uv/getting-started/installation/) 和
+[**ripgrep**](https://github.com/BurntSushi/ripgrep#installation)。
+uv 是用于运行 agent 的 Python 包与项目管理器；ripgrep 用于在工作区内快速搜索文件内容。
+
+## 安装与运行
 
 运行最新发布版本：
 
