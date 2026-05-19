@@ -46,49 +46,16 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 用户级配置默认位于 `~/.uv-agent/config.json`。项目可以用 `.uv-agent/config.json`
 覆盖；这个项目本地目录已被 git 忽略。API key 应放在环境变量或被忽略的本地配置里。
 
-最小配置结构：
-
-```json
-{
-  "providers": {
-    "main": {
-      "base_url": "https://api.example.com/v1",
-      "api_key_env": "UV_AGENT_API_KEY",
-      "responses": { "path": "/responses" }
-    }
-  },
-  "models": {
-    "main": {
-      "provider": "main",
-      "model": "your-model-name",
-      "api": "responses",
-      "context_window_tokens": 128000
-    }
-  },
-  "levels": {
-    "medium": { "model": "main" }
-  },
-  "runtime": {
-    "default_level": "medium"
-  },
-  "ui": {
-    "language": "auto",
-    "completion_notification": {
-      "enabled": true,
-      "terminal": true,
-      "bell": true
-    }
-  }
-}
-```
-
-在 TUI 中可以用 `/config` 切换默认 level、界面语言和自动压缩。把 `ui.language`
-设为 `zh-CN` 可使用中文界面。完成通知可通过 `ui.completion_notification`
-配置；非 Windows 平台使用终端 bell 作为完成提示音。
-
-
-<details>
-<summary>示例：DeepSeek 配置</summary>
+> **API 兼容**  
+> 本项目支持三种 API 格式——在模型配置中设置 `api` 字段即可：
+> 
+> | `api` 取值 | 格式 | 状态 |
+> |---|---|---|
+> | `"chat_completions"` | OpenAI Chat Completions API | ✅ 主要支持（功能完整） |
+> | `"responses"` | OpenAI Responses API | ⚠️ 实验性——可能存在 bug |
+> | `"anthropic_messages"` | Anthropic Messages API | ⚠️ 实验性——可能存在 bug |
+> 
+> 欢迎提交 Issue 和 PR！示例配置
 
 ```json
 {
@@ -168,9 +135,13 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
     }
   }
 }
+
 ```
 
-</details>
+在 TUI 中可以用 `/config` 切换默认 level、界面语言和自动压缩。把 `ui.language`
+设为 `zh-CN` 可使用中文界面。完成通知可通过 `ui.completion_notification`
+配置；非 Windows 平台使用终端 bell 作为完成提示音。
+
 
 完整字段见 [configuration](docs/configuration.md)，详细示例见
 [config.example.json](docs/config.example.json)。

@@ -49,50 +49,16 @@ User config lives at `~/.uv-agent/config.json`. A project can override it with
 `.uv-agent/config.json`; that project-local directory is ignored by git. Keep
 API keys in environment variables or ignored local config.
 
-Minimal shape:
-
-```json
-{
-  "providers": {
-    "main": {
-      "base_url": "https://api.example.com/v1",
-      "api_key_env": "UV_AGENT_API_KEY",
-      "responses": { "path": "/responses" }
-    }
-  },
-  "models": {
-    "main": {
-      "provider": "main",
-      "model": "your-model-name",
-      "api": "responses",
-      "context_window_tokens": 128000
-    }
-  },
-  "levels": {
-    "medium": { "model": "main" }
-  },
-  "runtime": {
-    "default_level": "medium"
-  },
-  "ui": {
-    "language": "auto",
-    "completion_notification": {
-      "enabled": true,
-      "terminal": true,
-      "bell": true
-    }
-  }
-}
-```
-
-Use `/config` in the TUI to switch the default level, language, and automatic
-compression. Set `ui.language` to `zh-CN` for a Chinese UI. Completion
-notifications can be configured under `ui.completion_notification`. Non-Windows
-platforms use the terminal bell for completion sound.
-
-
-<details>
-<summary>Example: DeepSeek configuration</summary>
+> **API compatibility**  
+> This project supports three API formats — set `api` on your model config:
+> 
+> | `api` value | Format | Status |
+> |---|---|---|
+> | `"chat_completions"` | OpenAI Chat Completions API | ✅ Primary (fully supported) |
+> | `"responses"` | OpenAI Responses API | ⚠️ Experimental — may have bugs |
+> | `"anthropic_messages"` | Anthropic Messages API | ⚠️ Experimental — may have bugs |
+> 
+> Issues and PRs are welcome for any format!Example configuration:
 
 ```json
 {
@@ -172,9 +138,14 @@ platforms use the terminal bell for completion sound.
     }
   }
 }
+
 ```
 
-</details>
+Use `/config` in the TUI to switch the default level, language, and automatic
+compression. Set `ui.language` to `zh-CN` for a Chinese UI. Completion
+notifications can be configured under `ui.completion_notification`. Non-Windows
+platforms use the terminal bell for completion sound.
+
 
 See [configuration](docs/configuration.md) for all supported options and
 [config.example.json](docs/config.example.json) for a detailed example.
