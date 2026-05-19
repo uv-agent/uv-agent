@@ -14,3 +14,4 @@ wheels/
 
 # Private design notes
 docs/design.md
+docs/pending-*.md
