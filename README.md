@@ -90,6 +90,92 @@ compression. Set `ui.language` to `zh-CN` for a Chinese UI. Completion
 notifications can be configured under `ui.completion_notification`. Non-Windows
 platforms use the terminal bell for completion sound.
 
+
+<details>
+<summary>Example: DeepSeek configuration</summary>
+
+```json
+{
+  "providers": {
+    "deepseek": {
+      "base_url": "https://api.deepseek.com",
+      "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "chat_completions": {
+        "path": "/chat/completions"
+      },
+      "message_passthrough": {
+        "assistant": [
+          "reasoning_content"
+        ]
+      },
+      "reasoning_display": {
+        "assistant_message_fields": [
+          "reasoning_content"
+        ],
+        "stream_delta_fields": [
+          "reasoning_content"
+        ]
+      }
+    }
+  },
+  "models": {
+    "deepseek-v4-flash": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "api": "chat_completions",
+      "supports_images": false,
+      "context_window_tokens": 1000000,
+      "params": {
+        "reasoning_effort": "high"
+      }
+    },
+    "deepseek-v4-pro": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "api": "chat_completions",
+      "supports_images": false,
+      "context_window_tokens": 1000000,
+      "params": {
+        "reasoning_effort": "max"
+      }
+    }
+  },
+  "levels": {
+    "deepseek-flash": {
+      "model": "deepseek-v4-flash"
+    },
+    "deepseek-pro": {
+      "model": "deepseek-v4-pro"
+    }
+  },
+  "runtime": {
+    "default_level": "deepseek-flash",
+    "store_provider_response": false,
+    "max_agent_rounds": 1000,
+    "compression": {
+      "enabled": true,
+      "model_level": "deepseek-flash",
+      "trigger_ratio": 0.9
+    },
+    "title_generation": {
+      "enabled": true,
+      "model_level": "deepseek-flash"
+    }
+  },
+  "runner": {
+    "default_timeout_s": 7200,
+    "max_output_bytes": 1000000
+  },
+  "ui": {
+    "completion_notification": {
+      "enabled": true
+    }
+  }
+}
+```
+
+</details>
+
 See [configuration](docs/configuration.md) for all supported options and
 [config.example.json](docs/config.example.json) for a detailed example.
 

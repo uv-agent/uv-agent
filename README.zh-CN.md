@@ -86,6 +86,92 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 设为 `zh-CN` 可使用中文界面。完成通知可通过 `ui.completion_notification`
 配置；非 Windows 平台使用终端 bell 作为完成提示音。
 
+
+<details>
+<summary>示例：DeepSeek 配置</summary>
+
+```json
+{
+  "providers": {
+    "deepseek": {
+      "base_url": "https://api.deepseek.com",
+      "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "chat_completions": {
+        "path": "/chat/completions"
+      },
+      "message_passthrough": {
+        "assistant": [
+          "reasoning_content"
+        ]
+      },
+      "reasoning_display": {
+        "assistant_message_fields": [
+          "reasoning_content"
+        ],
+        "stream_delta_fields": [
+          "reasoning_content"
+        ]
+      }
+    }
+  },
+  "models": {
+    "deepseek-v4-flash": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "api": "chat_completions",
+      "supports_images": false,
+      "context_window_tokens": 1000000,
+      "params": {
+        "reasoning_effort": "high"
+      }
+    },
+    "deepseek-v4-pro": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "api": "chat_completions",
+      "supports_images": false,
+      "context_window_tokens": 1000000,
+      "params": {
+        "reasoning_effort": "max"
+      }
+    }
+  },
+  "levels": {
+    "deepseek-flash": {
+      "model": "deepseek-v4-flash"
+    },
+    "deepseek-pro": {
+      "model": "deepseek-v4-pro"
+    }
+  },
+  "runtime": {
+    "default_level": "deepseek-flash",
+    "store_provider_response": false,
+    "max_agent_rounds": 1000,
+    "compression": {
+      "enabled": true,
+      "model_level": "deepseek-flash",
+      "trigger_ratio": 0.9
+    },
+    "title_generation": {
+      "enabled": true,
+      "model_level": "deepseek-flash"
+    }
+  },
+  "runner": {
+    "default_timeout_s": 7200,
+    "max_output_bytes": 1000000
+  },
+  "ui": {
+    "completion_notification": {
+      "enabled": true
+    }
+  }
+}
+```
+
+</details>
+
 完整字段见 [configuration](docs/configuration.md)，详细示例见
 [config.example.json](docs/config.example.json)。
 
