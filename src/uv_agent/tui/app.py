@@ -2092,10 +2092,17 @@ class UvAgentApp(App[None]):
                 elif event_type == "turn.completed":
                     self._update_turn_timestamps(item, run_state)
                     text = item["final_text"] or run_state.assistant_buffer
-                    if text and self._is_active_thread(item_thread_id) and self._assistant_cell is None:
-                        self._append_assistant_text(text)
-                        self._sync_run_state_from_active(run_state)
                     was_active_thread = self._is_active_thread(item_thread_id)
+                    if text and was_active_thread and self._assistant_cell is None:
+                        self._append_assistant_text(text)
+                    if was_active_thread:
+                        # Match re-entry behavior: every turn end folds its
+                        # process cells, not just turns that emitted
+                        # assistant.final_response_started.
+                        self._finalize_turn_render()
+                        self._sync_run_state_from_active(run_state)
+                    elif run_state.process_cells:
+                        run_state.process_collapsed = True
                     run_state.status = self._text("idle")
                     self._notify_turn_completed(item_thread_id, text, active_thread=was_active_thread)
                     if was_active_thread:
@@ -2439,11 +2446,14 @@ class UvAgentApp(App[None]):
         elif event_type == "compaction.completed":
             self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
         elif event_type == "turn.interrupted":
-            self._append_cell(f"[dim]{escape(self._text('interrupted'))}[/dim]", "event")
+            # Re-entry path renders no "interrupted" marker cell; mirror it
+            # by only folding the turn's process cells. See _finalize_turn_render.
+            self._finalize_turn_render()
         elif event_type == "turn.error":
             run_state = self._thread_state(str(item.get("thread_id") or self.thread_id or ""))
             if run_state is not None:
                 self._mark_run_error_state(run_state, item)
+            self._finalize_turn_render()
             self._append_turn_error(item)
 
     def _mark_run_error_state(self, run_state: ThreadRunState, event: dict[str, Any]) -> None:
@@ -2559,6 +2569,8 @@ class UvAgentApp(App[None]):
                 run_state.status = self._text("working")
             elif event_type == "turn.interrupted":
                 run_state.status = self._text("interrupted")
+                if run_state.process_cells:
+                    run_state.process_collapsed = True
             elif event_type == "turn.error":
                 run_state.status = self._text("error")
             return
@@ -3114,6 +3126,20 @@ class UvAgentApp(App[None]):
         self._process_collapsed = True
         self._refresh_process_fold_elapsed()
 
+    def _finalize_turn_render(self) -> None:
+        """Bring the live transcript to the same end-of-turn state as re-entry.
+
+        Mirrors `_mount_history_turn_events`: any pending reasoning is cleared,
+        the streaming assistant cell is sealed, and every process cell of the
+        turn is folded under a single FoldedProcessCell with the turn's elapsed
+        label. Safe to call multiple times in a single turn (e.g. once via
+        `assistant.final_response_started` and again on `turn.completed`).
+        """
+        self._clear_pending_reasoning()
+        self._seal_assistant_round()
+        self._collapse_process_cells()
+        self._refresh_process_fold_elapsed()
+
     def _track_current_assistant_cell_as_process(self) -> None:
         if self._assistant_cell is not None:
             self._track_process_cell(self._assistant_cell)
@@ -3184,11 +3210,13 @@ class UvAgentApp(App[None]):
             details = tool_call_detail_highlight_markup(call)
             if isinstance(pending_cell, ExpandableTranscriptCell):
                 pending_cell.set_details(markup, details)
+                self._mark_tool_cell_completed(pending_cell)
             elif tool_call_preview_line(call):
-                new_cell = self._replace_with_expandable_cell(pending_cell, markup, details, "tool_pending")
+                new_cell = self._replace_with_expandable_cell(pending_cell, markup, details, "event")
                 self._replace_process_cell(pending_cell, new_cell)
             else:
                 pending_cell.update(markup)
+                self._mark_tool_cell_completed(pending_cell)
         if payload is None:
             markup = f"[dim]{escape(self._text('python'))} {escape(self._text('python_completed'))}[/dim]"
             cell = self._append_cell(markup, "event")
@@ -3202,6 +3230,18 @@ class UvAgentApp(App[None]):
         cell.tool_payload = payload
         self._track_process_cell(cell)
         self._refresh_status(self._text("working"))
+
+    def _mark_tool_cell_completed(self, cell: TranscriptCell) -> None:
+        """Match re-entry rendering: completed tool calls use the 'event' class.
+
+        While streaming the call is marked 'tool_pending'; once `tool.output`
+        arrives the cell must look exactly like its history-rendered twin
+        (see `_append_tool_call_history`).
+        """
+        if cell.has_class("tool_pending"):
+            cell.remove_class("tool_pending")
+        if not cell.has_class("event"):
+            cell.add_class("event")
 
     def _append_tool_started(self, item: dict[str, Any]) -> None:
         call = item.get("call") or {}

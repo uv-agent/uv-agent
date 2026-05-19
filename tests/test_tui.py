@@ -410,6 +410,104 @@ class StableRoundEngine(AgentEngine):
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": "Done."}
 
 
+class InterruptedRoundEngine(AgentEngine):
+    """Yields reasoning + tool call + tool output, then waits for cancel and emits turn.interrupted."""
+
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+        self.started = asyncio.Event()
+
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        thread_id = thread_id or self.thread_store.create_thread("Interrupted round")
+        turn_id = "turn_interrupted"
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        )
+        yield {"type": "assistant.reasoning_delta", "thread_id": thread_id, "turn_id": turn_id, "text": "plan"}
+        output = [
+            {
+                "type": "function_call",
+                "call_id": "call_int",
+                "name": "run_python",
+                "arguments": '{"code":"print(1)"}',
+            },
+        ]
+        response = ModelResponse(
+            id="resp_int_1",
+            output=output,
+            output_text="",
+            raw={"id": "resp_int_1"},
+            usage={},
+            reasoning_text="plan",
+        )
+        self.thread_store.append(
+            thread_id,
+            "item.model_response",
+            turn_id=turn_id,
+            response_id=response.id,
+            output=response.output,
+            usage={},
+            reasoning_text=response.reasoning_text,
+        )
+        yield {"type": "model.response", "thread_id": thread_id, "turn_id": turn_id, "response": response}
+        yield {
+            "type": "tool.started",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "call": output[0],
+            "tool_call_index": 0,
+        }
+        payload = {
+            "script_id": "scr_int",
+            "run_id": "run_int",
+            "returncode": 0,
+            "timed_out": False,
+            "interrupted": False,
+            "truncated": False,
+            "stdout": "ok\n",
+            "stderr": "",
+            "events": [],
+            "run_log_path": "",
+        }
+        self.thread_store.append(
+            thread_id,
+            "item.runner_result",
+            turn_id=turn_id,
+            call_id="call_int",
+            result=payload,
+        )
+        self.thread_store.append(
+            thread_id,
+            "item.tool_output",
+            turn_id=turn_id,
+            item={"type": "function_call_output", "call_id": "call_int", "output": "{}"},
+        )
+        yield {
+            "type": "tool.output",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "call": output[0],
+            "tool_call_index": 0,
+            "output": {"type": "function_call_output", "call_id": "call_int", "output": __import__("json").dumps(payload)},
+        }
+        self.started.set()
+        while cancel_event is not None and not cancel_event.is_set():
+            await asyncio.sleep(0.01)
+        self.thread_store.append(thread_id, "turn.interrupted", turn_id=turn_id, reason="user_interrupt")
+        yield {"type": "turn.interrupted", "thread_id": thread_id, "turn_id": turn_id, "reason": "user_interrupt"}
+
+
 class SteppedRoundEngine(AgentEngine):
     def __init__(self, engine: AgentEngine) -> None:
         self.__dict__.update(engine.__dict__)
@@ -4148,3 +4246,122 @@ async def test_tui_tool_details_panel_toggles_events_with_e_key(
         assert panel.events_collapsed is False
         assert "halfway" in panel.body
         assert "done" in panel.body
+
+
+def _transcript_snapshot(app: UvAgentApp) -> list[dict[str, object]]:
+    """Normalized transcript snapshot for live ↔ re-entry equivalence checks.
+
+    Captures the structural shape that the user perceives: ordering of cells,
+    fold cells with their collapsed state, and the process-fold hidden state of
+    the cells underneath. Reasoning detail text is excluded because the live
+    streaming representation may differ from the persisted reasoning_text.
+    """
+    transcript = app.query_one("#transcript", TranscriptScroll)
+    snapshot: list[dict[str, object]] = []
+    for child in transcript.children:
+        if isinstance(child, FoldedProcessCell):
+            snapshot.append({
+                "kind": "fold",
+                "collapsed": child.collapsed,
+                "cell_count": len(child.cells),
+            })
+            continue
+        if not isinstance(child, TranscriptCell):
+            # Placeholders like EmptyState or load-older markers are not
+            # part of the per-turn transcript shape that we want to compare.
+            continue
+        entry: dict[str, object] = {
+            "kind": "expandable" if isinstance(child, ExpandableTranscriptCell) else "cell",
+            "classes": tuple(
+                cls for cls in (
+                    "user",
+                    "assistant",
+                    "event",
+                    "reasoning",
+                    "tool_pending",
+                    "error",
+                    "process_fold_hidden",
+                ) if child.has_class(cls)
+            ),
+            "copy_text": str(getattr(child, "copy_text", "") or ""),
+        }
+        if isinstance(child, ExpandableTranscriptCell):
+            entry["detail_title"] = child.detail_title or ""
+        snapshot.append(entry)
+    return snapshot
+
+
+@pytest.mark.asyncio
+async def test_tui_live_and_reentry_equivalent_for_completed_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = StableRoundEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app._start_turn("go")
+        await pilot.pause()
+        await pilot.pause()
+
+        live_snapshot = _transcript_snapshot(app)
+        thread_id = str(app.thread_id)
+
+        app._resume_thread(thread_id)
+        await pilot.pause()
+        reentry_snapshot = _transcript_snapshot(app)
+
+    assert live_snapshot == reentry_snapshot
+    # Sanity: the shared shape really folded the in-turn cells.
+    assert any(entry.get("kind") == "fold" and entry.get("collapsed") is True for entry in live_snapshot)
+
+
+@pytest.mark.asyncio
+async def test_tui_live_and_reentry_equivalent_for_interrupted_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = InterruptedRoundEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30), notifications=True) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("go")
+        await pilot.press("ctrl+enter")
+        await engine.started.wait()
+        await pilot.pause()
+
+        # Two Ctrl+C presses trigger the interrupt action.
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.2)
+
+        thread_id = str(app.thread_id)
+        # Wait until run loop finishes and the turn.interrupted event lands.
+        for _ in range(50):
+            if any(event["type"] == "turn.interrupted" for event in engine.thread_store.read(thread_id)):
+                break
+            await pilot.pause(0.02)
+
+        live_snapshot = _transcript_snapshot(app)
+
+        app._resume_thread(thread_id)
+        await pilot.pause()
+        reentry_snapshot = _transcript_snapshot(app)
+
+    assert live_snapshot == reentry_snapshot
+    # Sanity: process cells collapsed and no leftover "interrupted" marker cell.
+    assert any(entry.get("kind") == "fold" and entry.get("collapsed") is True for entry in live_snapshot)
+    interrupted_label = app._text("interrupted")
+    assert not any(
+        entry.get("kind") == "cell" and entry.get("copy_text") == interrupted_label
+        for entry in live_snapshot
+    )
+
