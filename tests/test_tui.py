@@ -7,7 +7,7 @@ import threading
 from PIL import Image as PILImage
 import pytest
 from textual import events
-from textual.widgets import OptionList, Static, TextArea
+from textual.widgets import Button, OptionList, Static, TextArea
 from textual_image.widget import Image as TerminalImage
 
 from uv_agent.clipboard import ClipboardImage
@@ -34,6 +34,8 @@ from uv_agent.tui.app import (
     FullscreenPanel,
     ImageAttachmentCell,
     ImagePreviewPanel,
+    PendingImage,
+    PendingImagePreviewPanel,
     TranscriptCell,
     TranscriptScroll,
     ToolDetailsPanel,
@@ -528,7 +530,7 @@ async def test_tui_user_scroll_disables_auto_follow(
         await pilot.pause()
 
         assert transcript.follow_tail is False
-        assert not app.query_one("#scroll-to-bottom-bar").has_class("hidden")
+        assert not app.query_one("#scroll-to-bottom-btn").has_class("hidden")
 
 
 @pytest.mark.asyncio
@@ -1690,6 +1692,46 @@ async def test_tui_composer_history_persists_globally(
 
 
 @pytest.mark.asyncio
+async def test_tui_composer_overlay_does_not_change_layout_when_scrolled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        footer = app.query_one("#composer-footer", Static)
+        composer.insert("1\n2\n3")
+        for index in range(40):
+            app._append_cell(f"line {index}\nextra text", "event")
+        await pilot.pause(0.2)
+        transcript.engage_follow_tail()
+        await pilot.pause(0.2)
+
+        shell_region = app.query_one("#composer-shell").region
+        composer_region = composer.region
+        footer_region = footer.region
+        bottom_region = app.query_one("#bottom-pane").region
+
+        transcript.action_page_up()
+        await pilot.pause()
+
+        assert app.query_one("#scroll-to-bottom-btn").region.y < composer.region.y
+        assert app.query_one("#composer-shell").region == shell_region
+        assert composer.region == composer_region
+        assert footer.region == footer_region
+        assert footer.region.y + footer.region.height <= app.size.height
+        assert app.query_one("#bottom-pane").region == bottom_region
+
+
+@pytest.mark.asyncio
 async def test_tui_composer_expands_and_collapses_with_tab_without_button(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1714,7 +1756,7 @@ async def test_tui_composer_expands_and_collapses_with_tab_without_button(
         await pilot.pause()
 
         assert app._composer_expanded is True
-        assert composer.styles.height.value == 13
+        assert composer.styles.height.value == 8
         assert str(footer.content)
 
         await pilot.press("tab")
@@ -1746,7 +1788,7 @@ async def test_tui_composer_expands_on_three_visual_lines(
 
         assert app._composer_visual_line_count(composer) == 3
         assert app._composer_expanded is True
-        assert composer.styles.height.value == 13
+        assert composer.styles.height.value == 8
 
 
 @pytest.mark.asyncio
@@ -3166,6 +3208,64 @@ async def test_tui_tool_result_details_support_keyboard_navigation(
 
 
 @pytest.mark.asyncio
+async def test_tui_pending_images_overlay_counts_and_opens_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    image_a = tmp_path / "pending-a.png"
+    image_b = tmp_path / "pending-b.png"
+    write_png(image_a)
+    write_png(image_b, color=(200, 80, 20))
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._pending_images.extend(
+            [
+                PendingImage(path=image_a, width=20, height=10),
+                PendingImage(path=image_b, width=30, height=15),
+            ]
+        )
+        app._refresh_pending_images()
+        await pilot.pause()
+
+        pending_button = app.query_one("#pending-images-btn", Static)
+        assert "pending 2 images" in str(pending_button.render())
+        assert not pending_button.has_class("hidden")
+
+        await pilot.click("#pending-images-btn")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, PendingImagePreviewPanel)
+        assert panel.index == 1
+        assert "pending-b.png" in str(panel.query_one("#image-preview-meta", Static).render())
+        assert Path(panel.query_one("#image-preview", TerminalImage).image or "") == image_b
+
+        panel.query_one("#pending-image-delete", Button).press()
+        await pilot.pause()
+
+        assert app.screen_stack[-1] is panel
+        assert app._pending_images == [PendingImage(path=image_a, width=20, height=10)]
+        assert panel.pending_images == [PendingImage(path=image_a, width=20, height=10)]
+        assert panel.index == 0
+        assert "pending-a.png" in str(panel.query_one("#image-preview-meta", Static).render())
+        assert "pending 1 image" in str(pending_button.render())
+
+        await pilot.press("delete")
+        await pilot.pause()
+
+        assert app._pending_images == []
+        assert app.screen is app.default_screen
+        assert pending_button.has_class("hidden")
+
+
+@pytest.mark.asyncio
 async def test_tui_f2_attaches_clipboard_image_and_sends_with_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3187,7 +3287,9 @@ async def test_tui_f2_attaches_clipboard_image_and_sends_with_turn(
         await pilot.pause()
 
         assert len(app._pending_images) == 1
-        assert "clip.png" in str(app.query_one("#composer-meta", Static).render())
+        pending_button = app.query_one("#pending-images-btn", Static)
+        assert "pending 1 image" in str(pending_button.render())
+        assert not pending_button.has_class("hidden")
 
         composer = app.query_one("#composer", TextArea)
         composer.insert("inspect")

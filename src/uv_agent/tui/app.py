@@ -26,7 +26,7 @@ from textual.screen import ModalScreen, Screen
 from textual.reactive import reactive
 from textual.selection import Selection
 from textual.strip import Strip
-from textual.widgets import Input, OptionList, Static, TextArea
+from textual.widgets import Button, Input, OptionList, Static, TextArea
 from textual.worker import Worker
 from textual.widgets._option_list import Option
 from textual_image.widget import Image as TerminalImage
@@ -64,8 +64,8 @@ from uv_agent.tui.formatting import (
 
 
 COMPOSER_COLLAPSED_HEIGHT = 5
+COMPOSER_EXPANDED_HEIGHT = 8
 COMPOSER_AUTO_EXPAND_LINES = 3
-COMPOSER_BOTTOM_RESERVED_ROWS = 2
 QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
@@ -111,7 +111,8 @@ class FullscreenPanel(ModalScreen[str | None]):
     CSS = """
     FullscreenPanel,
     ToolDetailsPanel,
-    ImagePreviewPanel {
+    ImagePreviewPanel,
+    PendingImagePreviewPanel {
         align: center middle;
         background: #05070acc;
     }
@@ -203,6 +204,12 @@ class FullscreenPanel(ModalScreen[str | None]):
     #image-preview {
         width: 100%;
         height: auto;
+    }
+
+    #pending-image-delete {
+        width: auto;
+        height: 1;
+        margin: 1 0 0 0;
     }
 
     #panel-footer {
@@ -703,6 +710,17 @@ class PendingImage:
     width: int
     height: int
 
+    def to_attachment(self) -> dict[str, Any]:
+        size = self.path.stat().st_size if self.path.exists() else 0
+        return {
+            "stored_path": str(self.path),
+            "source_path": str(self.path),
+            "mime_type": "image/png",
+            "size_bytes": size,
+            "width": self.width,
+            "height": self.height,
+        }
+
 
 @dataclass(frozen=True)
 class QueuedTurn:
@@ -794,11 +812,18 @@ class TranscriptScroll(VerticalScroll):
             self.near_bottom = True
             if restore_follow:
                 self.follow_tail = True
+            self._refresh_overlay()
             return
         near_bottom = (self.max_scroll_y - self.scroll_y) <= self._BOTTOM_THRESHOLD
         self.near_bottom = near_bottom
         if near_bottom and restore_follow:
             self.follow_tail = True
+        self._refresh_overlay()
+
+    def _refresh_overlay(self) -> None:
+        refresh = getattr(self.app, "_refresh_composer_overlay", None)
+        if callable(refresh):
+            refresh()
 
     def watch_scroll_y(self, old: float, new: float) -> None:
         super().watch_scroll_y(old, new)
@@ -1498,6 +1523,87 @@ class ImagePreviewPanel(FullscreenPanel):
         return "\n".join(lines)
 
 
+class PendingImagePreviewPanel(ImagePreviewPanel):
+    """Full-screen preview panel for images queued in the composer."""
+
+    BINDINGS = [
+        Binding("delete", "delete_current_image", "Delete", priority=True, show=False),
+        Binding("backspace", "delete_current_image", "Delete", priority=True, show=False),
+        *ImagePreviewPanel.BINDINGS,
+    ]
+
+    def __init__(self, pending_images: list[PendingImage], index: int = 0) -> None:
+        self.pending_images = pending_images
+        super().__init__([image.to_attachment() for image in pending_images], index)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="panel-shell"):
+            yield Static(self.panel_title, id="panel-header")
+            yield Static(self.subtitle, id="panel-subtitle")
+            yield Static("", markup=True, id="image-preview-meta")
+            yield Button("", variant="error", id="pending-image-delete", compact=True)
+            with VerticalScroll(id="image-preview-scroll"):
+                yield TerminalImage(id="image-preview")
+            yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
+
+    def _refresh_current(self) -> None:
+        super()._refresh_current()
+        text = getattr(self.app, "_text", lambda key: key)
+        self.panel_title = text("pending_image_preview")
+        self.subtitle = text("pending_image_preview_hint")
+        try:
+            self.query_one("#panel-header", Static).update(self.panel_title)
+            self.query_one("#panel-subtitle", Static).update(self.subtitle)
+            self.query_one("#pending-image-delete", Button).label = text("delete_pending_image")
+        except NoMatches:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "pending-image-delete":
+            return
+        event.stop()
+        self.action_delete_current_image()
+
+    def action_delete_current_image(self) -> None:
+        if not self.pending_images:
+            self.dismiss(None)
+            return
+        deleted = self.pending_images.pop(self.index)
+        app = self.app
+        delete = getattr(app, "_delete_pending_image", None)
+        if callable(delete):
+            delete(deleted)
+        if not self.pending_images:
+            self.dismiss(None)
+            return
+        self.index = min(self.index, len(self.pending_images) - 1)
+        self.attachments = [image.to_attachment() for image in self.pending_images]
+        self._refresh_current()
+
+    def _attachment_markup(self) -> str:
+        text = getattr(self.app, "_text", lambda key: key)
+        attachment = self._current_attachment()
+        if attachment is None:
+            return f"[dim]{escape(text('no_pending_images'))}[/dim]"
+        path = Path(str(attachment.get("stored_path") or ""))
+        size = int(attachment.get("size_bytes") or 0)
+        width = int(attachment.get("width") or 0)
+        height = int(attachment.get("height") or 0)
+        dimensions = f"{width}x{height}" if width and height else ""
+        lines = [
+            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold] "
+            f"[cyan]{escape(path.name or str(path))}[/cyan]",
+            "",
+            f"- {escape(text('image_path'))}: [cyan]{escape(str(path))}[/cyan]",
+        ]
+        if dimensions:
+            lines.append(f"- {escape(text('image_dimensions'))}: {escape(dimensions)}")
+        lines.append(f"- {escape(text('image_size'))}: {format_tokens(size)}B")
+        lines.append("")
+        lines.append(f"[dim]{escape(text('pending_image_open_hint'))}[/dim]")
+        return "\n".join(lines)
+
+
 class TranscriptScreen(Screen[None]):
     """Default screen with tighter transcript selection behavior."""
 
@@ -1576,7 +1682,7 @@ class UvAgentApp(App[None]):
 
     #bottom-pane {
         height: auto;
-        max-height: 50%;
+        max-height: 9;
         padding: 0 1 0 1;
         background: #0b0f14;
     }
@@ -1590,21 +1696,11 @@ class UvAgentApp(App[None]):
         background: #0b0f14;
     }
 
-    #composer-meta {
-        height: auto;
-        color: #8fa2b8;
-        padding: 0 1;
-        background: #0b0f14;
-    }
-
-    #scroll-to-bottom-bar {
-        height: auto;
-        align: right top;
-        background: #0b0f14;
-        padding: 0 1;
-    }
-
+    #pending-images-btn,
     #scroll-to-bottom-btn {
+        position: absolute;
+        overlay: screen;
+        layer: overlay;
         width: auto;
         height: 1;
         color: #7dd3fc;
@@ -1613,13 +1709,19 @@ class UvAgentApp(App[None]):
         text-style: bold;
     }
 
+    #pending-images-btn {
+        color: #c4b5fd;
+    }
+
+    #pending-images-btn.hidden,
+    #scroll-to-bottom-btn.hidden {
+        display: none;
+    }
+
+    #pending-images-btn:hover,
     #scroll-to-bottom-btn:hover {
         background: #2b3542;
         color: #ffffff;
-    }
-
-    #scroll-to-bottom-bar.hidden {
-        display: none;
     }
 
     #composer {
@@ -1749,14 +1851,14 @@ class UvAgentApp(App[None]):
         with Vertical(id="main-column"):
             with TranscriptScroll(id="transcript"):
                 yield EmptyState()
+            yield Static("", id="pending-images-btn", classes="hidden")
+            yield Static(
+                f"↓ {tr(self.language, 'back_to_bottom')}",
+                id="scroll-to-bottom-btn",
+                classes="hidden",
+            )
             with Vertical(id="bottom-pane"):
-                with Vertical(id="scroll-to-bottom-bar", classes="hidden"):
-                    yield Static(
-                        f"↓ {tr(self.language, 'back_to_bottom')}",
-                        id="scroll-to-bottom-btn",
-                    )
                 with Vertical(id="composer-shell"):
-                    yield Static("", id="composer-meta")
                     yield ComposerTextArea(
                         "",
                         placeholder=tr(self.language, "placeholder"),
@@ -1774,6 +1876,8 @@ class UvAgentApp(App[None]):
         self.query_one("#composer", TextArea).focus()
         transcript = self.query_one("#transcript", TranscriptScroll)
         self.watch(transcript, "near_bottom", self._on_near_bottom_changed)
+        self._refresh_pending_images()
+        self._refresh_composer_overlay()
 
     def on_unmount(self) -> None:
         self._mention_file_watcher_stop.set()
@@ -1781,28 +1885,35 @@ class UvAgentApp(App[None]):
             self._mention_file_watcher_worker.cancel()
 
     def _on_near_bottom_changed(self, near: bool) -> None:
-        try:
-            bar = self.query_one("#scroll-to-bottom-bar", Vertical)
-        except NoMatches:
-            return
-        if near:
-            bar.add_class("hidden")
-        else:
-            bar.remove_class("hidden")
+        self._refresh_composer_overlay()
 
     def on_click(self, event: events.Click) -> None:
         widget = getattr(event, "widget", None)
-        if widget is not None and widget.id == "scroll-to-bottom-btn":
+        if widget is not None and widget.id == "pending-images-btn":
+            event.stop()
+            self._open_pending_image_preview()
+        elif widget is not None and widget.id == "scroll-to-bottom-btn":
             event.stop()
             try:
                 transcript = self.query_one("#transcript", TranscriptScroll)
             except NoMatches:
                 return
             transcript.engage_follow_tail()
+            self._refresh_composer_overlay()
 
     def on_resize(self) -> None:
         self._refresh_status()
         self.call_after_refresh(self._resize_composer)
+        self.call_after_refresh(self._refresh_composer_overlay)
+
+    def _maximum_composer_height(self) -> int:
+        try:
+            transcript = self.query_one("#transcript", TranscriptScroll)
+        except NoMatches:
+            reserved = 1
+        else:
+            reserved = transcript.styles.min_height.value or 0
+        return max(COMPOSER_COLLAPSED_HEIGHT, self.size.height - int(reserved) - 1)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id != "composer":
@@ -2557,20 +2668,73 @@ class UvAgentApp(App[None]):
 
     def _refresh_pending_images(self) -> None:
         try:
-            meta = self.query_one("#composer-meta", Static)
+            button = self.query_one("#pending-images-btn", Static)
         except NoMatches:
             return
-        if not self._pending_images:
-            meta.update("")
+        count = len(self._pending_images)
+        if count:
+            button.update(f"📎 {self._pending_image_count_label(count)}")
+        else:
+            button.update("")
+        self._refresh_composer_overlay()
+
+    def _pending_image_count_label(self, count: int) -> str:
+        if self.language == "zh":
+            return f"{self._text('pending')} {count} {self._text('images')}"
+        image_word = "image" if count == 1 else self._text("images")
+        return f"{self._text('pending')} {count} {image_word}"
+
+    def _refresh_composer_overlay(self) -> None:
+        try:
+            pending_button = self.query_one("#pending-images-btn", Static)
+            bottom_button = self.query_one("#scroll-to-bottom-btn", Static)
+            composer = self.query_one("#composer", TextArea)
+            transcript = self.query_one("#transcript", TranscriptScroll)
+        except NoMatches:
             return
-        labels = [
-            f"{image.path.name} {image.width}x{image.height}"
-            for image in self._pending_images
-        ]
-        meta.update(
-            f"[dim]{escape(self._text('pending_images'))}: "
-            f"{escape(', '.join(labels))}[/dim]"
-        )
+        show_pending = bool(self._pending_images)
+        near_bottom = self._transcript_is_near_bottom(transcript)
+        if transcript.near_bottom != near_bottom:
+            transcript.near_bottom = near_bottom
+        show_bottom = not near_bottom
+        pending_button.set_class(not show_pending, "hidden")
+        bottom_button.set_class(not show_bottom, "hidden")
+        if not (show_pending or show_bottom):
+            pending_button.refresh(layout=True)
+            bottom_button.refresh(layout=True)
+            return
+        overlay_y = max(0, composer.region.y - 1)
+        left_x = composer.region.x
+        right_width = self._overlay_button_width(bottom_button)
+        right_x = max(left_x, composer.region.x + composer.region.width - right_width)
+        if show_pending:
+            pending_button.absolute_offset = Offset(left_x, overlay_y)
+        if show_bottom:
+            bottom_button.absolute_offset = Offset(right_x, overlay_y)
+        pending_button.refresh(layout=True)
+        bottom_button.refresh(layout=True)
+
+    def _transcript_is_near_bottom(self, transcript: TranscriptScroll) -> bool:
+        if transcript.max_scroll_y <= 0:
+            return True
+        return (transcript.max_scroll_y - transcript.scroll_y) <= transcript._BOTTOM_THRESHOLD
+
+    def _overlay_button_width(self, button: Static) -> int:
+        return max(1, cell_len(str(button.render())) + 4)
+
+    def _open_pending_image_preview(self) -> None:
+        if not self._pending_images:
+            self._flash(self._text("no_pending_images"))
+            return
+        self.push_screen(PendingImagePreviewPanel(list(self._pending_images), len(self._pending_images) - 1))
+
+    def _delete_pending_image(self, image: PendingImage) -> None:
+        try:
+            self._pending_images.remove(image)
+        except ValueError:
+            return
+        self._refresh_pending_images()
+        self._flash(f"{self._text('deleted_pending_image')}: {image.path.name}")
 
     def _queued_turn_markup(self, prompt: str, image_paths: list[Path]) -> str:
         suffix = ""
@@ -4327,8 +4491,13 @@ class UvAgentApp(App[None]):
         else:
             expanded = line_count >= COMPOSER_AUTO_EXPAND_LINES
         self._composer_expanded = expanded
-        height = self._expanded_composer_height() if expanded else COMPOSER_COLLAPSED_HEIGHT
+        height = self._expanded_composer_height() if expanded else min(
+            COMPOSER_COLLAPSED_HEIGHT,
+            self._maximum_composer_height(),
+        )
         composer.styles.height = height
+        if self.is_mounted:
+            self.call_after_refresh(self._refresh_composer_overlay)
 
     def _composer_visual_line_count(self, composer: TextArea) -> int:
         if composer.soft_wrap:
@@ -4337,10 +4506,7 @@ class UvAgentApp(App[None]):
         return max(1, composer.document.line_count)
 
     def _expanded_composer_height(self) -> int:
-        return max(
-            COMPOSER_COLLAPSED_HEIGHT,
-            (self.size.height // 2) - COMPOSER_BOTTOM_RESERVED_ROWS,
-        )
+        return min(COMPOSER_EXPANDED_HEIGHT, self._maximum_composer_height())
 
     def _flash(self, message: str, *, severity: str = "information") -> None:
         self.notify(message, severity=severity, timeout=2.0)
