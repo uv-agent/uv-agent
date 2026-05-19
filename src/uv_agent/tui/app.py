@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
@@ -44,7 +45,12 @@ from uv_agent.config import (
     redact_config,
 )
 from uv_agent.environment import application_version, detect_user_language, host_environment_line
-from uv_agent.errors import error_markup, escape_markup as escape_error_markup, format_error
+from uv_agent.errors import (
+    error_markup,
+    escape_markup as escape_error_markup,
+    format_error,
+    is_retryable_provider_error,
+)
 from uv_agent.i18n import command_description, tr
 from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.notifications import play_completion_sound
@@ -644,8 +650,12 @@ class ThreadRunState:
     cancel_event: asyncio.Event
     queue: list[QueuedTurn]
     status: str
+    turn_id: str | None = None
     started_at: str | None = None
     completed_at: str | None = None
+    retryable_error: bool = False
+    terminal_error: bool = False
+    live_events: list[dict[str, Any]] = field(default_factory=list)
     assistant_buffer: str = ""
     assistant_cell: TranscriptCell | None = None
     reasoning_buffer: str = ""
@@ -665,7 +675,6 @@ class ThreadRunState:
         self.tool_delta_cells.clear()
         self.process_cells = []
         self.process_fold_cell = None
-        self.process_collapsed = False
         self.process_anchor_cell = None
 
 
@@ -996,6 +1005,14 @@ class TranscriptCell(Static):
             except Exception:
                 return content
         return None
+
+
+class RetryTurnButton(Button):
+    """Retry affordance for transient provider/network turn failures."""
+
+    def __init__(self, label: str, *, thread_id: str | None = None) -> None:
+        super().__init__(label, variant="primary", compact=True, classes="retry_turn")
+        self.retry_thread_id = thread_id
 
 
 class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
@@ -1809,12 +1826,21 @@ class UvAgentApp(App[None]):
             for name, usage in COMMAND_SPECS
         ]
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if not isinstance(event.button, RetryTurnButton):
+            return
+        event.stop()
+        self._retry_thread(event.button.retry_thread_id or self.thread_id)
+
     def action_submit_composer(self) -> None:
         composer = self.query_one("#composer", TextArea)
         prompt = composer.text.strip()
         pending_images = list(self._pending_images)
         if not prompt and not pending_images:
             self._flash(self._text("write_first"))
+            return
+        if self._thread_has_blocking_error(self.thread_id):
+            self._flash(self._text("thread_blocked_after_error"), severity="error")
             return
         try:
             transcript = self.query_one("#transcript", TranscriptScroll)
@@ -1903,18 +1929,62 @@ class UvAgentApp(App[None]):
             self._current_cancel_event = cancel_event
         self._refresh_active_run_state()
 
-    async def _run_turn(self, prompt: str, thread_id: str, *, image_paths: list[Path]) -> None:
+    def _start_retry_turn(self, thread_id: str) -> None:
+        cancel_event = asyncio.Event()
+        started_at = utc_now_iso()
+        run_state = ThreadRunState(
+            thread_id=thread_id,
+            worker=None,
+            cancel_event=cancel_event,
+            queue=[],
+            status=self._text("thinking_status"),
+            started_at=started_at,
+        )
+        self._thread_runs[thread_id] = run_state
+        if self._is_active_thread(thread_id):
+            self.query_one("#composer-shell", Vertical).add_class("busy")
+            self._reset_live_view_state()
+            self._interrupt_armed = False
+            self._turn_started_at = started_at
+            self._turn_completed_at = None
+            self._reasoning_cell = self._append_cell(
+                f"[dim]{escape(self._text('thinking'))}...[/dim]",
+                "event",
+            )
+            self._sync_run_state_from_active(run_state)
+            self._refresh_status(self._text("thinking_status"))
+        worker = self.run_worker(
+            self._run_turn("", thread_id, image_paths=[], retry=True),
+            exclusive=False,
+            thread=False,
+        )
+        run_state.worker = worker
+        if self._is_active_thread(thread_id):
+            self._current_worker = worker
+            self._current_cancel_event = cancel_event
+        self._refresh_active_run_state()
+
+    async def _run_turn(
+        self,
+        prompt: str,
+        thread_id: str,
+        *,
+        image_paths: list[Path],
+        retry: bool = False,
+    ) -> None:
         run_state = self._thread_runs[thread_id]
         try:
             turn_kwargs: dict[str, Any] = {
-                "user_text": prompt,
                 "thread_id": thread_id,
                 "level": self.level,
                 "cancel_event": run_state.cancel_event,
             }
-            if image_paths:
+            if not retry:
+                turn_kwargs["user_text"] = prompt
+            if image_paths and not retry:
                 turn_kwargs["image_paths"] = image_paths
-            async for item in self.engine.run_turn(**turn_kwargs):
+            turn_stream = self.engine.retry_turn(**turn_kwargs) if retry else self.engine.run_turn(**turn_kwargs)
+            async for item in turn_stream:
                 item_thread_id = str(item.get("thread_id") or thread_id)
                 event_type = item["type"]
                 if event_type == "image.attachment":
@@ -1936,14 +2006,25 @@ class UvAgentApp(App[None]):
                         await self._handle_thread_event(
                             item_thread_id,
                             "assistant.reasoning_completed",
-                            {"text": reasoning_text},
+                            {
+                                "type": "assistant.reasoning_completed",
+                                "thread_id": item_thread_id,
+                                "turn_id": item.get("turn_id"),
+                                "turn_started_at": item.get("turn_started_at"),
+                                "text": reasoning_text,
+                            },
                             run_state,
                         )
                     else:
                         await self._handle_thread_event(
                             item_thread_id,
                             "assistant.reasoning_absent",
-                            {},
+                            {
+                                "type": "assistant.reasoning_absent",
+                                "thread_id": item_thread_id,
+                                "turn_id": item.get("turn_id"),
+                                "turn_started_at": item.get("turn_started_at"),
+                            },
                             run_state,
                         )
                     output = list(getattr(response, "output", []) or [])
@@ -1952,14 +2033,28 @@ class UvAgentApp(App[None]):
                         await self._handle_thread_event(
                             item_thread_id,
                             "assistant.response_with_tools",
-                            {},
+                            {
+                                "type": "assistant.response_with_tools",
+                                "thread_id": item_thread_id,
+                                "turn_id": item.get("turn_id"),
+                                "turn_started_at": item.get("turn_started_at"),
+                                "assistant_text": run_state.assistant_buffer,
+                            },
                             run_state,
                         )
                     else:
+                        if "assistant_text" not in item:
+                            item["assistant_text"] = run_state.assistant_buffer
                         await self._handle_thread_event(
                             item_thread_id,
                             "assistant.final_response_started",
-                            {},
+                            {
+                                "type": "assistant.final_response_started",
+                                "thread_id": item_thread_id,
+                                "turn_id": item.get("turn_id"),
+                                "turn_started_at": item.get("turn_started_at"),
+                                "assistant_text": item.get("assistant_text"),
+                            },
                             run_state,
                         )
                     run_state.status = self._text("reading")
@@ -1973,12 +2068,12 @@ class UvAgentApp(App[None]):
                 elif event_type == "tool.output":
                     await self._handle_thread_event(item_thread_id, "tool.output", item, run_state)
                 elif event_type == "compaction.completed":
-                    if self._is_active_thread(item_thread_id):
-                        self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
+                    await self._handle_thread_event(item_thread_id, "compaction.completed", item, run_state)
                 elif event_type == "turn.completed":
+                    self._update_turn_timestamps(item, run_state)
                     text = item["final_text"] or run_state.assistant_buffer
                     if text and self._is_active_thread(item_thread_id) and self._assistant_cell is None:
-                        await self._append_assistant_delta(text)
+                        self._append_assistant_text(text)
                         self._sync_run_state_from_active(run_state)
                     was_active_thread = self._is_active_thread(item_thread_id)
                     run_state.status = self._text("idle")
@@ -1986,21 +2081,39 @@ class UvAgentApp(App[None]):
                     if was_active_thread:
                         self._refresh_status(self._text("idle"))
                 elif event_type == "turn.interrupted":
+                    self._update_turn_timestamps(item, run_state)
+                    self._record_live_thread_event(run_state, "turn.interrupted", item)
                     run_state.status = self._text("interrupted")
                     if self._is_active_thread(item_thread_id):
-                        self._append_cell(f"[dim]{escape(self._text('interrupted'))}[/dim]", "event")
+                        self._apply_thread_event_to_active("turn.interrupted", item)
                         self._refresh_status(self._text("interrupted"))
                 elif event_type == "turn.error":
-                    run_state.status = self._text("error")
+                    self._update_turn_timestamps(item, run_state)
+                    self._mark_run_error_state(run_state, item)
+                    self._record_live_thread_event(run_state, "turn.error", item)
                     if self._is_active_thread(item_thread_id):
-                        self._append_turn_error(item)
+                        self._apply_thread_event_to_active("turn.error", item)
                         self._refresh_status(self._text("error"))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            error = format_error(exc)
+            retryable = is_retryable_provider_error(exc)
+            item = {
+                "type": "turn.error",
+                "thread_id": thread_id,
+                "turn_id": run_state.turn_id,
+                "created_at": utc_now_iso(),
+                "completed_at": utc_now_iso(),
+                "error_type": exc.__class__.__name__,
+                "message": str(exc) or repr(exc),
+                "retryable": retryable,
+            }
+            self._mark_run_error_state(run_state, item)
+            self._record_live_thread_event(run_state, "turn.error", item)
             run_state.status = self._text("error")
             if self._is_active_thread(thread_id):
-                self._append_cell(error_markup(format_error(exc)), "error")
+                self._append_turn_error(item, display_markup=error_markup(error))
                 self._refresh_status(self._text("error"))
         finally:
             next_turn = run_state.queue.pop(0) if run_state.queue else None
@@ -2015,15 +2128,24 @@ class UvAgentApp(App[None]):
                     queue=remaining_queue,
                 )
             else:
-                self._thread_runs.pop(thread_id, None)
-                if self._is_active_thread(thread_id):
+                keep_state = run_state.retryable_error or run_state.terminal_error
+                if keep_state:
+                    run_state.worker = None
+                    run_state.cancel_event = asyncio.Event()
+                    if self._is_active_thread(thread_id):
+                        self._sync_run_state_from_active(run_state)
+                    run_state.detach_widgets()
+                else:
+                    self._thread_runs.pop(thread_id, None)
+                if self._is_active_thread(thread_id) and self._default_screen_mounted():
                     self._current_worker = None
                     self._current_cancel_event = None
                     self._interrupt_armed = False
-                    if self._last_status != self._text("error"):
+                    if not keep_state and self._last_status != self._text("error"):
                         self._refresh_status(self._text("idle"))
                     self.query_one("#composer", TextArea).focus()
-                self._refresh_active_run_state()
+                if self._default_screen_mounted():
+                    self._refresh_active_run_state()
 
     def action_clear_input(self) -> None:
         composer = self.query_one("#composer", TextArea)
@@ -2095,13 +2217,23 @@ class UvAgentApp(App[None]):
     def _active_run_state(self) -> ThreadRunState | None:
         if self.thread_id is None:
             return None
-        return self._thread_runs.get(self.thread_id)
+        run_state = self._thread_runs.get(self.thread_id)
+        if run_state is not None and run_state.worker is None:
+            return None
+        return run_state
 
     def _active_queue_length(self) -> int:
         run_state = self._active_run_state()
         return len(run_state.queue) if run_state is not None else 0
 
-    def _reset_live_view_state(self) -> None:
+    def _default_screen_mounted(self) -> bool:
+        try:
+            self.query_one("#composer", TextArea)
+        except NoMatches:
+            return False
+        return True
+
+    def _reset_live_render_state(self) -> None:
         self._assistant_buffer = ""
         self._assistant_cell = None
         self._reasoning_cell = None
@@ -2113,6 +2245,9 @@ class UvAgentApp(App[None]):
         self._process_fold_cell = None
         self._process_collapsed = False
         self._process_anchor_cell = None
+
+    def _reset_live_view_state(self) -> None:
+        self._reset_live_render_state()
         self._turn_started_at = None
         self._turn_completed_at = None
 
@@ -2139,14 +2274,28 @@ class UvAgentApp(App[None]):
             self._thread_runs[thread_id] = run_state
         return run_state
 
+    def _thread_state(self, thread_id: str | None) -> ThreadRunState | None:
+        if thread_id is None:
+            return None
+        return self._thread_runs.get(thread_id)
+
+    def _thread_has_blocking_error(self, thread_id: str | None) -> bool:
+        run_state = self._thread_state(thread_id)
+        if run_state is not None and run_state.terminal_error:
+            return True
+        if run_state is not None and run_state.retryable_error:
+            return False
+        event = self._latest_thread_event(thread_id, "turn.error")
+        return bool(event and not self._is_retryable_error_event(event))
+
     def _is_active_thread(self, thread_id: str | None) -> bool:
         return bool(thread_id and self.thread_id == thread_id)
 
     def _refresh_active_run_state(self) -> None:
-        run_state = self._active_run_state()
-        self.busy = run_state is not None
+        run_state = self._thread_state(self.thread_id)
+        self.busy = run_state is not None and run_state.worker is not None
         shell = self.query_one("#composer-shell", Vertical)
-        if run_state is None:
+        if run_state is None or run_state.worker is None:
             shell.remove_class("busy")
             self._current_worker = None
             self._current_cancel_event = None
@@ -2194,6 +2343,9 @@ class UvAgentApp(App[None]):
         self._turn_completed_at = run_state.completed_at
 
     def _update_turn_timestamps(self, item: dict[str, Any], run_state: ThreadRunState) -> None:
+        turn_id = str(item.get("turn_id") or "").strip()
+        if turn_id:
+            run_state.turn_id = turn_id
         started_at = str(item.get("turn_started_at") or item.get("started_at") or "").strip()
         if started_at:
             run_state.started_at = started_at
@@ -2206,6 +2358,129 @@ class UvAgentApp(App[None]):
                 self._turn_completed_at = completed_at
                 self._refresh_process_fold_elapsed()
 
+    def _record_live_thread_event(
+        self,
+        run_state: ThreadRunState,
+        event_type: str,
+        item: dict[str, Any],
+    ) -> None:
+        if event_type in {"image.attachment", "turn.completed", "thread.title"}:
+            return
+        if event_type == "assistant.response_with_tools":
+            item.setdefault("assistant_text", run_state.assistant_buffer)
+        turn_id = str(item.get("turn_id") or "").strip()
+        if turn_id:
+            if run_state.turn_id and run_state.turn_id != turn_id:
+                run_state.live_events.clear()
+            run_state.turn_id = turn_id
+        run_state.live_events.append({"event_type": event_type, "item": self._live_event_item(item)})
+
+    def _live_event_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        copy = dict(item)
+        tool_call = copy.get("tool_call")
+        if tool_call is not None:
+            copy["tool_call"] = asdict(tool_call) if is_dataclass(tool_call) else dict(tool_call)
+        response = copy.get("response")
+        if response is not None:
+            copy.pop("response", None)
+        return copy
+
+    def _apply_thread_event_to_active(self, event_type: str, item: dict[str, Any]) -> None:
+        if event_type == "assistant.delta":
+            self._refresh_status(self._text("writing_answer"))
+            self._append_assistant_text(str(item.get("text") or ""))
+        elif event_type == "assistant.reasoning_delta":
+            self._refresh_status(self._text("thinking_status"))
+            self._append_reasoning_delta(str(item.get("text") or ""))
+        elif event_type == "assistant.reasoning_completed":
+            self._finalize_reasoning(str(item.get("text") or ""))
+        elif event_type == "assistant.reasoning_absent":
+            self._clear_pending_reasoning()
+        elif event_type == "image.attachment":
+            attachment = item.get("attachment") or {}
+            self._append_image_attachment_cell(attachment)
+        elif event_type == "tool.delta":
+            self._append_tool_delta(item)
+        elif event_type == "assistant.response_with_tools":
+            item.setdefault("assistant_text", self._assistant_buffer)
+            self._track_current_assistant_cell_as_process()
+            self._seal_assistant_round()
+        elif event_type == "assistant.final_response_started":
+            self._track_current_assistant_cell_as_process()
+            self._collapse_process_cells()
+        elif event_type == "tool.started":
+            self._clear_pending_reasoning()
+            self._seal_assistant_round()
+            self._append_tool_started(item)
+        elif event_type == "tool.output":
+            self._append_tool_output(item)
+        elif event_type == "compaction.completed":
+            self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
+        elif event_type == "turn.interrupted":
+            self._append_cell(f"[dim]{escape(self._text('interrupted'))}[/dim]", "event")
+        elif event_type == "turn.error":
+            run_state = self._thread_state(str(item.get("thread_id") or self.thread_id or ""))
+            if run_state is not None:
+                self._mark_run_error_state(run_state, item)
+            self._append_turn_error(item)
+
+    def _mark_run_error_state(self, run_state: ThreadRunState, event: dict[str, Any]) -> None:
+        retryable = self._is_retryable_error_event(event)
+        run_state.retryable_error = retryable
+        run_state.terminal_error = not retryable
+        run_state.status = self._text("error")
+
+    def _is_retryable_error_event(self, event: dict[str, Any]) -> bool:
+        if "retryable" in event:
+            return bool(event.get("retryable"))
+        error_type = str(event.get("error_type") or "")
+        message = str(event.get("message") or "").lower()
+        if error_type in {"TimeoutException", "RequestError", "ConnectError", "ReadError", "NetworkError"}:
+            return True
+        status = self._http_status_from_error(event)
+        return status == 429 or (status is not None and 500 <= status < 600) or "timeout" in message
+
+    def _http_status_from_error(self, event: dict[str, Any]) -> int | None:
+        value = event.get("status_code")
+        if isinstance(value, int):
+            return value
+        text = " ".join(str(event.get(key) or "") for key in ("error_type", "message", "title"))
+        match = re.search(r"\b(?:HTTP|status)\s*(\d{3})\b", text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _latest_thread_event(self, thread_id: str | None, event_type: str) -> dict[str, Any] | None:
+        if thread_id is None:
+            return None
+        try:
+            return self.engine.thread_store.latest_event(thread_id, event_type)
+        except (OSError, ValueError):
+            return None
+
+    def _retry_thread(self, thread_id: str | None) -> None:
+        if not thread_id:
+            return
+        run_state = self._thread_state(thread_id)
+        if run_state is not None and run_state.worker is not None:
+            self._flash(self._text("working"), severity="warning")
+            return
+        if self.thread_id != thread_id:
+            self._resume_thread(thread_id)
+        if run_state is not None:
+            self._thread_runs.pop(thread_id, None)
+        self._remove_retry_buttons(thread_id)
+        self._start_retry_turn(thread_id)
+
+    def _remove_retry_buttons(self, thread_id: str) -> None:
+        try:
+            transcript = self.query_one("#transcript", VerticalScroll)
+        except NoMatches:
+            return
+        for child in list(transcript.children):
+            if isinstance(child, RetryTurnButton) and child.retry_thread_id == thread_id:
+                child.remove()
+
     async def _handle_thread_event(
         self,
         thread_id: str,
@@ -2214,6 +2489,7 @@ class UvAgentApp(App[None]):
         run_state: ThreadRunState,
     ) -> None:
         self._update_turn_timestamps(item, run_state)
+        self._record_live_thread_event(run_state, event_type, item)
         if not self._is_active_thread(thread_id):
             if event_type == "assistant.delta":
                 run_state.assistant_buffer += str(item.get("text") or "")
@@ -2234,11 +2510,12 @@ class UvAgentApp(App[None]):
                 run_state.assistant_cell = None
             elif event_type == "tool.delta":
                 delta = item.get("tool_call")
-                index = int(getattr(delta, "index", 0))
+                index = int(self._tool_call_field(delta, "index", 0) or 0)
                 run_state.tool_delta_calls[index] = {
-                    "call_id": getattr(delta, "call_id", "") or "",
-                    "name": str(getattr(delta, "name", None) or "python"),
-                    "arguments": getattr(delta, "arguments", "") or getattr(delta, "arguments_delta", ""),
+                    "call_id": self._tool_call_field(delta, "call_id", "") or "",
+                    "name": str(self._tool_call_field(delta, "name", None) or "python"),
+                    "arguments": self._tool_call_field(delta, "arguments", "")
+                    or self._tool_call_field(delta, "arguments_delta", ""),
                 }
                 run_state.status = self._text("writing_script")
             elif event_type == "tool.started":
@@ -2256,34 +2533,15 @@ class UvAgentApp(App[None]):
                 run_state.status = self._text("working")
             elif event_type == "assistant.final_response_started" and run_state.process_cells:
                 run_state.process_collapsed = True
+            elif event_type == "compaction.completed":
+                run_state.status = self._text("working")
+            elif event_type == "turn.interrupted":
+                run_state.status = self._text("interrupted")
+            elif event_type == "turn.error":
+                run_state.status = self._text("error")
             return
         self._sync_active_from_run_state(run_state)
-        if event_type == "assistant.delta":
-            self._refresh_status(self._text("writing_answer"))
-            await self._append_assistant_delta(str(item.get("text") or ""))
-        elif event_type == "assistant.reasoning_delta":
-            self._refresh_status(self._text("thinking_status"))
-            self._append_reasoning_delta(str(item.get("text") or ""))
-        elif event_type == "assistant.reasoning_completed":
-            self._finalize_reasoning(str(item.get("text") or ""))
-        elif event_type == "assistant.reasoning_absent":
-            self._clear_pending_reasoning()
-        elif event_type == "image.attachment":
-            attachment = item.get("attachment") or {}
-            self._append_image_attachment_cell(attachment)
-        elif event_type == "tool.delta":
-            self._append_tool_delta(item)
-        elif event_type == "assistant.response_with_tools":
-            self._track_current_assistant_cell_as_process()
-            self._seal_assistant_round()
-        elif event_type == "assistant.final_response_started":
-            self._collapse_process_cells()
-        elif event_type == "tool.started":
-            self._clear_pending_reasoning()
-            self._seal_assistant_round()
-            self._append_tool_started(item)
-        elif event_type == "tool.output":
-            self._append_tool_output(item)
+        self._apply_thread_event_to_active(event_type, item)
         self._sync_run_state_from_active(run_state)
 
     def action_request_quit(self) -> None:
@@ -2711,7 +2969,7 @@ class UvAgentApp(App[None]):
             before=before,
         )
 
-    async def _append_assistant_delta(self, text: str) -> None:
+    def _append_assistant_text(self, text: str) -> None:
         self._assistant_buffer += text
         if self._assistant_cell is None:
             self._mark_transcript_content()
@@ -2719,6 +2977,9 @@ class UvAgentApp(App[None]):
             self.query_one("#transcript", VerticalScroll).mount(self._assistant_cell)
         self._assistant_cell.update(Markdown(self._assistant_buffer), copy_text=self._assistant_buffer)
         self._scroll_end()
+
+    async def _append_assistant_delta(self, text: str) -> None:
+        self._append_assistant_text(text)
 
     def _seal_assistant_round(self) -> None:
         self._assistant_buffer = ""
@@ -2762,7 +3023,10 @@ class UvAgentApp(App[None]):
 
     def _finalize_reasoning(self, text: str) -> None:
         stripped = text.strip()
+        if not stripped and self._reasoning_buffer.strip():
+            stripped = self._reasoning_buffer.strip()
         if not stripped:
+            self._clear_pending_reasoning()
             return
         summary, details = self._reasoning_markup(stripped)
         if isinstance(self._reasoning_cell, ExpandableTranscriptCell):
@@ -2969,12 +3233,13 @@ class UvAgentApp(App[None]):
 
     def _append_tool_delta(self, item: dict[str, Any]) -> None:
         delta = item.get("tool_call")
-        index = int(getattr(delta, "index", 0))
-        name = str(getattr(delta, "name", None) or "python")
+        index = int(self._tool_call_field(delta, "index", 0) or 0)
+        name = str(self._tool_call_field(delta, "name", None) or "python")
         call = {
-            "call_id": getattr(delta, "call_id", "") or "",
+            "call_id": self._tool_call_field(delta, "call_id", "") or "",
             "name": name,
-            "arguments": getattr(delta, "arguments", "") or getattr(delta, "arguments_delta", ""),
+            "arguments": self._tool_call_field(delta, "arguments", "")
+            or self._tool_call_field(delta, "arguments_delta", ""),
         }
         self._tool_delta_calls[index] = call
         detail = self._tool_call_preview(call)
@@ -3006,6 +3271,11 @@ class UvAgentApp(App[None]):
             cell.update(markup)
         self._track_process_cell(cell)
         self._refresh_status(self._text("writing_script"))
+
+    def _tool_call_field(self, tool_call: Any, name: str, default: Any = None) -> Any:
+        if isinstance(tool_call, dict):
+            return tool_call.get(name, default)
+        return getattr(tool_call, name, default)
 
     def _tool_pending_markup(
         self,
@@ -3099,7 +3369,12 @@ class UvAgentApp(App[None]):
     ) -> None:
         process_cells: list[TranscriptCell] = []
         anchor_cell: TranscriptCell | None = None
+        seen_user = False
         for event in events:
+            if event.get("type") == "item.user":
+                if seen_user:
+                    continue
+                seen_user = True
             for cell in self._mount_history_event(event, before=before) or []:
                 if event.get("type") == "item.user":
                     anchor_cell = cell
@@ -3187,20 +3462,58 @@ class UvAgentApp(App[None]):
             if cell is not None:
                 mounted.append(cell)
         elif event_type == "turn.error":
+            run_state = self._run_state_for_history_error(event)
+            if run_state is not None:
+                self._mark_run_error_state(run_state, event)
             mounted.append(self._append_turn_error(event, before=before))
         elif event_type == "item.compaction":
             mounted.append(self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event", before=before))
         return mounted
 
-    def _append_turn_error(self, event: dict[str, Any], *, before: object | None = None) -> TranscriptCell:
+    def _run_state_for_history_error(self, event: dict[str, Any]) -> ThreadRunState | None:
+        thread_id = str(event.get("thread_id") or self.thread_id or "")
+        if not thread_id:
+            return None
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is None:
+            run_state = ThreadRunState(
+                thread_id=thread_id,
+                worker=None,
+                cancel_event=asyncio.Event(),
+                queue=[],
+                status=self._text("error"),
+            )
+            self._thread_runs[thread_id] = run_state
+        return run_state
+
+    def _append_turn_error(
+        self,
+        event: dict[str, Any],
+        *,
+        before: object | None = None,
+        display_markup: str | None = None,
+    ) -> TranscriptCell:
         error_type = str(event.get("error_type") or "Turn error")
         message = str(event.get("message") or "The turn stopped before producing a final response.")
-        return self._append_cell(
-            f"[bold red]{escape_error_markup(error_type)}[/bold red] {escape_error_markup(message)}",
+        retryable = self._is_retryable_error_event(event)
+        hint = self._text("retry_network_error_hint") if retryable else self._text("thread_stopped_after_error")
+        content = display_markup or f"[bold red]{escape_error_markup(error_type)}[/bold red] {escape_error_markup(message)}"
+        cell = self._append_cell(
+            f"{content}\n[dim]{escape_error_markup(hint)}[/dim]",
             "error",
             before=before,
-            copy_text=f"{error_type}: {message}",
+            copy_text=f"{error_type}: {message}\n{hint}",
         )
+        if retryable:
+            self._append_retry_button(event, before=before)
+        return cell
+
+    def _append_retry_button(self, event: dict[str, Any], *, before: object | None = None) -> RetryTurnButton:
+        self._mark_transcript_content()
+        button = RetryTurnButton(self._text("retry"), thread_id=str(event.get("thread_id") or self.thread_id or ""))
+        self.query_one("#transcript", VerticalScroll).mount(button, before=before)
+        self._scroll_end()
+        return button
 
     def _append_tool_call_history(self, item: dict[str, Any], *, before: object | None = None) -> ExpandableTranscriptCell:
         return self._append_expandable_cell(
@@ -3332,7 +3645,8 @@ class UvAgentApp(App[None]):
             if len(last_text) > 120:
                 last_text = last_text[:117].rstrip() + "..."
             marker = f"{self._text('current')} " if thread_id == self.thread_id else ""
-            running = f" · {self._text('working')}" if thread_id in self._thread_runs else ""
+            state = self._thread_runs.get(thread_id)
+            running = f" · {self._text('working')}" if state is not None and state.worker is not None else ""
             items.append(
                 PickerItem(
                     id=thread_id,
@@ -4227,39 +4541,22 @@ class UvAgentApp(App[None]):
         self._render_thread_history(thread_id)
         if run_state is not None:
             if run_state.worker is not None:
+                self._replay_running_live_events(run_state)
+                if run_state.status != self._text("idle"):
+                    self._append_cell(f"[dim]{escape(run_state.status)}...[/dim]", "event")
+            elif run_state.retryable_error or run_state.terminal_error:
                 self._turn_started_at = run_state.started_at
                 self._turn_completed_at = run_state.completed_at
-                if run_state.reasoning_buffer:
-                    self._reasoning_buffer = run_state.reasoning_buffer
-                    first = run_state.reasoning_buffer.splitlines()[0]
-                    if len(first) > 120:
-                        first = first[:117].rstrip() + "..."
-                    self._reasoning_cell = self._append_cell(
-                        f"[dim]{escape(self._text('thinking'))}[/dim] [italic]{escape(first)}[/italic]",
-                        "event",
-                    )
-                if run_state.assistant_buffer:
-                    self._assistant_buffer = run_state.assistant_buffer
-                    self._assistant_cell = self._append_cell(
-                        Markdown(run_state.assistant_buffer),
-                        "assistant",
-                    )
-                    self._assistant_cell.copy_text = run_state.assistant_buffer
-                for index, call in sorted(run_state.tool_delta_calls.items()):
-                    self._tool_delta_calls[index] = dict(call)
-                    self._append_tool_pending_call(index, call)
-                self._append_cell(f"[dim]{escape(run_state.status)}...[/dim]", "event")
-                self._sync_run_state_from_active(run_state)
         if not self._transcript_has_content:
             self._reset_transcript()
         self._refresh_active_run_state()
-        self._refresh_status(self._text("resumed"))
+        self._refresh_status(run_state.status if run_state is not None and run_state.worker is None else self._text("resumed"))
         self._close_active_panel()
 
     def _render_thread_history(self, thread_id: str) -> None:
         segment = self.engine.thread_store.read_history_segment(
             thread_id,
-            event_types=VISIBLE_HISTORY_EVENT_TYPES,
+            event_types=VISIBLE_HISTORY_EVENT_TYPES | {"turn.started", "turn.completed"},
         )
         self._history_has_more = segment.has_more
         self._history_before_offset = segment.start_offset
@@ -4269,6 +4566,75 @@ class UvAgentApp(App[None]):
             transcript.mount(marker)
             self._history_more_cell = marker
         self._mount_history_events(segment.events)
+
+    def _replay_running_live_events(self, run_state: ThreadRunState) -> None:
+        was_collapsed = run_state.process_collapsed
+        self._reset_live_render_state()
+        self._turn_started_at = run_state.started_at
+        self._turn_completed_at = run_state.completed_at
+        if not run_state.live_events:
+            self._replay_running_buffers(run_state)
+            self._sync_run_state_from_active(run_state)
+            return
+
+        events = self._events_after_history(run_state.live_events)
+        for live_event in events:
+            self._apply_thread_event_to_active(
+                str(live_event.get("event_type") or ""),
+                live_event.get("item") if isinstance(live_event.get("item"), dict) else {},
+            )
+        if was_collapsed and self._process_cells and self._process_fold_cell is None:
+            self._collapse_process_cells()
+        self._sync_run_state_from_active(run_state)
+
+    def _replay_running_buffers(self, run_state: ThreadRunState) -> None:
+        was_collapsed = run_state.process_collapsed
+        if run_state.reasoning_buffer:
+            self._append_reasoning_delta(run_state.reasoning_buffer)
+        if run_state.assistant_buffer:
+            self._append_assistant_text(run_state.assistant_buffer)
+        for index, call in sorted(run_state.tool_delta_calls.items()):
+            self._tool_delta_calls[index] = dict(call)
+            self._append_tool_pending_call(index, call)
+        if was_collapsed and self._process_cells and self._process_fold_cell is None:
+            self._collapse_process_cells()
+
+    def _events_after_history(self, live_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        transcript = self.query_one("#transcript", VerticalScroll)
+        existing_texts = [
+            self._cell_text(child)
+            for child in transcript.children
+            if isinstance(child, TranscriptCell)
+        ]
+        start = 0
+        for index, live_event in enumerate(live_events):
+            event_type = str(live_event.get("event_type") or "")
+            item = live_event.get("item") if isinstance(live_event.get("item"), dict) else {}
+            if event_type == "tool.output":
+                output = item.get("output") if isinstance(item, dict) else {}
+                payload = parse_tool_payload(output if isinstance(output, dict) else {})
+                run_id = str((payload or {}).get("run_id") or "")
+                if run_id and any(run_id in text for text in existing_texts):
+                    start = index + 1
+            elif event_type == "assistant.response_with_tools":
+                text = str(item.get("assistant_text") or "")
+                if text and text in existing_texts:
+                    start = index + 1
+            elif event_type == "assistant.final_response_started":
+                text = str(item.get("assistant_text") or "")
+                if text and text in existing_texts:
+                    start = index + 1
+        return live_events[start:]
+
+    def _cell_text(self, cell: TranscriptCell) -> str:
+        parts = [str(cell.copy_text or "")]
+        if isinstance(cell, ExpandableTranscriptCell):
+            parts.append(cell.details)
+        try:
+            parts.append(str(cell.render()))
+        except Exception:
+            pass
+        return "\n".join(parts)
 
     def _load_older_thread_history(self) -> None:
         if not self.thread_id or self._history_before_offset is None:
@@ -4502,7 +4868,10 @@ class UvAgentApp(App[None]):
                 f" [dim]·[/dim] [cyan]{background_count} "
                 f"{escape(self._text('background_active'))}[/cyan]"
             )
-        self.query_one("#composer-footer", Static).update(footer)
+        try:
+            self.query_one("#composer-footer", Static).update(footer)
+        except NoMatches:
+            return
         self._refresh_pending_images()
 
     def _scroll_end(self) -> None:
