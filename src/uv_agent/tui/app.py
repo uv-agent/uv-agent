@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from rich.markdown import Markdown
 from rich.markup import escape, render as render_markup
+from rich.rule import Rule
 from rich.segment import Segment
 from rich.style import Style
 from rich.cells import cell_len
@@ -442,7 +443,7 @@ class FullscreenPanel(ModalScreen[str | None]):
             if not disabled:
                 self._option_ids[option_id] = item.id
             if disabled and not item.title and not item.description and not item.meta:
-                options.append(Option("[dim]" + ("─" * 48) + "[/dim]", id=option_id, disabled=True))
+                options.append(Option(Rule(characters="─", style="dim"), id=option_id, disabled=True))
                 continue
             options.append(
                 Option(
