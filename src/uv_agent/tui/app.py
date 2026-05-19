@@ -6,6 +6,7 @@ import os
 import threading
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -50,6 +51,7 @@ from uv_agent.notifications import play_completion_sound
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
+from uv_agent.time import utc_now_iso
 from uv_agent.tui import theme
 from uv_agent.tui.formatting import (
     format_elapsed,
@@ -580,6 +582,26 @@ def image_attachment_markup(attachment: dict[str, Any], *, label: str = "image a
     )
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _elapsed_between(started_at: str | None, ended_at: str | None = None) -> float | None:
+    started = _parse_iso_datetime(started_at)
+    if started is None:
+        return None
+    ended = _parse_iso_datetime(ended_at) or datetime.now(UTC)
+    return max(0.0, (ended - started).total_seconds())
+
+
 @dataclass(frozen=True)
 class CommandSpec:
     name: str
@@ -622,6 +644,8 @@ class ThreadRunState:
     cancel_event: asyncio.Event
     queue: list[QueuedTurn]
     status: str
+    started_at: str | None = None
+    completed_at: str | None = None
     assistant_buffer: str = ""
     assistant_cell: TranscriptCell | None = None
     reasoning_buffer: str = ""
@@ -1034,10 +1058,12 @@ class FoldedProcessCell(TranscriptCell, can_focus=True):
         cells: list[TranscriptCell],
         *,
         collapsed: bool = True,
+        elapsed_label: str = "",
         **kwargs: Any,
     ) -> None:
         self.cells = list(cells)
         self.collapsed = collapsed
+        self.elapsed_label = elapsed_label
         super().__init__("", **kwargs)
 
     def on_click(self, event: events.Click) -> None:
@@ -1052,6 +1078,10 @@ class FoldedProcessCell(TranscriptCell, can_focus=True):
     def set_cells(self, cells: list[TranscriptCell]) -> None:
         self.cells = list(cells)
         self._apply_visibility()
+        self._refresh()
+
+    def set_elapsed_label(self, elapsed_label: str) -> None:
+        self.elapsed_label = elapsed_label
         self._refresh()
 
     def set_collapsed(self, collapsed: bool) -> None:
@@ -1093,8 +1123,9 @@ class FoldedProcessCell(TranscriptCell, can_focus=True):
         state = text(key)
         step_label = text("process_fold_step" if count == 1 else "process_fold_steps")
         hint = text("process_fold_expand_hint" if self.collapsed else "process_fold_collapse_hint")
+        elapsed = f" · {escape(self.elapsed_label)}" if self.elapsed_label else ""
         self.update(
-            f"[dim]{escape(state)} · {count} {escape(step_label)}[/dim] "
+            f"[dim]{escape(state)} · {count} {escape(step_label)}{elapsed}[/dim] "
             f"[dim]{escape(hint)}[/dim]"
         )
 
@@ -1614,6 +1645,8 @@ class UvAgentApp(App[None]):
         self._last_status = tr(self.language, "idle")
         self._spinner_index = 0
         self._busy_started_at: float | None = None
+        self._turn_started_at: str | None = None
+        self._turn_completed_at: str | None = None
         self._last_tool_payload: dict[str, object] | None = None
         self._composer_history: list[str] = load_composer_history()
         self._composer_history_index: int | None = None
@@ -1830,12 +1863,14 @@ class UvAgentApp(App[None]):
         queue: list[QueuedTurn] | None = None,
     ) -> None:
         cancel_event = asyncio.Event()
+        started_at = utc_now_iso()
         run_state = ThreadRunState(
             thread_id=thread_id,
             worker=None,
             cancel_event=cancel_event,
             queue=list(queue or []),
-            status=self._text("working"),
+            status=self._text("thinking_status"),
+            started_at=started_at,
         )
         self._thread_runs[thread_id] = run_state
         if self._is_active_thread(thread_id):
@@ -1843,6 +1878,8 @@ class UvAgentApp(App[None]):
             self._reset_live_view_state()
             self._interrupt_armed = False
             self._process_anchor_cell = self._append_user(prompt)
+            self._turn_started_at = started_at
+            self._turn_completed_at = None
             for image_path in image_paths or []:
                 self._append_cell(
                     f"[dim]{escape(self._text('image_pending_sent'))}[/dim] "
@@ -1854,7 +1891,7 @@ class UvAgentApp(App[None]):
                 "event",
             )
             self._sync_run_state_from_active(run_state)
-            self._refresh_status(self._text("working"))
+            self._refresh_status(self._text("thinking_status"))
         worker = self.run_worker(
             self._run_turn(prompt, thread_id, image_paths=list(image_paths or [])),
             exclusive=False,
@@ -2071,6 +2108,8 @@ class UvAgentApp(App[None]):
         self._process_fold_cell = None
         self._process_collapsed = False
         self._process_anchor_cell = None
+        self._turn_started_at = None
+        self._turn_completed_at = None
 
     def _background_run_states(self) -> list[ThreadRunState]:
         return [
@@ -2106,10 +2145,14 @@ class UvAgentApp(App[None]):
             shell.remove_class("busy")
             self._current_worker = None
             self._current_cancel_event = None
+            self._turn_started_at = None
+            self._turn_completed_at = None
             return
         shell.add_class("busy")
         self._current_worker = run_state.worker
         self._current_cancel_event = run_state.cancel_event
+        self._turn_started_at = run_state.started_at
+        self._turn_completed_at = run_state.completed_at
 
     def _sync_run_state_from_active(self, run_state: ThreadRunState) -> None:
         run_state.assistant_buffer = self._assistant_buffer
@@ -2123,6 +2166,8 @@ class UvAgentApp(App[None]):
         run_state.process_fold_cell = self._process_fold_cell
         run_state.process_collapsed = self._process_collapsed
         run_state.process_anchor_cell = self._process_anchor_cell
+        run_state.started_at = self._turn_started_at
+        run_state.completed_at = self._turn_completed_at
 
     def _sync_active_from_run_state(self, run_state: ThreadRunState) -> None:
         self._assistant_buffer = run_state.assistant_buffer
@@ -2140,6 +2185,21 @@ class UvAgentApp(App[None]):
         )
         self._process_collapsed = run_state.process_collapsed
         self._process_anchor_cell = run_state.process_anchor_cell
+        self._turn_started_at = run_state.started_at
+        self._turn_completed_at = run_state.completed_at
+
+    def _update_turn_timestamps(self, item: dict[str, Any], run_state: ThreadRunState) -> None:
+        started_at = str(item.get("turn_started_at") or item.get("started_at") or "").strip()
+        if started_at:
+            run_state.started_at = started_at
+            if self._is_active_thread(run_state.thread_id):
+                self._turn_started_at = started_at
+        if item.get("type") in {"turn.completed", "turn.interrupted"}:
+            completed_at = str(item.get("completed_at") or item.get("created_at") or utc_now_iso()).strip()
+            run_state.completed_at = completed_at
+            if self._is_active_thread(run_state.thread_id):
+                self._turn_completed_at = completed_at
+                self._refresh_process_fold_elapsed()
 
     async def _handle_thread_event(
         self,
@@ -2148,13 +2208,16 @@ class UvAgentApp(App[None]):
         item: dict[str, Any],
         run_state: ThreadRunState,
     ) -> None:
+        self._update_turn_timestamps(item, run_state)
         if not self._is_active_thread(thread_id):
             if event_type == "assistant.delta":
                 run_state.assistant_buffer += str(item.get("text") or "")
+                run_state.status = self._text("writing_answer")
             elif event_type == "assistant.reasoning_delta":
-                stripped = str(item.get("text") or "").strip()
-                if stripped:
-                    run_state.reasoning_buffer = (run_state.reasoning_buffer + " " + stripped).strip()
+                delta_text = str(item.get("text") or "")
+                if delta_text:
+                    run_state.reasoning_buffer = self._append_reasoning_text(run_state.reasoning_buffer, delta_text)
+                run_state.status = self._text("thinking_status")
             elif event_type == "assistant.reasoning_completed":
                 run_state.reasoning_buffer = ""
                 run_state.reasoning_cell = None
@@ -2172,7 +2235,7 @@ class UvAgentApp(App[None]):
                     "name": str(getattr(delta, "name", None) or "python"),
                     "arguments": getattr(delta, "arguments", "") or getattr(delta, "arguments_delta", ""),
                 }
-                run_state.status = self._text("running_python")
+                run_state.status = self._text("writing_script")
             elif event_type == "tool.started":
                 delta_index = item.get("tool_call_index")
                 if isinstance(delta_index, int):
@@ -2191,8 +2254,10 @@ class UvAgentApp(App[None]):
             return
         self._sync_active_from_run_state(run_state)
         if event_type == "assistant.delta":
+            self._refresh_status(self._text("writing_answer"))
             await self._append_assistant_delta(str(item.get("text") or ""))
         elif event_type == "assistant.reasoning_delta":
+            self._refresh_status(self._text("thinking_status"))
             self._append_reasoning_delta(str(item.get("text") or ""))
         elif event_type == "assistant.reasoning_completed":
             self._finalize_reasoning(str(item.get("text") or ""))
@@ -2655,11 +2720,13 @@ class UvAgentApp(App[None]):
         self._assistant_cell = None
 
     def _append_reasoning_delta(self, text: str) -> None:
-        stripped = text.strip()
-        if not stripped:
+        if not text:
             return
-        self._reasoning_buffer = (self._reasoning_buffer + " " + stripped).strip()
-        first = self._reasoning_buffer.splitlines()[0]
+        self._reasoning_buffer = self._append_reasoning_text(self._reasoning_buffer, text)
+        display_text = self._reasoning_buffer.strip()
+        if not display_text:
+            return
+        first = display_text.splitlines()[0]
         if len(first) > 120:
             first = first[:117].rstrip() + "..."
         markup = (
@@ -2671,6 +2738,11 @@ class UvAgentApp(App[None]):
         else:
             self._reasoning_cell.update(markup)
             self._scroll_end()
+
+    def _append_reasoning_text(self, existing: str, delta: str) -> str:
+        if not existing:
+            return delta.lstrip()
+        return existing + delta
 
     def _reasoning_markup(self, text: str) -> tuple[str, str]:
         stripped = text.strip()
@@ -2749,6 +2821,7 @@ class UvAgentApp(App[None]):
             after=self._process_anchor_cell,
         )
         self._process_collapsed = True
+        self._refresh_process_fold_elapsed()
 
     def _track_current_assistant_cell_as_process(self) -> None:
         if self._assistant_cell is not None:
@@ -2761,6 +2834,7 @@ class UvAgentApp(App[None]):
         collapsed: bool = True,
         before: object | None = None,
         after: TranscriptCell | None = None,
+        elapsed_label: str | None = None,
     ) -> FoldedProcessCell:
         self._mark_transcript_content()
         insert_before = before
@@ -2771,6 +2845,7 @@ class UvAgentApp(App[None]):
         cell = FoldedProcessCell(
             cells,
             collapsed=collapsed,
+            elapsed_label=elapsed_label if elapsed_label is not None else self._process_elapsed_label(),
             classes="process_fold",
             markup=True,
         )
@@ -2778,6 +2853,14 @@ class UvAgentApp(App[None]):
         self._process_fold_cell = cell
         self._scroll_end()
         return cell
+
+    def _process_elapsed_label(self, *, started_at: str | None = None, completed_at: str | None = None) -> str:
+        seconds = _elapsed_between(started_at or self._turn_started_at, completed_at or self._turn_completed_at)
+        return format_elapsed(seconds) if seconds is not None else ""
+
+    def _refresh_process_fold_elapsed(self) -> None:
+        if self._process_fold_cell is not None:
+            self._process_fold_cell.set_elapsed_label(self._process_elapsed_label())
 
     def _cell_after(self, cell: TranscriptCell) -> object | None:
         try:
@@ -2917,7 +3000,7 @@ class UvAgentApp(App[None]):
         else:
             cell.update(markup)
         self._track_process_cell(cell)
-        self._refresh_status(self._text("running_python"))
+        self._refresh_status(self._text("writing_script"))
 
     def _tool_pending_markup(
         self,
@@ -3023,7 +3106,20 @@ class UvAgentApp(App[None]):
                 collapsed=True,
                 before=before,
                 after=anchor_cell,
+                elapsed_label=self._history_turn_elapsed_label(events),
             )
+
+    def _history_turn_elapsed_label(self, events: list[dict[str, Any]]) -> str:
+        started_at = ""
+        completed_at = ""
+        for event in events:
+            event_type = event.get("type")
+            if not started_at and event_type in {"turn.started", "item.user"}:
+                started_at = str(event.get("created_at") or "")
+            if event_type in {"turn.completed", "turn.interrupted"}:
+                completed_at = str(event.get("created_at") or "")
+        seconds = _elapsed_between(started_at, completed_at)
+        return format_elapsed(seconds) if seconds is not None else ""
 
     def _history_cell_is_process(self, event: dict[str, Any], cell: TranscriptCell) -> bool:
         event_type = event.get("type")
@@ -4114,6 +4210,8 @@ class UvAgentApp(App[None]):
         self._render_thread_history(thread_id)
         if run_state is not None:
             if run_state.worker is not None:
+                self._turn_started_at = run_state.started_at
+                self._turn_completed_at = run_state.completed_at
                 if run_state.reasoning_buffer:
                     self._reasoning_buffer = run_state.reasoning_buffer
                     first = run_state.reasoning_buffer.splitlines()[0]
@@ -4363,8 +4461,11 @@ class UvAgentApp(App[None]):
             frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
             spinner = frames[self._spinner_index % len(frames)] + " "
             self._spinner_index += 1
-            if self._busy_started_at is not None:
-                elapsed = format_elapsed(monotonic() - self._busy_started_at)
+            elapsed_seconds = _elapsed_between(self._turn_started_at)
+            if elapsed_seconds is None and self._busy_started_at is not None:
+                elapsed_seconds = monotonic() - self._busy_started_at
+            if elapsed_seconds is not None:
+                elapsed = format_elapsed(elapsed_seconds)
                 elapsed_suffix = f" [dim]({escape(elapsed)})[/dim]"
 
         if self.busy:

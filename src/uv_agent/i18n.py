@@ -7,6 +7,9 @@ TEXT = {
     "en": {
         "idle": "Idle",
         "working": "Working",
+        "thinking_status": "Thinking",
+        "writing_script": "Writing script",
+        "writing_answer": "Writing answer",
         "reading": "Reading",
         "running_python": "Running python",
         "error": "Error",
@@ -170,6 +173,9 @@ TEXT = {
     "zh": {
         "idle": "空闲",
         "working": "工作中",
+        "thinking_status": "思考中",
+        "writing_script": "编写脚本中",
+        "writing_answer": "回复中",
         "reading": "读取中",
         "running_python": "运行 Python",
         "error": "错误",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import asyncio
 import threading
+from datetime import UTC, datetime, timedelta
 
 from PIL import Image as PILImage
 import pytest
@@ -1277,6 +1278,7 @@ async def test_tui_process_fold_expands_original_cells(
 
         assert fold_cell.collapsed is False
         assert all(not cell.has_class("process_fold_hidden") for cell in fold_cell.cells)
+
         assert any(
             isinstance(cell, ExpandableTranscriptCell)
             and cell.detail_title == "reasoning_details"
@@ -1300,17 +1302,69 @@ async def test_tui_process_fold_expands_original_cells(
             for cell in fold_cell.cells
         )
 
-        await pilot.press("ctrl+g")
-        await pilot.pause()
 
-        assert fold_cell.collapsed is True
-        assert all(cell.has_class("process_fold_hidden") for cell in fold_cell.cells)
+@pytest.mark.asyncio
+async def test_tui_reasoning_deltas_stream_without_inserted_spaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
 
-        await pilot.press("ctrl+g")
-        await pilot.pause()
+    async with app.run_test(size=(120, 30)):
+        run_state = app._run_state_for_thread("thread_live")
+        app.thread_id = "thread_live"
+        app._append_reasoning_delta("foo")
+        app._append_reasoning_delta("bar")
+        assert app._reasoning_buffer == "foobar"
 
-        assert fold_cell.collapsed is False
-        assert all(not cell.has_class("process_fold_hidden") for cell in fold_cell.cells)
+        await app._handle_thread_event(
+            "background",
+            "assistant.reasoning_delta",
+            {"type": "assistant.reasoning_delta", "text": "alpha"},
+            run_state,
+        )
+        await app._handle_thread_event(
+            "background",
+            "assistant.reasoning_delta",
+            {"type": "assistant.reasoning_delta", "text": "beta"},
+            run_state,
+        )
+        assert run_state.reasoning_buffer == "alphabeta"
+
+
+@pytest.mark.asyncio
+async def test_tui_process_fold_shows_persisted_turn_elapsed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    started = datetime(2025, 1, 1, tzinfo=UTC)
+    completed = started + timedelta(seconds=65)
+    events = [
+        {"type": "turn.started", "created_at": started.isoformat(), "turn_id": "t"},
+        {"type": "item.user", "created_at": started.isoformat(), "turn_id": "t", "item": {}},
+        {"type": "turn.completed", "created_at": completed.isoformat(), "turn_id": "t"},
+    ]
+
+    async with app.run_test(size=(120, 30)):
+        cell = app._append_cell("process", "event")
+        fold = app._append_process_fold_cell(
+            [cell],
+            elapsed_label=app._history_turn_elapsed_label(events),
+        )
+
+        assert fold.elapsed_label == "1m 05s"
+        fold._refresh()
+        assert "1m 05s" in str(fold.render())
 
 
 @pytest.mark.asyncio

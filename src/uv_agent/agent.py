@@ -343,7 +343,7 @@ class AgentEngine:
             input_items = turn_input.input_items
             request_input_items = turn_input.request_input_items()
             pre_user_items = self._pre_user_context_items(thread_id)
-            self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+            turn_started_event = self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
             user_item = message_item("user", user_text)
             self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
             title_task = self._start_title_generation_task(
@@ -404,6 +404,7 @@ class AgentEngine:
                                 "type": "assistant.delta",
                                 "thread_id": thread_id,
                                 "turn_id": turn_id,
+                                "turn_started_at": turn_started_event.get("created_at"),
                                 "text": stream_event.text,
                             }
                         elif stream_event.type == "reasoning_delta" and stream_event.text:
@@ -412,6 +413,7 @@ class AgentEngine:
                                 "type": "assistant.reasoning_delta",
                                 "thread_id": thread_id,
                                 "turn_id": turn_id,
+                                "turn_started_at": turn_started_event.get("created_at"),
                                 "text": stream_event.text,
                             }
                         elif stream_event.type == "tool_call_delta" and stream_event.tool_call:
@@ -419,6 +421,7 @@ class AgentEngine:
                                 "type": "tool.delta",
                                 "thread_id": thread_id,
                                 "turn_id": turn_id,
+                                "turn_started_at": turn_started_event.get("created_at"),
                                 "tool_call": stream_event.tool_call,
                             }
                         elif stream_event.type == "completed":
@@ -436,6 +439,7 @@ class AgentEngine:
                             "type": "assistant.delta",
                             "thread_id": thread_id,
                             "turn_id": turn_id,
+                            "turn_started_at": turn_started_event.get("created_at"),
                             "text": completed_text_delta,
                         }
                     reasoning_text = response.reasoning_text or "".join(reasoning_parts).strip()
@@ -453,6 +457,7 @@ class AgentEngine:
                         "type": "model.response",
                         "thread_id": thread_id,
                         "turn_id": turn_id,
+                        "turn_started_at": turn_started_event.get("created_at"),
                         "response": response,
                         "reasoning_text": reasoning_text,
                     }
@@ -478,6 +483,7 @@ class AgentEngine:
                             "type": "tool.started",
                             "thread_id": thread_id,
                             "turn_id": turn_id,
+                            "turn_started_at": turn_started_event.get("created_at"),
                             "call": call,
                             "tool_call_index": call_index,
                         }
@@ -501,6 +507,7 @@ class AgentEngine:
                             "type": "tool.output",
                             "thread_id": thread_id,
                             "turn_id": turn_id,
+                            "turn_started_at": turn_started_event.get("created_at"),
                             "call": call,
                             "tool_call_index": call_index,
                             "output": display_output,
@@ -554,7 +561,7 @@ class AgentEngine:
                     title_task.cancel()
                 return
 
-            self.thread_store.append(
+            turn_completed_event = self.thread_store.append(
                 thread_id,
                 "turn.completed",
                 turn_id=turn_id,
@@ -585,6 +592,9 @@ class AgentEngine:
                 "type": "turn.completed",
                 "thread_id": thread_id,
                 "turn_id": turn_id,
+                "turn_started_at": turn_started_event.get("created_at"),
+                "created_at": turn_completed_event.get("created_at"),
+                "completed_at": turn_completed_event.get("created_at"),
                 "final_text": final_text,
             }
 
