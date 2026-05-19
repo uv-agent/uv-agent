@@ -7,6 +7,13 @@ import tokenize
 from typing import Any
 
 
+# Runtime event sentinel keys. These mirror values in
+# ``uv_agent_runtime.events`` and ``uv_agent.agent`` so the TUI can detect and
+# hide structured-event JSON lines that the runner interleaves into stdout.
+RUNTIME_EVENT_EVENT_ID_KEY = "_uv_agent_event_id"
+RUNTIME_EVENT_RUN_ID_KEY = "_uv_agent_run_id"
+
+
 # Glyphs shared by transcript cells. Sigils (not emoji) render uniformly across
 # terminals; chosen to match codex/gemini/opencode conventions.
 GLYPH_USER = "›"
@@ -199,6 +206,37 @@ def _python_token_markup(token_type: int, token_text: str) -> str:
     return escaped
 
 
+def strip_runtime_event_lines(text: str, *, run_id: str | None = None) -> str:
+    """Drop structured runtime-event JSON lines from interleaved stdout."""
+    if not text:
+        return ""
+    kept: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if _is_runtime_event_line(line, run_id=run_id):
+            continue
+        kept.append(line)
+    return "".join(kept)
+
+
+def _is_runtime_event_line(line: str, *, run_id: str | None = None) -> bool:
+    stripped = line.strip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(value, dict) or "kind" not in value:
+        return False
+    event_id = value.get(RUNTIME_EVENT_EVENT_ID_KEY)
+    if not isinstance(event_id, str) or not event_id:
+        return False
+    event_run_id = value.get(RUNTIME_EVENT_RUN_ID_KEY)
+    if not isinstance(event_run_id, str) or not event_run_id:
+        return False
+    return not run_id or event_run_id == run_id
+
+
 def short_block(value: str, *, max_lines: int = 8, max_chars: int = 1800) -> str:
     """Return a terminal-friendly preview of stdout or stderr."""
     value = value.strip()
@@ -292,7 +330,11 @@ def tool_result_markup(payload: dict[str, Any]) -> str:
         f"[{color}]{status}[/{color}]{elapsed_suffix}"
     )
     lines = [header]
-    stdout = short_block(str(payload.get("stdout") or ""))
+    run_id_str = str(payload.get("run_id") or "")
+    raw_stdout = strip_runtime_event_lines(
+        str(payload.get("stdout") or ""), run_id=run_id_str
+    )
+    stdout = short_block(raw_stdout)
     stderr = short_block(str(payload.get("stderr") or ""))
     if stdout:
         lines.append("[dim]stdout[/dim]\n" + escape(stdout))
@@ -327,7 +369,10 @@ def tool_timeline_markup(payload: dict[str, Any]) -> str:
     if len(events) > 5:
         lines.append(f"  [dim]… +{len(events) - 5} more events[/dim]")
     stderr = short_block(str(payload.get("stderr") or ""), max_lines=3, max_chars=600)
-    stdout = short_block(str(payload.get("stdout") or ""), max_lines=3, max_chars=600)
+    stdout_raw = strip_runtime_event_lines(
+        str(payload.get("stdout") or ""), run_id=run_id
+    )
+    stdout = short_block(stdout_raw, max_lines=3, max_chars=600)
     if stderr and returncode != 0:
         lines.append("  [red]" + GLYPH_NESTED + " stderr[/red]\n  " + escape(stderr).replace("\n", "\n  "))
     elif stderr:
@@ -339,8 +384,17 @@ def tool_timeline_markup(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def tool_detail_markup(payload: dict[str, Any]) -> str:
-    """Render complete hidden details for an expandable tool cell."""
+def tool_detail_markup(
+    payload: dict[str, Any], *, events_collapsed: bool = False
+) -> str:
+    """Render complete hidden details for an expandable tool cell.
+
+    Structured runtime events are stripped from the displayed stdout (they are
+    already surfaced individually in the events section). Events are rendered
+    one per line in a friendly format so backslash escape characters from
+    ``json.dumps`` are not shown. The events section can be folded via
+    ``events_collapsed=True``.
+    """
     lines = [
         "[dim]details[/dim]",
         f"script_id: {escape(str(payload.get('script_id') or '-'))}",
@@ -353,10 +407,21 @@ def tool_detail_markup(payload: dict[str, Any]) -> str:
     if run_log_path:
         lines.append(f"run_log_path: {escape(run_log_path)}")
     events = payload.get("events") if isinstance(payload.get("events"), list) else []
-    if events:
-        lines.append("[dim]events[/dim]")
-        lines.append(escape(json.dumps(events, ensure_ascii=False, indent=2)))
-    stdout = str(payload.get("stdout") or "").strip()
+    valid_events = [event for event in events if isinstance(event, dict)]
+    if valid_events:
+        if events_collapsed:
+            lines.append(
+                "[dim]events (collapsed · "
+                f"{len(valid_events)} events · press e to expand)[/dim]"
+            )
+        else:
+            lines.append("[dim]events (press e to collapse)[/dim]")
+            for event in valid_events:
+                lines.append(structured_event_markup(event))
+    run_id = str(payload.get("run_id") or "")
+    stdout = strip_runtime_event_lines(
+        str(payload.get("stdout") or ""), run_id=run_id
+    ).strip()
     stderr = str(payload.get("stderr") or "").strip()
     if stdout:
         lines.append("[dim]stdout[/dim]")

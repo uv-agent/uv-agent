@@ -298,7 +298,10 @@ ToastRack {{
 #transcript {{
     height: 1fr;
     min-height: 6;
-    padding: 1 2 0 1;
+    /* No right padding so the vertical scrollbar can sit flush against the
+     * screen's right column. Right-side breathing room for transcript text is
+     * provided by ``TranscriptCell``'s right padding instead. */
+    padding: 1 0 0 1;
     background: {t.BG_CANVAS};
     overflow-x: auto;
     scrollbar-size: 1 1;

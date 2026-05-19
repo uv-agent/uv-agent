@@ -1030,6 +1030,9 @@ class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
         self.details = details
         self.detail_title = detail_title
         self.detail_hint = detail_hint
+        # Optional runner payload, attached for tool-result cells so the
+        # details panel can re-render the body with stdout folded/unfolded.
+        self.tool_payload: dict[str, Any] | None = None
         super().__init__(self._content(), **kwargs)
 
     def on_click(self, event: events.Click) -> None:
@@ -1221,12 +1224,15 @@ class ToolDetailsPanel(FullscreenPanel):
     BINDINGS = [
         Binding("j", "next_detail", "Next", priority=True, show=False),
         Binding("k", "previous_detail", "Previous", priority=True, show=False),
+        Binding("e", "toggle_events", "Toggle events", priority=True, show=False),
         Binding("ctrl+d", "dismiss_panel", "Close", priority=True, show=False),
         *FullscreenPanel.BINDINGS,
     ]
 
     def __init__(self, cell: ExpandableTranscriptCell) -> None:
         self.current_cell = cell
+        # events fold state, persisted across j/k navigation within the panel
+        self.events_collapsed = False
         super().__init__(title="", body=cell.details, subtitle="")
 
     def on_mount(self) -> None:
@@ -1245,6 +1251,10 @@ class ToolDetailsPanel(FullscreenPanel):
             event.stop()
             self.action_previous_detail()
             return
+        if event.key == "e":
+            event.stop()
+            self.action_toggle_events()
+            return
         if event.key == "ctrl+d":
             event.stop()
             self.action_dismiss_panel()
@@ -1257,6 +1267,12 @@ class ToolDetailsPanel(FullscreenPanel):
     def action_previous_detail(self) -> None:
         self._move(-1)
 
+    def action_toggle_events(self) -> None:
+        if self.current_cell.tool_payload is None:
+            return
+        self.events_collapsed = not self.events_collapsed
+        self._refresh_current()
+
     def _move(self, step: int) -> None:
         app = self.app
         if not hasattr(app, "_relative_expandable_cell"):
@@ -1268,7 +1284,11 @@ class ToolDetailsPanel(FullscreenPanel):
         text = getattr(self.app, "_text", lambda key: key)
         self.panel_title = text(self.current_cell.detail_title)
         self.subtitle = text(self.current_cell.detail_hint)
-        self.body = self.current_cell.details
+        payload = self.current_cell.tool_payload
+        if payload is not None:
+            self.body = tool_detail_markup(payload, events_collapsed=self.events_collapsed)
+        else:
+            self.body = self.current_cell.details
         try:
             self.query_one("#panel-header", Static).update(self.panel_title)
             self.query_one("#panel-subtitle", Static).update(self.subtitle)
@@ -2406,7 +2426,9 @@ class UvAgentApp(App[None]):
             self._track_current_assistant_cell_as_process()
             self._seal_assistant_round()
         elif event_type == "assistant.final_response_started":
-            self._track_current_assistant_cell_as_process()
+            # The current assistant cell here is the final user-visible reply
+            # for this turn (its deltas have already streamed). Only collapse
+            # prior process cells; do NOT classify the final reply as process.
             self._collapse_process_cells()
         elif event_type == "tool.started":
             self._clear_pending_reasoning()
@@ -3177,6 +3199,7 @@ class UvAgentApp(App[None]):
         markup = tool_timeline_markup(payload)
         details = tool_detail_markup(payload)
         cell = self._append_expandable_cell(markup, details, "event")
+        cell.tool_payload = payload
         self._track_process_cell(cell)
         self._refresh_status(self._text("working"))
 
@@ -3446,14 +3469,14 @@ class UvAgentApp(App[None]):
         elif event_type == "item.runner_result":
             result = event.get("result") or {}
             self._last_tool_payload = result
-            mounted.append(
-                self._append_expandable_cell(
-                    tool_timeline_markup(result),
-                    tool_detail_markup(result),
-                    "event",
-                    before=before,
-                )
+            replayed_cell = self._append_expandable_cell(
+                tool_timeline_markup(result),
+                tool_detail_markup(result),
+                "event",
+                before=before,
             )
+            replayed_cell.tool_payload = result
+            mounted.append(replayed_cell)
         elif event_type == "item.image_attachment":
             attachment = event.get("attachment") or {}
             mounted.append(self._append_image_attachment_cell(attachment, before=before))

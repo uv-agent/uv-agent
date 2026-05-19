@@ -27,7 +27,12 @@ from uv_agent.config import (
 from uv_agent.model_client import FakeModelClient, ModelResponse, ToolCallDelta, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
-from uv_agent.tui.formatting import short_thread
+from uv_agent.tui.formatting import (
+    RUNTIME_EVENT_EVENT_ID_KEY,
+    RUNTIME_EVENT_RUN_ID_KEY,
+    short_thread,
+    tool_detail_markup,
+)
 from uv_agent.tui.app import (
     EmptyState,
     ExpandableTranscriptCell,
@@ -3961,3 +3966,185 @@ async def test_tui_ctrl_q_is_not_a_quit_binding(
 
         assert app._quit_armed is False
         assert not list(app.screen.query("Toast"))
+
+
+@pytest.mark.asyncio
+async def test_tui_final_response_is_not_folded_into_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the final assistant reply must remain visible (never folded
+    into the process collapse) when its ``assistant.delta`` events streamed
+    before the ``assistant.final_response_started`` event arrived."""
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        # Simulate a turn that used tools: intermediate assistant text +
+        # tool result, then a final reply.
+        app._append_assistant_text("intermediate thoughts before tools")
+        await pilot.pause()
+        app._apply_thread_event_to_active(
+            "assistant.response_with_tools",
+            {"type": "assistant.response_with_tools"},
+        )
+        app._append_tool_output(
+            {
+                "call": {"call_id": "call_1"},
+                "output": {
+                    "output": __import__("json").dumps(
+                        {
+                            "script_id": "scr_1",
+                            "run_id": "run_1",
+                            "returncode": 0,
+                            "stdout": "tool output",
+                            "stderr": "",
+                            "events": [],
+                        }
+                    )
+                },
+            }
+        )
+        await pilot.pause()
+
+        # Final round: deltas stream first, then final_response_started fires.
+        app._append_assistant_text("FINAL ANSWER VISIBLE")
+        await pilot.pause()
+        final_cell = app._assistant_cell
+        assert final_cell is not None
+
+        app._apply_thread_event_to_active(
+            "assistant.final_response_started",
+            {"type": "assistant.final_response_started"},
+        )
+        await pilot.pause()
+
+        # The final reply cell must not be hidden by the process fold.
+        assert not final_cell.has_class("process_fold_hidden")
+        # And it should not be tracked as a process cell.
+        assert final_cell not in app._process_cells
+        # The process fold itself should exist for the intermediate steps.
+        assert app._process_fold_cell is not None
+
+
+def test_tool_detail_markup_strips_runtime_event_lines_from_stdout() -> None:
+    event = {
+        "kind": "progress",
+        "message": "halfway",
+        RUNTIME_EVENT_EVENT_ID_KEY: "evt_1",
+        RUNTIME_EVENT_RUN_ID_KEY: "run_1",
+    }
+    payload = {
+        "script_id": "scr_1",
+        "run_id": "run_1",
+        "returncode": 0,
+        "stdout": "visible line 1\n" + __import__("json").dumps(event) + "\nvisible line 2\n",
+        "stderr": "",
+        "events": [event],
+    }
+    markup = tool_detail_markup(payload)
+    assert "visible line 1" in markup
+    assert "visible line 2" in markup
+    # The structured event JSON line must not appear in stdout output.
+    assert RUNTIME_EVENT_EVENT_ID_KEY not in markup
+    # Events are rendered via structured_event_markup, so JSON-dump backslash
+    # escapes (e.g. "\\n", "\\\"") never reach the rendered body.
+    assert "\\n" not in markup
+    assert '\\"' not in markup
+    # Event content still surfaces in the events section.
+    assert "halfway" in markup
+
+
+def test_tool_detail_markup_collapses_events_when_requested() -> None:
+    payload = {
+        "script_id": "scr_1",
+        "run_id": "run_1",
+        "returncode": 0,
+        "stdout": "stdout line\n",
+        "stderr": "",
+        "events": [
+            {"kind": "progress", "message": "step one"},
+            {"kind": "progress", "message": "step two"},
+        ],
+    }
+    expanded = tool_detail_markup(payload, events_collapsed=False)
+    collapsed = tool_detail_markup(payload, events_collapsed=True)
+    # Stdout is always visible.
+    assert "stdout line" in expanded
+    assert "stdout line" in collapsed
+    # Events visible when expanded, hidden when collapsed.
+    assert "step one" in expanded and "step two" in expanded
+    assert "collapse" in expanded
+    assert "step one" not in collapsed
+    assert "step two" not in collapsed
+    assert "expand" in collapsed
+    assert "2 events" in collapsed
+
+
+@pytest.mark.asyncio
+async def test_tui_tool_details_panel_toggles_events_with_e_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+    payload = {
+        "script_id": "scr_1",
+        "run_id": "run_1",
+        "returncode": 0,
+        "stdout": "alpha line\nbravo line\ncharlie line",
+        "stderr": "",
+        "events": [
+            {"kind": "progress", "message": "halfway"},
+            {"kind": "progress", "message": "done"},
+        ],
+        "run_log_path": str(tmp_path / "run.jsonl"),
+    }
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._append_tool_output(
+            {
+                "call": {"call_id": "call_1"},
+                "output": {"output": __import__("json").dumps(payload)},
+            }
+        )
+        await pilot.pause()
+
+        cell = app.query_one(ExpandableTranscriptCell)
+        await pilot.click(cell)
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, ToolDetailsPanel)
+        assert panel.events_collapsed is False
+        assert "halfway" in panel.body
+        assert "done" in panel.body
+        # stdout remains visible regardless of events fold state
+        assert "alpha line" in panel.body
+
+        await pilot.press("e")
+        await pilot.pause()
+
+        assert panel.events_collapsed is True
+        assert "halfway" not in panel.body
+        assert "done" not in panel.body
+        assert "2 events" in panel.body
+        assert "alpha line" in panel.body
+
+        await pilot.press("e")
+        await pilot.pause()
+
+        assert panel.events_collapsed is False
+        assert "halfway" in panel.body
+        assert "done" in panel.body
