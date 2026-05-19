@@ -2824,7 +2824,15 @@ async def test_tui_config_toggle_refreshes_without_escape_history(
     async with app.run_test(size=(90, 24), notifications=True) as pilot:
         command_palette_title = app._text("command_palette")
         await pilot.press("ctrl+o")
-        await pilot.press("c")
+        await pilot.pause()
+
+        command_panel = app.screen_stack[-1]
+        assert isinstance(command_panel, FullscreenPanel)
+        ids = [item.id for item in command_panel.items]
+        command_panel.query_one("#panel-content", OptionList).highlighted = ids.index(
+            "/config"
+        )
+
         await pilot.press("enter")
         await pilot.pause()
 
