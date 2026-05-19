@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import io
 import json
-import keyword
-import tokenize
 from typing import Any
+
+from pygments import lex as _pyg_lex
+from pygments.lexers.python import PythonLexer as _PythonLexer
+from pygments.token import Token as _Token
 
 
 # Runtime event sentinel keys. These mirror values in
@@ -140,70 +141,81 @@ def tool_call_detail_highlight_markup(call: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Mapping from Pygments token types to Textual markup styles. The list is
+# ordered most-specific first; ``token in parent`` walks the token hierarchy
+# so e.g. ``Token.Literal.String.Single in Token.Literal.String`` matches.
+# Colors intentionally extend the previous tokenize-based palette so existing
+# tests around keyword / string highlight continue to hold.
+_PYG_STYLE_MAP: tuple[tuple[Any, str], ...] = (
+    (_Token.Comment, "#94a3b8 italic"),
+    (_Token.Keyword.Constant, "bold #f472b6"),
+    (_Token.Operator.Word, "bold #7dd3fc"),
+    (_Token.Keyword, "bold #7dd3fc"),
+    (_Token.Name.Builtin.Pseudo, "italic #a78bfa"),
+    (_Token.Name.Builtin, "#a78bfa"),
+    (_Token.Name.Function, "#facc15"),
+    (_Token.Name.Class, "bold #facc15"),
+    (_Token.Name.Decorator, "#fde68a"),
+    (_Token.Name.Exception, "bold #f87171"),
+    (_Token.Literal.String.Doc, "#94a3b8 italic"),
+    (_Token.Literal.String.Escape, "#fb923c"),
+    (_Token.Literal.String.Interpol, "#fb923c"),
+    (_Token.Literal.String, "#fbbf24"),
+    (_Token.Literal.Number, "#fb923c"),
+    (_Token.Operator, "#94a3b8"),
+)
+
+# Reuse a single lexer instance. ``stripnl``/``ensurenl`` off so trailing
+# whitespace round-trips exactly.
+_PY_LEXER = _PythonLexer(stripnl=False, ensurenl=False)
+
+
+def _pyg_style(token_type: Any) -> str:
+    for parent, style in _PYG_STYLE_MAP:
+        if token_type in parent:
+            return style
+    return ""
+
+
 def python_syntax_markup(code: str) -> str:
-    """Return Textual markup with lightweight Python token highlighting."""
-    lines = code.splitlines(keepends=True)
-    if not lines:
+    """Return Textual markup with full Python syntax highlighting.
+
+    Uses Pygments' ``PythonLexer`` so the script panel covers keywords,
+    builtins, numbers, operators, decorators, class/function names, string
+    escapes, f-string interpolation, comments and docstrings. Contiguous
+    tokens sharing the same style are coalesced into one markup span to keep
+    the output compact and stable.
+    """
+    if not code:
         return ""
-    rendered: list[str] = []
-    cursor_line = 1
-    cursor_col = 0
+    pieces: list[str] = []
+    pending_style = ""
+    pending_text = ""
 
-    def append_plain(text: str) -> None:
-        if text:
-            rendered.append(escape(text))
-
-    def append_gap(end_line: int, end_col: int) -> None:
-        nonlocal cursor_line, cursor_col
-        if end_line < cursor_line or (end_line == cursor_line and end_col < cursor_col):
+    def flush() -> None:
+        nonlocal pending_text
+        if not pending_text:
             return
-        if end_line == cursor_line:
-            append_plain(lines[cursor_line - 1][cursor_col:end_col])
+        escaped = escape(pending_text)
+        if pending_style:
+            pieces.append(f"[{pending_style}]{escaped}[/{pending_style}]")
         else:
-            append_plain(lines[cursor_line - 1][cursor_col:])
-            for line_no in range(cursor_line + 1, end_line):
-                append_plain(lines[line_no - 1])
-            append_plain(lines[end_line - 1][:end_col])
-        cursor_line = end_line
-        cursor_col = end_col
+            pieces.append(escaped)
+        pending_text = ""
 
     try:
-        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
-        for token in tokens:
-            token_type = token.type
-            token_text = token.string
-            start_line, start_col = token.start
-            end_line, end_col = token.end
-            if token_type in {
-                tokenize.ENCODING,
-                tokenize.ENDMARKER,
-                tokenize.INDENT,
-                tokenize.DEDENT,
-                tokenize.NL,
-                tokenize.NEWLINE,
-            }:
+        for token_type, token_text in _pyg_lex(code, _PY_LEXER):
+            if not token_text:
                 continue
-            append_gap(start_line, start_col)
-            rendered.append(_python_token_markup(token_type, token_text))
-            cursor_line = end_line
-            cursor_col = end_col
-    except tokenize.TokenError:
+            style = _pyg_style(token_type)
+            if style != pending_style:
+                flush()
+                pending_style = style
+            pending_text += token_text
+        flush()
+    except Exception:
         return escape(code)
-
-    append_gap(len(lines), len(lines[-1]))
-    return "".join(rendered)
-
-
-def _python_token_markup(token_type: int, token_text: str) -> str:
-    escaped = escape(token_text)
-    if token_type == tokenize.COMMENT:
-        return f"[#94a3b8 italic]{escaped}[/#94a3b8 italic]"
-    if token_type == tokenize.STRING:
-        return f"[#fbbf24]{escaped}[/#fbbf24]"
-    if token_type == tokenize.NAME:
-        if keyword.iskeyword(token_text):
-            return f"[bold #7dd3fc]{escaped}[/bold #7dd3fc]"
-    return escaped
+    return "".join(pieces)
 
 
 def strip_runtime_event_lines(text: str, *, run_id: str | None = None) -> str:

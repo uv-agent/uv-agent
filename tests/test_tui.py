@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
+import re
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -48,6 +49,14 @@ from uv_agent.tui.app import (
     ToolDetailsPanel,
     UvAgentApp,
 )
+
+
+_MARKUP_TAG_RE = re.compile(r"\[/?[^\[\]]*\]")
+
+
+def strip_markup(text: str) -> str:
+    """Drop Textual markup spans so substring assertions can target source text."""
+    return _MARKUP_TAG_RE.sub("", text).replace("\\[", "[").replace("\\]", "]")
 
 
 @pytest.fixture(autouse=True)
@@ -1516,8 +1525,8 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
         )
         assert any(
             isinstance(cell, ExpandableTranscriptCell)
-            and "print(" in cell.details
-            and "'ok'" in cell.details
+            and "print(" in strip_markup(cell.details)
+            and "'ok'" in strip_markup(cell.details)
             for cell in fold_cell.cells
         )
         assert any(
@@ -1582,8 +1591,8 @@ async def test_tui_live_tool_call_and_result_are_separate_cells(
         await pilot.pause()
 
         call_cell, result_cell = app.query(ExpandableTranscriptCell).nodes
-        assert "print(42)" in str(call_cell.render())
-        assert "print(43)" in call_cell.details
+        assert "print(42)" in strip_markup(str(call_cell.render()))
+        assert "print(43)" in strip_markup(call_cell.details)
         assert "run_live" in result_cell.details
         assert "ok" in result_cell.details
         assert "print(42)" not in str(result_cell.render())
@@ -1634,12 +1643,12 @@ async def test_tui_live_multiple_tool_calls_keep_call_result_boundaries(
 
         cells = app.query(ExpandableTranscriptCell).nodes
         assert len(cells) == 4
-        assert "print(0)" in cells[0].details
+        assert "print(0)" in strip_markup(cells[0].details)
         assert "run_0" in cells[1].details
-        assert "print(0)" not in cells[1].details
-        assert "print(1)" in cells[2].details
+        assert "print(0)" not in strip_markup(cells[1].details)
+        assert "print(1)" in strip_markup(cells[2].details)
         assert "run_1" in cells[3].details
-        assert "print(1)" not in cells[3].details
+        assert "print(1)" not in strip_markup(cells[3].details)
 
 
 @pytest.mark.asyncio
@@ -2026,7 +2035,7 @@ async def test_tui_renders_tool_delta_before_tool_started(
 
         assert len(app.query(".tool_pending").nodes) == 1
         cell = app.query_one(ExpandableTranscriptCell)
-        assert "print(1)" in cell.details
+        assert "print(1)" in strip_markup(cell.details)
 
 
 @pytest.mark.asyncio
@@ -3613,7 +3622,7 @@ async def test_tui_resume_running_thread_rebinds_live_cells(
         assert assistant.copy_text == "I will run more"
         assert len(app.query(".tool_pending").nodes) == 1
         cell = app.query_one(ExpandableTranscriptCell)
-        assert "print(1)" in cell.details
+        assert "print(1)" in strip_markup(cell.details)
 
 
 @pytest.mark.asyncio
@@ -3856,6 +3865,10 @@ async def test_tui_tool_call_details_highlight_python_source(
         assert "print(item)" in rendered
         assert "[bold #7dd3fc]for[/bold #7dd3fc]" in panel.body
         assert "[#fbbf24]'alpha'[/#fbbf24]" in panel.body
+        # Pygments-based highlighter additionally colors builtins and the
+        # ``in`` operator word, which the prior tokenize-based pass missed.
+        assert "[#a78bfa]print[/#a78bfa]" in panel.body
+        assert "[bold #7dd3fc]in[/bold #7dd3fc]" in panel.body
 
 
 @pytest.mark.asyncio
