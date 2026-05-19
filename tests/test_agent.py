@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import httpx
 
 from uv_agent.agent import (
     AgentEngine,
@@ -48,6 +49,20 @@ class BlockingModelClient(FakeModelClient):
         self.started.set()
         await asyncio.Event().wait()
         yield
+
+
+class PartialStreamClient(FakeModelClient):
+    def __init__(self, event: ModelStreamEvent) -> None:
+        super().__init__([])
+        self.event = event
+        self.started = asyncio.Event()
+        self.delivered = asyncio.Event()
+
+    async def stream_response(self, **kwargs):
+        self.started.set()
+        yield self.event
+        self.delivered.set()
+        await asyncio.Event().wait()
 
 
 class RoutedModelClient(FakeModelClient):
@@ -117,6 +132,27 @@ class CompletedOnlyStreamClient(FakeModelClient):
         yield ModelStreamEvent(type="completed", response=parse_responses_response(self.responses.pop(0)))
 
 
+class FailingStreamClient(FakeModelClient):
+    def __init__(self, exc: BaseException) -> None:
+        super().__init__([])
+        self.exc = exc
+
+    async def stream_response(self, **kwargs):
+        self.requests.append(
+            {
+                "input": kwargs.get("input_items", []),
+                "level": kwargs.get("level"),
+                "tools": kwargs.get("tools") or [],
+                "instructions": kwargs.get("instructions"),
+                "stream": True,
+                "previous_response_id": kwargs.get("previous_response_id"),
+            }
+        )
+        if False:
+            yield None
+        raise self.exc
+
+
 class LookAtRunner:
     def __init__(self, image_path: Path) -> None:
         self.image_path = image_path
@@ -143,6 +179,32 @@ class LookAtRunner:
                     "note": "inspect",
                 }
             ],
+        )
+
+    async def rerun(self, request: RerunRequest) -> PythonRunResult:
+        raise AssertionError("rerun should not be called")
+
+
+class SimpleRunner:
+    def __init__(self, *, interrupted: bool = False) -> None:
+        self.requests: list[PythonRunRequest] = []
+        self.interrupted = interrupted
+
+    async def run(self, request: PythonRunRequest) -> PythonRunResult:
+        self.requests.append(request)
+        return PythonRunResult(
+            script_id="scr_simple",
+            run_id="run_simple",
+            returncode=0,
+            stdout="simple\n",
+            stderr="",
+            timed_out=False,
+            interrupted=self.interrupted,
+            truncated=False,
+            run_log_path=request.cwd / "run.jsonl",
+            script_path=request.cwd / "script.py",
+            final_script_path=request.cwd / "final.py",
+            events=[],
         )
 
     async def rerun(self, request: RerunRequest) -> PythonRunResult:
@@ -486,7 +548,62 @@ async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path:
     follow_up = [event async for event in engine.run_turn(user_text="continue", thread_id=thread_id)]
 
     assert follow_up[-1]["type"] == "turn.completed"
-    assert "interrupted" in str(follow_client.requests[0]["input"])
+    assert "interrupted" not in str(follow_client.requests[0]["input"])
+    assert "continue" in str(follow_client.requests[0]["input"])
+
+
+@pytest.mark.asyncio
+async def test_responses_interrupted_partial_stream_adds_bridge_and_uses_full_replay(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    partial_client = PartialStreamClient(ModelStreamEvent(type="text_delta", text="I will call a tool"))
+    engine = AgentEngine(
+        config=config,
+        model_client=partial_client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    cancel_event = asyncio.Event()
+
+    async def collect() -> list[dict[str, object]]:
+        return [event async for event in engine.run_turn(user_text="start", cancel_event=cancel_event)]
+
+    task = asyncio.create_task(collect())
+    await partial_client.started.wait()
+    await partial_client.delivered.wait()
+    cancel_event.set()
+    events = await asyncio.wait_for(task, timeout=5)
+    thread_id = str(events[-1]["thread_id"])
+
+    follow_client = FakeModelClient(
+        [
+            {
+                "id": "resp_follow",
+                "output_text": "continued",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "continued"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine.model_client = follow_client
+    [event async for event in engine.run_turn(user_text="continue", thread_id=thread_id)]
+
+    assert follow_client.requests[0]["previous_response_id"] is None
+    request_input = follow_client.requests[0]["input"]
+    assert any(
+        item.get("role") == "assistant"
+        and "An assistant response did not complete" in message_item_text(item)
+        for item in request_input
+    )
+    assert request_input[-1]["role"] == "user"
+    assert "continue" in str(request_input[-1])
 
 
 @pytest.mark.asyncio
@@ -1021,7 +1138,190 @@ async def test_agent_persists_model_stream_error(tmp_path: Path) -> None:
     assert events[-1]["error_type"] == "RuntimeError"
     assert "FakeModelClient has no responses left" in events[-1]["message"]
     assert stored_events[-1]["type"] == "turn.error"
+    assert stored_events[-1]["retryable"] is False
     assert not any(event["type"] == "turn.completed" for event in stored_events)
+
+
+@pytest.mark.asyncio
+async def test_agent_marks_provider_network_errors_retryable(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    request = httpx.Request("POST", "https://example.com/v1/responses")
+    exc = httpx.ConnectError("network down", request=request)
+    engine = AgentEngine(
+        config=config,
+        model_client=FailingStreamClient(exc),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="try provider")]
+    stored_events = engine.thread_store.read(events[-1]["thread_id"])
+
+    assert events[-1]["type"] == "turn.error"
+    assert events[-1]["retryable"] is True
+    assert stored_events[-1]["retryable"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_retry_turn_retries_model_request_without_new_user_message(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    first_client = FailingStreamClient(httpx.ConnectError("network down", request=httpx.Request("POST", "https://example.com")))
+    engine = AgentEngine(
+        config=config,
+        model_client=first_client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    failed_events = [event async for event in engine.run_turn(user_text="try provider")]
+    thread_id = failed_events[-1]["thread_id"]
+    failed_input = first_client.requests[0]["input"]
+
+    retry_client = FakeModelClient(
+        [
+            {
+                "id": "resp_retry",
+                "output_text": "retried",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "retried"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine.model_client = retry_client
+    retry_events = [event async for event in engine.retry_turn(thread_id=thread_id)]
+    stored_events = engine.thread_store.read(thread_id)
+
+    assert retry_events[-1]["type"] == "turn.completed"
+    assert [event["type"] for event in stored_events].count("item.user") == 1
+    assert retry_client.requests[0]["input"] == failed_input
+    assert "try provider" in str(retry_client.requests[0]["input"])
+
+
+@pytest.mark.asyncio
+async def test_agent_retry_turn_resumes_pending_tool_call(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    runner = SimpleRunner()
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient(
+            [
+                {
+                    "id": "resp_final",
+                    "output_text": "done",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done"}],
+                        }
+                    ],
+                }
+            ]
+        ),
+        runner=runner,  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.thread_store.append(thread_id, "turn.started", turn_id="t1")
+    user_item = message_item("user", "run tool")
+    engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=user_item)
+    response_output = [
+        {
+            "type": "function_call",
+            "call_id": "call_retry",
+            "name": "run_python",
+            "arguments": json.dumps({"code": "print('retry')"}),
+        }
+    ]
+    engine.thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="t1",
+        model_api="responses",
+        response_id="resp_tool",
+        output=response_output,
+        usage={},
+        reasoning_text="",
+    )
+    engine.thread_store.append(
+        thread_id,
+        "turn.error",
+        turn_id="t1",
+        error_type="ConnectError",
+        message="network down",
+        retryable=True,
+    )
+
+    events = [event async for event in engine.retry_turn(thread_id=thread_id)]
+
+    assert any(event["type"] == "tool.output" for event in events)
+    assert events[-1]["type"] == "turn.completed"
+    assert len(runner.requests) == 1
+    assert len(engine.model_client.requests) == 1  # type: ignore[attr-defined]
+    assert engine.model_client.requests[0]["previous_response_id"] == "resp_tool"  # type: ignore[attr-defined]
+    request_input = engine.model_client.requests[0]["input"]  # type: ignore[attr-defined]
+    assert request_input[0]["type"] == "function_call_output"
+    assert request_input[0]["call_id"] == "call_retry"
+    assert user_item not in request_input
+    assert response_output[0] not in request_input
+
+
+def test_reconstruct_input_closes_interrupted_pending_tool_call(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.thread_store.append(thread_id, "turn.started", turn_id="t1")
+    user_item = message_item("user", "run tool")
+    engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=user_item)
+    response_output = [
+        {
+            "type": "function_call",
+            "call_id": "call_interrupted",
+            "name": "run_python",
+            "arguments": json.dumps({"code": "print(1)"}),
+        }
+    ]
+    engine.thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="t1",
+        output=response_output,
+    )
+    engine.thread_store.append(thread_id, "turn.interrupted", turn_id="t1", reason="user_interrupt")
+
+    reconstructed = engine._reconstruct_input(thread_id)
+
+    assert reconstructed[:2] == [user_item, *response_output]
+    assert [item.get("type") for item in reconstructed[-2:]] == [
+        "function_call_output",
+        "message",
+    ]
+    assert reconstructed[-1]["role"] == "assistant"
+    assert "A tool call did not produce a complete tool result" in message_item_text(reconstructed[-1])
+
+    messages = chat_messages(reconstructed, instructions=None, model=config.model_for_level(None))
+    assert [message["role"] for message in messages[-2:]] == ["tool", "assistant"]
 
 
 @pytest.mark.asyncio

@@ -37,6 +37,7 @@ from uv_agent.tui.app import (
     ImagePreviewPanel,
     PendingImage,
     PendingImagePreviewPanel,
+    RetryTurnButton,
     TranscriptCell,
     TranscriptScroll,
     ToolDetailsPanel,
@@ -186,6 +187,99 @@ class ErrorEngine(AgentEngine):
         }
 
 
+class RetryableErrorEngine(AgentEngine):
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+        self.calls: list[dict[str, object]] = []
+
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        self.calls.append({"kind": "run_turn", "user_text": user_text})
+        thread_id = thread_id or self.thread_store.create_thread("Retryable")
+        turn_id = f"turn_retry_{len(self.calls)}"
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        )
+        if len(self.calls) == 1:
+            error = self.thread_store.append(
+                thread_id,
+                "turn.error",
+                turn_id=turn_id,
+                error_type="ConnectError",
+                message="connection failed",
+                retryable=True,
+            )
+            yield {
+                "type": "turn.error",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "created_at": error.get("created_at"),
+                "completed_at": error.get("created_at"),
+                "error_type": "ConnectError",
+                "message": "connection failed",
+                "retryable": True,
+            }
+            return
+        self.thread_store.append(
+            thread_id,
+            "item.model_response",
+            turn_id=turn_id,
+            response_id="retry_ok",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Recovered."}],
+                }
+            ],
+            usage={},
+            reasoning_text="",
+        )
+        yield {"type": "assistant.delta", "thread_id": thread_id, "turn_id": turn_id, "text": "Recovered."}
+        self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text="Recovered.")
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": "Recovered."}
+
+    async def retry_turn(
+        self,
+        *,
+        thread_id: str,
+        level: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        self.calls.append({"kind": "retry_turn", "thread_id": thread_id})
+        turn_id = "turn_retry_success"
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id, retry=True)
+        self.thread_store.append(thread_id, "turn.retry", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.model_response",
+            turn_id=turn_id,
+            response_id="retry_ok",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Recovered."}],
+                }
+            ],
+            usage={},
+            reasoning_text="",
+        )
+        yield {"type": "assistant.delta", "thread_id": thread_id, "turn_id": turn_id, "text": "Recovered."}
+        self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text="Recovered.")
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": "Recovered."}
+
+
 class StableRoundEngine(AgentEngine):
     def __init__(self, engine: AgentEngine) -> None:
         self.__dict__.update(engine.__dict__)
@@ -295,6 +389,148 @@ class StableRoundEngine(AgentEngine):
             ],
             output_text="Done.",
             raw={"id": "resp_2"},
+            usage={},
+        )
+        self.thread_store.append(
+            thread_id,
+            "item.model_response",
+            turn_id=turn_id,
+            response_id=final_response.id,
+            output=final_response.output,
+            usage={},
+            reasoning_text="",
+        )
+        yield {"type": "model.response", "thread_id": thread_id, "turn_id": turn_id, "response": final_response}
+        self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text="Done.")
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": "Done."}
+
+
+class SteppedRoundEngine(AgentEngine):
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+        self.gates: dict[str, asyncio.Event] = {}
+        self.reached: dict[str, asyncio.Event] = {}
+
+    def _gate(self, name: str) -> asyncio.Event:
+        return self.gates.setdefault(name, asyncio.Event())
+
+    def _reached(self, name: str) -> asyncio.Event:
+        return self.reached.setdefault(name, asyncio.Event())
+
+    async def _wait_for_step(self, name: str) -> None:
+        self._reached(name).set()
+        await self._gate(name).wait()
+
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        thread_id = thread_id or self.thread_store.create_thread("Stepped round")
+        turn_id = "turn_stepped"
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        )
+        yield {"type": "assistant.reasoning_delta", "thread_id": thread_id, "turn_id": turn_id, "text": "plan"}
+        await self._wait_for_step("reasoning")
+
+        output = [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will inspect."}],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_stepped",
+                "name": "run_python",
+                "arguments": '{"code":"print(7)"}',
+            },
+        ]
+        yield {"type": "assistant.delta", "thread_id": thread_id, "turn_id": turn_id, "text": "I will inspect."}
+        response = ModelResponse(
+            id="resp_stepped_1",
+            output=output,
+            output_text="I will inspect.",
+            raw={"id": "resp_stepped_1"},
+            usage={},
+            reasoning_text="plan",
+        )
+        self.thread_store.append(
+            thread_id,
+            "item.model_response",
+            turn_id=turn_id,
+            response_id=response.id,
+            output=response.output,
+            usage={},
+            reasoning_text=response.reasoning_text,
+        )
+        yield {"type": "model.response", "thread_id": thread_id, "turn_id": turn_id, "response": response}
+        await self._wait_for_step("model_response")
+
+        yield {
+            "type": "tool.started",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "call": output[1],
+            "tool_call_index": 0,
+        }
+        await self._wait_for_step("tool_started")
+
+        payload = {
+            "script_id": "scr_stepped",
+            "run_id": "run_stepped",
+            "returncode": 0,
+            "timed_out": False,
+            "interrupted": False,
+            "truncated": False,
+            "stdout": "ok\n",
+            "stderr": "",
+            "events": [],
+            "run_log_path": "",
+        }
+        self.thread_store.append(
+            thread_id,
+            "item.runner_result",
+            turn_id=turn_id,
+            call_id="call_stepped",
+            result=payload,
+        )
+        self.thread_store.append(
+            thread_id,
+            "item.tool_output",
+            turn_id=turn_id,
+            item={"type": "function_call_output", "call_id": "call_stepped", "output": "{}"},
+        )
+        yield {
+            "type": "tool.output",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "call": output[1],
+            "tool_call_index": 0,
+            "output": {"type": "function_call_output", "call_id": "call_stepped", "output": __import__("json").dumps(payload)},
+        }
+        await self._wait_for_step("tool_output")
+
+        yield {"type": "assistant.delta", "thread_id": thread_id, "turn_id": turn_id, "text": "Done."}
+        final_response = ModelResponse(
+            id="resp_stepped_2",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done."}],
+                }
+            ],
+            output_text="Done.",
+            raw={"id": "resp_stepped_2"},
             usage={},
         )
         self.thread_store.append(
@@ -2994,6 +3230,70 @@ async def test_tui_renders_persisted_turn_error(
 
 
 @pytest.mark.asyncio
+async def test_tui_retryable_turn_error_keeps_retry_button(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = RetryableErrorEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("retry me")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        buttons = app.query(RetryTurnButton).nodes
+        assert len(buttons) == 1
+        assert app.busy is False
+        assert app._last_status == app._text("error")
+
+        await pilot.click(buttons[0])
+        await pilot.pause(0.2)
+
+        transcript_text = "\n".join(app._cell_text(cell) for cell in app.query(TranscriptCell).nodes)
+        assert engine.calls == [
+            {"kind": "run_turn", "user_text": "retry me"},
+            {"kind": "retry_turn", "thread_id": app.thread_id},
+        ]
+        user_events = [event for event in engine.thread_store.read(app.thread_id) if event["type"] == "item.user"]
+        assert len(user_events) == 1
+        assert "Recovered." in transcript_text
+        assert app.query(RetryTurnButton).nodes == []
+
+
+@pytest.mark.asyncio
+async def test_tui_non_retryable_turn_error_blocks_follow_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = ErrorEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("bad turn")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        assert app.query(RetryTurnButton).nodes == []
+        assert app._thread_has_blocking_error(app.thread_id)
+
+        composer.insert("follow up")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+
+        user_events = [event for event in engine.thread_store.read(app.thread_id) if event["type"] == "item.user"]
+        assert len(user_events) == 1
+
+
+@pytest.mark.asyncio
 async def test_tui_clear_while_current_thread_runs_keeps_old_thread_backgrounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3126,6 +3426,113 @@ async def test_tui_resume_running_thread_rebinds_live_cells(
         assert len(app.query(".tool_pending").nodes) == 1
         cell = app.query_one(ExpandableTranscriptCell)
         assert "print(1)" in cell.details
+
+
+@pytest.mark.asyncio
+async def test_tui_resume_backgrounded_thread_replays_live_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = SteppedRoundEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("inspect")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        thread_id = app.thread_id
+        assert thread_id is not None
+
+        await engine._reached("reasoning").wait()
+        app._handle_command("/clear")
+        await pilot.pause()
+        assert app.thread_id is None
+
+        engine._gate("reasoning").set()
+        await engine._reached("model_response").wait()
+        engine._gate("model_response").set()
+        await engine._reached("tool_started").wait()
+        await pilot.pause()
+
+        app._resume_thread(thread_id)
+        await pilot.pause()
+
+        assert app.thread_id == thread_id
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        text = "\n".join(app._cell_text(child) for child in transcript.children if isinstance(child, TranscriptCell))
+        assert "plan" in text
+        assert "I will inspect." in text
+        assert "print(7)" in text
+        assert "Done." not in text
+
+        engine._gate("tool_started").set()
+        await engine._reached("tool_output").wait()
+        await pilot.pause()
+
+        text = "\n".join(app._cell_text(child) for child in transcript.children if isinstance(child, TranscriptCell))
+        assert "run_stepped" in text
+
+        engine._gate("tool_output").set()
+        await pilot.pause(0.2)
+
+
+@pytest.mark.asyncio
+async def test_tui_resume_after_background_tool_output_does_not_duplicate_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = SteppedRoundEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("inspect")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        thread_id = app.thread_id
+        assert thread_id is not None
+
+        await engine._reached("reasoning").wait()
+        app._handle_command("/clear")
+        await pilot.pause()
+        engine._gate("reasoning").set()
+        await engine._reached("model_response").wait()
+        engine._gate("model_response").set()
+        await engine._reached("tool_started").wait()
+        engine._gate("tool_started").set()
+        await engine._reached("tool_output").wait()
+        await pilot.pause()
+
+        app._resume_thread(thread_id)
+        await pilot.pause()
+
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        result_cells = [
+            child
+            for child in transcript.children
+            if isinstance(child, ExpandableTranscriptCell) and "run_stepped" in child.details
+        ]
+        assistant_cells = [
+            child
+            for child in transcript.children
+            if isinstance(child, TranscriptCell)
+            and child.has_class("assistant")
+            and child.copy_text == "I will inspect."
+        ]
+        text = "\n".join(app._cell_text(child) for child in transcript.children if isinstance(child, TranscriptCell))
+        assert len(result_cells) == 1
+        assert len(assistant_cells) == 1
+        assert "Done." not in text
+
+        engine._gate("tool_output").set()
+        await pilot.pause(0.2)
 
 
 @pytest.mark.asyncio
