@@ -13,6 +13,12 @@ project evolves.
 
 ## Install And Run
 
+> **Prerequisites**  
+> You need [**uv**](https://docs.astral.sh/uv/getting-started/installation/) and
+> [**ripgrep**](https://github.com/BurntSushi/ripgrep#installation) installed
+> on your system. uv is the Python package and project manager used to run the
+> agent; ripgrep is used for fast file-content searches inside the workspace.
+
 Run the latest published package:
 
 ```powershell
