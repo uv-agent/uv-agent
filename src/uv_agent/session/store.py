@@ -34,6 +34,7 @@ VISIBLE_HISTORY_EVENT_TYPES = {
     "item.compaction",
     "turn.interrupted",
     "turn.error",
+    "turn.retry",
 }
 
 

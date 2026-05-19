@@ -54,6 +54,16 @@ def format_error(exc: BaseException) -> DisplayError:
     return DisplayError(title=exc.__class__.__name__, message=str(exc) or repr(exc))
 
 
+def is_retryable_provider_error(exc: BaseException) -> bool:
+    """Return True for transient provider/network failures that can be retried."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return status_code == 429 or 500 <= status_code < 600
+    if isinstance(exc, (httpx.TimeoutException, httpx.RequestError)):
+        return True
+    return False
+
+
 def error_markup(error: DisplayError) -> str:
     lines = [f"[bold red]{error.title}[/bold red] {escape_markup(error.message)}"]
     if error.hint:
