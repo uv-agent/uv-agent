@@ -13,6 +13,7 @@ from uv_agent_runtime import (
     apply_patch_any,
     ask,
     check_command,
+    clear_codequery_cache,
     compare_text,
     connect_declared,
     connect_named,
@@ -22,12 +23,15 @@ from uv_agent_runtime import (
     emit_progress,
     emit_result,
     enter_dir,
+    find_files,
+    find_symbols,
     list_declared_servers,
     list_files,
     look_at,
     make_unified_diff,
     normalize_text,
     path_info,
+    query_code,
     read_json,
     read_text,
     read_text_lossless,
@@ -36,7 +40,9 @@ from uv_agent_runtime import (
     run_command,
     run_process_text,
     saved_scripts,
+    search_text,
     snapshot_files,
+    supported_symbol_languages,
     thread_digest,
     workspace_transaction,
     write_text_lossless,
@@ -650,3 +656,187 @@ def test_runtime_emit_event_writes_complete_lines_from_threads(
     event_ids = [event["_uv_agent_event_id"] for event in events]
     assert all(event_id.startswith("evt_") for event_id in event_ids)
     assert len(set(event_ids)) == len(event_ids)
+
+
+# ---- codesearch / codequery -----------------------------------------------
+
+import shutil
+
+requires_rg = pytest.mark.skipif(
+    shutil.which("rg") is None,
+    reason="ripgrep (`rg`) not on PATH",
+)
+
+
+@pytest.fixture
+def codequery_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    monkeypatch.setenv("UV_AGENT_HOME", str(home))
+    # Reset in-process LRU caches so language/parser/query objects are rebuilt
+    # against the freshly created on-disk cache directory.
+    from uv_agent_runtime import codequery
+
+    codequery._language.cache_clear()
+    codequery._parser.cache_clear()
+    codequery._query.cache_clear()
+    yield home
+
+
+def _make_python_workspace(root: Path) -> None:
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    (root / "src" / "a.py").write_text(
+        "def hello():\n    return 1\n\nclass Foo:\n    def bar(self):\n        return hello()\n",
+        encoding="utf-8",
+    )
+    (root / "src" / "b.py").write_text(
+        "def world():\n    return 42\n",
+        encoding="utf-8",
+    )
+    (root / "README.md").write_text("# project\n", encoding="utf-8")
+
+
+@requires_rg
+def test_codesearch_find_files_and_search_text(tmp_path: Path) -> None:
+    _make_python_workspace(tmp_path)
+
+    files = find_files(tmp_path, globs=["*.py"])
+    assert sorted(p.replace("\\", "/") for p in files) == ["src/a.py", "src/b.py"]
+
+    hits = search_text("hello", root=tmp_path, file_types=["py"])
+    paths = [h.path.replace("\\", "/") for h in hits]
+    lines = sorted((p, h.line) for p, h in zip(paths, hits))
+    assert ("src/a.py", 1) in lines
+    assert ("src/a.py", 6) in lines
+    assert all(h.text and h.submatches for h in hits)
+
+
+@requires_rg
+def test_codesearch_search_text_fixed_string_and_max_total(tmp_path: Path) -> None:
+    _make_python_workspace(tmp_path)
+    hits = search_text("def ", root=tmp_path, fixed_string=True, max_total=2)
+    assert len(hits) == 2
+    for hit in hits:
+        assert hit.line >= 1
+        assert hit.submatches[0].text == "def "
+
+
+@requires_rg
+def test_codequery_supported_languages_includes_python() -> None:
+    langs = supported_symbol_languages()
+    assert "python" in langs
+    assert "rust" in langs
+
+
+@requires_rg
+def test_codequery_find_symbols_returns_python_definitions(
+    tmp_path: Path,
+    codequery_home: Path,
+) -> None:
+    _make_python_workspace(tmp_path)
+
+    symbols = find_symbols(tmp_path)
+    names = {(s.kind, s.name, s.path.replace("\\", "/")) for s in symbols}
+    assert ("function", "hello", "src/a.py") in names
+    assert ("class", "Foo", "src/a.py") in names
+    assert ("function", "bar", "src/a.py") in names
+    assert ("function", "world", "src/b.py") in names
+
+    # Cache was populated on disk under the isolated home.
+    assert (codequery_home / "cache" / "codequery" / "index.sqlite").exists()
+
+
+@requires_rg
+def test_codequery_find_symbols_filters_by_kind_and_name(
+    tmp_path: Path,
+    codequery_home: Path,
+) -> None:
+    _make_python_workspace(tmp_path)
+    only_class = find_symbols(tmp_path, kinds=["class"])
+    assert [s.name for s in only_class] == ["Foo"]
+
+    named = find_symbols(tmp_path, name_pattern=r"^h")
+    assert [s.name for s in named] == ["hello"]
+
+
+@requires_rg
+def test_codequery_query_code_runs_arbitrary_tree_sitter_query(
+    tmp_path: Path,
+    codequery_home: Path,
+) -> None:
+    _make_python_workspace(tmp_path)
+    captures = query_code(
+        "(call function: (identifier) @call)",
+        language="python",
+        root=tmp_path,
+    )
+    assert len(captures) == 1
+    cap = captures[0]
+    assert cap.name == "call"
+    assert cap.text == "hello"
+    assert cap.path.replace("\\", "/") == "src/a.py"
+
+
+@requires_rg
+def test_codequery_cache_is_incremental(
+    tmp_path: Path,
+    codequery_home: Path,
+) -> None:
+    import sqlite3
+
+    _make_python_workspace(tmp_path)
+    find_symbols(tmp_path)
+    db = codequery_home / "cache" / "codequery" / "index.sqlite"
+
+    def read_stats() -> dict[str, tuple[int, int]]:
+        conn = sqlite3.connect(db)
+        try:
+            return {
+                rel: (mtime, size)
+                for rel, mtime, size in conn.execute(
+                    "SELECT rel_path, mtime_ns, size FROM files"
+                )
+            }
+        finally:
+            conn.close()
+
+    before = read_stats()
+    assert before, "cache should contain at least one file row"
+
+    # Re-running without changes must reuse cached rows verbatim.
+    find_symbols(tmp_path)
+    assert read_stats() == before
+
+    # Mutating one file invalidates only that file's row.
+    target = tmp_path / "src" / "b.py"
+    target.write_text(
+        "def world():\n    return 0\n\ndef extra():\n    return None\n",
+        encoding="utf-8",
+    )
+    symbols = find_symbols(tmp_path)
+    names = {s.name for s in symbols if s.path.endswith("b.py")}
+    assert {"world", "extra"} <= names
+
+    after = read_stats()
+    rel_b = next(p for p in after if p.endswith("b.py"))
+    rel_a = next(p for p in after if p.endswith("a.py"))
+    assert after[rel_b] != before[rel_b]
+    assert after[rel_a] == before[rel_a]
+
+    # Deleting a file prunes the row on the next call.
+    target.unlink()
+    find_symbols(tmp_path)
+    pruned = read_stats()
+    assert all(not p.endswith("b.py") for p in pruned)
+
+
+@requires_rg
+def test_codequery_clear_cache_drops_rows(
+    tmp_path: Path,
+    codequery_home: Path,
+) -> None:
+    _make_python_workspace(tmp_path)
+    find_symbols(tmp_path)
+    removed = clear_codequery_cache(root=tmp_path)
+    assert removed > 0
+    # Second clear has nothing to remove.
+    assert clear_codequery_cache(root=tmp_path) == 0

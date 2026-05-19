@@ -208,6 +208,12 @@ from uv_agent_runtime import (
     list_declared_servers,
     connect_named,
     connect_declared,
+    search_text,
+    find_files,
+    find_symbols,
+    query_code,
+    supported_symbol_languages,  # list languages with a built-in tree-sitter symbol query
+    clear_codequery_cache,  # drop the tree-sitter capture cache (root=path scopes the wipe)
 )
 </imports>
 <helper name="enter_dir">
@@ -407,6 +413,47 @@ print(list_declared_servers())
 with connect_named("server-name") as client:
     client.initialize()
     print(client.list_tools())
+]]></example>
+</helper>
+<helper name="search_text">
+<description>Use for grep-like content search across the workspace. It wraps the system `rg` (ripgrep) binary, honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `fixed_string=True` to disable regex, and `max_count_per_file`/`max_total` to bound output.</description>
+<example><![CDATA[
+from uv_agent_runtime import search_text
+
+for hit in search_text(r"def\\s+handle_\\w+", root="src", file_types=["py"], max_total=20):
+    print(hit.path, hit.line, hit.text)
+]]></example>
+</helper>
+<helper name="find_files">
+<description>Use to enumerate workspace files honoring .gitignore via `rg --files`. It is much faster than Path.rglob on large repositories and accepts the same `globs`, `file_types`, `hidden`, and `no_ignore` controls as search_text.</description>
+<example><![CDATA[
+from uv_agent_runtime import find_files
+
+for path in find_files("src", globs=["*.py", "!**/migrations/**"]):
+    print(path)
+]]></example>
+</helper>
+<helper name="find_symbols">
+<description>Use to locate function/class/method/struct/interface/... definitions across the workspace via tree-sitter. Results are cached per file in ~/.uv-agent/cache/codequery so repeat calls only re-parse files whose (mtime, size) changed. Filter with `languages=[...]`, `kinds=["function","class","method"]`, or `name_pattern=r"^test_"`. Built-in language support: see supported_symbol_languages().</description>
+<example><![CDATA[
+from uv_agent_runtime import find_symbols, supported_symbol_languages
+
+print(supported_symbol_languages())
+for sym in find_symbols("src", kinds=["class"], name_pattern=r"Engine$"):
+    print(sym.path, sym.start_row, sym.name)
+]]></example>
+</helper>
+<helper name="query_code">
+<description>Use to run a custom tree-sitter query (S-expression text) over a single language across the workspace. Each capture in the query becomes a Capture with path, position, and source text. Results are cached identically to find_symbols and keyed by query SHA, so repeated identical queries are nearly free.</description>
+<example><![CDATA[
+from uv_agent_runtime import query_code
+
+for cap in query_code(
+    "(call function: (attribute attribute: (identifier) @method))",
+    language="python",
+    root="src",
+):
+    print(cap.path, cap.start_row, cap.text)
 ]]></example>
 </helper>
 </runtime_helpers>"""

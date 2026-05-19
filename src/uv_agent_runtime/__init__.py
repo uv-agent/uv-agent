@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+from .codequery import (
+    Capture,
+    Symbol,
+    clear_cache as clear_codequery_cache,
+    find_symbols,
+    query_code,
+    supported_symbol_languages,
+)
+from .codesearch import (
+    Match,
+    RipgrepNotFoundError,
+    Submatch,
+    find_files,
+    search_text,
+)
 from .cwd import enter_dir
 from .events import emit_event, emit_progress, emit_result
 from .files import list_files, read_json, read_text, resolve_workspace_path, write_json, write_text
@@ -40,12 +55,17 @@ from .threads import list_thread_digests, thread_digest
 from .vision import look_at
 
 __all__ = [
+    "Capture",
     "CommandTextResult",
+    "Match",
     "McpResult",
     "PatchResult",
     "PathInfo",
     "ReplacementResult",
+    "RipgrepNotFoundError",
     "Snapshot",
+    "Submatch",
+    "Symbol",
     "McpStdioClient",
     "SubagentResult",
     "TextComparison",
@@ -54,6 +74,7 @@ __all__ = [
     "apply_patch_any",
     "ask",
     "check_command",
+    "clear_codequery_cache",
     "compare_text",
     "connect_declared",
     "connect_named",
@@ -63,6 +84,8 @@ __all__ = [
     "emit_progress",
     "emit_result",
     "enter_dir",
+    "find_files",
+    "find_symbols",
     "list_declared_servers",
     "list_files",
     "list_thread_digests",
@@ -70,6 +93,7 @@ __all__ = [
     "make_unified_diff",
     "normalize_text",
     "path_info",
+    "query_code",
     "read_json",
     "read_text",
     "read_text_lossless",
@@ -79,7 +103,9 @@ __all__ = [
     "run_command",
     "run_process_text",
     "saved_scripts",
+    "search_text",
     "snapshot_files",
+    "supported_symbol_languages",
     "thread_digest",
     "workspace_transaction",
     "write_json",
