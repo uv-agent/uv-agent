@@ -90,7 +90,7 @@ class WorkspaceRuleIndex:
             return ""
         lines = [
             "<workspace_rule_index>",
-            f"Rule files were found under the active {label}. Contents load automatically when entering or working in the matching directory.",
+            f"Rule files were found under the active {label}. Use enter_dir for a matching directory to load unseen rule contents through the tool result.",
         ]
         for path in self.paths:
             lines.append(f"- {display_path(path, root=self.root)}")

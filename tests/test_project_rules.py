@@ -81,6 +81,7 @@ def test_workspace_rule_index_can_render_active_working_directory_label(tmp_path
     rendered = discover_workspace_rule_index(project).render(label="working directory")
 
     assert "active working directory" in rendered
+    assert "Use enter_dir" in rendered
 
 
 def test_load_directory_rules_only_loads_current_directory(tmp_path: Path) -> None:
@@ -92,6 +93,7 @@ def test_load_directory_rules_only_loads_current_directory(tmp_path: Path) -> No
 
     context = load_directory_rules(project, root=project)
 
-    rendered = context.render(root=project, heading="directory_rules_loaded")
+    rendered = context.render(root=project)
+    assert "<workspace_rules>" in rendered
     assert "root" in rendered
     assert "child" not in rendered
