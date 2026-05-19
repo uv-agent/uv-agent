@@ -222,6 +222,14 @@ from uv_agent_runtime import (
     clear_codequery_cache,  # drop the tree-sitter capture cache (root=path scopes the wipe)
 )
 </imports>
+<helper_selection>
+<rule>Prefer the smallest helper that directly matches the task. When two helpers both work, choose the one requiring less generated code, less parsing, and a smaller read/write surface.</rule>
+<rule>For focused text edits, prefer replace_exact for small exact replacements and apply_patch for localized multi-line edits. Use read_text_lossless/write_text_lossless when rewriting generated content, preserving text metadata matters, or the edit spans a large structured section.</rule>
+<rule>For discovery, prefer find_files/search_text/find_symbols over manual directory walking, broad file reads, or ad hoc parsing.</rule>
+<rule>For process execution, prefer run_process_text over raw subprocess unless advanced subprocess control is needed.</rule>
+<rule>Use workspace_transaction or snapshot_files for risky or multi-file edits, not for every small change.</rule>
+<rule>Use ask for bounded independent work; handle the immediate critical path locally.</rule>
+</helper_selection>
 <helper name="enter_dir">
 <description>Use early when the task belongs in a repository, subdirectory, or path discovered during execution. It changes the Python cwd, persists that cwd for later runs in the thread, and may load directory rules.</description>
 <example><![CDATA[
@@ -248,7 +256,7 @@ look_at("screenshots/failure.png", note="inspect failing UI state")
 ]]></example>
 </helper>
 <helper name="workspace_transaction">
-<description>Use around multi-file edits, generated transformations, or risky experiments. It snapshots selected files and restores them automatically if the block raises.</description>
+<description>Use around risky edits, multi-file changes, generated transformations, or experiments that may need automatic rollback.</description>
 <example><![CDATA[
 from uv_agent_runtime import apply_patch, workspace_transaction
 
@@ -291,7 +299,7 @@ print(file.newline, file.final_newline, file.bom)
 ]]></example>
 </helper>
 <helper name="write_text_lossless">
-<description>Use when writing generated text while preserving or explicitly choosing text metadata. Passing like=read_text_lossless(path) preserves encoding, BOM, newline style, and final newline policy.</description>
+<description>Use when writing generated or substantially transformed text while preserving or explicitly choosing text metadata. Passing like=read_text_lossless(path) preserves encoding, BOM, newline style, and final newline policy.</description>
 <example><![CDATA[
 from uv_agent_runtime import read_text_lossless, write_text_lossless
 
@@ -317,7 +325,7 @@ text = normalize_text("a\r\nb", eol="lf", final_newline=True)
 ]]></example>
 </helper>
 <helper name="replace_exact">
-<description>Use for small exact replacements where preserving file text metadata matters. It rejects empty old text and raises with context when the target text is missing.</description>
+<description>Use for small exact text replacements. It preserves file text metadata, rejects empty old text, and raises with context when the target text is missing.</description>
 <example><![CDATA[
 from uv_agent_runtime import replace_exact
 
@@ -334,7 +342,7 @@ print(info.kind, info.is_relative_to_base)
 ]]></example>
 </helper>
 <helper name="apply_patch">
-<description>Use for focused file edits with uv_agent_runtime's custom patch envelope. It is not standard unified diff syntax; every update hunk line must start with space, -, or +, and the patch fails without partial writes if context is missing.</description>
+<description>Use for small to medium localized edits where a patch is clearer than reconstructing file text. It validates context before writing and avoids partial writes; patch hunks use the uv-agent patch envelope shown below.</description>
 <example><![CDATA[
 from uv_agent_runtime import apply_patch
 
@@ -375,7 +383,7 @@ print(make_unified_diff("old\n", "new\n", path="src/app.py"))
 ]]></example>
 </helper>
 <helper name="run_process_text">
-<description>Use to run external commands with explicit stdout/stderr decoding, env patching, and timeout control. It avoids relying on terminal default encodings.</description>
+<description>Use to run external commands with explicit stdout/stderr decoding, env patching, and timeout control. Prefer it over raw subprocess for ordinary command execution.</description>
 <example><![CDATA[
 from uv_agent_runtime import run_process_text
 
@@ -422,7 +430,7 @@ with connect_named("server-name") as client:
 ]]></example>
 </helper>
 <helper name="search_text">
-<description>Use for grep-like content search across the workspace. It wraps the system `rg` (ripgrep) binary, honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `fixed_string=True` to disable regex, and `max_count_per_file`/`max_total` to bound output.</description>
+<description>Use for grep-like content search across the workspace instead of broad file reads or manual scanning. It wraps the system `rg` (ripgrep), honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `fixed_string=True` to disable regex, and `max_count_per_file`/`max_total` to bound output.</description>
 <example><![CDATA[
 from uv_agent_runtime import search_text
 
@@ -431,7 +439,7 @@ for hit in search_text(r"def\\s+handle_\\w+", root="src", file_types=["py"], max
 ]]></example>
 </helper>
 <helper name="find_files">
-<description>Use to enumerate workspace files honoring .gitignore via `rg --files`. It is much faster than Path.rglob on large repositories and accepts the same `globs`, `file_types`, `hidden`, and `no_ignore` controls as search_text.</description>
+<description>Use to enumerate workspace files honoring .gitignore via `rg --files` instead of manual directory walking. It is much faster than Path.rglob on large repositories and accepts the same `globs`, `file_types`, `hidden`, and `no_ignore` controls as search_text.</description>
 <example><![CDATA[
 from uv_agent_runtime import find_files
 

@@ -2068,7 +2068,15 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "snapshot_files" in turn_context
     assert "restore_snapshot" in turn_context
     assert "run_process_text" in turn_context
-    assert "custom patch envelope" in turn_context
+    assert "<helper_selection>" in turn_context
+    assert "Prefer the smallest helper that directly matches the task" in turn_context
+    assert "replace_exact for small exact replacements" in turn_context
+    assert "apply_patch for localized multi-line edits" in turn_context
+    assert "write_text_lossless when rewriting generated content" in turn_context
+    assert "prefer find_files/search_text/find_symbols" in turn_context
+    assert "prefer run_process_text over raw subprocess" in turn_context
+    assert "Use ask for bounded independent work" in turn_context
+    assert "uv-agent patch envelope shown below" in turn_context
     assert turn_context.count("<description>") >= 18
     assert turn_context.count("<example><![CDATA[") >= 18
     assert '<helper name="replace_exact">' in turn_context
