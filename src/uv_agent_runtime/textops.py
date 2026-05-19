@@ -1,0 +1,566 @@
+from __future__ import annotations
+
+import difflib
+import os
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+from unidiff import PatchSet
+from unidiff.patch import PatchedFile
+
+from .files import resolve_workspace_path
+from .patch import PatchResult, apply_patch
+
+
+@dataclass(frozen=True)
+class PathInfo:
+    path: str
+    exists: bool
+    kind: Literal["file", "dir", "missing", "other"]
+    size: int | None
+    cwd: str
+    base: str | None
+    is_absolute: bool
+    is_relative_to_base: bool | None
+
+
+@dataclass(frozen=True)
+class TextFile:
+    path: str
+    text: str
+    encoding: str
+    newline: Literal["lf", "crlf", "cr", "mixed", "none"]
+    final_newline: bool
+    bom: bool
+
+
+@dataclass(frozen=True)
+class TextComparison:
+    equal: bool
+    kind: Literal["equal", "content", "eol", "final_newline"]
+    message: str
+    first_difference_line: int | None = None
+    left: str | None = None
+    right: str | None = None
+
+
+@dataclass(frozen=True)
+class ReplacementResult:
+    path: str
+    replacements: int
+    before: TextFile
+    after: TextFile
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    root: str
+    files: dict[str, bytes | None]
+
+
+@dataclass(frozen=True)
+class CommandTextResult:
+    args: list[str]
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def path_info(path: str | Path, *, base: str | Path | None = None) -> PathInfo:
+    """Return resolved path metadata without mutating the filesystem."""
+
+    resolved = resolve_workspace_path(path)
+    kind: Literal["file", "dir", "missing", "other"]
+    if resolved.is_file():
+        kind = "file"
+    elif resolved.is_dir():
+        kind = "dir"
+    elif resolved.exists():
+        kind = "other"
+    else:
+        kind = "missing"
+    size = resolved.stat().st_size if kind == "file" else None
+    resolved_base = resolve_workspace_path(base) if base is not None else None
+    is_relative = None
+    if resolved_base is not None:
+        try:
+            resolved.relative_to(resolved_base)
+            is_relative = True
+        except ValueError:
+            is_relative = False
+    return PathInfo(
+        path=str(resolved),
+        exists=resolved.exists(),
+        kind=kind,
+        size=size,
+        cwd=str(Path.cwd().resolve()),
+        base=str(resolved_base) if resolved_base is not None else None,
+        is_absolute=Path(path).is_absolute(),
+        is_relative_to_base=is_relative,
+    )
+
+
+def read_text_lossless(path: str | Path, *, encoding: str = "utf-8") -> TextFile:
+    """Read text while preserving newline, BOM, and final-newline metadata."""
+
+    resolved = resolve_workspace_path(path)
+    raw = resolved.read_bytes()
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig" if encoding.lower().replace("_", "-") == "utf-8" else encoding)
+    return TextFile(
+        path=str(resolved),
+        text=text,
+        encoding=encoding,
+        newline=_detect_newline_style(text),
+        final_newline=text.endswith(("\n", "\r")),
+        bom=bom,
+    )
+
+
+def write_text_lossless(
+    path: str | Path,
+    text: str,
+    *,
+    like: TextFile | str | Path | None = None,
+    encoding: str | None = None,
+    newline: Literal["lf", "crlf", "cr", "none"] | None = None,
+    final_newline: bool | None = None,
+    bom: bool | None = None,
+    atomic: bool = True,
+) -> Path:
+    """Write text with explicit or source-derived encoding/newline metadata."""
+
+    resolved = resolve_workspace_path(path)
+    template = _coerce_text_file(like) if like is not None else None
+    chosen_encoding = encoding or (template.encoding if template else "utf-8")
+    chosen_newline = newline or (_single_newline_style(template.newline) if template else None)
+    chosen_final_newline = final_newline if final_newline is not None else template.final_newline if template else None
+    chosen_bom = template.bom if bom is None and template else bool(bom)
+    if bom is not None:
+        chosen_bom = bom
+
+    normalized = normalize_text(text, eol=None if chosen_newline == "none" else chosen_newline, final_newline=chosen_final_newline)
+    data = normalized.encode(chosen_encoding)
+    if chosen_bom and chosen_encoding.lower().replace("_", "-") == "utf-8" and not data.startswith(b"\xef\xbb\xbf"):
+        data = b"\xef\xbb\xbf" + data
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    if atomic:
+        _atomic_write_bytes(resolved, data)
+    else:
+        resolved.write_bytes(data)
+    return resolved
+
+
+def compare_text(
+    left: str | TextFile,
+    right: str | TextFile,
+    *,
+    ignore_eol: bool = False,
+    ignore_final_newline: bool = False,
+) -> TextComparison:
+    """Compare two text values and classify common newline-only differences."""
+
+    left_text = left.text if isinstance(left, TextFile) else left
+    right_text = right.text if isinstance(right, TextFile) else right
+    if left_text == right_text:
+        return TextComparison(True, "equal", "texts are identical")
+    normalized_left = left_text
+    normalized_right = right_text
+    if ignore_eol:
+        normalized_left = normalize_text(normalized_left, eol="lf")
+        normalized_right = normalize_text(normalized_right, eol="lf")
+    if ignore_final_newline:
+        normalized_left = normalized_left.rstrip("\r\n")
+        normalized_right = normalized_right.rstrip("\r\n")
+    if normalized_left == normalized_right:
+        if _strip_final_newline(left_text) == _strip_final_newline(right_text):
+            return TextComparison(False, "final_newline", "texts differ only by final newline")
+        return TextComparison(False, "eol", "texts differ only by newline representation")
+    line, left_line, right_line = _first_line_difference(normalized_left, normalized_right)
+    return TextComparison(False, "content", "texts differ by content", line, left_line, right_line)
+
+
+def normalize_text(
+    text: str,
+    *,
+    eol: Literal["lf", "crlf", "cr"] | None = None,
+    final_newline: bool | None = None,
+) -> str:
+    """Normalize EOL style and final newline policy for generated text."""
+
+    if eol is None:
+        normalized = text
+    elif eol == "lf":
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    elif eol == "crlf":
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+    elif eol == "cr":
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r")
+    else:
+        raise ValueError(f"unsupported eol style: {eol!r}")
+    if final_newline is True and not normalized.endswith(("\n", "\r")):
+        normalized += _final_newline_for_text(normalized, eol)
+    elif final_newline is False:
+        normalized = normalized.rstrip("\r\n")
+    return normalized
+
+
+def replace_exact(path: str | Path, old: str, new: str, *, count: int = 1) -> ReplacementResult:
+    """Replace exact text in a file, preserving its original text metadata."""
+
+    if not old:
+        raise ValueError("old text must not be empty")
+    if count < 1:
+        raise ValueError("count must be >= 1")
+    before = read_text_lossless(path)
+    found = before.text.count(old)
+    if found < count:
+        context = _missing_context(before.text, old)
+        raise ValueError(f"expected at least {count} occurrence(s), found {found}.{context}")
+    after_text = before.text.replace(old, new, count)
+    write_text_lossless(path, after_text, like=before)
+    after = read_text_lossless(path)
+    return ReplacementResult(path=after.path, replacements=count, before=before, after=after)
+
+
+def make_unified_diff(
+    before: str,
+    after: str,
+    *,
+    path: str | None = None,
+    context: int = 3,
+) -> str:
+    """Create a unified diff from two text values."""
+
+    label = path or "text"
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{label}",
+            tofile=f"b/{label}",
+            n=context,
+        )
+    )
+
+
+def apply_patch_any(
+    patch: str,
+    *,
+    cwd: str | Path | None = None,
+    format: Literal["auto", "apply_patch", "unified"] = "auto",
+    dry_run: bool = False,
+    check: bool = True,
+) -> PatchResult:
+    """Apply either uv-agent patch envelopes or simple unified-diff patches."""
+
+    selected = _detect_patch_format(patch) if format == "auto" else format
+    if selected == "apply_patch":
+        if dry_run:
+            return _dry_run_apply_patch(patch, cwd=cwd, check=check)
+        return apply_patch(patch, cwd=cwd, check=check)
+    if selected == "unified":
+        envelope = convert_patch(patch, from_format="unified", to_format="apply_patch")
+        if dry_run:
+            return _dry_run_apply_patch(envelope, cwd=cwd, check=check)
+        return apply_patch(envelope, cwd=cwd, check=check)
+    raise ValueError(f"unsupported patch format: {format!r}")
+
+
+def convert_patch(
+    patch: str,
+    *,
+    from_format: Literal["apply_patch", "unified"],
+    to_format: Literal["apply_patch", "unified"],
+) -> str:
+    """Convert between simple unified diffs and uv-agent patch envelopes."""
+
+    if from_format == to_format:
+        return patch
+    if from_format == "unified" and to_format == "apply_patch":
+        return _unified_to_apply_patch(patch)
+    raise ValueError(f"conversion {from_format!r} -> {to_format!r} is not supported")
+
+
+@contextmanager
+def workspace_transaction(paths: Sequence[str | Path] | None = None, *, root: str | Path = ".") -> Iterator[Snapshot]:
+    """Snapshot selected files and restore them if the enclosed block fails."""
+
+    snapshot = snapshot_files(paths or ["."], root=root)
+    try:
+        yield snapshot
+    except BaseException:
+        restore_snapshot(snapshot)
+        raise
+
+
+def snapshot_files(paths: Sequence[str | Path], *, root: str | Path = ".") -> Snapshot:
+    """Capture file bytes for explicit restoration later."""
+
+    resolved_root = resolve_workspace_path(root)
+    captured: dict[str, bytes | None] = {}
+    for item in paths:
+        resolved = resolve_workspace_path(item, cwd=resolved_root)
+        targets = sorted(path for path in resolved.rglob("*") if path.is_file()) if resolved.is_dir() else [resolved]
+        if not targets and not resolved.exists():
+            _record_snapshot_path(captured, resolved_root, resolved, None)
+        for target in targets:
+            _record_snapshot_path(captured, resolved_root, target, target.read_bytes() if target.exists() else None)
+    return Snapshot(root=str(resolved_root), files=captured)
+
+
+def restore_snapshot(snapshot: Snapshot) -> list[str]:
+    """Restore a Snapshot captured by snapshot_files."""
+
+    root = Path(snapshot.root).resolve()
+    restored: list[str] = []
+    for rel_path, data in snapshot.files.items():
+        target = (root / rel_path).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"snapshot path escapes root: {rel_path}") from exc
+        if data is None:
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+                restored.append(rel_path)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(target, data)
+        restored.append(rel_path)
+    return sorted(restored)
+
+
+def run_process_text(
+    args: Sequence[str],
+    *,
+    cwd: str | Path | None = None,
+    encoding: str = "utf-8",
+    errors: str = "replace",
+    env_patch: Mapping[str, str | None] | None = None,
+    timeout_s: float | None = None,
+) -> CommandTextResult:
+    """Run a command and decode stdout/stderr with explicit encoding policy."""
+
+    env = os.environ.copy()
+    for key, value in (env_patch or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    completed = subprocess.run(
+        list(args),
+        cwd=None if cwd is None else str(resolve_workspace_path(cwd)),
+        env=env,
+        timeout=timeout_s,
+        capture_output=True,
+        check=False,
+    )
+    return CommandTextResult(
+        args=list(args),
+        returncode=completed.returncode,
+        stdout=completed.stdout.decode(encoding, errors=errors),
+        stderr=completed.stderr.decode(encoding, errors=errors),
+    )
+
+
+def _coerce_text_file(value: TextFile | str | Path) -> TextFile:
+    if isinstance(value, TextFile):
+        return value
+    return read_text_lossless(value)
+
+
+def _detect_newline_style(text: str) -> Literal["lf", "crlf", "cr", "mixed", "none"]:
+    crlf = text.count("\r\n")
+    without_crlf = text.replace("\r\n", "")
+    lf = without_crlf.count("\n")
+    cr = without_crlf.count("\r")
+    styles = sum(1 for count in (crlf, lf, cr) if count)
+    if styles == 0:
+        return "none"
+    if styles > 1:
+        return "mixed"
+    if crlf:
+        return "crlf"
+    if cr:
+        return "cr"
+    return "lf"
+
+
+def _single_newline_style(style: str) -> Literal["lf", "crlf", "cr", "none"] | None:
+    if style in {"lf", "crlf", "cr", "none"}:
+        return style  # type: ignore[return-value]
+    return None
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _strip_final_newline(text: str) -> str:
+    return text[:-1] if text.endswith(("\n", "\r")) else text
+
+
+def _final_newline_for_text(text: str, eol: str | None) -> str:
+    if eol == "crlf":
+        return "\r\n"
+    if eol == "cr":
+        return "\r"
+    if eol == "lf":
+        return "\n"
+    style = _detect_newline_style(text)
+    if style == "crlf":
+        return "\r\n"
+    if style == "cr":
+        return "\r"
+    return "\n"
+
+
+def _first_line_difference(left: str, right: str) -> tuple[int | None, str | None, str | None]:
+    left_lines = left.splitlines()
+    right_lines = right.splitlines()
+    for index, (left_line, right_line) in enumerate(zip(left_lines, right_lines), start=1):
+        if left_line != right_line:
+            return index, left_line, right_line
+    if len(left_lines) != len(right_lines):
+        index = min(len(left_lines), len(right_lines)) + 1
+        left_line = left_lines[index - 1] if index <= len(left_lines) else None
+        right_line = right_lines[index - 1] if index <= len(right_lines) else None
+        return index, left_line, right_line
+    return None, None, None
+
+
+def _missing_context(text: str, needle: str) -> str:
+    if not needle:
+        return " Empty search text is not allowed."
+    first = needle.splitlines()[0] if needle.splitlines() else needle
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if first and first in line:
+            return f" First needle line appears near line {line_no}: {line[:120]!r}"
+    return ""
+
+
+def _detect_patch_format(patch: str) -> Literal["apply_patch", "unified"]:
+    stripped = patch.lstrip()
+    if stripped.startswith("*** Begin Patch"):
+        return "apply_patch"
+    if stripped.startswith("diff --git") or stripped.startswith("--- "):
+        return "unified"
+    raise ValueError("could not detect patch format")
+
+
+def _dry_run_apply_patch(patch: str, *, cwd: str | Path | None, check: bool) -> PatchResult:
+    root = resolve_workspace_path(cwd or ".")
+    before_paths = _file_paths_under(root)
+    snapshot = snapshot_files(["."], root=root)
+    try:
+        result = apply_patch(patch, cwd=cwd, check=check)
+    finally:
+        restore_snapshot(snapshot)
+        for path in sorted(_file_paths_under(root) - before_paths, key=lambda item: len(item.parts), reverse=True):
+            path.unlink()
+            _remove_empty_parents(path.parent, root)
+    return result
+
+
+def _file_paths_under(root: Path) -> set[Path]:
+    if not root.exists():
+        return set()
+    if root.is_file():
+        return {root.resolve()}
+    return {path.resolve() for path in root.rglob("*") if path.is_file()}
+
+
+def _remove_empty_parents(path: Path, stop: Path) -> None:
+    stop = stop.resolve()
+    current = path.resolve()
+    while current != stop and current.exists():
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _unified_to_apply_patch(diff: str) -> str:
+    files = PatchSet(diff.splitlines(keepends=True))
+    if not files:
+        raise ValueError("unified diff contains no file headers")
+    lines = ["*** Begin Patch"]
+    for file_diff in files:
+        old_path = _patched_source_path(file_diff)
+        new_path = _patched_target_path(file_diff)
+        if file_diff.is_binary_file:
+            raise ValueError(f"binary diffs are not supported: {new_path or old_path}")
+        if file_diff.is_added_file:
+            lines.append(f"*** Add File: {new_path}")
+            for hunk in file_diff:
+                for line in hunk:
+                    if line.is_added:
+                        lines.append(_apply_patch_line("+", line.value))
+            continue
+        if file_diff.is_removed_file:
+            lines.append(f"*** Delete File: {old_path}")
+            continue
+        lines.append(f"*** Update File: {old_path}")
+        if file_diff.is_rename or new_path != old_path:
+            lines.append(f"*** Move to: {new_path}")
+        for hunk in file_diff:
+            lines.append("@@")
+            for line in hunk:
+                if line.is_context:
+                    lines.append(_apply_patch_line(" ", line.value))
+                elif line.is_removed:
+                    lines.append(_apply_patch_line("-", line.value))
+                elif line.is_added:
+                    lines.append(_apply_patch_line("+", line.value))
+    lines.append("*** End Patch")
+    return "\n".join(lines) + "\n"
+
+
+def _clean_diff_path(path: str) -> str:
+    if path == "/dev/null":
+        return path
+    if path.startswith("a/") or path.startswith("b/"):
+        return path[2:]
+    return path
+
+
+def _patched_source_path(file_diff: PatchedFile) -> str:
+    return _clean_diff_path(file_diff.source_file)
+
+
+def _patched_target_path(file_diff: PatchedFile) -> str:
+    return _clean_diff_path(file_diff.target_file)
+
+
+def _apply_patch_line(prefix: str, value: str) -> str:
+    return prefix + value.rstrip("\r\n")
+
+
+def _record_snapshot_path(captured: dict[str, bytes | None], root: Path, path: Path, data: bytes | None) -> None:
+    resolved = path.resolve()
+    try:
+        rel = resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"snapshot path escapes root: {path}") from exc
+    captured[str(rel)] = data

@@ -10,11 +10,14 @@ import pytest
 
 from uv_agent_runtime import (
     apply_patch,
+    apply_patch_any,
     ask,
     check_command,
+    compare_text,
     connect_declared,
     connect_named,
     connect_stdio,
+    convert_patch,
     emit_event,
     emit_progress,
     emit_result,
@@ -22,11 +25,21 @@ from uv_agent_runtime import (
     list_declared_servers,
     list_files,
     look_at,
+    make_unified_diff,
+    normalize_text,
+    path_info,
     read_json,
     read_text,
+    read_text_lossless,
+    replace_exact,
+    restore_snapshot,
     run_command,
+    run_process_text,
     saved_scripts,
+    snapshot_files,
     thread_digest,
+    workspace_transaction,
+    write_text_lossless,
     write_json,
     write_text,
 )
@@ -197,6 +210,168 @@ def test_runtime_command_helpers() -> None:
     assert result.returncode == 0
     assert result.stdout.strip() == "ok"
     assert check_command(["python", "-c", "print('checked')"]).stdout.strip() == "checked"
+
+
+def test_runtime_lossless_text_helpers_preserve_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_bytes(b"\xef\xbb\xbffirst\r\nsecond\r\n")
+
+    loaded = read_text_lossless(path)
+
+    assert loaded.text == "first\r\nsecond\r\n"
+    assert loaded.bom is True
+    assert loaded.newline == "crlf"
+    assert loaded.final_newline is True
+
+    write_text_lossless(path, "changed\nagain\n", like=loaded)
+
+    assert path.read_bytes() == b"\xef\xbb\xbfchanged\r\nagain\r\n"
+
+
+def test_runtime_write_text_lossless_without_template_preserves_input_text(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+
+    write_text_lossless(path, "first\r\nsecond\r\n")
+
+    assert path.read_bytes() == b"first\r\nsecond\r\n"
+
+
+def test_runtime_compare_and_normalize_text_helpers() -> None:
+    comparison = compare_text("a\r\nb\r\n", "a\nb\n", ignore_eol=True)
+
+    assert comparison.kind == "eol"
+    assert normalize_text("a\r\nb", eol="crlf", final_newline=True) == "a\r\nb\r\n"
+
+
+def test_runtime_replace_exact_reports_context_and_preserves_style(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text("first\r\nold\r\nlast\r\n", encoding="utf-8", newline="")
+
+    result = replace_exact(path, "old", "new")
+
+    assert result.replacements == 1
+    assert path.read_bytes() == b"first\r\nnew\r\nlast\r\n"
+    with pytest.raises(ValueError, match="found 0"):
+        replace_exact(path, "missing", "nope")
+    with pytest.raises(ValueError, match="old text must not be empty"):
+        replace_exact(path, "", "nope")
+
+
+def test_runtime_replace_exact_preserves_mixed_newlines(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_bytes(b"first\r\nold\nlast\r")
+
+    result = replace_exact(path, "old", "new")
+
+    assert result.before.newline == "mixed"
+    assert path.read_bytes() == b"first\r\nnew\nlast\r"
+
+
+def test_runtime_unified_diff_conversion_and_apply_any(tmp_path: Path) -> None:
+    path = tmp_path / "a.txt"
+    path.write_text("old\n", encoding="utf-8")
+    diff = make_unified_diff("old\n", "new\n", path="a.txt")
+
+    envelope = convert_patch(diff, from_format="unified", to_format="apply_patch")
+    result = apply_patch_any(envelope, cwd=tmp_path)
+
+    assert "*** Update File: a.txt" in envelope
+    assert result.returncode == 0
+    assert path.read_text(encoding="utf-8") == "new\n"
+
+
+def test_runtime_apply_patch_any_dry_run_restores_created_files(tmp_path: Path) -> None:
+    patch = """*** Begin Patch
+*** Add File: nested/new.txt
++created
+*** End Patch
+"""
+
+    result = apply_patch_any(patch, cwd=tmp_path, dry_run=True)
+
+    assert result.returncode == 0
+    assert result.changed_files == ["nested/new.txt"]
+    assert not (tmp_path / "nested" / "new.txt").exists()
+    assert not (tmp_path / "nested").exists()
+
+
+def test_runtime_git_unified_diff_conversion_handles_add_delete_and_rename(tmp_path: Path) -> None:
+    (tmp_path / "old.txt").write_text("remove\n", encoding="utf-8")
+    (tmp_path / "rename_from.txt").write_text("before\n", encoding="utf-8")
+    diff = """diff --git a/new.txt b/new.txt
+new file mode 100644
+index 0000000..3b18e51
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,2 @@
++hello
++world
+diff --git a/old.txt b/old.txt
+deleted file mode 100644
+index 3b18e51..0000000
+--- a/old.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-remove
+diff --git a/rename_from.txt b/rename_to.txt
+similarity index 50%
+rename from rename_from.txt
+rename to rename_to.txt
+--- a/rename_from.txt
++++ b/rename_to.txt
+@@ -1 +1 @@
+-before
++after
+"""
+
+    envelope = convert_patch(diff, from_format="unified", to_format="apply_patch")
+    result = apply_patch_any(envelope, cwd=tmp_path)
+
+    assert "*** Add File: new.txt" in envelope
+    assert "*** Delete File: old.txt" in envelope
+    assert "*** Move to: rename_to.txt" in envelope
+    assert result.returncode == 0
+    assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "hello\nworld\n"
+    assert not (tmp_path / "old.txt").exists()
+    assert not (tmp_path / "rename_from.txt").exists()
+    assert (tmp_path / "rename_to.txt").read_text(encoding="utf-8") == "after\n"
+
+
+def test_runtime_workspace_transaction_restores_on_failure(tmp_path: Path) -> None:
+    path = tmp_path / "a.txt"
+    path.write_text("before\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with workspace_transaction([path], root=tmp_path):
+            path.write_text("after\n", encoding="utf-8")
+            raise RuntimeError("boom")
+
+    assert path.read_text(encoding="utf-8") == "before\n"
+
+
+def test_runtime_snapshot_restore_and_path_info(tmp_path: Path) -> None:
+    path = tmp_path / "a.txt"
+    path.write_text("before\n", encoding="utf-8")
+
+    snapshot = snapshot_files([path], root=tmp_path)
+    path.write_text("after\n", encoding="utf-8")
+    restored = restore_snapshot(snapshot)
+    info = path_info(path, base=tmp_path)
+
+    assert restored == ["a.txt"]
+    assert path.read_text(encoding="utf-8") == "before\n"
+    assert info.kind == "file"
+    assert info.is_relative_to_base is True
+
+
+def test_runtime_run_process_text_decodes_explicitly() -> None:
+    result = run_process_text(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write('✓'.encode('utf-8'))"],
+        encoding="utf-8",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "✓"
 
 
 def test_runtime_enter_dir_changes_cwd_and_emits_event(tmp_path: Path, capsys) -> None:
