@@ -441,6 +441,9 @@ class FullscreenPanel(ModalScreen[str | None]):
             disabled = not item.id
             if not disabled:
                 self._option_ids[option_id] = item.id
+            if disabled and not item.title and not item.description and not item.meta:
+                options.append(Option("[dim]" + ("─" * 48) + "[/dim]", id=option_id, disabled=True))
+                continue
             options.append(
                 Option(
                     f"[bold cyan]{escape(item.title)}[/bold cyan]"
@@ -504,14 +507,11 @@ class FullscreenPanel(ModalScreen[str | None]):
 
 
 COMMAND_SPECS = [
-    ("/threads", "/threads"),
-    ("/status", "/status"),
-    ("/config", "/config"),
-    ("/models", "/models"),
-    ("/level", "/level"),
-    ("/mcp", "/mcp"),
-    ("/skills", "/skills"),
     ("/clear", "/clear"),
+    ("/status", "/status"),
+    ("/level", "/level"),
+    ("/threads", "/threads"),
+    ("/config", "/config"),
     ("/quit", "/quit"),
     ("/help", "/help"),
 ]
@@ -1613,6 +1613,7 @@ class TranscriptScreen(Screen[None]):
 
 
 class UvAgentApp(App[None]):
+    ENABLE_COMMAND_PALETTE = False
     CLICK_CHAIN_TIME_THRESHOLD = 0.25
 
     CSS = MAIN_APP_CSS
@@ -1623,8 +1624,7 @@ class UvAgentApp(App[None]):
         Binding("ctrl+g", "toggle_visible_process_folds", "Process", priority=True),
         Binding("tab", "toggle_composer_height", "Height", priority=True),
         Binding("ctrl+s", "toggle_status_panel", "Status", priority=True),
-        Binding("ctrl+o", "open_threads", "Threads", priority=True),
-        Binding("ctrl+p", "open_command_palette", "Commands", priority=True),
+        Binding("ctrl+o", "open_command_palette", "Commands", priority=True),
         Binding("ctrl+d", "toggle_tool_details", "Details", priority=True),
         Binding("f2", "attach_clipboard_image", "Attach image", priority=True),
         Binding("f3", "preview_images", "Images", priority=True),
@@ -2614,10 +2614,11 @@ class UvAgentApp(App[None]):
     def action_toggle_status_panel(self) -> None:
         self._open_status_panel()
 
-    def action_open_threads(self) -> None:
-        self._open_threads_panel()
-
     def action_open_command_palette(self) -> None:
+        panel = self._active_fullscreen_panel()
+        if panel is not None:
+            panel.close_navigation()
+            return
         self._open_command_palette()
 
     def action_toggle_composer_height(self) -> None:
@@ -2964,9 +2965,8 @@ class UvAgentApp(App[None]):
             f"[bold]{escape(self._text('keyboard_shortcuts'))}[/bold]",
             f"- [cyan]Ctrl+Enter / Ctrl+J[/cyan] [dim]{escape(self._text('help_send'))}[/dim]",
             f"- [cyan]Enter[/cyan] [dim]{escape(self._text('help_newline'))}[/dim]",
-            f"- [cyan]Ctrl+P / /[/cyan] [dim]{escape(self._text('help_commands'))}[/dim]",
+            f"- [cyan]Ctrl+O / /[/cyan] [dim]{escape(self._text('help_commands'))}[/dim]",
             f"- [cyan]F1 / ?[/cyan] [dim]{escape(self._text('help_help'))}[/dim]",
-            f"- [cyan]Ctrl+O[/cyan] [dim]{escape(self._text('help_threads'))}[/dim]",
             f"- [cyan]Ctrl+S[/cyan] [dim]{escape(self._text('help_status'))}[/dim]",
             f"- [cyan]Ctrl+D[/cyan] [dim]{escape(self._text('help_details'))}[/dim]",
             f"- [cyan]F2[/cyan] [dim]{escape(self._text('help_attach_image'))}[/dim]",
@@ -2987,7 +2987,7 @@ class UvAgentApp(App[None]):
         self._open_panel("\n".join(lines), "help", self._text("help"))
 
     def _append_help(self) -> None:
-        lines = [f"[bold]{escape(self._text('commands'))}[/bold] [dim](Ctrl+P, F1, Esc)[/dim]"]
+        lines = [f"[bold]{escape(self._text('commands'))}[/bold] [dim](Ctrl+O, F1, Esc)[/dim]"]
         for spec in self._commands():
             lines.append(
                 f"[cyan]{escape(spec.usage):<18}[/cyan] [dim]{escape(spec.description)}[/dim]"
@@ -4270,6 +4270,12 @@ class UvAgentApp(App[None]):
                 meta=self._text("config_compression_hint"),
             ),
             PickerItem(
+                id="models",
+                title=self._text("models"),
+                description=self._text("models_hint"),
+                meta=self._text("config_models_readonly_hint"),
+            ),
+            PickerItem(
                 id="sources",
                 title=self._text("config_sources"),
                 description=str(editable_config_path(self.project_root)),
@@ -4303,6 +4309,8 @@ class UvAgentApp(App[None]):
             self._toggle_completion_notification()
         elif item_id == "compression":
             self._toggle_compression()
+        elif item_id == "models":
+            self._open_models_panel()
         elif item_id == "sources":
             self._open_config_sources_panel()
         elif item_id == "raw":
@@ -4565,6 +4573,16 @@ class UvAgentApp(App[None]):
         return
 
     def _open_command_palette(self, *, query: str = "") -> None:
+        self._open_picker(
+            self._text("command_palette"),
+            self._command_palette_items(),
+            self._choose_command,
+            subtitle=self._text("command_filter_hint"),
+            initial_filter=query,
+            navigate=True,
+        )
+
+    def _command_palette_items(self) -> list[PickerItem]:
         items = [
             PickerItem(
                 id=spec.name,
@@ -4573,16 +4591,39 @@ class UvAgentApp(App[None]):
             )
             for spec in self._commands()
         ]
-        self._open_picker(
-            self._text("command_palette"),
-            items,
-            self._choose_command,
-            subtitle=self._text("command_filter_hint"),
-            initial_filter=query,
-            navigate=True,
-        )
+        mention_items: list[PickerItem] = []
+        for item in self._mcp_mention_items():
+            mention_items.append(
+                PickerItem(
+                    id=f"mcp:{item.id}",
+                    title=f"mcp:{item.title}",
+                    description=item.description,
+                    meta=item.meta,
+                )
+            )
+        for item in self._skill_mention_items():
+            mention_items.append(
+                PickerItem(
+                    id=f"skill:{item.id}",
+                    title=f"skill:{item.title}",
+                    description=item.description,
+                    meta=item.meta,
+                )
+            )
+        if mention_items:
+            items.append(PickerItem(id="", title=""))
+            items.extend(mention_items)
+        return items
 
     def _choose_command(self, command: str) -> None:
+        if command.startswith("mcp:"):
+            self._choose_mcp_mention(command.removeprefix("mcp:"))
+            self._close_active_panel()
+            return
+        if command.startswith("skill:"):
+            self._choose_skill_mention(command.removeprefix("skill:"))
+            self._close_active_panel()
+            return
         spec = next((item for item in self._commands() if item.name == command), None)
         if spec is None:
             return

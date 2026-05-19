@@ -995,9 +995,12 @@ async def test_tui_command_picker_supports_keyboard_selection(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.press("ctrl+p")
+        await pilot.press("ctrl+o")
         await pilot.pause()
-        assert isinstance(app.screen_stack[-1], FullscreenPanel)
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        ids = [item.id for item in panel.items]
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("/threads")
 
         await pilot.press("enter")
         await pilot.pause()
@@ -1005,6 +1008,60 @@ async def test_tui_command_picker_supports_keyboard_selection(
         threads_panel = app.screen_stack[-1]
         assert isinstance(threads_panel, FullscreenPanel)
         assert threads_panel.panel_title == app._text("threads")
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_p_does_not_open_textual_command_palette(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        baseline_screens = len(app.screen_stack)
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+
+        assert len(app.screen_stack) == baseline_screens
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+
+        assert isinstance(app.screen_stack[-1], FullscreenPanel)
+        assert app.screen_stack[-1].panel_title == app._text("command_palette")
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_o_toggles_command_palette_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("command_palette")
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+
+        assert not isinstance(app.screen_stack[-1], FullscreenPanel)
 
 
 @pytest.mark.asyncio
@@ -1021,7 +1078,7 @@ async def test_tui_command_picker_opens_level_panel(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.press("ctrl+p")
+        await pilot.press("ctrl+o")
         await pilot.press("l")
         await pilot.press("enter")
         await pilot.pause()
@@ -1052,7 +1109,7 @@ async def test_tui_command_picker_escape_returns_from_level_to_commands(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.press("ctrl+p")
+        await pilot.press("ctrl+o")
         await pilot.press("l")
         await pilot.press("enter")
         await pilot.pause()
@@ -1087,8 +1144,8 @@ async def test_tui_command_picker_escape_returns_through_config_pages(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.press("ctrl+p")
-        await pilot.press("c")
+        await pilot.press("ctrl+o")
+        await pilot.press("c", "o")
         await pilot.press("enter")
         await pilot.pause()
 
@@ -1160,7 +1217,7 @@ async def test_tui_command_palette_hides_run_and_skill_name_commands(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.press("ctrl+p")
+        await pilot.press("ctrl+o")
         await pilot.pause()
 
         panel = app.screen_stack[-1]
@@ -1172,13 +1229,15 @@ async def test_tui_command_palette_hides_run_and_skill_name_commands(
         assert "/rules" not in titles
         assert "/scripts" not in titles
         assert "/panel" not in titles
+        assert "models" not in titles
+        assert "mcp" not in titles
         assert "level" in titles
-        assert "skills" in titles
+        assert "skills" not in titles
         assert all(not title.startswith("/") for title in titles)
 
 
 @pytest.mark.asyncio
-async def test_tui_command_palette_starts_with_threads_command(
+async def test_tui_command_palette_starts_with_priority_commands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1191,15 +1250,18 @@ async def test_tui_command_palette_starts_with_threads_command(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.press("ctrl+p")
-        await pilot.press("enter")
+        await pilot.press("ctrl+o")
         await pilot.pause()
 
-        assert app.thread_id is None
-        assert isinstance(app.screen_stack[-1], FullscreenPanel)
-        assert app.screen_stack[-1].panel_title == app._text("threads")
-        composer = app.query_one("#composer", TextArea)
-        assert composer.text == ""
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert [item.id for item in panel.items[:5]] == [
+            "/clear",
+            "/status",
+            "/level",
+            "/threads",
+            "/config",
+        ]
 
 
 @pytest.mark.asyncio
@@ -1221,7 +1283,9 @@ async def test_tui_command_palette_thread_selection_closes_panel(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.press("ctrl+p")
+        await pilot.press("ctrl+o")
+        for _ in range(3):
+            await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause()
 
@@ -1250,7 +1314,7 @@ async def test_tui_command_palette_clear_closes_panel(
 
     async with app.run_test(size=(90, 24)) as pilot:
         app.thread_id = thread_id
-        await pilot.press("ctrl+p")
+        await pilot.press("ctrl+o")
         await pilot.press("c", "l")
         await pilot.press("enter")
         await pilot.pause()
@@ -1260,7 +1324,7 @@ async def test_tui_command_palette_clear_closes_panel(
 
 
 @pytest.mark.asyncio
-async def test_tui_command_palette_skills_opens_leaf_picker(
+async def test_tui_command_palette_lists_skill_mentions_inline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1275,15 +1339,17 @@ async def test_tui_command_palette_skills_opens_leaf_picker(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.press("ctrl+p")
-        await pilot.press("s", "k")
-        await pilot.press("enter")
-        await pilot.pause(0.2)
+        await pilot.press("ctrl+o")
+        await pilot.pause()
 
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
-        assert panel.panel_title == app._text("skills")
+        ids = [item.id for item in panel.items]
+        assert "" in ids
+        assert "skill:demo" in ids
+        assert ids.index("") < ids.index("skill:demo")
 
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("skill:demo")
         await pilot.press("enter")
         await pilot.pause()
 
@@ -1331,6 +1397,10 @@ async def test_tui_thread_picker_resumes_and_renders_history(
         await pilot.pause()
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
+        ids = [item.id for item in panel.items]
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("/threads")
+        await pilot.press("enter")
+        await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
 
@@ -2753,7 +2823,7 @@ async def test_tui_config_toggle_refreshes_without_escape_history(
 
     async with app.run_test(size=(90, 24), notifications=True) as pilot:
         command_palette_title = app._text("command_palette")
-        await pilot.press("ctrl+p")
+        await pilot.press("ctrl+o")
         await pilot.press("c")
         await pilot.press("enter")
         await pilot.pause()
@@ -2835,11 +2905,11 @@ async def test_tui_models_panel_is_read_only(
 
 
 @pytest.mark.asyncio
-async def test_tui_config_panel_omits_model_editing_entries(
+async def test_tui_config_panel_includes_read_only_models_entry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`/config` must not offer model editing rows."""
+    """`/config` links to the read-only models view without offering model edits."""
     monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -2857,6 +2927,7 @@ async def test_tui_config_panel_omits_model_editing_entries(
         assert isinstance(panel, FullscreenPanel)
         ids = [item.id for item in panel.items]
         assert "default_level" in ids
+        assert "models" in ids
         assert "level_models" not in ids
         assert "current_level" not in ids
         # Helpers used by the removed flows must also be gone.
@@ -2864,6 +2935,12 @@ async def test_tui_config_panel_omits_model_editing_entries(
         assert not hasattr(app, "_open_level_model_panel")
         assert not hasattr(app, "_set_level_model_from_choice")
         assert not hasattr(app, "_set_level_reasoning_from_choice")
+
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("models")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.screen_stack[-1].panel_title == app._text("models")
 
 
 @pytest.mark.asyncio
@@ -4364,4 +4441,3 @@ async def test_tui_live_and_reentry_equivalent_for_interrupted_round(
         entry.get("kind") == "cell" and entry.get("copy_text") == interrupted_label
         for entry in live_snapshot
     )
-
