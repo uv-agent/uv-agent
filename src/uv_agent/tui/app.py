@@ -19,7 +19,7 @@ from textual import events
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.geometry import Offset
 from textual.screen import ModalScreen, Screen
@@ -50,6 +50,7 @@ from uv_agent.notifications import play_completion_sound
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
+from uv_agent.tui import theme
 from uv_agent.tui.formatting import (
     format_elapsed,
     format_tokens,
@@ -60,6 +61,12 @@ from uv_agent.tui.formatting import (
     tool_call_summary_markup,
     tool_detail_markup,
     tool_timeline_markup,
+)
+from uv_agent.tui.styles import (
+    EMPTY_STATE_CSS,
+    FULLSCREEN_PANEL_CSS,
+    MAIN_APP_CSS,
+    TRANSCRIPT_CELL_CSS,
 )
 
 
@@ -108,130 +115,7 @@ class PickerOptionList(OptionList):
 class FullscreenPanel(ModalScreen[str | None]):
     """Scrollable full-screen panel/picker."""
 
-    CSS = """
-    FullscreenPanel,
-    ToolDetailsPanel,
-    ImagePreviewPanel,
-    PendingImagePreviewPanel {
-        align: center middle;
-        background: #05070acc;
-    }
-
-    #panel-shell {
-        width: 92%;
-        height: 88%;
-        max-width: 120;
-        border: round #3a4a60;
-        background: #0c1118;
-        padding: 1 2;
-    }
-
-    #panel-header {
-        height: 1;
-        color: #dce7f3;
-        text-style: bold;
-    }
-
-    #panel-subtitle {
-        height: 1;
-        color: #8fa2b8;
-    }
-
-    #panel-filter {
-        height: 3;
-        margin: 1 0 0 0;
-        border: tall #263649;
-        background: #0f1721;
-        color: #e9eef5;
-    }
-
-    #panel-content {
-        height: 1fr;
-        margin: 1 0 0 0;
-        border: tall #1f2b3a;
-        background: #0a0f15;
-        padding: 0 1;
-        scrollbar-size-vertical: 1;
-        scrollbar-background: #0a0f15;
-        scrollbar-background-hover: #0a0f15;
-        scrollbar-background-active: #0a0f15;
-        scrollbar-color: #2b3542;
-        scrollbar-color-hover: #3a4a60;
-        scrollbar-color-active: #7dd3fc;
-        scrollbar-corner-color: #0a0f15;
-    }
-
-    #panel-body {
-        height: 1fr;
-        margin: 1 0 0 0;
-        border: tall #1f2b3a;
-        background: #0a0f15;
-        padding: 1 1;
-        scrollbar-size-vertical: 1;
-        scrollbar-background: #0a0f15;
-        scrollbar-background-hover: #0a0f15;
-        scrollbar-background-active: #0a0f15;
-        scrollbar-color: #2b3542;
-        scrollbar-color-hover: #3a4a60;
-        scrollbar-color-active: #7dd3fc;
-        scrollbar-corner-color: #0a0f15;
-    }
-
-    #image-preview-meta {
-        height: auto;
-        margin: 1 0 0 0;
-        border: tall #1f2b3a;
-        background: #0a0f15;
-        padding: 1 1;
-    }
-
-    #image-preview-scroll {
-        height: 1fr;
-        margin: 1 0 0 0;
-        border: tall #1f2b3a;
-        background: #0a0f15;
-        padding: 1 1;
-        scrollbar-size-vertical: 1;
-        scrollbar-background: #0a0f15;
-        scrollbar-background-hover: #0a0f15;
-        scrollbar-background-active: #0a0f15;
-        scrollbar-color: #2b3542;
-        scrollbar-color-hover: #3a4a60;
-        scrollbar-color-active: #7dd3fc;
-        scrollbar-corner-color: #0a0f15;
-    }
-
-    #image-preview {
-        width: 100%;
-        height: auto;
-    }
-
-    #pending-image-delete {
-        width: auto;
-        height: 1;
-        margin: 1 0 0 0;
-    }
-
-    #panel-footer {
-        height: 1;
-        margin: 1 0 0 0;
-        color: #7b8796;
-    }
-
-    OptionList {
-        height: 1fr;
-        border: none;
-        background: #0a0f15;
-        scrollbar-size-vertical: 1;
-        scrollbar-background: #0a0f15;
-        scrollbar-background-hover: #0a0f15;
-        scrollbar-background-active: #0a0f15;
-        scrollbar-color: #2b3542;
-        scrollbar-color-hover: #3a4a60;
-        scrollbar-color-active: #7dd3fc;
-        scrollbar-corner-color: #0a0f15;
-    }
-    """
+    CSS = FULLSCREEN_PANEL_CSS
 
     BINDINGS = [
         Binding("escape", "dismiss_panel", "Close", priority=True, show=False),
@@ -275,8 +159,11 @@ class FullscreenPanel(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="panel-shell"):
-            yield Static(self.panel_title, id="panel-header")
-            yield Static(self.subtitle, id="panel-subtitle")
+            # Title bar: header on the left, subtitle (status / hints) right-
+            # aligned on the same row to free a vertical line of chrome.
+            with Horizontal(id="panel-titlebar"):
+                yield Static(self.panel_title, id="panel-header")
+                yield Static(self.subtitle, id="panel-subtitle")
             yield Input(placeholder=getattr(self.app, "_text", lambda key: key)("filter"), id="panel-filter")
             yield PickerOptionList(id="panel-content", compact=False)
             yield VerticalScroll(Static(self.body, markup=True, id="panel-body-content"), id="panel-body")
@@ -897,18 +784,7 @@ class EmptyState(Static):
 
     FRAMES = ["·  ", "·· ", "···", " ··", "  ·", "   "]
 
-    DEFAULT_CSS = """
-    EmptyState {
-        width: 100%;
-        height: 100%;
-        content-align: center middle;
-        color: #7f91a8;
-    }
-
-    EmptyState.hidden {
-        display: none;
-    }
-    """
+    DEFAULT_CSS = EMPTY_STATE_CSS
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__("", id=id)
@@ -1004,55 +880,9 @@ def _event_offset(event: dict[str, Any] | None) -> int | None:
 class TranscriptCell(Static):
     """Small transcript block used by the Textual chat timeline."""
 
-    SELECTION_STYLE = Style(color="#061018", bgcolor="#7dd3fc")
+    SELECTION_STYLE = Style(color=theme.SELECTION_FG, bgcolor=theme.SELECTION_BG)
 
-    DEFAULT_CSS = """
-    TranscriptCell {
-        width: 100%;
-        margin: 0 0 1 0;
-        padding: 0 1;
-    }
-
-    TranscriptCell.user {
-        background: #111a24;
-        color: #dce7f3;
-    }
-
-    TranscriptCell.assistant {
-        background: #101a17;
-        color: #e5e7eb;
-    }
-
-    TranscriptCell.event {
-        background: #0e141b;
-        color: #aeb7c4;
-    }
-
-    TranscriptCell.reasoning {
-        background: #0c1219;
-        color: #9aa6b6;
-        text-style: italic;
-    }
-
-    TranscriptCell.process_fold {
-        background: #0c1219;
-        color: #aeb7c4;
-    }
-
-    TranscriptCell.process_fold_hidden {
-        display: none;
-    }
-
-    TranscriptCell.tool_pending {
-        background: #0e141b;
-        color: #c8d2e0;
-    }
-
-    TranscriptCell.error {
-        background: #241316;
-        color: #ffb4b4;
-    }
-    """
+    DEFAULT_CSS = TRANSCRIPT_CELL_CSS
 
     def __init__(self, content: object = "", *, copy_text: str | None = None, **kwargs: Any) -> None:
         super().__init__(content, **kwargs)
@@ -1400,6 +1230,56 @@ class ToolDetailsPanel(FullscreenPanel):
             pass
 
 
+def _update_static_if_changed(widget: Static, markup: str) -> None:
+    """Call ``Static.update`` only when the rendered markup actually changes.
+
+    ``Static.update`` always triggers a repaint, even if the new content is
+    identical to the previous one. For widgets sharing the screen with a
+    :class:`TerminalImage`, every redundant repaint becomes a visible image
+    flicker on terminals using sixel / TGP encoding. The previous value is
+    cached as an attribute on the widget instance (``Static`` keeps its
+    internal content under a name-mangled attribute, so storing our own copy
+    is the simplest stable comparison).
+    """
+
+    if getattr(widget, "_uv_last_markup", None) == markup:
+        return
+    widget._uv_last_markup = markup  # type: ignore[attr-defined]
+    widget.update(markup)
+
+
+class StableTerminalImage(TerminalImage, Renderable=TerminalImage._Renderable):
+    """A :class:`TerminalImage` that caches its renderable across renders.
+
+    The upstream widget rebuilds the renderable (and so re-encodes / retransmits
+    the image bytes) on every :py:meth:`render` call. Textual invokes
+    :py:meth:`render` for many unrelated reasons (focus changes, layout
+    invalidation, scroll updates), and the repeated re-encode is what users
+    perceive as the image preview "flickering" when navigating with j/k or
+    scrolling. We memoize the renderable keyed by ``(image identity, styled
+    size)`` and only recreate it when one of those actually changes. The
+    ``image`` setter already clears ``self._renderable``, so swapping images
+    naturally invalidates the cache without extra wiring.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._stable_size: tuple[Any, Any] | None = None
+
+    def render(self) -> Any:
+        if not self._image:
+            self._stable_size = None
+            return ""
+        size = self._get_styled_size()
+        if self._renderable is not None and self._stable_size == size:
+            return self._renderable
+        if self._renderable is not None:
+            self._renderable.cleanup()
+        self._renderable = self._Renderable(self._image, *size)
+        self._stable_size = size
+        return self._renderable
+
+
 class ImagePreviewPanel(FullscreenPanel):
     """Full-screen image attachment panel with j/k navigation."""
 
@@ -1420,12 +1300,17 @@ class ImagePreviewPanel(FullscreenPanel):
         super().__init__(title="", body="", subtitle="")
 
     def compose(self) -> ComposeResult:
+        # The meta line lives INSIDE the scroll container so the whole panel
+        # interior (meta + image) scrolls as a single unit when the image is
+        # taller than the viewport, instead of giving the image its own
+        # standalone scrollbar.
         with Vertical(id="panel-shell"):
-            yield Static(self.panel_title, id="panel-header")
-            yield Static(self.subtitle, id="panel-subtitle")
-            yield Static("", markup=True, id="image-preview-meta")
+            with Horizontal(id="panel-titlebar"):
+                yield Static(self.panel_title, id="panel-header")
+                yield Static(self.subtitle, id="panel-subtitle")
             with VerticalScroll(id="image-preview-scroll"):
-                yield TerminalImage(id="image-preview")
+                yield Static("", markup=True, id="image-preview-meta")
+                yield StableTerminalImage(id="image-preview")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def _render_page(self, *, filter_value: str = "", highlighted: int | None = None) -> None:
@@ -1484,11 +1369,24 @@ class ImagePreviewPanel(FullscreenPanel):
         attachment = self._current_attachment()
         path = Path(str(attachment.get("stored_path") or "")) if attachment else None
         try:
-            self.query_one("#panel-header", Static).update(self.panel_title)
-            self.query_one("#panel-subtitle", Static).update(self.subtitle)
-            self.query_one("#image-preview-meta", Static).update(self._attachment_markup())
-            self.query_one("#image-preview", TerminalImage).image = path if path and path.exists() else None
-            self.query_one("#image-preview-scroll", VerticalScroll).scroll_to(y=0, animate=False)
+            # Batch all updates so Textual emits one composite paint instead of
+            # several, and guard each ``Static.update`` so unchanged labels do
+            # not force a redundant repaint that the terminal would render as a
+            # flicker over the image.
+            with self.app.batch_update():
+                _update_static_if_changed(self.query_one("#panel-header", Static), self.panel_title)
+                _update_static_if_changed(self.query_one("#panel-subtitle", Static), self.subtitle)
+                _update_static_if_changed(
+                    self.query_one("#image-preview-meta", Static), self._attachment_markup()
+                )
+                image_widget = self.query_one("#image-preview", TerminalImage)
+                new_image = path if path and path.exists() else None
+                # The upstream setter unconditionally calls ``refresh(layout=True)``
+                # (and on Sixel, ``refresh(recompose=True)``), so we skip the
+                # assignment whenever the path has not changed.
+                if image_widget.image != new_image:
+                    image_widget.image = new_image
+                self.query_one("#image-preview-scroll", VerticalScroll).scroll_to(y=0, animate=False)
         except NoMatches:
             pass
 
@@ -1506,21 +1404,24 @@ class ImagePreviewPanel(FullscreenPanel):
         source = str(attachment.get("source_path") or "")
         note = str(attachment.get("note") or "").strip()
         size = int(attachment.get("size_bytes") or 0)
-        lines = [
-            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold] "
-            f"[cyan]{escape(path.name or str(path))}[/cyan]",
-            "",
-            f"- {escape(text('image_path'))}: [cyan]{escape(str(path))}[/cyan]",
-            f"- {escape(text('image_mime'))}: {escape(str(attachment.get('mime_type') or ''))}",
-            f"- {escape(text('image_size'))}: {format_tokens(size)}B",
+        # Display name prefers the user-supplied source filename so tests and
+        # users see the file as they know it; the stored path appears dimmed at
+        # the end for traceability.
+        display_name = Path(source).name if source else (path.name or str(path))
+        mime = str(attachment.get("mime_type") or "").strip()
+        parts = [
+            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold]",
+            f"[cyan]{escape(display_name)}[/cyan]",
         ]
-        if source:
-            lines.append(f"- {escape(text('image_source'))}: {escape(source)}")
+        if mime:
+            parts.append(escape(mime))
+        if size:
+            parts.append(f"{format_tokens(size)}B")
+        parts.append(f"[dim]{escape(str(path))}[/dim]")
+        line = " · ".join(parts)
         if note:
-            lines.append(f"- {escape(text('image_note'))}: {escape(note)}")
-        lines.append("")
-        lines.append(f"[dim]{escape(text('image_open_hint'))}[/dim]")
-        return "\n".join(lines)
+            line += f"  [dim]{escape(text('image_note'))}: {escape(note)}[/dim]"
+        return line
 
 
 class PendingImagePreviewPanel(ImagePreviewPanel):
@@ -1537,13 +1438,17 @@ class PendingImagePreviewPanel(ImagePreviewPanel):
         super().__init__([image.to_attachment() for image in pending_images], index)
 
     def compose(self) -> ComposeResult:
+        # Delete button stays outside the scroll so it remains reachable even
+        # when a tall image scrolls; meta moves into the scroll alongside the
+        # image so the panel interior scrolls as one unit.
         with Vertical(id="panel-shell"):
-            yield Static(self.panel_title, id="panel-header")
-            yield Static(self.subtitle, id="panel-subtitle")
-            yield Static("", markup=True, id="image-preview-meta")
+            with Horizontal(id="panel-titlebar"):
+                yield Static(self.panel_title, id="panel-header")
+                yield Static(self.subtitle, id="panel-subtitle")
             yield Button("", variant="error", id="pending-image-delete", compact=True)
             with VerticalScroll(id="image-preview-scroll"):
-                yield TerminalImage(id="image-preview")
+                yield Static("", markup=True, id="image-preview-meta")
+                yield StableTerminalImage(id="image-preview")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def _refresh_current(self) -> None:
@@ -1552,9 +1457,13 @@ class PendingImagePreviewPanel(ImagePreviewPanel):
         self.panel_title = text("pending_image_preview")
         self.subtitle = text("pending_image_preview_hint")
         try:
-            self.query_one("#panel-header", Static).update(self.panel_title)
-            self.query_one("#panel-subtitle", Static).update(self.subtitle)
-            self.query_one("#pending-image-delete", Button).label = text("delete_pending_image")
+            with self.app.batch_update():
+                _update_static_if_changed(self.query_one("#panel-header", Static), self.panel_title)
+                _update_static_if_changed(self.query_one("#panel-subtitle", Static), self.subtitle)
+                delete_button = self.query_one("#pending-image-delete", Button)
+                new_label = text("delete_pending_image")
+                if str(delete_button.label) != new_label:
+                    delete_button.label = new_label
         except NoMatches:
             pass
 
@@ -1581,27 +1490,24 @@ class PendingImagePreviewPanel(ImagePreviewPanel):
         self._refresh_current()
 
     def _attachment_markup(self) -> str:
-        text = getattr(self.app, "_text", lambda key: key)
         attachment = self._current_attachment()
         if attachment is None:
+            text = getattr(self.app, "_text", lambda key: key)
             return f"[dim]{escape(text('no_pending_images'))}[/dim]"
         path = Path(str(attachment.get("stored_path") or ""))
         size = int(attachment.get("size_bytes") or 0)
         width = int(attachment.get("width") or 0)
         height = int(attachment.get("height") or 0)
-        dimensions = f"{width}x{height}" if width and height else ""
-        lines = [
-            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold] "
+        parts = [
+            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold]",
             f"[cyan]{escape(path.name or str(path))}[/cyan]",
-            "",
-            f"- {escape(text('image_path'))}: [cyan]{escape(str(path))}[/cyan]",
         ]
-        if dimensions:
-            lines.append(f"- {escape(text('image_dimensions'))}: {escape(dimensions)}")
-        lines.append(f"- {escape(text('image_size'))}: {format_tokens(size)}B")
-        lines.append("")
-        lines.append(f"[dim]{escape(text('pending_image_open_hint'))}[/dim]")
-        return "\n".join(lines)
+        if width and height:
+            parts.append(f"{width}×{height}")
+        if size:
+            parts.append(f"{format_tokens(size)}B")
+        parts.append(f"[dim]{escape(str(path))}[/dim]")
+        return " · ".join(parts)
 
 
 class TranscriptScreen(Screen[None]):
@@ -1641,111 +1547,7 @@ class TranscriptScreen(Screen[None]):
 class UvAgentApp(App[None]):
     CLICK_CHAIN_TIME_THRESHOLD = 0.25
 
-    CSS = """
-    Screen {
-        layout: horizontal;
-        background: #0b0f14;
-        color: #d8dee9;
-    }
-
-    Screen > .screen--selection {
-        background: #7dd3fc;
-        color: #061018;
-    }
-
-    ToastRack {
-        dock: top;
-        align-horizontal: right;
-    }
-
-    #main-column {
-        width: 1fr;
-        min-width: 0;
-        height: 100%;
-        background: #0b0f14;
-    }
-
-    #transcript {
-        height: 1fr;
-        min-height: 6;
-        padding: 1 2 0 1;
-        background: #0b0f14;
-        scrollbar-size-vertical: 1;
-        scrollbar-background: #0b0f14;
-        scrollbar-background-hover: #0b0f14;
-        scrollbar-background-active: #0b0f14;
-        scrollbar-color: #2b3542;
-        scrollbar-color-hover: #3a4a60;
-        scrollbar-color-active: #7dd3fc;
-        scrollbar-corner-color: #0b0f14;
-    }
-
-    #bottom-pane {
-        height: auto;
-        max-height: 9;
-        padding: 0 1 0 1;
-        background: #0b0f14;
-    }
-
-    #composer-shell {
-        height: auto;
-        background: #0b0f14;
-    }
-
-    #composer-shell.busy {
-        background: #0b0f14;
-    }
-
-    #pending-images-btn,
-    #scroll-to-bottom-btn {
-        position: absolute;
-        overlay: screen;
-        layer: overlay;
-        width: auto;
-        height: 1;
-        color: #7dd3fc;
-        background: #1a2330;
-        padding: 0 2;
-        text-style: bold;
-    }
-
-    #pending-images-btn {
-        color: #c4b5fd;
-    }
-
-    #pending-images-btn.hidden,
-    #scroll-to-bottom-btn.hidden {
-        display: none;
-    }
-
-    #pending-images-btn:hover,
-    #scroll-to-bottom-btn:hover {
-        background: #2b3542;
-        color: #ffffff;
-    }
-
-    #composer {
-        width: 1fr;
-        height: 5;
-        min-height: 5;
-        margin: 0;
-        border: round #2a3646;
-        padding: 0 1;
-        background: #0b0f14;
-        color: #edf2f7;
-    }
-
-    #composer:focus {
-        border: round #3f9bc9;
-    }
-
-    #composer-footer {
-        height: 1;
-        color: #516071;
-        padding: 0 1;
-        background: #0b0f14;
-    }
-    """
+    CSS = MAIN_APP_CSS
 
     BINDINGS = [
         Binding("ctrl+enter", "submit_composer", "Send", priority=True),
