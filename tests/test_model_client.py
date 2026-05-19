@@ -16,6 +16,7 @@ from uv_agent.config import (
 )
 from uv_agent.model_client import (
     ModelStreamEvent,
+    SSE_DONE,
     UnifiedModelClient,
     anthropic_image_source,
     anthropic_messages,
@@ -271,7 +272,7 @@ def test_parse_chat_response_preserves_passthrough_and_reasoning_fields() -> Non
 
 
 def test_parse_sse_event_handles_done_and_json() -> None:
-    assert parse_sse_event(None, ["[DONE]"]) is None
+    assert parse_sse_event(None, ["[DONE]"]) == {"type": SSE_DONE}
     parsed = parse_sse_event("response.completed", ['{"response":{"id":"x"}}'])
     assert parsed == {"type": "response.completed", "response": {"id": "x"}}
 
@@ -420,6 +421,72 @@ async def test_stream_chat_accumulates_passthrough_and_configured_reasoning(
     assert completed.response is not None
     assert completed.response.output[0]["reasoning_content"] == "think more"
     assert completed.response.reasoning_text == "think more"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_allows_empty_chunks_before_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_stream_sse(provider, api, payload):
+        yield {"id": "chat_1", "choices": []}
+        yield {"id": "chat_1", "choices": [{"delta": {}}]}
+        yield {"type": SSE_DONE}
+
+    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={"m": ModelConfig(name="m", provider="p", model="remote", api="chat_completions")},
+        levels={"medium": LevelConfig(name="medium", model="m", params={})},
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
+        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
+    )
+    client = UnifiedModelClient(config)
+
+    events = [
+        event
+        async for event in client.stream_response(
+            input_items=[],
+            level="medium",
+            tools=[],
+            instructions=None,
+        )
+    ]
+
+    assert len(events) == 1
+    assert events[0].type == "completed"
+    assert events[0].response is not None
+    assert events[0].response.output_text == ""
+    assert events[0].response.output == []
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_errors_when_empty_stream_ends_without_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_stream_sse(provider, api, payload):
+        yield {"id": "chat_1", "choices": []}
+        yield {"id": "chat_1", "choices": [{"delta": {}}]}
+
+    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={"m": ModelConfig(name="m", provider="p", model="remote", api="chat_completions")},
+        levels={"medium": LevelConfig(name="medium", model="m", params={})},
+        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
+        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
+    )
+    client = UnifiedModelClient(config)
+
+    with pytest.raises(RuntimeError, match="before \\[DONE\\]"):
+        [
+            event
+            async for event in client.stream_response(
+                input_items=[],
+                level="medium",
+                tools=[],
+                instructions=None,
+            )
+        ]
 
 
 @pytest.mark.asyncio

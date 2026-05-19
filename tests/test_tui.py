@@ -147,6 +147,45 @@ class ImageCaptureEngine(AgentEngine):
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": text}
 
 
+class ErrorEngine(AgentEngine):
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        thread_id = thread_id or self.thread_store.create_thread("Errored")
+        turn_id = "turn_error"
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        )
+        error = self.thread_store.append(
+            thread_id,
+            "turn.error",
+            turn_id=turn_id,
+            error_type="RuntimeError",
+            message="Chat completions stream ended before [DONE] without returning content",
+        )
+        yield {
+            "type": "turn.error",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "created_at": error.get("created_at"),
+            "completed_at": error.get("created_at"),
+            "error_type": "RuntimeError",
+            "message": "Chat completions stream ended before [DONE] without returning content",
+        }
+
+
 class StableRoundEngine(AgentEngine):
     def __init__(self, engine: AgentEngine) -> None:
         self.__dict__.update(engine.__dict__)
@@ -2927,6 +2966,31 @@ async def test_tui_ctrl_c_twice_interrupts_busy_turn_without_selection(
 
         assert app.busy is False
         assert any(event["type"] == "turn.interrupted" for event in engine.thread_store.read(app.thread_id))
+
+
+@pytest.mark.asyncio
+async def test_tui_renders_persisted_turn_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = ErrorEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("long work")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        transcript_text = "\n".join(str(cell.render()) for cell in app.query(TranscriptCell).nodes)
+        assert "RuntimeError" in transcript_text
+        assert "before" in transcript_text
+        assert "DONE" in transcript_text
+        assert app._last_status == app._text("error")
+        assert any(event["type"] == "turn.error" for event in engine.thread_store.read(app.thread_id))
 
 
 @pytest.mark.asyncio

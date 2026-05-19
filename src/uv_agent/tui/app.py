@@ -44,7 +44,7 @@ from uv_agent.config import (
     redact_config,
 )
 from uv_agent.environment import application_version, detect_user_language, host_environment_line
-from uv_agent.errors import error_markup, format_error
+from uv_agent.errors import error_markup, escape_markup as escape_error_markup, format_error
 from uv_agent.i18n import command_description, tr
 from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.notifications import play_completion_sound
@@ -1990,6 +1990,11 @@ class UvAgentApp(App[None]):
                     if self._is_active_thread(item_thread_id):
                         self._append_cell(f"[dim]{escape(self._text('interrupted'))}[/dim]", "event")
                         self._refresh_status(self._text("interrupted"))
+                elif event_type == "turn.error":
+                    run_state.status = self._text("error")
+                    if self._is_active_thread(item_thread_id):
+                        self._append_turn_error(item)
+                        self._refresh_status(self._text("error"))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2194,7 +2199,7 @@ class UvAgentApp(App[None]):
             run_state.started_at = started_at
             if self._is_active_thread(run_state.thread_id):
                 self._turn_started_at = started_at
-        if item.get("type") in {"turn.completed", "turn.interrupted"}:
+        if item.get("type") in {"turn.completed", "turn.interrupted", "turn.error"}:
             completed_at = str(item.get("completed_at") or item.get("created_at") or utc_now_iso()).strip()
             run_state.completed_at = completed_at
             if self._is_active_thread(run_state.thread_id):
@@ -3116,7 +3121,7 @@ class UvAgentApp(App[None]):
             event_type = event.get("type")
             if not started_at and event_type in {"turn.started", "item.user"}:
                 started_at = str(event.get("created_at") or "")
-            if event_type in {"turn.completed", "turn.interrupted"}:
+            if event_type in {"turn.completed", "turn.interrupted", "turn.error"}:
                 completed_at = str(event.get("created_at") or "")
         seconds = _elapsed_between(started_at, completed_at)
         return format_elapsed(seconds) if seconds is not None else ""
@@ -3181,9 +3186,21 @@ class UvAgentApp(App[None]):
             cell = self._append_reasoning_history(str(event.get("text") or ""), before=before)
             if cell is not None:
                 mounted.append(cell)
+        elif event_type == "turn.error":
+            mounted.append(self._append_turn_error(event, before=before))
         elif event_type == "item.compaction":
             mounted.append(self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event", before=before))
         return mounted
+
+    def _append_turn_error(self, event: dict[str, Any], *, before: object | None = None) -> TranscriptCell:
+        error_type = str(event.get("error_type") or "Turn error")
+        message = str(event.get("message") or "The turn stopped before producing a final response.")
+        return self._append_cell(
+            f"[bold red]{escape_error_markup(error_type)}[/bold red] {escape_error_markup(message)}",
+            "error",
+            before=before,
+            copy_text=f"{error_type}: {message}",
+        )
 
     def _append_tool_call_history(self, item: dict[str, Any], *, before: object | None = None) -> ExpandableTranscriptCell:
         return self._append_expandable_cell(

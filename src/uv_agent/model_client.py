@@ -18,6 +18,7 @@ CHAT_DELTA_CONTROL_FIELDS = {
     "function_call",
     "refusal",
 }
+SSE_DONE = "__uv_agent_sse_done__"
 
 
 @dataclass(frozen=True)
@@ -270,9 +271,14 @@ class UnifiedModelClient:
         tool_acc: dict[int, dict[str, Any]] = {}
         response_id: str | None = None
         usage: dict[str, Any] = {}
+        done = False
+        saw_payload = False
         passthrough_fields = set(model.message_passthrough.fields_for_role("assistant"))
         reasoning_fields = set(model.reasoning_display.stream_delta_fields)
         async for data in stream_sse(provider, model.api, payload):
+            if data.get("type") == SSE_DONE:
+                done = True
+                break
             if not data:
                 continue
             response_id = data.get("id") or response_id
@@ -284,16 +290,19 @@ class UnifiedModelClient:
                 if delta.get("content"):
                     text = delta["content"]
                     text_parts.append(text)
+                    saw_payload = True
                     yield ModelStreamEvent(type="text_delta", text=text)
                 for field in passthrough_fields:
                     value = delta.get(field)
                     if isinstance(value, str) and value:
                         passthrough_acc[field] = passthrough_acc.get(field, "") + value
+                        saw_payload = True
                 for field in reasoning_fields:
                     value = delta.get(field)
                     if isinstance(value, str) and value:
                         reasoning_fields_seen.add(field)
                         reasoning_parts.append(value)
+                        saw_payload = True
                         yield ModelStreamEvent(type="reasoning_delta", text=value)
                 if model.reasoning_display.unknown_text_delta_as_reasoning:
                     for field, value in delta.items():
@@ -301,8 +310,10 @@ class UnifiedModelClient:
                             continue
                         if isinstance(value, str) and value:
                             reasoning_parts.append(value)
+                            saw_payload = True
                             yield ModelStreamEvent(type="reasoning_delta", text=value)
                 for tool_call in delta.get("tool_calls") or []:
+                    saw_payload = True
                     index = int(tool_call.get("index", 0))
                     existing = tool_acc.setdefault(index, {"arguments": ""})
                     if tool_call.get("id"):
@@ -322,6 +333,8 @@ class UnifiedModelClient:
                             arguments_delta=function.get("arguments", ""),
                         ),
                     )
+        if not done and not saw_payload:
+            raise RuntimeError("Chat completions stream ended before [DONE] without returning content")
 
         output_text = "".join(text_parts)
         reasoning_text = "".join(reasoning_parts)
@@ -455,7 +468,7 @@ def parse_sse_event(event_name: str | None, data_lines: list[str]) -> dict[str, 
         return None
     raw = "\n".join(data_lines)
     if raw == "[DONE]":
-        return None
+        return {"type": SSE_DONE}
     data = json.loads(raw)
     if event_name and "type" not in data:
         data["type"] = event_name

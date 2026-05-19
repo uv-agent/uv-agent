@@ -560,6 +560,27 @@ class AgentEngine:
                 if title_task is not None:
                     title_task.cancel()
                 return
+            except Exception as exc:
+                error_event = self.thread_store.append(
+                    thread_id,
+                    "turn.error",
+                    turn_id=turn_id,
+                    error_type=exc.__class__.__name__,
+                    message=str(exc) or repr(exc),
+                )
+                if title_task is not None:
+                    title_task.cancel()
+                yield {
+                    "type": "turn.error",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "turn_started_at": turn_started_event.get("created_at"),
+                    "created_at": error_event.get("created_at"),
+                    "completed_at": error_event.get("created_at"),
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc) or repr(exc),
+                }
+                return
 
             turn_completed_event = self.thread_store.append(
                 thread_id,

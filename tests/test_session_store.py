@@ -101,6 +101,34 @@ def test_thread_digest_starts_after_latest_compaction_and_hides_tools(tmp_path: 
     ]
 
 
+def test_thread_digest_includes_turn_error(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Errored")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    )
+    store.append(
+        thread_id,
+        "turn.error",
+        turn_id="t1",
+        error_type="EmptyModelResponseError",
+        message="Model returned an empty final response",
+    )
+
+    digest = store.thread_digest(thread_id)
+    thread = store.list_threads()[0]
+
+    assert digest["items"] == [
+        {"role": "user", "text": "hello"},
+        {"role": "system", "text": "turn error: Model returned an empty final response"},
+    ]
+    assert thread["interrupted_turn_count"] == 1
+    assert thread["turn_count"] == 0
+
+
 def test_read_after_latest_compaction_returns_only_needed_suffix(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Compact suffix")

@@ -33,6 +33,7 @@ VISIBLE_HISTORY_EVENT_TYPES = {
     "item.reasoning_partial",
     "item.compaction",
     "turn.interrupted",
+    "turn.error",
 }
 
 
@@ -520,6 +521,13 @@ def digest_items(events: list[dict[str, Any]], *, include_tools: bool = False) -
                     "text": f"turn interrupted: {event.get('reason') or 'user_interrupt'}",
                 }
             )
+        elif event_type == "turn.error":
+            items.append(
+                {
+                    "role": "system",
+                    "text": f"turn error: {event.get('message') or event.get('error_type') or 'unknown error'}",
+                }
+            )
         elif include_tools and event_type in {"item.runner_result", "item.tool_output"}:
             items.append({"role": "tool", "text": tool_event_text(event)})
     return items
@@ -602,7 +610,7 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
 
     if event_type == "turn.completed":
         metadata["turn_count"] = int(metadata.get("turn_count") or 0) + 1
-    elif event_type == "turn.interrupted":
+    elif event_type in {"turn.interrupted", "turn.error"}:
         metadata["interrupted_turn_count"] = int(metadata.get("interrupted_turn_count") or 0) + 1
     elif event_type == "item.compaction":
         metadata["latest_compaction_offset"] = event.get("_jsonl_offset")

@@ -977,6 +977,54 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_persists_model_stream_error(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "run_python",
+                        "arguments": "{\"code\":\"print('observed')\\n\"}",
+                    }
+                ],
+            },
+        ]
+    )
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+        ),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,
+        thread_store=ThreadStore(tmp_path / ".uv-agent"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="run it")]
+    thread_id = events[-1]["thread_id"]
+    stored_events = engine.thread_store.read(thread_id)
+
+    assert events[-1]["type"] == "turn.error"
+    assert events[-1]["error_type"] == "RuntimeError"
+    assert "FakeModelClient has no responses left" in events[-1]["message"]
+    assert stored_events[-1]["type"] == "turn.error"
+    assert not any(event["type"] == "turn.completed" for event in stored_events)
+
+
+@pytest.mark.asyncio
 async def test_tool_look_at_adds_assistant_bridge_before_image_context(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
