@@ -145,8 +145,6 @@ async def stream_chat_response(
     reasoning_fields = set(model.reasoning_display.stream_delta_fields)
     async for event in stream:
         data = object_dump(event)
-        if not data:
-            continue
         response_id = data.get("id") or response_id
         if data.get("usage"):
             usage = data["usage"]

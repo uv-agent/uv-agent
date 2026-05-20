@@ -34,7 +34,7 @@ Providers describe HTTP endpoints and authentication.
 | `base_url` | string | required | Base URL used with endpoint `path`. |
 | `api_key` | string | `null` | Direct bearer token. Prefer `api_key_env` for secrets. |
 | `api_key_env` | string | `null` | Environment variable that contains the bearer token. |
-| `headers` | object | `{}` | Static HTTP headers added to every request. |
+| `headers` | object | `{}` | Extra SDK default headers passed on a best-effort basis. |
 | `params` | object | `{}` | JSON payload fields shared by all model requests for this provider. |
 | `message_passthrough` | object | `{}` | Chat message fields to persist and replay for provider-specific APIs. Models inherit this unless they override fields. |
 | `reasoning_display` | object | `{}` | Provider-specific fields that should be shown as reasoning in the TUI. Models inherit this unless they override fields. |
@@ -61,6 +61,12 @@ method. For example, `base_url: "https://api.example.com/v1"` and `path:
 
 Secrets are redacted in config display paths, but committed config should still
 avoid direct `api_key` values.
+
+SDK credential behavior is preserved. `api_key` and `api_key_env` are passed to
+the provider SDK when configured; otherwise the SDK may use its own environment
+variables or raise its normal missing-credentials error. `headers` can add
+provider-specific headers, but it is not a replacement for SDK credential
+configuration unless that provider SDK accepts the header itself.
 
 Provider `message_passthrough` and `reasoning_display` are defaults for every
 model that uses the provider. A model can override individual fields while

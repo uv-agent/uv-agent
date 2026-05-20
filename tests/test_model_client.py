@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import openai
 import pytest
 
 from uv_agent.config import (
@@ -259,10 +260,11 @@ def test_responses_payload_supports_previous_response_id() -> None:
     assert payload["stream"] is True
 
 
-def test_openai_client_strips_sdk_owned_endpoint_path_and_preserves_header_only_auth() -> None:
+def test_openai_client_strips_sdk_owned_endpoint_path_and_passes_extra_headers() -> None:
     provider = ProviderConfig(
         name="p",
         base_url="https://api.example.com/v1",
+        api_key="test-key",
         headers={"api-key": "test-key"},
         responses=EndpointConfig(path="/responses"),
     )
@@ -270,8 +272,17 @@ def test_openai_client_strips_sdk_owned_endpoint_path_and_preserves_header_only_
     client = openai_client(provider, "responses", "/responses")
 
     assert str(client.base_url) == "https://api.example.com/v1/"
-    assert client.auth_headers == {}
+    assert client.auth_headers == {"Authorization": "Bearer test-key"}
     assert client.default_headers["api-key"] == "test-key"
+
+
+def test_openai_client_uses_sdk_default_missing_credentials_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_ADMIN_KEY", raising=False)
+    provider = ProviderConfig(name="p", base_url="https://api.example.com/v1")
+
+    with pytest.raises(openai.OpenAIError, match="Missing credentials"):
+        openai_client(provider, "responses", "/responses")
 
 
 def test_responses_create_kwargs_passes_unknown_params_as_extra_body() -> None:
@@ -729,7 +740,7 @@ async def test_stream_chat_accumulates_passthrough_and_configured_reasoning(
 
 
 @pytest.mark.asyncio
-async def test_stream_chat_allows_empty_chunks_before_done(
+async def test_stream_chat_allows_empty_sdk_chunks(
 ) -> None:
     sdk_client = FakeOpenAIClient(
         chat_events=[
