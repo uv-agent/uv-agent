@@ -3,12 +3,40 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator
-from typing import Any, Callable
+from typing import Any
+
+from anthropic import AsyncAnthropic
+from anthropic.types import Message
 
 from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.model.content import chat_output_items
-from uv_agent.model.http import post_json, stream_sse
 from uv_agent.model.types import ModelResponse, ModelStreamEvent
+
+
+ANTHROPIC_MESSAGES_PATH = "/v1/messages"
+ANTHROPIC_SDK_PARAM_KEYS = {
+    "cache_control",
+    "container",
+    "extra_headers",
+    "extra_query",
+    "inference_geo",
+    "max_tokens",
+    "messages",
+    "metadata",
+    "model",
+    "output_config",
+    "service_tier",
+    "stop_sequences",
+    "stream",
+    "system",
+    "temperature",
+    "thinking",
+    "timeout",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p",
+}
 
 
 def anthropic_payload(
@@ -146,6 +174,50 @@ def anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def anthropic_client(provider: ProviderConfig) -> AsyncAnthropic:
+    return AsyncAnthropic(
+        api_key=provider.resolved_api_key(),
+        base_url=anthropic_sdk_base_url(provider),
+        default_headers=provider.headers or None,
+    )
+
+
+def anthropic_sdk_base_url(provider: ProviderConfig) -> str:
+    endpoint_path = provider.endpoint_for_api("anthropic_messages").path
+    messages_url = provider.base_url.rstrip("/") + endpoint_path
+    if messages_url.endswith(ANTHROPIC_MESSAGES_PATH):
+        return messages_url[: -len(ANTHROPIC_MESSAGES_PATH)] or provider.base_url.rstrip("/")
+    return provider.base_url
+
+
+def anthropic_create_kwargs(
+    *,
+    provider: ProviderConfig,
+    model: ModelConfig,
+    input_items: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    instructions: str | None,
+) -> dict[str, Any]:
+    payload = anthropic_payload(provider, model, input_items, tools, instructions, stream=False)
+    payload.pop("stream", None)
+    kwargs = {key: value for key, value in payload.items() if key in ANTHROPIC_SDK_PARAM_KEYS}
+    extra_body = endpoint_extra_body(provider, model)
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    return kwargs
+
+
+def endpoint_extra_body(provider: ProviderConfig, model: ModelConfig) -> dict[str, Any] | None:
+    endpoint = provider.endpoint_for_api("anthropic_messages")
+    extra = {
+        key: value
+        for source in (provider.params, endpoint.params, model.params)
+        for key, value in source.items()
+        if key not in ANTHROPIC_SDK_PARAM_KEYS
+    }
+    return extra or None
+
+
 async def create_anthropic_response(
     *,
     provider: ProviderConfig,
@@ -153,10 +225,19 @@ async def create_anthropic_response(
     input_items: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     instructions: str | None,
+    client: AsyncAnthropic | None = None,
 ) -> ModelResponse:
-    payload = anthropic_payload(provider, model, input_items, tools, instructions, stream=False)
-    data = await post_json(provider, model.api, payload)
-    return parse_anthropic_response(data)
+    client = client or anthropic_client(provider)
+    response = await client.messages.create(
+        **anthropic_create_kwargs(
+            provider=provider,
+            model=model,
+            input_items=input_items,
+            tools=tools,
+            instructions=instructions,
+        )
+    )
+    return parse_anthropic_message(response)
 
 
 async def stream_anthropic_response(
@@ -166,40 +247,55 @@ async def stream_anthropic_response(
     input_items: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     instructions: str | None,
-    stream_events: Callable[[ProviderConfig, str, dict[str, Any]], AsyncIterator[dict[str, Any]]] = stream_sse,
+    client: AsyncAnthropic | None = None,
 ) -> AsyncIterator[ModelStreamEvent]:
-    payload = anthropic_payload(provider, model, input_items, tools, instructions, stream=True)
+    client = client or anthropic_client(provider)
     text_parts: list[str] = []
     tool_acc: dict[int, dict[str, Any]] = {}
     response_id: str | None = None
     usage: dict[str, Any] = {}
-    async for data in stream_events(provider, model.api, payload):
-        event_type = data.get("type", "")
-        if data.get("message", {}).get("id"):
-            response_id = data["message"]["id"]
-        if data.get("message", {}).get("usage"):
-            usage = data["message"]["usage"]
+    stream = await client.messages.create(
+        stream=True,
+        **anthropic_create_kwargs(
+            provider=provider,
+            model=model,
+            input_items=input_items,
+            tools=tools,
+            instructions=instructions,
+        ),
+    )
+    async for event in stream:
+        event_type = getattr(event, "type", "")
+        message = getattr(event, "message", None)
+        if message is not None:
+            response_id = getattr(message, "id", None) or response_id
+            usage = object_dump(getattr(message, "usage", None)) or usage
+        if event_type == "message_start":
+            continue
         if event_type == "content_block_delta":
-            index = int(data.get("index", 0))
-            delta = data.get("delta") or {}
-            if delta.get("type") == "text_delta":
-                text = delta.get("text", "")
+            index = int(getattr(event, "index", 0))
+            delta = getattr(event, "delta", None)
+            delta_type = getattr(delta, "type", "")
+            if delta_type == "text_delta":
+                text = getattr(delta, "text", "")
                 text_parts.append(text)
                 yield ModelStreamEvent(type="text_delta", text=text)
-            elif delta.get("type") in {"thinking_delta", "signature_delta"}:
-                yield ModelStreamEvent(type="reasoning_delta", text=str(delta.get("thinking") or ""))
-            elif delta.get("type") == "input_json_delta":
+            elif delta_type in {"thinking_delta", "signature_delta"}:
+                yield ModelStreamEvent(type="reasoning_delta", text=str(getattr(delta, "thinking", "") or ""))
+            elif delta_type == "input_json_delta":
                 existing = tool_acc.setdefault(index, {"arguments": ""})
-                existing["arguments"] += delta.get("partial_json", "")
+                existing["arguments"] += getattr(delta, "partial_json", "")
         elif event_type == "content_block_start":
-            block = data.get("content_block") or {}
-            if block.get("type") == "tool_use":
-                index = int(data.get("index", 0))
+            block = getattr(event, "content_block", None)
+            if getattr(block, "type", "") == "tool_use":
+                index = int(getattr(event, "index", 0))
                 tool_acc[index] = {
-                    "call_id": block.get("id"),
-                    "name": block.get("name"),
-                    "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                    "call_id": getattr(block, "id", None),
+                    "name": getattr(block, "name", None),
+                    "arguments": json.dumps(object_dump(getattr(block, "input", None)) or {}, ensure_ascii=False),
                 }
+        elif event_type == "message_delta":
+            usage = object_dump(getattr(event, "usage", None)) or usage
         elif event_type == "message_stop":
             output = chat_output_items("".join(text_parts), tool_acc)
             yield ModelStreamEvent(
@@ -213,3 +309,17 @@ async def stream_anthropic_response(
                 ),
             )
             return
+
+
+def parse_anthropic_message(message: Message) -> ModelResponse:
+    return parse_anthropic_response(object_dump(message))
+
+
+def object_dump(value: object) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return value
+    return dict(value) if hasattr(value, "__iter__") else {}

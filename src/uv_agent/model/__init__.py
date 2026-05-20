@@ -2,18 +2,26 @@ from __future__ import annotations
 
 from uv_agent.model.anthropic import (
     anthropic_image_source,
+    anthropic_sdk_base_url,
     anthropic_message_content,
     anthropic_messages,
     anthropic_payload,
     anthropic_tool,
+    create_anthropic_response,
+    endpoint_extra_body,
+    parse_anthropic_message,
     parse_anthropic_response,
+    stream_anthropic_response,
 )
 from uv_agent.model.chat import (
     CHAT_DELTA_CONTROL_FIELDS,
     chat_payload,
+    create_chat_response,
     parse_chat_response,
     parse_chat_response_for_model,
+    stream_chat_response,
 )
+from uv_agent.model.client import FakeModelClient, UnifiedModelClient
 from uv_agent.model.content import (
     chat_message_content,
     chat_message_passthrough,
@@ -35,17 +43,25 @@ from uv_agent.model.http import (
     post_json,
     stream_sse,
 )
-from uv_agent.model.responses import parse_responses_response, responses_payload
+from uv_agent.model.responses import (
+    parse_responses_response,
+    responses_payload,
+    stream_responses_response,
+)
 from uv_agent.model.types import ModelClient, ModelResponse, ModelStreamEvent, ToolCallDelta
+
 
 __all__ = [
     "CHAT_DELTA_CONTROL_FIELDS",
+    "FakeModelClient",
     "ModelClient",
     "ModelResponse",
     "ModelStreamEvent",
     "SSE_DONE",
     "ToolCallDelta",
+    "UnifiedModelClient",
     "anthropic_image_source",
+    "anthropic_sdk_base_url",
     "anthropic_message_content",
     "anthropic_messages",
     "anthropic_payload",
@@ -62,9 +78,11 @@ __all__ = [
     "chat_tool_call_message",
     "decode_json_response",
     "endpoint_url",
+    "endpoint_extra_body",
     "extract_responses_text",
     "message_text",
     "parse_anthropic_response",
+    "parse_anthropic_message",
     "parse_chat_response",
     "parse_chat_response_for_model",
     "parse_responses_response",
@@ -72,4 +90,7 @@ __all__ = [
     "post_json",
     "responses_payload",
     "stream_sse",
+    "stream_anthropic_response",
+    "stream_chat_response",
+    "stream_responses_response",
 ]

@@ -51,9 +51,12 @@ Endpoint config shape:
 }
 ```
 
-`path` is appended to `base_url` with no extra URL rewriting. For example,
-`base_url: "https://api.example.com/v1"` and `path: "/responses"` becomes
-`https://api.example.com/v1/responses`.
+For `responses` and `chat_completions`, `path` is appended to `base_url`
+with no extra URL rewriting. For example, `base_url:
+"https://api.example.com/v1"` and `path: "/responses"` becomes
+`https://api.example.com/v1/responses`. Anthropic Messages requests use the
+official Anthropic SDK, which owns the `/v1/messages` path; endpoint `params`
+still participate in request parameter merging.
 
 Secrets are redacted in config display paths, but committed config should still
 avoid direct `api_key` values.

@@ -14,16 +14,20 @@ from uv_agent.config import (
     RunnerConfig,
     RuntimeConfig,
 )
-from uv_agent.model_client import (
+from uv_agent.model import (
     ModelStreamEvent,
     SSE_DONE,
     UnifiedModelClient,
     anthropic_image_source,
+    anthropic_sdk_base_url,
     anthropic_messages,
     anthropic_payload,
+    create_anthropic_response,
     chat_message_content,
     chat_messages,
     chat_payload,
+    endpoint_extra_body,
+    parse_anthropic_message,
     parse_anthropic_response,
     parse_chat_response,
     parse_chat_response_for_model,
@@ -295,6 +299,38 @@ def test_anthropic_payload_uses_messages_shape() -> None:
     assert "tools" not in payload
 
 
+def test_anthropic_sdk_base_url_strips_default_messages_path() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.anthropic.com",
+        anthropic_messages=EndpointConfig(path="/v1/messages"),
+    )
+
+    assert anthropic_sdk_base_url(provider) == "https://api.anthropic.com"
+
+
+def test_anthropic_sdk_base_url_strips_messages_path_when_base_url_has_v1() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com/v1",
+        anthropic_messages=EndpointConfig(path="/messages"),
+    )
+
+    assert anthropic_sdk_base_url(provider) == "https://api.example.com"
+
+
+def test_anthropic_endpoint_extra_body_keeps_unknown_params() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.anthropic.com",
+        params={"temperature": 0.2, "vendor_flag": True},
+        anthropic_messages=EndpointConfig(path="/v1/messages", params={"max_tokens": 99}),
+    )
+    model = ModelConfig(name="m", provider="p", model="claude", params={"custom": "x"})
+
+    assert endpoint_extra_body(provider, model) == {"vendor_flag": True, "custom": "x"}
+
+
 def test_anthropic_messages_convert_tool_items() -> None:
     messages = anthropic_messages(
         [
@@ -333,6 +369,107 @@ def test_parse_anthropic_response_maps_tool_use() -> None:
     assert response.output_text == "hello"
     assert response.output[1]["type"] == "function_call"
     assert response.output[1]["call_id"] == "toolu_1"
+
+
+def test_parse_anthropic_message_maps_sdk_message() -> None:
+    class Message:
+        def model_dump(self, mode):
+            assert mode == "json"
+            return {
+                "id": "msg_1",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+                "content": [{"type": "text", "text": "hello"}],
+            }
+
+    response = parse_anthropic_message(Message())
+
+    assert response.id == "msg_1"
+    assert response.output_text == "hello"
+    assert response.usage == {"input_tokens": 1, "output_tokens": 2}
+
+
+@pytest.mark.asyncio
+async def test_create_anthropic_response_uses_sdk_client() -> None:
+    class Messages:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        async def create(self, **kwargs):
+            self.kwargs = kwargs
+
+            class Message:
+                def model_dump(self, mode):
+                    return {
+                        "id": "msg_1",
+                        "usage": {},
+                        "content": [{"type": "text", "text": "done"}],
+                    }
+
+            return Message()
+
+    class Client:
+        def __init__(self) -> None:
+            self.messages = Messages()
+
+    provider = ProviderConfig(name="p", base_url="https://api.anthropic.com")
+    model = ModelConfig(name="m", provider="p", model="claude", api="anthropic_messages")
+    client = Client()
+
+    response = await create_anthropic_response(
+        provider=provider,
+        model=model,
+        input_items=[],
+        tools=[],
+        instructions="system",
+        client=client,
+    )
+
+    assert response.output_text == "done"
+    assert client.messages.kwargs["model"] == "claude"
+    assert client.messages.kwargs["messages"] == []
+    assert client.messages.kwargs["system"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_create_anthropic_response_passes_unknown_params_as_extra_body() -> None:
+    class Messages:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        async def create(self, **kwargs):
+            self.kwargs = kwargs
+
+            class Message:
+                def model_dump(self, mode):
+                    return {"id": "msg_1", "usage": {}, "content": []}
+
+            return Message()
+
+    class Client:
+        def __init__(self) -> None:
+            self.messages = Messages()
+
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.anthropic.com",
+        params={"temperature": 0.2, "vendor_flag": True},
+    )
+    model = ModelConfig(name="m", provider="p", model="claude", params={"custom": "x"})
+    client = Client()
+
+    await create_anthropic_response(
+        provider=provider,
+        model=model,
+        input_items=[],
+        tools=[],
+        instructions=None,
+        client=client,
+    )
+
+    assert client.messages.kwargs["temperature"] == 0.2
+    assert client.messages.kwargs["extra_body"] == {"vendor_flag": True, "custom": "x"}
+    assert "vendor_flag" not in client.messages.kwargs
+    assert "custom" not in client.messages.kwargs
 
 
 def test_image_parts_convert_for_chat_and_anthropic() -> None:
@@ -382,7 +519,7 @@ async def test_stream_chat_accumulates_passthrough_and_configured_reasoning(
             ],
         }
 
-    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
     config = AppConfig(
         providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
         models={
@@ -432,7 +569,7 @@ async def test_stream_chat_allows_empty_chunks_before_done(
         yield {"id": "chat_1", "choices": [{"delta": {}}]}
         yield {"type": SSE_DONE}
 
-    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
     config = AppConfig(
         providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
         models={"m": ModelConfig(name="m", provider="p", model="remote", api="chat_completions")},
@@ -467,7 +604,7 @@ async def test_stream_chat_errors_when_empty_stream_ends_without_done(
         yield {"id": "chat_1", "choices": []}
         yield {"id": "chat_1", "choices": [{"delta": {}}]}
 
-    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
     config = AppConfig(
         providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
         models={"m": ModelConfig(name="m", provider="p", model="remote", api="chat_completions")},
@@ -496,7 +633,7 @@ async def test_stream_chat_can_treat_unknown_text_delta_as_reasoning(
     async def fake_stream_sse(provider, api, payload):
         yield {"id": "chat_1", "choices": [{"delta": {"vendor_thought": "hidden-ish"}}]}
 
-    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
     config = AppConfig(
         providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
         models={
@@ -537,7 +674,7 @@ async def test_stream_chat_fallback_can_display_passthrough_field_as_reasoning(
     async def fake_stream_sse(provider, api, payload):
         yield {"id": "chat_1", "choices": [{"delta": {"reasoning_content": "think"}}]}
 
-    monkeypatch.setattr("uv_agent.model_client.stream_sse", fake_stream_sse)
+    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
     config = AppConfig(
         providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
         models={

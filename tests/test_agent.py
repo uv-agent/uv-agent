@@ -28,7 +28,7 @@ from uv_agent.config import (
     TitleGenerationConfig,
     load_config,
 )
-from uv_agent.model_client import (
+from uv_agent.model import (
     FakeModelClient,
     ModelStreamEvent,
     anthropic_messages,
