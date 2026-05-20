@@ -56,7 +56,7 @@ and Esc to close.
 | `/status` | Show runtime status, model level, context usage, config paths, rules, and saved scripts. |
 | `/config` | Edit user-facing settings and inspect redacted config. |
 | `/models` | Show configured models. This panel is read-only. |
-| `/level [name]` | Switch the active model level for this TUI session. |
+| `/level [name]` | Switch the active model level for the current thread. |
 | `/mcp` | Show MCP declarations and insert MCP mentions. |
 | `/skills` | Show discovered skills and insert skill mentions. |
 | `/clear` | Clear the current transcript view and active thread selection. |
@@ -74,7 +74,9 @@ and Esc to close.
 
 Provider definitions, model definitions, and level-to-model mappings are edited
 in JSON config files. Use `/models` to inspect configured models and `/level` to
-switch the current session level.
+switch the current thread level. Switching between levels backed by different
+models is allowed, but the transcript records a warning because context
+conversion between models is best effort.
 
 Language choices are:
 

@@ -419,6 +419,33 @@ class StableRoundEngine(AgentEngine):
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": "Done."}
 
 
+class LevelCaptureEngine(AgentEngine):
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+        self.levels: list[str | None] = []
+
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        self.levels.append(level)
+        thread_id = thread_id or self.thread_store.create_thread("Level capture")
+        turn_id = f"turn_{len(self.levels)}"
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        )
+        self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text="done")
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": "done"}
+
+
 class InterruptedRoundEngine(AgentEngine):
     """Yields reasoning + tool call + tool output, then waits for cancel and emits turn.interrupted."""
 
@@ -733,6 +760,30 @@ def response(text: str, response_id: str = "resp") -> dict[str, object]:
             }
         ],
     }
+
+
+def with_extra_model_levels(engine: AgentEngine) -> AgentEngine:
+    engine.config = AppConfig(
+        providers=engine.config.providers,
+        models={
+            **engine.config.models,
+            "other": ModelConfig(
+                name="other",
+                provider="p",
+                model="other-remote",
+                context_window_tokens=258_000,
+                params={},
+            ),
+        },
+        levels={
+            **engine.config.levels,
+            "other": LevelConfig(name="other", model="other", params={}),
+        },
+        runtime=engine.config.runtime,
+        runner=engine.config.runner,
+        ui=engine.config.ui,
+    )
+    return engine
 
 
 @pytest.mark.asyncio
@@ -1210,6 +1261,131 @@ async def test_tui_level_panel_uses_configured_levels_only(
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
         assert [item.id for item in panel.items] == ["small", "medium"]
+
+
+@pytest.mark.asyncio
+async def test_tui_persists_level_used_for_thread_and_restores_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = LevelCaptureEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._handle_level_command("large")
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("first")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        thread_id = app.thread_id
+        assert thread_id is not None
+        assert engine.levels == ["large"]
+        assert engine.thread_store.thread_digest(thread_id)["active_level"] == "large"
+
+        app._handle_command("/clear")
+        await pilot.pause()
+        assert app.thread_id is None
+        assert app.level is None
+
+        app._resume_thread(thread_id)
+        await pilot.pause()
+        assert app.level == "large"
+
+        composer.insert("second")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        assert engine.levels == ["large", "large"]
+
+
+@pytest.mark.asyncio
+async def test_tui_new_thread_uses_default_level_after_clearing_thread_level(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = LevelCaptureEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._handle_level_command("large")
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("first")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        app._handle_command("/clear")
+        await pilot.pause()
+        composer.insert("new thread")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        assert engine.levels == ["large", "medium"]
+
+
+@pytest.mark.asyncio
+async def test_tui_switching_between_levels_on_same_model_does_not_warn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app.thread_id = engine.thread_store.create_thread()
+        app._persist_thread_level(app.thread_id, "medium")
+
+        app._handle_level_command("large")
+        await pilot.pause()
+
+        events = engine.thread_store.read(app.thread_id)
+        assert not any(event["type"] == "thread.model_switch_warning" for event in events)
+        assert engine.thread_store.thread_digest(app.thread_id)["active_level"] == "large"
+
+
+@pytest.mark.asyncio
+async def test_tui_cross_model_level_switch_persists_visible_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = with_extra_model_levels(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app.thread_id = engine.thread_store.create_thread()
+        app._persist_thread_level(app.thread_id, "medium")
+
+        app._handle_level_command("other")
+        await pilot.pause()
+
+        events = engine.thread_store.read(app.thread_id)
+        warnings = [event for event in events if event["type"] == "thread.model_switch_warning"]
+        assert len(warnings) == 1
+        assert warnings[0]["from_level"] == "medium"
+        assert warnings[0]["to_level"] == "other"
+        assert engine.thread_store.thread_digest(app.thread_id)["active_level"] == "other"
+
+        transcript_text = "\n".join(app._cell_text(cell) for cell in app.query(TranscriptCell).nodes)
+        assert app._text("model_switch_warning") in transcript_text
+
+        app._reset_transcript(show_empty=False)
+        app._render_thread_history(app.thread_id)
+        await pilot.pause()
+
+        rendered_history = "\n".join(app._cell_text(cell) for cell in app.query(TranscriptCell).nodes)
+        assert app._text("model_switch_warning") in rendered_history
 
 
 @pytest.mark.asyncio

@@ -1348,6 +1348,37 @@ def test_reconstruct_input_closes_interrupted_pending_tool_call(tmp_path: Path) 
     assert [message["role"] for message in messages[-2:]] == ["tool", "assistant"]
 
 
+def test_model_switch_warning_is_not_reconstructed_as_model_context(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.thread_store.append(thread_id, "thread.level_updated", level="medium", model="default")
+    engine.thread_store.append(
+        thread_id,
+        "thread.model_switch_warning",
+        from_level="medium",
+        to_level="other",
+        from_model="default",
+        to_model="other",
+        message="context conversion is best effort",
+    )
+    user_item = message_item("user", "continue")
+    engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=user_item)
+
+    reconstructed = engine._reconstruct_input(thread_id)
+
+    assert reconstructed == [user_item]
+    assert "context conversion is best effort" not in str(reconstructed)
+
+
 @pytest.mark.asyncio
 async def test_tool_look_at_adds_assistant_bridge_before_image_context(tmp_path: Path) -> None:
     project_root = tmp_path / "project"

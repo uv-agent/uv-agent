@@ -71,6 +71,32 @@ def test_thread_title_update_overrides_created_title(tmp_path: Path) -> None:
     assert store.thread_digest(thread_id)["title"] == "Generated title"
 
 
+def test_thread_level_and_model_switch_warning_update_metadata(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("New thread")
+
+    store.append(thread_id, "thread.level_updated", level="large", model="main")
+    warning = store.append(
+        thread_id,
+        "thread.model_switch_warning",
+        from_level="medium",
+        to_level="large",
+        from_model="fast",
+        to_model="main",
+        message="context conversion is best effort",
+    )
+
+    digest = store.thread_digest(thread_id)
+    thread = store.list_threads()[0]
+
+    assert digest["active_level"] == "large"
+    assert digest["active_model"] == "main"
+    assert thread["active_level"] == "large"
+    assert thread["active_model"] == "main"
+    assert digest["latest_model_switch_warning"]["message"] == "context conversion is best effort"
+    assert digest["latest_model_switch_warning"]["_jsonl_offset"] == warning["_jsonl_offset"]
+
+
 def test_thread_digest_starts_after_latest_compaction_and_hides_tools(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Digest")

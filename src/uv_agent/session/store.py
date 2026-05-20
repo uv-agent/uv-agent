@@ -32,6 +32,7 @@ VISIBLE_HISTORY_EVENT_TYPES = {
     "item.reasoning_delta",
     "item.reasoning_partial",
     "item.compaction",
+    "thread.model_switch_warning",
     "turn.interrupted",
     "turn.error",
     "turn.retry",
@@ -319,6 +320,9 @@ class ThreadStore:
             "title": metadata.get("title") or "New thread",
             "created_at": metadata.get("created_at"),
             "updated_at": metadata.get("updated_at"),
+            "active_level": metadata.get("active_level"),
+            "active_model": metadata.get("active_model"),
+            "latest_model_switch_warning": metadata.get("latest_model_switch_warning"),
             "last_text": metadata.get("last_text") or "",
             "turn_count": int(metadata.get("turn_count") or 0),
             "interrupted_turn_count": int(metadata.get("interrupted_turn_count") or 0),
@@ -604,6 +608,31 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
         cwd = str(event.get("cwd") or "").strip()
         if cwd:
             metadata["latest_cwd"] = cwd
+        return
+
+    if event_type == "thread.level_updated":
+        level = str(event.get("level") or "").strip()
+        model = str(event.get("model") or "").strip()
+        if level:
+            metadata["active_level"] = level
+        if model:
+            metadata["active_model"] = model
+        if event.get("previous_level"):
+            metadata["previous_level"] = event.get("previous_level")
+        if event.get("previous_model"):
+            metadata["previous_model"] = event.get("previous_model")
+        return
+
+    if event_type == "thread.model_switch_warning":
+        metadata["latest_model_switch_warning"] = {
+            "created_at": event.get("created_at"),
+            "from_level": event.get("from_level"),
+            "to_level": event.get("to_level"),
+            "from_model": event.get("from_model"),
+            "to_model": event.get("to_model"),
+            "message": event.get("message") or "",
+            "_jsonl_offset": event.get("_jsonl_offset"),
+        }
         return
 
     if event_type == "item.user":

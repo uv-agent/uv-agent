@@ -645,6 +645,7 @@ class PendingImage:
 @dataclass(frozen=True)
 class QueuedTurn:
     prompt: str
+    level: str | None = None
     image_paths: list[Path] = field(default_factory=list)
 
 
@@ -1893,10 +1894,13 @@ class UvAgentApp(App[None]):
         image_paths = [image.path for image in pending_images]
         self._pending_images.clear()
         self._refresh_pending_images()
+        thread_id = self._ensure_active_thread()
+        level = self._current_level_for_thread(thread_id)
+        self._persist_thread_level(thread_id, level)
         active_run = self._active_run_state()
         if active_run is not None:
             run_state = active_run
-            run_state.queue.append(QueuedTurn(prompt=prompt, image_paths=image_paths))
+            run_state.queue.append(QueuedTurn(prompt=prompt, level=level, image_paths=image_paths))
             if self._is_active_thread(run_state.thread_id):
                 self._append_cell(
                     self._queued_turn_markup(prompt, image_paths),
@@ -1904,18 +1908,26 @@ class UvAgentApp(App[None]):
                 )
             self._refresh_status()
             return
-        self._start_turn(prompt, image_paths=image_paths)
+        self._start_turn(prompt, level=level, image_paths=image_paths)
 
-    def _start_turn(self, prompt: str, *, image_paths: list[Path] | None = None) -> None:
-        if self.thread_id is None:
-            self.thread_id = self.engine.thread_store.create_thread()
-        self._start_background_turn(self.thread_id, prompt, image_paths=image_paths)
+    def _start_turn(
+        self,
+        prompt: str,
+        *,
+        level: str | None = None,
+        image_paths: list[Path] | None = None,
+    ) -> None:
+        thread_id = self._ensure_active_thread()
+        level = level or self._current_level_for_thread(thread_id)
+        self._persist_thread_level(thread_id, level)
+        self._start_background_turn(thread_id, prompt, level=level, image_paths=image_paths)
 
     def _start_background_turn(
         self,
         thread_id: str,
         prompt: str,
         *,
+        level: str | None,
         image_paths: list[Path] | None = None,
         queue: list[QueuedTurn] | None = None,
     ) -> None:
@@ -1950,7 +1962,7 @@ class UvAgentApp(App[None]):
             self._sync_run_state_from_active(run_state)
             self._refresh_status(self._text("thinking_status"))
         worker = self.run_worker(
-            self._run_turn(prompt, thread_id, image_paths=list(image_paths or [])),
+            self._run_turn(prompt, thread_id, level=level, image_paths=list(image_paths or [])),
             exclusive=False,
             thread=False,
         )
@@ -1985,7 +1997,13 @@ class UvAgentApp(App[None]):
             self._sync_run_state_from_active(run_state)
             self._refresh_status(self._text("thinking_status"))
         worker = self.run_worker(
-            self._run_turn("", thread_id, image_paths=[], retry=True),
+            self._run_turn(
+                "",
+                thread_id,
+                level=self._current_level_for_thread(thread_id),
+                image_paths=[],
+                retry=True,
+            ),
             exclusive=False,
             thread=False,
         )
@@ -2000,6 +2018,7 @@ class UvAgentApp(App[None]):
         prompt: str,
         thread_id: str,
         *,
+        level: str | None,
         image_paths: list[Path],
         retry: bool = False,
     ) -> None:
@@ -2007,7 +2026,7 @@ class UvAgentApp(App[None]):
         try:
             turn_kwargs: dict[str, Any] = {
                 "thread_id": thread_id,
-                "level": self.level,
+                "level": level,
                 "cancel_event": run_state.cancel_event,
             }
             if not retry:
@@ -2162,6 +2181,7 @@ class UvAgentApp(App[None]):
                 self._start_background_turn(
                     thread_id,
                     next_turn.prompt,
+                    level=next_turn.level,
                     image_paths=next_turn.image_paths,
                     queue=remaining_queue,
                 )
@@ -2263,6 +2283,102 @@ class UvAgentApp(App[None]):
     def _active_queue_length(self) -> int:
         run_state = self._active_run_state()
         return len(run_state.queue) if run_state is not None else 0
+
+    def _ensure_active_thread(self) -> str:
+        if self.thread_id is None:
+            self.thread_id = self.engine.thread_store.create_thread()
+        return self.thread_id
+
+    def _current_level_for_thread(self, thread_id: str | None = None) -> str | None:
+        if self.level:
+            return self.level
+        if thread_id:
+            metadata_level = self._thread_metadata_level(thread_id)
+            if metadata_level:
+                return metadata_level
+        return self.engine.config.runtime.default_level
+
+    def _thread_metadata(self, thread_id: str) -> dict[str, Any]:
+        try:
+            return self.engine.thread_store.thread_digest(thread_id)
+        except (OSError, ValueError, FileNotFoundError):
+            return {}
+
+    def _thread_metadata_level(self, thread_id: str) -> str | None:
+        level = str(self._thread_metadata(thread_id).get("active_level") or "").strip()
+        return level or None
+
+    def _level_model_name(self, level: str | None) -> str:
+        try:
+            return self.engine.config.level(level).model
+        except ConfigError:
+            return ""
+
+    def _level_model_signature(self, level: str | None) -> tuple[str, str, str] | None:
+        try:
+            model = self.engine.config.model_for_level(level)
+        except ConfigError:
+            return None
+        return (model.provider, model.api, model.model)
+
+    def _levels_use_same_model(self, left: str | None, right: str | None) -> bool:
+        left_signature = self._level_model_signature(left)
+        right_signature = self._level_model_signature(right)
+        return bool(left_signature and right_signature and left_signature == right_signature)
+
+    def _persist_thread_level(self, thread_id: str, level: str | None) -> None:
+        if not thread_id or not level:
+            return
+        metadata = self._thread_metadata(thread_id)
+        if metadata.get("active_level") == level and metadata.get("active_model") == self._level_model_name(level):
+            return
+        self.engine.thread_store.append(
+            thread_id,
+            "thread.level_updated",
+            level=level,
+            model=self._level_model_name(level),
+            previous_level=metadata.get("active_level"),
+            previous_model=metadata.get("active_model"),
+        )
+
+    def _append_model_switch_warning(
+        self,
+        thread_id: str,
+        *,
+        from_level: str,
+        to_level: str,
+    ) -> None:
+        message = self._text("model_switch_warning")
+        event = self.engine.thread_store.append(
+            thread_id,
+            "thread.model_switch_warning",
+            from_level=from_level,
+            to_level=to_level,
+            from_model=self._level_model_name(from_level),
+            to_model=self._level_model_name(to_level),
+            message=message,
+        )
+        if self._is_active_thread(thread_id):
+            self._append_model_switch_warning_cell(event)
+
+    def _append_model_switch_warning_cell(
+        self,
+        event: dict[str, Any],
+        *,
+        before: object | None = None,
+    ) -> TranscriptCell:
+        message = str(event.get("message") or self._text("model_switch_warning"))
+        from_level = str(event.get("from_level") or "")
+        to_level = str(event.get("to_level") or "")
+        suffix = ""
+        if from_level or to_level:
+            suffix = f"\n[dim]{escape(from_level or '?')} -> {escape(to_level or '?')}[/dim]"
+        return self._append_cell(
+            f"[yellow]{escape(message)}[/yellow]{suffix}",
+            "event",
+            before=before,
+            copy_text=message,
+        )
 
     def _default_screen_mounted(self) -> bool:
         try:
@@ -2927,6 +3043,7 @@ class UvAgentApp(App[None]):
                 active_run.detach_widgets()
             self._close_active_panel()
             self.thread_id = None
+            self.level = None
             self._reset_live_view_state()
             self._pending_images.clear()
             self._reset_transcript()
@@ -3542,6 +3659,8 @@ class UvAgentApp(App[None]):
             mounted.append(self._append_turn_error(event, before=before))
         elif event_type == "item.compaction":
             mounted.append(self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event", before=before))
+        elif event_type == "thread.model_switch_warning":
+            mounted.append(self._append_model_switch_warning_cell(event, before=before))
         return mounted
 
     def _run_state_for_history_error(self, event: dict[str, Any]) -> ThreadRunState | None:
@@ -4547,7 +4666,21 @@ class UvAgentApp(App[None]):
         if name not in self.engine.config.levels:
             self._append_cell(f"[red]{escape(self._text('unknown_level'))}[/red] {escape(name)}", "error")
             return
+        previous_level = self._current_level_for_thread(self.thread_id)
+        if (
+            self.thread_id is not None
+            and previous_level
+            and previous_level != name
+            and not self._levels_use_same_model(previous_level, name)
+        ):
+            self._append_model_switch_warning(
+                self.thread_id,
+                from_level=previous_level,
+                to_level=name,
+            )
         self.level = name
+        if self.thread_id is not None:
+            self._persist_thread_level(self.thread_id, name)
         self._append_cell(f"[dim]{escape(self._text('level'))}[/dim] [cyan]{escape(name)}[/cyan]", "event")
         self._refresh_status()
 
@@ -4651,6 +4784,7 @@ class UvAgentApp(App[None]):
         if run_state is not None and run_state is not active_run:
             run_state.detach_widgets()
         self.thread_id = thread_id
+        self.level = self._thread_metadata_level(thread_id)
         self._reset_live_view_state()
         self._reset_transcript(show_empty=False)
         self._render_thread_history(thread_id)
