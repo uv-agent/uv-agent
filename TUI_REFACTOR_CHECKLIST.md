@@ -12,8 +12,8 @@ Plan:
 - [x] Move shared TUI dataclasses/state helpers out of `app.py`.
 - [x] Move reusable widgets out of `app.py`.
 - [x] Move fullscreen panel classes out of `app.py`.
-- [ ] Isolate mention scanning/picker support from the app class.
-- [ ] Isolate config panel/write helpers from the app class.
+- [x] Isolate mention scanning/picker support from the app class.
+- [x] Isolate config panel/write helpers from the app class.
 - [ ] Isolate image attachment/preview app helpers where it reduces app state.
 - [ ] Split turn event handling enough to reduce the `_run_turn` event chain.
 - [ ] Run the full test suite.
