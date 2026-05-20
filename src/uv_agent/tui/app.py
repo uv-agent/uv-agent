@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import sys
 import threading
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
@@ -16,7 +15,7 @@ from rich.markup import escape
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.geometry import Offset
 from textual.screen import Screen
@@ -81,6 +80,7 @@ from uv_agent.tui.widgets import (
     TranscriptCell,
     TranscriptScroll,
 )
+from uv_agent.tui.window_title import sanitized_window_title, write_window_title
 
 
 COMPOSER_COLLAPSED_HEIGHT = 5
@@ -90,7 +90,23 @@ QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-WINDOW_TITLE_MAX_LEN = 60
+
+
+__all__ = [
+    "EmptyState",
+    "ExpandableTranscriptCell",
+    "FoldedProcessCell",
+    "FullscreenPanel",
+    "ImageAttachmentCell",
+    "ImagePreviewPanel",
+    "PendingImage",
+    "PendingImagePreviewPanel",
+    "RetryTurnButton",
+    "ToolDetailsPanel",
+    "TranscriptCell",
+    "TranscriptScroll",
+    "UvAgentApp",
+]
 
 
 COMMAND_SPECS = [
@@ -2946,10 +2962,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if self.busy or self._any_thread_running():
             spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
             title = f"{spinner} {title}"
-        # Sanitize: OSC strings can't contain BEL/ESC/control chars.
-        title = "".join(ch for ch in title if ch >= " " and ch != "\x7f")
-        if len(title) > WINDOW_TITLE_MAX_LEN:
-            title = title[: WINDOW_TITLE_MAX_LEN - 1].rstrip() + "…"
+        title = sanitized_window_title(title)
         if title == self._last_window_title:
             return
         self._last_window_title = title
@@ -2958,19 +2971,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         # the OSC sequence directly to the original stdout (which Textual leaves
         # untouched at the Python level) so Windows Terminal / xterm-style hosts
         # actually update their title bar.
-        sequence = f"\x1b]0;{title}\x07"
-        try:
-            stream = sys.__stdout__
-            if stream is not None:
-                stream.write(sequence)
-                stream.flush()
-                return
-        except Exception:
-            pass
-        try:
-            os.write(1, sequence.encode("utf-8", errors="replace"))
-        except Exception:
-            pass
+        write_window_title(title)
 
     def _scroll_end(self) -> None:
         transcript = self.query_one("#transcript", TranscriptScroll)

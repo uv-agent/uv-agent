@@ -9,7 +9,7 @@ from typing import Any
 from uv_agent.config import RunnerConfig
 from uv_agent.ids import new_id
 from uv_agent.jsonl import JsonlWriter
-from uv_agent.runner.events import parse_structured_event
+from uv_agent.runner.events import parse_structured_event as parse_structured_event
 from uv_agent.runner.metadata import ensure_dependency
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RerunRequest, RunnerEvent
 from uv_agent.runner.output import OutputCapture, pump_stream

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import os
 import json
-from pathlib import Path
+import os
+import shutil
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -674,8 +675,6 @@ def test_runtime_emit_event_writes_complete_lines_from_threads(
 
 
 # ---- codesearch / codequery -----------------------------------------------
-
-import shutil
 
 requires_rg = pytest.mark.skipif(
     shutil.which("rg") is None,

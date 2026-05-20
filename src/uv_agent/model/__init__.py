@@ -70,6 +70,8 @@ __all__ = [
     "chat_tool",
     "chat_tool_acc_from_message",
     "chat_tool_call_message",
+    "create_anthropic_response",
+    "create_chat_response",
     "endpoint_extra_body",
     "extract_responses_text",
     "message_text",
