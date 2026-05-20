@@ -2865,7 +2865,14 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         )
         composer.styles.height = height
         if self.is_mounted:
+            # Textual's TextArea.edit() triggers scroll_cursor_visible() before
+            # virtual_size is refreshed, so when the composer is at its max
+            # height a freshly inserted newline leaves the cursor off-screen
+            # (max_scroll_y is clamped against the stale virtual_size). Defer a
+            # second scroll_cursor_visible() until after the layout pass so the
+            # textarea can scroll using the up-to-date geometry.
             self.call_after_refresh(self._refresh_composer_overlay)
+            self.call_after_refresh(composer.scroll_cursor_visible)
 
     def _composer_visual_line_count(self, composer: TextArea) -> int:
         if composer.soft_wrap:
