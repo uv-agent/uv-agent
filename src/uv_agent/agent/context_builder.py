@@ -7,7 +7,7 @@ from typing import Any
 
 from uv_agent.config import AppConfig
 from uv_agent.environment import UserLanguage, host_environment_line
-from uv_agent.prompts import RUNTIME_HELPERS_CONTEXT
+from uv_agent.agent.prompts import RUNTIME_HELPERS_CONTEXT
 
 
 def runtime_environment_context(

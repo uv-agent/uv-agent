@@ -26,6 +26,7 @@ Principles:
 - [x] Evaluate replacing hand-built Anthropic protocol code with the official SDK.
 - [x] Split runner stream/event parsing helpers out of `runner.py`.
 - [x] Run full test suite and confirm behavior parity.
+- [x] Group split agent and model modules under package directories.
 
 ## Non-goals
 

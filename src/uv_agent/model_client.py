@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from uv_agent.config import AppConfig
-from uv_agent.model_anthropic import (
+from uv_agent.model.anthropic import (
     anthropic_image_source,
     anthropic_message_content,
     anthropic_messages,
@@ -15,7 +15,7 @@ from uv_agent.model_anthropic import (
     parse_anthropic_response,
     stream_anthropic_response,
 )
-from uv_agent.model_chat import (
+from uv_agent.model.chat import (
     CHAT_DELTA_CONTROL_FIELDS,
     chat_payload,
     create_chat_response,
@@ -23,7 +23,7 @@ from uv_agent.model_chat import (
     parse_chat_response_for_model,
     stream_chat_response,
 )
-from uv_agent.model_content import (
+from uv_agent.model.content import (
     chat_message_content,
     chat_message_passthrough,
     chat_message_reasoning_text,
@@ -35,7 +35,7 @@ from uv_agent.model_content import (
     extract_responses_text,
     message_text,
 )
-from uv_agent.model_http import (
+from uv_agent.model.http import (
     SSE_DONE,
     auth_headers,
     decode_json_response,
@@ -44,13 +44,13 @@ from uv_agent.model_http import (
     post_json,
     stream_sse,
 )
-from uv_agent.model_responses import (
+from uv_agent.model.responses import (
     create_responses_response,
     parse_responses_response,
     responses_payload,
     stream_responses_response,
 )
-from uv_agent.model_types import ModelClient, ModelResponse, ModelStreamEvent, ToolCallDelta
+from uv_agent.model.types import ModelClient, ModelResponse, ModelStreamEvent, ToolCallDelta
 
 
 class UnifiedModelClient:

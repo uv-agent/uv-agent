@@ -5,9 +5,9 @@ from collections.abc import AsyncIterator
 from typing import Any, Callable
 
 from uv_agent.config import ModelConfig, ProviderConfig
-from uv_agent.model_content import extract_responses_text
-from uv_agent.model_http import post_json, stream_sse
-from uv_agent.model_types import ModelResponse, ModelStreamEvent
+from uv_agent.model.content import extract_responses_text
+from uv_agent.model.http import post_json, stream_sse
+from uv_agent.model.types import ModelResponse, ModelStreamEvent
 
 
 def responses_payload(

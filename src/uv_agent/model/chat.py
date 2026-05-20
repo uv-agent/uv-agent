@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Callable
 
 from uv_agent.config import ModelConfig, ProviderConfig
-from uv_agent.model_content import (
+from uv_agent.model.content import (
     chat_message_passthrough,
     chat_message_reasoning_text,
     chat_messages,
@@ -12,8 +12,8 @@ from uv_agent.model_content import (
     chat_tool,
     chat_tool_acc_from_message,
 )
-from uv_agent.model_http import SSE_DONE, post_json, stream_sse
-from uv_agent.model_types import ModelResponse, ModelStreamEvent, ToolCallDelta
+from uv_agent.model.http import SSE_DONE, post_json, stream_sse
+from uv_agent.model.types import ModelResponse, ModelStreamEvent, ToolCallDelta
 
 CHAT_DELTA_CONTROL_FIELDS = {
     "role",

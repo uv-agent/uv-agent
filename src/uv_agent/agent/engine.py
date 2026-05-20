@@ -11,14 +11,14 @@ from time import monotonic
 from typing import Any, Callable
 
 from uv_agent.attachments import AttachmentStore, image_message_item
-from uv_agent.compaction import (
+from uv_agent.agent.compaction import (
     compaction_replacement_input,
     compaction_trigger_item,
     retained_user_messages_after_compaction,
     retain_item_after_compaction,
 )
 from uv_agent.config import AppConfig
-from uv_agent.context_builder import (
+from uv_agent.agent.context_builder import (
     context_fingerprint,
     model_levels_context,
     runtime_environment_context,
@@ -29,11 +29,11 @@ from uv_agent.context import ContextStats, estimate_tokens, usage_token_count
 from uv_agent.environment import detect_user_language, host_environment
 from uv_agent.errors import is_retryable_provider_error
 from uv_agent.ids import new_id
-from uv_agent.messages import assistant_output_item, message_item, message_item_text
+from uv_agent.agent.messages import assistant_output_item, message_item, message_item_text
 from uv_agent.mcp_config import discover_mcp_servers, render_mcp_summary
-from uv_agent.model_client import ModelClient, ModelResponse
+from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
-from uv_agent.prompts import (
+from uv_agent.agent.prompts import (
     COMPACTED_CONTEXT_CONTINUATION,
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
     INTERRUPTED_TOOL_CONTEXT_BRIDGE,
@@ -51,7 +51,7 @@ from uv_agent.project_rules import (
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
 from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.skills import discover_skills, render_skill_summary
-from uv_agent.tool_results import function_output, model_tool_payload
+from uv_agent.agent.tool_results import function_output, model_tool_payload
 
 
 DEFAULT_THREAD_TITLES = {"New thread", "new thread", "新会话"}

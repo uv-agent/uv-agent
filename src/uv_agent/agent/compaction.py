@@ -4,9 +4,9 @@ import copy
 from typing import Any
 
 from uv_agent.context import estimate_tokens
-from uv_agent.messages import message_item, message_item_text
-from uv_agent.model_client import ModelResponse
-from uv_agent.prompts import COMPACTED_CONTEXT_CONTINUATION, COMPACTION_SUMMARIZATION_PROMPT
+from uv_agent.agent.messages import message_item, message_item_text
+from uv_agent.agent.prompts import COMPACTED_CONTEXT_CONTINUATION, COMPACTION_SUMMARIZATION_PROMPT
+from uv_agent.model.types import ModelResponse
 
 COMPACTION_USER_MESSAGE_MAX_TOKENS = 20_000
 
