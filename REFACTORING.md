@@ -22,8 +22,8 @@ Principles:
 - [x] Extract compaction helpers from `agent.py`.
 - [x] Extract tool result projection/filtering from `agent.py`.
 - [x] Reduce duplicated turn/retry model-loop code in `agent.py`.
-- [ ] Split model provider protocol code out of `model_client.py`.
-- [ ] Evaluate replacing hand-built Anthropic protocol code with the official SDK.
+- [x] Split model provider protocol code out of `model_client.py`.
+- [x] Evaluate replacing hand-built Anthropic protocol code with the official SDK.
 - [ ] Split runner stream/event parsing helpers out of `runner.py`.
 - [ ] Run full test suite and confirm behavior parity.
 
