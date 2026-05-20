@@ -21,7 +21,7 @@ Principles:
 - [x] Extract stable prompt and runtime-context rendering from `agent.py`.
 - [x] Extract compaction helpers from `agent.py`.
 - [x] Extract tool result projection/filtering from `agent.py`.
-- [ ] Reduce duplicated turn/retry model-loop code in `agent.py`.
+- [x] Reduce duplicated turn/retry model-loop code in `agent.py`.
 - [ ] Split model provider protocol code out of `model_client.py`.
 - [ ] Evaluate replacing hand-built Anthropic protocol code with the official SDK.
 - [ ] Split runner stream/event parsing helpers out of `runner.py`.

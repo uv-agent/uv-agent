@@ -106,6 +106,40 @@ class RuleRuntimeState:
     cwd_notice_cwd: Path | None = None
 
 
+@dataclass
+class StreamResponseState:
+    assistant_parts: list[str] = field(default_factory=list)
+    reasoning_parts: list[str] = field(default_factory=list)
+    saw_stream_output: bool = False
+    response: ModelResponse | None = None
+
+    @property
+    def partial_text(self) -> str:
+        return "".join(self.assistant_parts).strip()
+
+    @property
+    def partial_reasoning_text(self) -> str:
+        return "".join(self.reasoning_parts).strip()
+
+    def reset(self) -> None:
+        self.assistant_parts.clear()
+        self.reasoning_parts.clear()
+        self.response = None
+
+    def require_response(self) -> ModelResponse:
+        if self.response is None:
+            raise RuntimeError("Model stream ended without completion")
+        return self.response
+
+
+@dataclass(frozen=True)
+class ToolCallTurnResult:
+    tool_output: dict[str, Any]
+    attachments: list[dict[str, Any]]
+    started_event: dict[str, Any]
+    output_event: dict[str, Any]
+
+
 class AgentEngine:
     def __init__(
         self,
@@ -201,87 +235,23 @@ class AgentEngine:
                 }
 
             final_text = ""
-            assistant_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            saw_stream_output = False
+            stream_state = StreamResponseState()
             try:
                 for round_index in range(self.config.runtime.max_agent_rounds):
                     self._raise_if_cancelled(cancel_event)
-                    response: ModelResponse | None = None
-                    async for stream_event in self._stream_response_until_cancelled(
+                    async for event in self._stream_and_persist_model_response(
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        turn_started_at=turn_started_event.get("created_at"),
                         input_items=copy.deepcopy(request_input_items),
                         level=level,
                         instructions=system_instructions,
-                        cancel_event=cancel_event,
                         previous_response_id=turn_input.request_previous_response_id(),
+                        stream_state=stream_state,
+                        cancel_event=cancel_event,
                     ):
-                        self._raise_if_cancelled(cancel_event)
-                        if stream_event.type == "text_delta" and stream_event.text:
-                            saw_stream_output = True
-                            assistant_parts.append(stream_event.text)
-                            yield {
-                                "type": "assistant.delta",
-                                "thread_id": thread_id,
-                                "turn_id": turn_id,
-                                "turn_started_at": turn_started_event.get("created_at"),
-                                "text": stream_event.text,
-                            }
-                        elif stream_event.type == "reasoning_delta" and stream_event.text:
-                            saw_stream_output = True
-                            reasoning_parts.append(stream_event.text)
-                            yield {
-                                "type": "assistant.reasoning_delta",
-                                "thread_id": thread_id,
-                                "turn_id": turn_id,
-                                "turn_started_at": turn_started_event.get("created_at"),
-                                "text": stream_event.text,
-                            }
-                        elif stream_event.type == "tool_call_delta" and stream_event.tool_call:
-                            saw_stream_output = True
-                            yield {
-                                "type": "tool.delta",
-                                "thread_id": thread_id,
-                                "turn_id": turn_id,
-                                "turn_started_at": turn_started_event.get("created_at"),
-                                "tool_call": stream_event.tool_call,
-                            }
-                        elif stream_event.type == "completed":
-                            response = stream_event.response
-                    self._raise_if_cancelled(cancel_event)
-                    if response is None:
-                        raise RuntimeError("Model stream ended without completion")
-                    completed_text_delta = completion_text_delta(
-                        response.output_text,
-                        "".join(assistant_parts),
-                    )
-                    if completed_text_delta:
-                        assistant_parts.append(completed_text_delta)
-                        yield {
-                            "type": "assistant.delta",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "turn_started_at": turn_started_event.get("created_at"),
-                            "text": completed_text_delta,
-                        }
-                    reasoning_text = response.reasoning_text or "".join(reasoning_parts).strip()
-                    self.thread_store.append(
-                        thread_id,
-                        "item.model_response",
-                        turn_id=turn_id,
-                        model_api=self._model_api_for_level(level),
-                        response_id=response.id,
-                        output=response.output,
-                        usage=response.usage,
-                        reasoning_text=reasoning_text,
-                    )
-                    yield {
-                        "type": "model.response",
-                        "thread_id": thread_id,
-                        "turn_id": turn_id,
-                        "turn_started_at": turn_started_event.get("created_at"),
-                        "response": response,
-                        "reasoning_text": reasoning_text,
-                    }
+                        yield event
+                    response = stream_state.require_response()
                     input_items.extend(response.output)
                     turn_input.previous_response_id = response.id
                     turn_input.use_previous_response_id = bool(
@@ -289,8 +259,7 @@ class AgentEngine:
                     )
                     turn_input.pending_items.clear()
                     request_input_items = turn_input.request_input_items()
-                    assistant_parts.clear()
-                    reasoning_parts.clear()
+                    stream_state.reset()
 
                     tool_calls = [item for item in response.output if item.get("type") == "function_call"]
                     if not tool_calls:
@@ -299,40 +268,26 @@ class AgentEngine:
 
                     round_attachments: list[dict[str, Any]] = []
                     for call_index, call in enumerate(tool_calls):
-                        self._raise_if_cancelled(cancel_event)
-                        yield {
-                            "type": "tool.started",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "turn_started_at": turn_started_event.get("created_at"),
-                            "call": call,
-                            "tool_call_index": call_index,
-                        }
-                        tool_output, attachments, display_output = await self._handle_tool_call(
-                            call,
-                            thread_id,
-                            turn_id,
+                        result = await self._execute_tool_call_for_turn(
+                            call=call,
+                            call_index=call_index,
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                            turn_started_at=turn_started_event.get("created_at"),
                             cancel_event=cancel_event,
                         )
+                        yield result.started_event
                         self.thread_store.append(
                             thread_id,
                             "item.tool_output",
                             turn_id=turn_id,
-                            item=tool_output,
+                            item=result.tool_output,
                         )
-                        input_items.append(tool_output)
-                        request_input_items.append(tool_output)
-                        turn_input.pending_items.append(tool_output)
-                        round_attachments.extend(attachments)
-                        yield {
-                            "type": "tool.output",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "turn_started_at": turn_started_event.get("created_at"),
-                            "call": call,
-                            "tool_call_index": call_index,
-                            "output": display_output,
-                        }
+                        input_items.append(result.tool_output)
+                        request_input_items.append(result.tool_output)
+                        turn_input.pending_items.append(result.tool_output)
+                        round_attachments.extend(result.attachments)
+                        yield result.output_event
                     if round_attachments:
                         for attachment in round_attachments:
                             self.thread_store.append(
@@ -350,7 +305,7 @@ class AgentEngine:
                 else:
                     raise RuntimeError("Agent exceeded max_agent_rounds")
             except (asyncio.CancelledError, TurnInterrupted):
-                partial_text = "".join(assistant_parts).strip()
+                partial_text = stream_state.partial_text
                 if partial_text:
                     self.thread_store.append(
                         thread_id,
@@ -358,7 +313,7 @@ class AgentEngine:
                         turn_id=turn_id,
                         text=partial_text,
                     )
-                reasoning_text = "".join(reasoning_parts).strip()
+                reasoning_text = stream_state.partial_reasoning_text
                 if reasoning_text:
                     self.thread_store.append(
                         thread_id,
@@ -371,14 +326,14 @@ class AgentEngine:
                     "turn.interrupted",
                     turn_id=turn_id,
                     reason="user_interrupt",
-                    partial_stream=saw_stream_output,
+                    partial_stream=stream_state.saw_stream_output,
                 )
                 yield {
                     "type": "turn.interrupted",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "reason": "user_interrupt",
-                    "partial_stream": saw_stream_output,
+                    "partial_stream": stream_state.saw_stream_output,
                 }
                 if title_task is not None:
                     title_task.cancel()
@@ -459,46 +414,30 @@ class AgentEngine:
             turn_started_event = self.thread_store.append(thread_id, "turn.started", turn_id=turn_id, retry=True)
             self.thread_store.append(thread_id, "turn.retry", turn_id=turn_id)
             final_text = ""
-            assistant_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            saw_stream_output = False
+            stream_state = StreamResponseState()
             try:
                 if retry_state.pending_tool_calls:
                     round_attachments: list[dict[str, Any]] = []
                     for call_index, call in enumerate(retry_state.pending_tool_calls):
-                        self._raise_if_cancelled(cancel_event)
-                        yield {
-                            "type": "tool.started",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "turn_started_at": turn_started_event.get("created_at"),
-                            "call": call,
-                            "tool_call_index": call_index,
-                        }
-                        tool_output, attachments, display_output = await self._handle_tool_call(
-                            call,
-                            thread_id,
-                            turn_id,
+                        result = await self._execute_tool_call_for_turn(
+                            call=call,
+                            call_index=call_index,
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                            turn_started_at=turn_started_event.get("created_at"),
                             cancel_event=cancel_event,
                         )
+                        yield result.started_event
                         self.thread_store.append(
                             thread_id,
                             "item.tool_output",
                             turn_id=turn_id,
-                            item=tool_output,
+                            item=result.tool_output,
                         )
-                        retry_state.input_items.append(tool_output)
-                        retry_state.pending_items.append(tool_output)
-                        round_attachments.extend(attachments)
-                        yield {
-                            "type": "tool.output",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "turn_started_at": turn_started_event.get("created_at"),
-                            "call": call,
-                            "tool_call_index": call_index,
-                            "output": display_output,
-                        }
+                        retry_state.input_items.append(result.tool_output)
+                        retry_state.pending_items.append(result.tool_output)
+                        round_attachments.extend(result.attachments)
+                        yield result.output_event
                     if round_attachments:
                         for attachment in round_attachments:
                             self.thread_store.append(
@@ -512,87 +451,24 @@ class AgentEngine:
 
                 for _ in range(self.config.runtime.max_agent_rounds):
                     self._raise_if_cancelled(cancel_event)
-                    response: ModelResponse | None = None
-                    async for stream_event in self._stream_response_until_cancelled(
+                    async for event in self._stream_and_persist_model_response(
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        turn_started_at=turn_started_event.get("created_at"),
                         input_items=retry_state.request_input_items(),
                         level=level,
                         instructions=system_instructions,
-                        cancel_event=cancel_event,
                         previous_response_id=retry_state.request_previous_response_id(),
+                        stream_state=stream_state,
+                        cancel_event=cancel_event,
                     ):
-                        self._raise_if_cancelled(cancel_event)
-                        if stream_event.type == "text_delta" and stream_event.text:
-                            saw_stream_output = True
-                            assistant_parts.append(stream_event.text)
-                            yield {
-                                "type": "assistant.delta",
-                                "thread_id": thread_id,
-                                "turn_id": turn_id,
-                                "turn_started_at": turn_started_event.get("created_at"),
-                                "text": stream_event.text,
-                            }
-                        elif stream_event.type == "reasoning_delta" and stream_event.text:
-                            saw_stream_output = True
-                            reasoning_parts.append(stream_event.text)
-                            yield {
-                                "type": "assistant.reasoning_delta",
-                                "thread_id": thread_id,
-                                "turn_id": turn_id,
-                                "turn_started_at": turn_started_event.get("created_at"),
-                                "text": stream_event.text,
-                            }
-                        elif stream_event.type == "tool_call_delta" and stream_event.tool_call:
-                            saw_stream_output = True
-                            yield {
-                                "type": "tool.delta",
-                                "thread_id": thread_id,
-                                "turn_id": turn_id,
-                                "turn_started_at": turn_started_event.get("created_at"),
-                                "tool_call": stream_event.tool_call,
-                            }
-                        elif stream_event.type == "completed":
-                            response = stream_event.response
-                    self._raise_if_cancelled(cancel_event)
-                    if response is None:
-                        raise RuntimeError("Model stream ended without completion")
-                    completed_text_delta = completion_text_delta(
-                        response.output_text,
-                        "".join(assistant_parts),
-                    )
-                    if completed_text_delta:
-                        assistant_parts.append(completed_text_delta)
-                        yield {
-                            "type": "assistant.delta",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "turn_started_at": turn_started_event.get("created_at"),
-                            "text": completed_text_delta,
-                        }
-                    reasoning_text = response.reasoning_text or "".join(reasoning_parts).strip()
-                    self.thread_store.append(
-                        thread_id,
-                        "item.model_response",
-                        turn_id=turn_id,
-                        model_api=self._model_api_for_level(level),
-                        response_id=response.id,
-                        output=response.output,
-                        usage=response.usage,
-                        reasoning_text=reasoning_text,
-                    )
-                    yield {
-                        "type": "model.response",
-                        "thread_id": thread_id,
-                        "turn_id": turn_id,
-                        "turn_started_at": turn_started_event.get("created_at"),
-                        "response": response,
-                        "reasoning_text": reasoning_text,
-                    }
+                        yield event
+                    response = stream_state.require_response()
                     retry_state.input_items.extend(response.output)
                     retry_state.previous_response_id = response.id
                     retry_state.use_previous_response_id = bool(response.id and self._level_uses_responses_api(level))
                     retry_state.pending_items.clear()
-                    assistant_parts.clear()
-                    reasoning_parts.clear()
+                    stream_state.reset()
                     tool_calls = [item for item in response.output if item.get("type") == "function_call"]
                     if not tool_calls:
                         final_text = response.output_text
@@ -600,39 +476,25 @@ class AgentEngine:
                     retry_state.pending_tool_calls = tool_calls
                     round_attachments = []
                     for call_index, call in enumerate(tool_calls):
-                        self._raise_if_cancelled(cancel_event)
-                        yield {
-                            "type": "tool.started",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "turn_started_at": turn_started_event.get("created_at"),
-                            "call": call,
-                            "tool_call_index": call_index,
-                        }
-                        tool_output, attachments, display_output = await self._handle_tool_call(
-                            call,
-                            thread_id,
-                            turn_id,
+                        result = await self._execute_tool_call_for_turn(
+                            call=call,
+                            call_index=call_index,
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                            turn_started_at=turn_started_event.get("created_at"),
                             cancel_event=cancel_event,
                         )
+                        yield result.started_event
                         self.thread_store.append(
                             thread_id,
                             "item.tool_output",
                             turn_id=turn_id,
-                            item=tool_output,
+                            item=result.tool_output,
                         )
-                        retry_state.input_items.append(tool_output)
-                        retry_state.pending_items.append(tool_output)
-                        round_attachments.extend(attachments)
-                        yield {
-                            "type": "tool.output",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "turn_started_at": turn_started_event.get("created_at"),
-                            "call": call,
-                            "tool_call_index": call_index,
-                            "output": display_output,
-                        }
+                        retry_state.input_items.append(result.tool_output)
+                        retry_state.pending_items.append(result.tool_output)
+                        round_attachments.extend(result.attachments)
+                        yield result.output_event
                     if round_attachments:
                         for attachment in round_attachments:
                             self.thread_store.append(
@@ -648,10 +510,10 @@ class AgentEngine:
                 else:
                     raise RuntimeError("Agent exceeded max_agent_rounds")
             except (asyncio.CancelledError, TurnInterrupted):
-                partial_text = "".join(assistant_parts).strip()
+                partial_text = stream_state.partial_text
                 if partial_text:
                     self.thread_store.append(thread_id, "item.assistant_partial", turn_id=turn_id, text=partial_text)
-                reasoning_text = "".join(reasoning_parts).strip()
+                reasoning_text = stream_state.partial_reasoning_text
                 if reasoning_text:
                     self.thread_store.append(thread_id, "item.reasoning_partial", turn_id=turn_id, text=reasoning_text)
                 self.thread_store.append(
@@ -659,14 +521,14 @@ class AgentEngine:
                     "turn.interrupted",
                     turn_id=turn_id,
                     reason="user_interrupt",
-                    partial_stream=saw_stream_output,
+                    partial_stream=stream_state.saw_stream_output,
                 )
                 yield {
                     "type": "turn.interrupted",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "reason": "user_interrupt",
-                    "partial_stream": saw_stream_output,
+                    "partial_stream": stream_state.saw_stream_output,
                 }
                 return
             except Exception as exc:
@@ -927,10 +789,139 @@ class AgentEngine:
         )
         return function_output(call, model_tool_payload(payload)), attachments, function_output(call, payload)
 
+    async def _execute_tool_call_for_turn(
+        self,
+        *,
+        call: dict[str, Any],
+        call_index: int,
+        thread_id: str,
+        turn_id: str,
+        turn_started_at: object,
+        cancel_event: asyncio.Event | None,
+    ) -> ToolCallTurnResult:
+        self._raise_if_cancelled(cancel_event)
+        started_event = {
+            "type": "tool.started",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "turn_started_at": turn_started_at,
+            "call": call,
+            "tool_call_index": call_index,
+        }
+        tool_output, attachments, display_output = await self._handle_tool_call(
+            call,
+            thread_id,
+            turn_id,
+            cancel_event=cancel_event,
+        )
+        output_event = {
+            "type": "tool.output",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "turn_started_at": turn_started_at,
+            "call": call,
+            "tool_call_index": call_index,
+            "output": display_output,
+        }
+        return ToolCallTurnResult(
+            tool_output=tool_output,
+            attachments=attachments,
+            started_event=started_event,
+            output_event=output_event,
+        )
+
     @staticmethod
     def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:
         if cancel_event is not None and cancel_event.is_set():
             raise TurnInterrupted()
+
+    async def _stream_and_persist_model_response(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        turn_started_at: object,
+        input_items: list[dict[str, Any]],
+        level: str | None,
+        instructions: str,
+        previous_response_id: str | None,
+        stream_state: StreamResponseState,
+        cancel_event: asyncio.Event | None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        stream_state.response = None
+        async for stream_event in self._stream_response_until_cancelled(
+            input_items=input_items,
+            level=level,
+            instructions=instructions,
+            cancel_event=cancel_event,
+            previous_response_id=previous_response_id,
+        ):
+            self._raise_if_cancelled(cancel_event)
+            if stream_event.type == "text_delta" and stream_event.text:
+                stream_state.saw_stream_output = True
+                stream_state.assistant_parts.append(stream_event.text)
+                yield {
+                    "type": "assistant.delta",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "turn_started_at": turn_started_at,
+                    "text": stream_event.text,
+                }
+            elif stream_event.type == "reasoning_delta" and stream_event.text:
+                stream_state.saw_stream_output = True
+                stream_state.reasoning_parts.append(stream_event.text)
+                yield {
+                    "type": "assistant.reasoning_delta",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "turn_started_at": turn_started_at,
+                    "text": stream_event.text,
+                }
+            elif stream_event.type == "tool_call_delta" and stream_event.tool_call:
+                stream_state.saw_stream_output = True
+                yield {
+                    "type": "tool.delta",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "turn_started_at": turn_started_at,
+                    "tool_call": stream_event.tool_call,
+                }
+            elif stream_event.type == "completed":
+                stream_state.response = stream_event.response
+        self._raise_if_cancelled(cancel_event)
+        response = stream_state.require_response()
+        completed_text_delta = completion_text_delta(
+            response.output_text,
+            "".join(stream_state.assistant_parts),
+        )
+        if completed_text_delta:
+            stream_state.assistant_parts.append(completed_text_delta)
+            yield {
+                "type": "assistant.delta",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "turn_started_at": turn_started_at,
+                "text": completed_text_delta,
+            }
+        reasoning_text = response.reasoning_text or stream_state.partial_reasoning_text
+        self.thread_store.append(
+            thread_id,
+            "item.model_response",
+            turn_id=turn_id,
+            model_api=self._model_api_for_level(level),
+            response_id=response.id,
+            output=response.output,
+            usage=response.usage,
+            reasoning_text=reasoning_text,
+        )
+        yield {
+            "type": "model.response",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "turn_started_at": turn_started_at,
+            "response": response,
+            "reasoning_text": reasoning_text,
+        }
 
     async def _stream_response_until_cancelled(
         self,
