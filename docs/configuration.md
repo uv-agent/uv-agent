@@ -34,7 +34,7 @@ Providers describe HTTP endpoints and authentication.
 | `base_url` | string | required | Base URL used with endpoint `path`. |
 | `api_key` | string | `null` | Direct bearer token. Prefer `api_key_env` for secrets. |
 | `api_key_env` | string | `null` | Environment variable that contains the bearer token. |
-| `headers` | object | `{}` | Static HTTP headers added to every request. |
+| `headers` | object | `{}` | Extra SDK default headers passed on a best-effort basis. |
 | `params` | object | `{}` | JSON payload fields shared by all model requests for this provider. |
 | `message_passthrough` | object | `{}` | Chat message fields to persist and replay for provider-specific APIs. Models inherit this unless they override fields. |
 | `reasoning_display` | object | `{}` | Provider-specific fields that should be shown as reasoning in the TUI. Models inherit this unless they override fields. |
@@ -51,12 +51,22 @@ Endpoint config shape:
 }
 ```
 
-`path` is appended to `base_url` with no extra URL rewriting. For example,
-`base_url: "https://api.example.com/v1"` and `path: "/responses"` becomes
-`https://api.example.com/v1/responses`.
+Model requests use the official OpenAI and Anthropic SDKs. Endpoint `path`
+exists so existing configs can describe the target API shape, but SDK-backed
+requests strip the SDK-owned suffix from `base_url`: `/responses`,
+`/chat/completions`, and `/v1/messages` are owned by the corresponding SDK
+method. For example, `base_url: "https://api.example.com/v1"` and `path:
+"/responses"` creates an OpenAI SDK client with base URL
+`https://api.example.com/v1`.
 
 Secrets are redacted in config display paths, but committed config should still
 avoid direct `api_key` values.
+
+SDK credential behavior is preserved. `api_key` and `api_key_env` are passed to
+the provider SDK when configured; otherwise the SDK may use its own environment
+variables or raise its normal missing-credentials error. `headers` can add
+provider-specific headers, but it is not a replacement for SDK credential
+configuration unless that provider SDK accepts the header itself.
 
 Provider `message_passthrough` and `reasoning_display` are defaults for every
 model that uses the provider. A model can override individual fields while
@@ -77,10 +87,12 @@ Models bind a provider to a concrete remote model name and API format.
 | `message_passthrough` | object | provider default | Chat message fields to persist and replay for this model. |
 | `reasoning_display` | object | provider default | Provider-specific fields that should be shown as reasoning for this model. |
 
-Payload params are merged from provider, endpoint, model, and level settings.
-Later layers win when the same key appears. `message_passthrough` and
-`reasoning_display` are inherited from provider to model; model config overrides
-only the fields it names.
+Request params are merged from provider, endpoint, model, and level settings.
+Later layers win when the same key appears. Params accepted by the SDK method
+are passed as normal keyword arguments. Unknown params are merged into SDK
+`extra_body`; an explicit `extra_body` object in params is merged there too.
+`message_passthrough` and `reasoning_display` are inherited from provider to
+model; model config overrides only the fields it names.
 
 `message_passthrough` shape:
 

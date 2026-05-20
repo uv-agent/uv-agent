@@ -25,7 +25,7 @@ from uv_agent.config import (
     CompletionNotificationConfig,
     UiConfig,
 )
-from uv_agent.model_client import FakeModelClient, ModelResponse, ToolCallDelta, parse_responses_response
+from uv_agent.model import FakeModelClient, ModelResponse, ToolCallDelta, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
 from uv_agent.tui.formatting import (

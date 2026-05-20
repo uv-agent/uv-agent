@@ -4,7 +4,7 @@ from pathlib import Path
 
 from uv_agent.agent import AgentEngine
 from uv_agent.config import load_config
-from uv_agent.model_client import UnifiedModelClient
+from uv_agent.model import UnifiedModelClient
 from uv_agent.paths import project_state_dir
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore

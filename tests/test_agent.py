@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 import httpx
+import openai
 
 from uv_agent.agent import (
     AgentEngine,
@@ -28,7 +29,8 @@ from uv_agent.config import (
     TitleGenerationConfig,
     load_config,
 )
-from uv_agent.model_client import (
+from uv_agent.errors import format_error, is_retryable_provider_error
+from uv_agent.model import (
     FakeModelClient,
     ModelStreamEvent,
     anthropic_messages,
@@ -1163,6 +1165,28 @@ async def test_agent_marks_provider_network_errors_retryable(tmp_path: Path) -> 
     assert events[-1]["type"] == "turn.error"
     assert events[-1]["retryable"] is True
     assert stored_events[-1]["retryable"] is True
+
+
+def test_openai_sdk_status_errors_format_and_retry_like_provider_errors() -> None:
+    request = httpx.Request("POST", "https://example.com/v1/responses")
+    response = httpx.Response(429, request=request, json={"error": {"message": "rate limited"}})
+    exc = openai.APIStatusError("rate limited", response=response, body={"error": "rate limited"})
+
+    error = format_error(exc)
+
+    assert error.title == "Provider HTTP 429"
+    assert "rate limited" in error.detail
+    assert is_retryable_provider_error(exc) is True
+
+
+def test_openai_sdk_connection_errors_are_retryable_provider_errors() -> None:
+    request = httpx.Request("POST", "https://example.com/v1/responses")
+    exc = openai.APIConnectionError(message="network down", request=request)
+
+    error = format_error(exc)
+
+    assert error.title == "Provider connection error"
+    assert is_retryable_provider_error(exc) is True
 
 
 @pytest.mark.asyncio

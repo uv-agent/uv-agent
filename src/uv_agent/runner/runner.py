@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
-import json
 import os
-import signal
-import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -13,14 +9,13 @@ from typing import Any
 from uv_agent.config import RunnerConfig
 from uv_agent.ids import new_id
 from uv_agent.jsonl import JsonlWriter
+from uv_agent.runner.events import parse_structured_event
 from uv_agent.runner.metadata import ensure_dependency
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RerunRequest, RunnerEvent
+from uv_agent.runner.output import OutputCapture, pump_stream
+from uv_agent.runner.process import kill_process_tree, subprocess_group_kwargs, uv_run_argv
 from uv_agent.runner.store import ScriptStore
 from uv_agent.time import utc_now_iso
-
-
-STREAM_READ_CHUNK_BYTES = 64 * 1024
-OUTPUT_TRUNCATION_MARKER = "\n[uv-agent runner output truncated]\n"
 
 
 class PythonRunner:
@@ -195,11 +190,7 @@ class PythonRunner:
         writer.write(started)
         yield RunnerEvent("run.started", started)
 
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
-        structured_events: list[dict[str, Any]] = []
-        byte_count = {"value": 0}
-        truncated = {"value": False}
+        capture = OutputCapture()
         returncode: int | None = None
         timed_out = False
         interrupted = False
@@ -211,32 +202,32 @@ class PythonRunner:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                **_subprocess_group_kwargs(),
+                **subprocess_group_kwargs(),
             )
             stdout_task = asyncio.create_task(
-                self._pump_stream(
-                    "stdout",
-                    process.stdout,
-                    writer,
-                    stdout_parts,
-                    structured_events,
-                    run_id,
-                    script_id,
-                    byte_count,
-                    truncated,
+                pump_stream(
+                    stream_name="stdout",
+                    stream=process.stdout,
+                    writer=writer,
+                    sink=capture.stdout_parts,
+                    structured_events=capture.structured_events,
+                    run_id=run_id,
+                    script_id=script_id,
+                    max_output_bytes=self.config.max_output_bytes,
+                    capture=capture,
                 )
             )
             stderr_task = asyncio.create_task(
-                self._pump_stream(
-                    "stderr",
-                    process.stderr,
-                    writer,
-                    stderr_parts,
-                    structured_events,
-                    run_id,
-                    script_id,
-                    byte_count,
-                    truncated,
+                pump_stream(
+                    stream_name="stderr",
+                    stream=process.stderr,
+                    writer=writer,
+                    sink=capture.stderr_parts,
+                    structured_events=capture.structured_events,
+                    run_id=run_id,
+                    script_id=script_id,
+                    max_output_bytes=self.config.max_output_bytes,
+                    capture=capture,
                 )
             )
             try:
@@ -258,11 +249,11 @@ class PythonRunner:
                     returncode = wait_task.result()
                 elif cancel_task is not None and cancel_task in done:
                     interrupted = True
-                    await _kill_process_tree(process)
+                    await kill_process_tree(process)
                     returncode = await wait_task
                 else:
                     timed_out = True
-                    await _kill_process_tree(process)
+                    await kill_process_tree(process)
                     returncode = await wait_task
                 for task in tasks:
                     if task is wait_task or task.done():
@@ -273,10 +264,10 @@ class PythonRunner:
                     await asyncio.gather(*cancellable, return_exceptions=True)
             except TimeoutError:
                 timed_out = True
-                await _kill_process_tree(process)
+                await kill_process_tree(process)
                 returncode = await wait_task
             except asyncio.CancelledError:
-                await _kill_process_tree(process)
+                await kill_process_tree(process)
                 raise
             await asyncio.gather(stdout_task, stderr_task)
         except Exception as exc:
@@ -295,15 +286,15 @@ class PythonRunner:
             script_id=script_id,
             run_id=run_id,
             returncode=returncode,
-            stdout="".join(stdout_parts),
-            stderr="".join(stderr_parts),
+            stdout="".join(capture.stdout_parts),
+            stderr="".join(capture.stderr_parts),
             timed_out=timed_out,
             interrupted=interrupted,
-            truncated=truncated["value"],
+            truncated=capture.truncated,
             run_log_path=run_log_path,
             script_path=original_path,
             final_script_path=final_path,
-            events=structured_events,
+            events=capture.structured_events,
         )
         completed = {
             "type": "run.completed",
@@ -313,127 +304,10 @@ class PythonRunner:
             "returncode": returncode,
             "timed_out": timed_out,
             "interrupted": interrupted,
-            "truncated": truncated["value"],
+            "truncated": capture.truncated,
         }
         writer.write(completed)
         yield RunnerEvent("run.completed", {**completed, "result": result})
-
-    async def _pump_stream(
-        self,
-        stream_name: str,
-        stream: asyncio.StreamReader | None,
-        writer: JsonlWriter,
-        sink: list[str],
-        structured_events: list[dict[str, Any]],
-        run_id: str,
-        script_id: str,
-        byte_count: dict[str, int],
-        truncated: dict[str, bool],
-    ) -> None:
-        if stream is None:
-            return
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        event_parser = _StructuredEventLineParser(
-            structured_events=structured_events,
-            run_id=run_id,
-        )
-        while True:
-            chunk = await stream.read(STREAM_READ_CHUNK_BYTES)
-            if not chunk:
-                break
-            if truncated["value"]:
-                continue
-
-            remaining = self.config.max_output_bytes - byte_count["value"]
-            if len(chunk) > remaining:
-                captured = chunk[: max(0, remaining)]
-                if captured:
-                    text = decoder.decode(captured)
-                    self._record_output_text(
-                        stream_name=stream_name,
-                        text=text,
-                        writer=writer,
-                        sink=sink,
-                        event_parser=event_parser,
-                        run_id=run_id,
-                        script_id=script_id,
-                    )
-                    tail = decoder.decode(b"", final=True)
-                    self._record_output_text(
-                        stream_name=stream_name,
-                        text=tail,
-                        writer=writer,
-                        sink=sink,
-                        event_parser=event_parser,
-                        run_id=run_id,
-                        script_id=script_id,
-                    )
-                byte_count["value"] += len(chunk)
-                truncated["value"] = True
-                sink.append(OUTPUT_TRUNCATION_MARKER)
-                writer.write(
-                    {
-                        "type": "run.output_truncated",
-                        "created_at": utc_now_iso(),
-                        "run_id": run_id,
-                        "script_id": script_id,
-                        "max_output_bytes": self.config.max_output_bytes,
-                    }
-                )
-                continue
-
-            byte_count["value"] += len(chunk)
-            text = decoder.decode(chunk)
-            self._record_output_text(
-                stream_name=stream_name,
-                text=text,
-                writer=writer,
-                sink=sink,
-                event_parser=event_parser,
-                run_id=run_id,
-                script_id=script_id,
-            )
-
-        if not truncated["value"]:
-            tail = decoder.decode(b"", final=True)
-            if tail:
-                self._record_output_text(
-                    stream_name=stream_name,
-                    text=tail,
-                    writer=writer,
-                    sink=sink,
-                    event_parser=event_parser,
-                    run_id=run_id,
-                    script_id=script_id,
-                )
-            if stream_name == "stdout":
-                event_parser.finish()
-
-    @staticmethod
-    def _record_output_text(
-        *,
-        stream_name: str,
-        text: str,
-        writer: JsonlWriter,
-        sink: list[str],
-        event_parser: _StructuredEventLineParser,
-        run_id: str,
-        script_id: str,
-    ) -> None:
-        if not text:
-            return
-        sink.append(text)
-        if stream_name == "stdout":
-            event_parser.feed(text)
-        writer.write(
-            {
-                "type": f"run.{stream_name}",
-                "created_at": utc_now_iso(),
-                "run_id": run_id,
-                "script_id": script_id,
-                "text": text,
-            }
-        )
 
     def _merged_uv_args(self, uv_args: list[str]) -> list[str]:
         merged = list(self.config.default_uv_args)
@@ -441,127 +315,3 @@ class PythonRunner:
             if arg not in merged:
                 merged.append(arg)
         return merged
-
-
-def uv_run_argv(uv_args: list[str], script_path: Path, script_args: list[str]) -> list[str]:
-    effective_uv_args = list(uv_args)
-    if not has_uv_log_level_arg(effective_uv_args):
-        effective_uv_args.insert(0, "--quiet")
-    return ["uv", "run", *effective_uv_args, str(script_path), *script_args]
-
-
-def _subprocess_group_kwargs() -> dict[str, Any]:
-    if os.name == "posix":
-        return {"start_new_session": True}
-    if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {}
-
-
-async def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-    if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
-    elif os.name == "nt":
-        try:
-            taskkill = await asyncio.create_subprocess_exec(
-                "taskkill",
-                "/PID",
-                str(process.pid),
-                "/T",
-                "/F",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await taskkill.wait()
-        except OSError:
-            process.kill()
-    else:
-        process.kill()
-
-
-def has_uv_log_level_arg(args: list[str]) -> bool:
-    for arg in args:
-        if arg in {"--quiet", "--verbose"}:
-            return True
-        if arg.startswith("-") and not arg.startswith("--") and set(arg[1:]) <= {"q", "v"}:
-            return True
-    return False
-
-
-RUNTIME_EVENT_EVENT_ID_KEY = "_uv_agent_event_id"
-RUNTIME_EVENT_RUN_ID_KEY = "_uv_agent_run_id"
-
-
-class _StructuredEventLineParser:
-    """Incrementally parse JSON runtime events without buffering ordinary long lines."""
-
-    def __init__(
-        self,
-        *,
-        structured_events: list[dict[str, Any]],
-        run_id: str | None = None,
-    ) -> None:
-        self._structured_events = structured_events
-        self._run_id = run_id
-        self._candidate: list[str] | None = None
-        self._line_disqualified = False
-
-    def feed(self, text: str) -> None:
-        start = 0
-        while True:
-            newline_index = text.find("\n", start)
-            if newline_index == -1:
-                self._feed_fragment(text[start:])
-                return
-            self._feed_fragment(text[start : newline_index + 1])
-            self.finish()
-            start = newline_index + 1
-
-    def finish(self) -> None:
-        if self._candidate is not None:
-            parsed = parse_structured_event("".join(self._candidate), run_id=self._run_id)
-            if parsed is not None:
-                self._structured_events.append(parsed)
-        self._candidate = None
-        self._line_disqualified = False
-
-    def _feed_fragment(self, text: str) -> None:
-        if not text:
-            return
-        if self._candidate is not None:
-            self._candidate.append(text)
-            return
-        if self._line_disqualified:
-            return
-        stripped = text.lstrip()
-        if stripped.startswith("{"):
-            self._candidate = [stripped]
-        elif stripped:
-            self._line_disqualified = True
-
-
-def parse_structured_event(text: str, *, run_id: str | None = None) -> dict[str, Any] | None:
-    """Parse one uv_agent_runtime.emit_event JSON line if present."""
-    stripped = text.strip()
-    if not stripped.startswith("{"):
-        return None
-    try:
-        value = json.loads(stripped)
-    except Exception:
-        return None
-    if not isinstance(value, dict) or "kind" not in value:
-        return None
-    event_id = value.get(RUNTIME_EVENT_EVENT_ID_KEY)
-    if not isinstance(event_id, str) or not event_id:
-        return None
-    event_run_id = value.get(RUNTIME_EVENT_RUN_ID_KEY)
-    if not isinstance(event_run_id, str) or not event_run_id:
-        return None
-    if run_id is not None and event_run_id != run_id:
-        return None
-    return value
