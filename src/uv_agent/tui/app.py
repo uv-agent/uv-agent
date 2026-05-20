@@ -2,51 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import sys
 import threading
-from collections import deque
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
 from rich.markdown import Markdown
-from rich.markup import escape, render as render_markup
-from rich.rule import Rule
-from rich.segment import Segment
-from rich.style import Style
-from rich.cells import cell_len
+from rich.markup import escape
 from textual import events
-from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.geometry import Offset
-from textual.screen import ModalScreen, Screen
+from textual.screen import Screen
 from textual.reactive import reactive
 from textual.selection import Selection
-from textual.strip import Strip
-from textual.widgets import Button, Input, OptionList, Static, TextArea
+from textual.widgets import Button, Static, TextArea
 from textual.worker import Worker
-from textual.widgets._option_list import Option
-from textual_image.widget import Image as TerminalImage
-from watchfiles import Change, watch
 
 from uv_agent.agent import DEFAULT_THREAD_TITLES
 from uv_agent.app_factory import create_engine
 from uv_agent.clipboard import ClipboardImageError, save_clipboard_image
-from uv_agent.config import (
-    ConfigError,
-    config_sources,
-    editable_config_path,
-    load_config,
-    load_raw_config,
-    redact_config,
-)
+from uv_agent.config import ConfigError
 from uv_agent.environment import application_version, detect_user_language, host_environment_line
 from uv_agent.errors import (
     error_markup,
@@ -55,13 +36,11 @@ from uv_agent.errors import (
     is_retryable_provider_error,
 )
 from uv_agent.i18n import command_description, tr
-from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.notifications import play_completion_sound
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
-from uv_agent.skills import discover_skills
 from uv_agent.time import utc_now_iso
-from uv_agent.tui import theme
+from uv_agent.tui.config_panels import ConfigPanelMixin
 from uv_agent.tui.formatting import (
     format_elapsed,
     format_tokens,
@@ -73,12 +52,35 @@ from uv_agent.tui.formatting import (
     tool_detail_markup,
     tool_timeline_markup,
 )
-from uv_agent.tui.styles import (
-    EMPTY_STATE_CSS,
-    FULLSCREEN_PANEL_CSS,
-    MAIN_APP_CSS,
-    TRANSCRIPT_CELL_CSS,
+from uv_agent.tui.image_support import ImageSupportMixin
+from uv_agent.tui.mentions import MentionMixin
+from uv_agent.tui.panels import (
+    FullscreenPanel,
+    ImagePreviewPanel,
+    PendingImagePreviewPanel,
+    ToolDetailsPanel,
 )
+from uv_agent.tui.state import (
+    CommandSpec,
+    MentionScanCache,
+    PendingImage,
+    PickerItem,
+    QueuedTurn,
+    ThreadRunState,
+)
+from uv_agent.tui.styles import MAIN_APP_CSS
+from uv_agent.tui.widgets import (
+    ComposerTextArea,
+    EmptyState,
+    ExpandableTranscriptCell,
+    FoldedProcessCell,
+    ImageAttachmentCell,
+    LoadOlderHistoryCell,
+    RetryTurnButton,
+    TranscriptCell,
+    TranscriptScroll,
+)
+from uv_agent.tui.window_title import sanitized_window_title, write_window_title
 
 
 COMPOSER_COLLAPSED_HEIGHT = 5
@@ -88,427 +90,23 @@ QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-WINDOW_TITLE_MAX_LEN = 60
 
 
-@dataclass(frozen=True)
-class PickerItem:
-    id: str
-    title: str
-    description: str = ""
-    meta: str = ""
-
-
-@dataclass
-class PanelPage:
-    title: str
-    body: str = ""
-    items: list[PickerItem] | None = None
-    subtitle: str = ""
-    filter_value: str = ""
-    highlighted: int | None = None
-    mention_kind: str | None = None
-    mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None
-    select_callback: Callable[[str], None] | None = None
-    close_on_select: bool = False
-
-
-@dataclass
-class MentionScanCache:
-    items: list[PickerItem] = field(default_factory=list)
-    complete: bool = False
-    generation: int = 0
-    worker: Worker[None] | None = None
-
-
-class PickerOptionList(OptionList):
-    ALLOW_SELECT = True
-
-
-class FullscreenPanel(ModalScreen[str | None]):
-    """Scrollable full-screen panel/picker."""
-
-    CSS = FULLSCREEN_PANEL_CSS
-
-    BINDINGS = [
-        Binding("escape", "dismiss_panel", "Close", priority=True, show=False),
-        Binding("up", "cursor_up", "Up", priority=True, show=False),
-        Binding("down", "cursor_down", "Down", priority=True, show=False),
-        Binding("pageup", "page_up", "Page up", priority=True, show=False),
-        Binding("pagedown", "page_down", "Page down", priority=True, show=False),
-        Binding("enter", "select_or_close", "Select", priority=True, show=False),
-    ]
-
-    def __init__(
-        self,
-        *,
-        title: str,
-        body: str = "",
-        items: list[PickerItem] | None = None,
-        subtitle: str = "",
-        initial_filter: str = "",
-        mention_kind: str | None = None,
-        mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None,
-        select_callback: Callable[[str], None] | None = None,
-        close_on_select: bool = False,
-        navigation_enabled: bool = False,
-    ) -> None:
-        super().__init__()
-        self.panel_title = title
-        self.body = body
-        self.picker_mode = items is not None or mention_kind is not None
-        self.items = items or []
-        self.subtitle = subtitle
-        self.initial_filter = initial_filter.strip()
-        self.mention_kind = mention_kind
-        self.mention_items = mention_items
-        self._selected_mention_kind: str | None = None
-        self._filtered = list(self.items)
-        self._option_ids: dict[str, str] = {}
-        self._select_callback = select_callback
-        self._close_on_select = close_on_select
-        self.can_navigate = navigation_enabled
-        self._page_stack: list[PanelPage] = []
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="panel-shell"):
-            # Title bar: header on the left, subtitle (status / hints) right-
-            # aligned on the same row to free a vertical line of chrome.
-            with Horizontal(id="panel-titlebar"):
-                yield Static(self.panel_title, id="panel-header")
-                yield Static(self.subtitle, id="panel-subtitle")
-            yield Input(placeholder=getattr(self.app, "_text", lambda key: key)("filter"), id="panel-filter")
-            yield PickerOptionList(id="panel-content", compact=False)
-            yield VerticalScroll(Static(self.body, markup=True, id="panel-body-content"), id="panel-body")
-            yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
-
-    def on_mount(self) -> None:
-        self._render_page(filter_value=self.initial_filter)
-
-    def on_click(self, event: events.Click) -> None:
-        try:
-            shell = self.query_one("#panel-shell", Vertical)
-        except NoMatches:
-            return
-        screen_x = event.screen_x if event.screen_x is not None else event.x
-        screen_y = event.screen_y if event.screen_y is not None else event.y
-        if not shell.region.contains(screen_x, screen_y):
-            event.stop()
-            self.dismiss(None)
-
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id != "panel-filter":
-            return
-        self._apply_filter(event.value)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "panel-filter":
-            return
-        event.stop()
-        self.action_select_or_close()
-
-    def on_key(self, event: events.Key) -> None:
-        actions = {
-            "up": self.action_cursor_up,
-            "down": self.action_cursor_down,
-            "pageup": self.action_page_up,
-            "page_up": self.action_page_up,
-            "pagedown": self.action_page_down,
-            "page_down": self.action_page_down,
-            "enter": self.action_select_or_close,
-        }
-        action = actions.get(event.key)
-        if action is not None:
-            event.stop()
-            try:
-                action()
-            except SkipAction:
-                pass
-            return
-        if not self.picker_mode:
-            return
-        filter_input = self.query_one("#panel-filter", Input)
-        if self.mention_kind == "file" and (
-            event.character == "@" or event.key in {"@", "at", "commercial_at"}
-        ):
-            event.stop()
-            self._switch_mention_kind("thread", filter_value="@")
-            return
-        if event.key == "backspace":
-            event.stop()
-            if self.mention_kind == "thread" and filter_input.value == "@":
-                self._switch_mention_kind("file", filter_value="")
-                return
-            filter_input.value = filter_input.value[:-1]
-            self._apply_filter(filter_input.value)
-            return
-        if event.key in {"ctrl+u", "ctrl+w"}:
-            event.stop()
-            filter_input.value = ""
-            self._apply_filter("")
-            return
-        if event.character and not event.key.startswith("ctrl+"):
-            event.stop()
-            filter_input.value += event.character
-            self._apply_filter(filter_input.value)
-
-    def _apply_filter(self, value: str) -> None:
-        query = value.casefold().strip()
-        if self.mention_kind == "thread" and query.startswith("@"):
-            query = query[1:].strip()
-        if not query:
-            self._filtered = list(self.items)
-        else:
-            prefix_matches = [
-                item for item in self.items if item.title.casefold().lstrip("/").startswith(query.lstrip("/"))
-            ]
-            contains_matches = [
-                item
-                for item in self.items
-                if item not in prefix_matches
-                and query in (item.title + " " + item.description + " " + item.meta).casefold()
-            ]
-            self._filtered = prefix_matches + contains_matches
-        self._refresh_options()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option_id:
-            self._select_value(self._option_ids.get(event.option_id, event.option_id))
-
-    def action_dismiss_panel(self) -> None:
-        if self._page_stack:
-            self._restore_previous_page()
-            return
-        self.dismiss(None)
-
-    def action_cursor_up(self) -> None:
-        if self.picker_mode:
-            self.query_one("#panel-content", OptionList).action_cursor_up()
-            return
-        self.query_one("#panel-body", VerticalScroll).action_scroll_up()
-
-    def action_cursor_down(self) -> None:
-        if self.picker_mode:
-            self.query_one("#panel-content", OptionList).action_cursor_down()
-            return
-        self.query_one("#panel-body", VerticalScroll).action_scroll_down()
-
-    def action_page_up(self) -> None:
-        if self.picker_mode:
-            self.query_one("#panel-content", OptionList).action_page_up()
-            return
-        self.query_one("#panel-body", VerticalScroll).action_page_up()
-
-    def action_page_down(self) -> None:
-        if self.picker_mode:
-            self.query_one("#panel-content", OptionList).action_page_down()
-            return
-        self.query_one("#panel-body", VerticalScroll).action_page_down()
-
-    def action_select_or_close(self) -> None:
-        if not self.picker_mode:
-            self.dismiss(None)
-            return
-        if not self._filtered:
-            return
-        option_list = self.query_one("#panel-content", OptionList)
-        highlighted = option_list.highlighted
-        if highlighted is None or highlighted < 0 or highlighted >= option_list.option_count:
-            return
-        option = option_list.get_option_at_index(highlighted)
-        if option.id and option.id in self._option_ids:
-            self._selected_mention_kind = self.mention_kind
-            self._select_value(self._option_ids[option.id])
-
-    def navigate_picker(
-        self,
-        *,
-        title: str,
-        items: list[PickerItem],
-        callback: Callable[[str], None],
-        subtitle: str = "",
-        initial_filter: str = "",
-        close_on_select: bool = False,
-    ) -> None:
-        self._page_stack.append(self._snapshot_page())
-        self._load_page(
-            PanelPage(
-                title=title,
-                items=items,
-                subtitle=subtitle,
-                filter_value=initial_filter,
-                select_callback=callback,
-                close_on_select=close_on_select,
-            )
-        )
-
-    def replace_picker(
-        self,
-        *,
-        title: str,
-        items: list[PickerItem],
-        callback: Callable[[str], None],
-        subtitle: str = "",
-        initial_filter: str = "",
-        close_on_select: bool = False,
-    ) -> None:
-        self._load_page(
-            PanelPage(
-                title=title,
-                items=items,
-                subtitle=subtitle,
-                filter_value=initial_filter,
-                select_callback=callback,
-                close_on_select=close_on_select,
-            )
-        )
-
-    def navigate_panel(self, *, title: str, body: str, subtitle: str = "") -> None:
-        self._page_stack.append(self._snapshot_page())
-        self._load_page(PanelPage(title=title, body=body, subtitle=subtitle))
-
-    def close_navigation(self) -> None:
-        self._page_stack.clear()
-        self.dismiss(None)
-
-    def _select_value(self, value: str) -> None:
-        if self._select_callback is not None:
-            close_on_select = self._close_on_select
-            self._select_callback(value)
-            if close_on_select:
-                self.close_navigation()
-            return
-        self.dismiss(value)
-
-    def _snapshot_page(self) -> PanelPage:
-        filter_value = ""
-        highlighted = None
-        if self.picker_mode:
-            try:
-                filter_value = self.query_one("#panel-filter", Input).value
-                highlighted = self.query_one("#panel-content", OptionList).highlighted
-            except NoMatches:
-                pass
-        return PanelPage(
-            title=self.panel_title,
-            body=self.body,
-            items=list(self.items) if self.picker_mode else None,
-            subtitle=self.subtitle,
-            filter_value=filter_value,
-            highlighted=highlighted,
-            mention_kind=self.mention_kind,
-            mention_items=self.mention_items,
-            select_callback=self._select_callback,
-            close_on_select=self._close_on_select,
-        )
-
-    def _restore_previous_page(self) -> None:
-        self._load_page(self._page_stack.pop())
-
-    def _load_page(self, page: PanelPage) -> None:
-        self.panel_title = page.title
-        self.body = page.body
-        self.picker_mode = page.items is not None or page.mention_kind is not None
-        self.items = page.items or []
-        self.subtitle = page.subtitle
-        self.mention_kind = page.mention_kind
-        self.mention_items = page.mention_items
-        self._select_callback = page.select_callback
-        self._close_on_select = page.close_on_select
-        self._filtered = list(self.items)
-        self._render_page(filter_value=page.filter_value, highlighted=page.highlighted)
-
-    def _render_page(self, *, filter_value: str = "", highlighted: int | None = None) -> None:
-        self.query_one("#panel-header", Static).update(self.panel_title)
-        self.query_one("#panel-subtitle", Static).update(self.subtitle)
-        filter_input = self.query_one("#panel-filter", Input)
-        option_list = self.query_one("#panel-content", OptionList)
-        body = self.query_one("#panel-body", VerticalScroll)
-        body_content = self.query_one("#panel-body-content", Static)
-        filter_input.display = self.picker_mode
-        option_list.display = self.picker_mode
-        body.display = not self.picker_mode
-        if self.picker_mode:
-            filter_input.value = filter_value
-            self._apply_filter(filter_value)
-            if highlighted is not None and option_list.option_count:
-                option_list.highlighted = min(highlighted, option_list.option_count - 1)
-            option_list.focus()
-            return
-        body_content.update(self.body)
-        body.focus()
-
-    def _refresh_options(self) -> None:
-        self._option_ids = {}
-        options = []
-        for index, item in enumerate(self._filtered):
-            option_id = f"item_{index}"
-            disabled = not item.id
-            if not disabled:
-                self._option_ids[option_id] = item.id
-            if disabled and not item.title and not item.description and not item.meta:
-                options.append(Option(Rule(characters="─", style="dim"), id=option_id, disabled=True))
-                continue
-            options.append(
-                Option(
-                    f"[bold cyan]{escape(item.title)}[/bold cyan]"
-                    + (f"\n[dim]{escape(item.description)}[/dim]" if item.description else "")
-                    + (f"\n[dim]{escape(item.meta)}[/dim]" if item.meta else ""),
-                    id=option_id,
-                    disabled=disabled,
-                )
-            )
-        if not options:
-            text = getattr(self.app, "_text", lambda key: key)
-            if self.mention_kind == "file":
-                label = text("no_mention_files")
-            elif self.mention_kind == "thread":
-                label = text("no_threads")
-            elif self.mention_kind == "mcp":
-                label = text("no_mcp")
-            elif self.mention_kind == "skill":
-                label = text("no_skills")
-            else:
-                label = text("no_matches")
-            options = [Option(f"[dim]{escape(label)}[/dim]", id="")]
-        option_list = self.query_one("#panel-content", OptionList)
-        previous = option_list.highlighted
-        option_list.set_options(options)
-        if options:
-            option_list.highlighted = min(previous if previous is not None else 0, len(options) - 1)
-
-    def update_picker_items(self, items: list[PickerItem], *, subtitle: str | None = None) -> None:
-        if not self.picker_mode:
-            return
-        self.items = list(items)
-        if subtitle is not None:
-            self.subtitle = subtitle
-            try:
-                self.query_one("#panel-subtitle", Static).update(subtitle)
-            except NoMatches:
-                return
-        try:
-            filter_value = self.query_one("#panel-filter", Input).value
-        except NoMatches:
-            return
-        self._apply_filter(filter_value)
-
-    def _switch_mention_kind(self, kind: str, *, filter_value: str) -> None:
-        if self.mention_items is None:
-            return
-        title, items, subtitle = self.mention_items(kind)
-        self.mention_kind = kind
-        self.panel_title = title
-        self.items = items
-        self.subtitle = subtitle
-        self.query_one("#panel-header", Static).update(title)
-        self.query_one("#panel-subtitle", Static).update(subtitle)
-        filter_input = self.query_one("#panel-filter", Input)
-        filter_input.value = filter_value
-        self._apply_filter(filter_value)
-        handler = getattr(self.app, "_start_mention_scan", None)
-        if callable(handler):
-            handler(kind)
+__all__ = [
+    "EmptyState",
+    "ExpandableTranscriptCell",
+    "FoldedProcessCell",
+    "FullscreenPanel",
+    "ImageAttachmentCell",
+    "ImagePreviewPanel",
+    "PendingImage",
+    "PendingImagePreviewPanel",
+    "RetryTurnButton",
+    "ToolDetailsPanel",
+    "TranscriptCell",
+    "TranscriptScroll",
+    "UvAgentApp",
+]
 
 
 COMMAND_SPECS = [
@@ -522,75 +120,7 @@ COMMAND_SPECS = [
 ]
 
 
-CODE_FILE_SUFFIXES = {
-    ".cfg",
-    ".css",
-    ".csv",
-    ".env",
-    ".gd",
-    ".go",
-    ".html",
-    ".ini",
-    ".js",
-    ".json",
-    ".jsonl",
-    ".jsx",
-    ".lock",
-    ".md",
-    ".mjs",
-    ".py",
-    ".rs",
-    ".scss",
-    ".toml",
-    ".tsx",
-    ".ts",
-    ".txt",
-    ".xml",
-    ".yaml",
-    ".yml",
-}
-IGNORED_MENTION_DIRS = {
-    ".code-search",
-    ".git",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".uv-agent",
-    ".venv",
-    "__pycache__",
-    "__pypackages__",
-    "build",
-    "coverage",
-    "dist",
-    "env",
-    "htmlcov",
-    "node_modules",
-    "out",
-    "site-packages",
-    "target",
-    "tmp",
-    "vendor",
-    "venv",
-}
-MAX_MENTION_ITEMS = 300
-MENTION_SCAN_BATCH_SIZE = 50
-MENTION_SCAN_DIRECTORY_LIMIT = 20000
-MENTION_SCAN_FILE_LIMIT = 100000
-MENTION_WATCH_DEBOUNCE_MS = 1000
-MENTION_WATCH_POLL_DELAY_MS = 2000
 
-
-def image_attachment_markup(attachment: dict[str, Any], *, label: str = "image attached") -> str:
-    path = Path(str(attachment.get("stored_path") or ""))
-    name = path.name or str(path)
-    size = int(attachment.get("size_bytes") or 0)
-    size_label = f" · {format_tokens(size)}B" if size else ""
-    return (
-        f"[dim]{escape(label)}[/dim] "
-        f"[cyan]{escape(name)}[/cyan]"
-        f"[dim]{escape(size_label)}[/dim]\n"
-        "[dim][preview][/dim]"
-    )
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -611,264 +141,6 @@ def _elapsed_between(started_at: str | None, ended_at: str | None = None) -> flo
         return None
     ended = _parse_iso_datetime(ended_at) or datetime.now(UTC)
     return max(0.0, (ended - started).total_seconds())
-
-
-@dataclass(frozen=True)
-class CommandSpec:
-    name: str
-    usage: str
-    description: str
-
-    @property
-    def palette_title(self) -> str:
-        return self.name.removeprefix("/")
-
-
-@dataclass(frozen=True)
-class PendingImage:
-    path: Path
-    width: int
-    height: int
-
-    def to_attachment(self) -> dict[str, Any]:
-        size = self.path.stat().st_size if self.path.exists() else 0
-        return {
-            "stored_path": str(self.path),
-            "source_path": str(self.path),
-            "mime_type": "image/png",
-            "size_bytes": size,
-            "width": self.width,
-            "height": self.height,
-        }
-
-
-@dataclass(frozen=True)
-class QueuedTurn:
-    prompt: str
-    level: str | None = None
-    image_paths: list[Path] = field(default_factory=list)
-
-
-@dataclass
-class ThreadRunState:
-    thread_id: str
-    worker: Worker[None] | None
-    cancel_event: asyncio.Event
-    queue: list[QueuedTurn]
-    status: str
-    turn_id: str | None = None
-    started_at: str | None = None
-    completed_at: str | None = None
-    retryable_error: bool = False
-    terminal_error: bool = False
-    live_events: list[dict[str, Any]] = field(default_factory=list)
-    assistant_buffer: str = ""
-    assistant_cell: TranscriptCell | None = None
-    reasoning_buffer: str = ""
-    reasoning_cell: TranscriptCell | None = None
-    tool_cells: dict[str, TranscriptCell] = field(default_factory=dict)
-    tool_delta_cells: dict[int, TranscriptCell] = field(default_factory=dict)
-    tool_delta_calls: dict[int, dict[str, Any]] = field(default_factory=dict)
-    process_cells: list[TranscriptCell] = field(default_factory=list)
-    process_fold_cell: TranscriptCell | None = None
-    process_collapsed: bool = False
-    process_anchor_cell: TranscriptCell | None = None
-
-    def detach_widgets(self) -> None:
-        self.assistant_cell = None
-        self.reasoning_cell = None
-        self.tool_cells.clear()
-        self.tool_delta_cells.clear()
-        self.process_cells = []
-        self.process_fold_cell = None
-        self.process_anchor_cell = None
-
-
-class TranscriptScroll(VerticalScroll):
-    """VerticalScroll that auto-follows tail until the user intervenes.
-
-    The streaming SSE renderer used to call `scroll_end` on every delta, which
-    fought the user when they were dragging the scrollbar to read history. As
-    soon as the user moves the scroll position themselves we drop the
-    `follow_tail` flag. Returning to the bottom or submitting from the bottom
-    resumes auto-follow; the bottom button still explicitly resumes it too.
-    """
-
-    follow_tail = reactive(True)
-    # Independent of follow_tail: True whenever the viewport is at (or within
-    # a small slack from) the bottom, regardless of how it got there. Drives
-    # the "back to bottom" button visibility so the button hides as soon as
-    # the user is already at the bottom, even if they got there by scrolling
-    # manually rather than via the button.
-    near_bottom = reactive(True)
-
-    _BOTTOM_THRESHOLD = 2
-
-    def programmatic_scroll_end(self) -> None:
-        # Defer the actual scroll to after the next refresh so any pending
-        # mount/update has had a chance to recompute virtual_size; otherwise
-        # `scroll_end` reads a stale `max_scroll_y` and only crawls along
-        # one row at a time during streaming.
-        def _do() -> None:
-            self.scroll_end(animate=False, immediate=True)
-            self._recompute_near_bottom()
-
-        self.call_after_refresh(_do)
-
-    def engage_follow_tail(self) -> None:
-        self.follow_tail = True
-        self.programmatic_scroll_end()
-
-    def _disengage_follow_tail(self) -> None:
-        if self.follow_tail:
-            self.follow_tail = False
-
-    def _disengage_follow_tail_if_scrolled(self, old_scroll_y: float) -> None:
-        if self.scroll_y != old_scroll_y:
-            self._disengage_follow_tail()
-
-    def _disengage_follow_tail_for_target(self, target_y: float) -> None:
-        if self.validate_scroll_y(target_y) != self.scroll_y:
-            self._disengage_follow_tail()
-
-    def _recompute_near_bottom(self, *, restore_follow: bool = False) -> None:
-        # When there's nothing to scroll, the bottom is trivially "right here"
-        # so the button stays hidden.
-        if self.max_scroll_y <= 0:
-            self.near_bottom = True
-            if restore_follow:
-                self.follow_tail = True
-            self._refresh_overlay()
-            return
-        near_bottom = (self.max_scroll_y - self.scroll_y) <= self._BOTTOM_THRESHOLD
-        self.near_bottom = near_bottom
-        if near_bottom and restore_follow:
-            self.follow_tail = True
-        self._refresh_overlay()
-
-    def _refresh_overlay(self) -> None:
-        refresh = getattr(self.app, "_refresh_composer_overlay", None)
-        if callable(refresh):
-            refresh()
-
-    def watch_scroll_y(self, old: float, new: float) -> None:
-        super().watch_scroll_y(old, new)
-        self._recompute_near_bottom(restore_follow=True)
-
-    def watch_virtual_size(self, old: Any, new: Any) -> None:
-        # Content height changed (new cells appended, expand/collapse, etc.)
-        # so the distance-from-bottom may have changed even though scroll_y
-        # did not.
-        self._recompute_near_bottom()
-
-    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        old_scroll_y = self.scroll_y
-        super()._on_mouse_scroll_up(event)
-        self._disengage_follow_tail_if_scrolled(old_scroll_y)
-
-    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        old_scroll_y = self.scroll_y
-        super()._on_mouse_scroll_down(event)
-        self._disengage_follow_tail_if_scrolled(old_scroll_y)
-
-    def _on_scroll_up(self, event: Any) -> None:
-        self._disengage_follow_tail_for_target(
-            self.scroll_y - self.scrollable_content_region.height
-        )
-        super()._on_scroll_up(event)
-
-    def _on_scroll_down(self, event: Any) -> None:
-        self._disengage_follow_tail_for_target(
-            self.scroll_y + self.scrollable_content_region.height
-        )
-        super()._on_scroll_down(event)
-
-    def _on_scroll_to(self, message: Any) -> None:
-        y = getattr(message, "y", None)
-        if y is not None and y != self.scroll_y:
-            self._disengage_follow_tail()
-        super()._on_scroll_to(message)
-
-    def action_scroll_up(self) -> None:
-        self._disengage_follow_tail_for_target(self.scroll_target_y - 1)
-        super().action_scroll_up()
-
-    def action_scroll_down(self) -> None:
-        self._disengage_follow_tail_for_target(self.scroll_target_y + 1)
-        super().action_scroll_down()
-
-    def action_page_up(self) -> None:
-        self._disengage_follow_tail_for_target(
-            self.scroll_y - self.scrollable_content_region.height
-        )
-        super().action_page_up()
-
-    def action_page_down(self) -> None:
-        self._disengage_follow_tail_for_target(
-            self.scroll_y + self.scrollable_content_region.height
-        )
-        super().action_page_down()
-
-    def action_scroll_home(self) -> None:
-        self._disengage_follow_tail_for_target(0)
-        super().action_scroll_home()
-
-    def action_scroll_end(self) -> None:
-        super().action_scroll_end()
-        self.follow_tail = True
-
-
-class EmptyState(Static):
-    """Animated empty transcript state."""
-
-    FRAMES = ["·  ", "·· ", "···", " ··", "  ·", "   "]
-
-    DEFAULT_CSS = EMPTY_STATE_CSS
-
-    def __init__(self, *, id: str | None = None) -> None:
-        super().__init__("", id=id)
-        self.frame = 0
-
-    def tick(self) -> None:
-        frame = self.FRAMES[self.frame % len(self.FRAMES)]
-        self.frame += 1
-        text = getattr(self.app, "_text", lambda key: key)
-        self.update(
-            f"[bold #dce7f3]{escape(text('ready_title'))}[/bold #dce7f3] [dim]{escape(frame)}[/dim]\n"
-            f"[dim]{escape(text('ready_hint'))}[/dim]"
-        )
-
-
-class ComposerTextArea(TextArea):
-    """Composer text area with Ctrl+C reserved for app-level interrupt/quit."""
-
-    def action_cursor_up(self, select: bool = False) -> None:
-        if not select:
-            handler = getattr(self.app, "_handle_composer_history_key", None)
-            if callable(handler) and handler(self, "up"):
-                return
-        super().action_cursor_up(select)
-
-    def action_cursor_down(self, select: bool = False) -> None:
-        if not select:
-            handler = getattr(self.app, "_handle_composer_history_key", None)
-            if callable(handler) and handler(self, "down"):
-                return
-        super().action_cursor_down(select)
-
-    def action_copy(self) -> None:
-        super().action_copy()
-        app = self.app
-        notify = getattr(app, "_text", lambda k: k)
-        app.notify(notify("copied"), timeout=1.5)
-
-    BINDINGS = [
-        binding
-        for binding in TextArea.BINDINGS
-        if not {"ctrl+c", "super+c"}.intersection(
-            key.strip() for key in binding.key.split(",")
-        )
-    ]
 
 
 def composer_history_path() -> Path:
@@ -916,674 +188,6 @@ def _event_offset(event: dict[str, Any] | None) -> int | None:
     return value if isinstance(value, int) else None
 
 
-class TranscriptCell(Static):
-    """Small transcript block used by the Textual chat timeline."""
-
-    SELECTION_STYLE = Style(color=theme.SELECTION_FG, bgcolor=theme.SELECTION_BG)
-
-    DEFAULT_CSS = TRANSCRIPT_CELL_CSS
-
-    def __init__(self, content: object = "", *, copy_text: str | None = None, **kwargs: Any) -> None:
-        super().__init__(content, **kwargs)
-        self.copy_text: str | None = copy_text if copy_text is not None else self._plain_copy_text(content)
-        self._rendered_copy_lines: dict[int, str] = {}
-
-    def update(self, content: object = "", *, layout: bool = True, copy_text: str | None = None) -> None:
-        self.copy_text = copy_text if copy_text is not None else self._plain_copy_text(content)
-        self._rendered_copy_lines.clear()
-        super().update(content, layout=layout)
-
-    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
-        text = self._current_copy_text()
-        if text is not None:
-            return selection.extract(text), "\n"
-        return super().get_selection(selection)
-
-    def render_line(self, y: int) -> Strip:
-        strip = super().render_line(y)
-        rendered_text = strip.text.rstrip()
-        if rendered_text:
-            self._rendered_copy_lines[y] = rendered_text
-        return self._with_content_offsets(self._highlight_selection(strip, y), y)
-
-    def _with_content_offsets(self, strip: Strip, y: int) -> Strip:
-        offset_x = 0
-        segments = []
-        for segment in strip:
-            if segment.control:
-                segments.append(segment)
-                continue
-            text = segment.text
-            style = segment.style
-            if text:
-                style = (style or Style()) + Style(meta={"offset": (offset_x, y)})
-            segments.append(Segment(text, style, segment.control))
-            offset_x += len(text)
-        return Strip(segments, strip.cell_length)
-
-    def _highlight_selection(self, strip: Strip, y: int) -> Strip:
-        selection = self.text_selection
-        if selection is None:
-            return strip
-        span = selection.get_span(y)
-        if span is None:
-            return strip
-        start, end = span
-        if end == -1:
-            end = strip.cell_length
-        line_text = strip.text
-        start = self._character_offset_to_cell(line_text, start)
-        end = self._character_offset_to_cell(line_text, end)
-        start = max(0, min(start, strip.cell_length))
-        end = max(start, min(end, strip.cell_length))
-        if start == end:
-            return strip
-        before = strip.crop(0, start)
-        selected = self._apply_selection_style(strip.crop(start, end))
-        after = strip.crop(end, strip.cell_length)
-        return Strip.join([before, selected, after])
-
-    def _character_offset_to_cell(self, text: str, offset: int) -> int:
-        offset = max(0, min(offset, len(text)))
-        return cell_len(text[:offset])
-
-    def _apply_selection_style(self, strip: Strip) -> Strip:
-        segments = []
-        for text, style, control in strip:
-            if control:
-                segments.append(Segment(text, style, control))
-            else:
-                segments.append(Segment(text, (style or Style()) + self.SELECTION_STYLE))
-        return Strip(segments, strip.cell_length)
-
-    def _current_copy_text(self) -> str | None:
-        if self._rendered_copy_lines:
-            return "\n".join(
-                self._rendered_copy_lines.get(y, "")
-                for y in range(max(self._rendered_copy_lines) + 1)
-            )
-        return self.copy_text
-
-    def _plain_copy_text(self, content: object) -> str | None:
-        if isinstance(content, str):
-            try:
-                return str(render_markup(content))
-            except Exception:
-                return content
-        return None
-
-
-class RetryTurnButton(Button):
-    """Retry affordance for transient provider/network turn failures."""
-
-    def __init__(self, label: str, *, thread_id: str | None = None) -> None:
-        super().__init__(label, variant="primary", compact=True, classes="retry_turn")
-        self.retry_thread_id = thread_id
-
-
-class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
-    """Transcript cell that opens hidden details in a panel."""
-
-    def __init__(
-        self,
-        summary: str,
-        details: str,
-        detail_title: str = "tool_details",
-        detail_hint: str = "tool_details_hint",
-        **kwargs: Any,
-    ) -> None:
-        self.summary = summary
-        self.details = details
-        self.detail_title = detail_title
-        self.detail_hint = detail_hint
-        # Optional runner payload, attached for tool-result cells so the
-        # details panel can re-render the body with stdout folded/unfolded.
-        self.tool_payload: dict[str, Any] | None = None
-        super().__init__(self._content(), **kwargs)
-
-    def on_click(self, event: events.Click) -> None:
-        event.stop()
-        self.open_details()
-
-    def on_key(self, event: events.Key) -> None:
-        app = self.app
-        if event.key in {"enter", "space"}:
-            event.stop()
-            self.open_details()
-        elif event.key == "j" and hasattr(app, "_focus_relative_expandable_cell"):
-            event.stop()
-            app._focus_relative_expandable_cell(self, 1)
-        elif event.key == "k" and hasattr(app, "_focus_relative_expandable_cell"):
-            event.stop()
-            app._focus_relative_expandable_cell(self, -1)
-        elif event.key == "escape" and hasattr(app, "action_focus_composer"):
-            event.stop()
-            app.action_focus_composer()
-
-    def set_details(self, summary: str, details: str) -> None:
-        self.summary = summary
-        self.details = details
-        self.update(self._content())
-
-    def open_details(self) -> None:
-        app = self.app
-        if hasattr(app, "_open_tool_details_panel"):
-            app._open_tool_details_panel(self)
-
-    def _content(self) -> str:
-        lines = self.summary.splitlines() or [""]
-        lines[0] = f"{lines[0]} [dim][details][/dim]"
-        return "\n".join(lines)
-
-
-class FoldedProcessCell(TranscriptCell, can_focus=True):
-    """A transcript-level fold that reveals the original in-between cells."""
-
-    def __init__(
-        self,
-        cells: list[TranscriptCell],
-        *,
-        collapsed: bool = True,
-        elapsed_label: str = "",
-        **kwargs: Any,
-    ) -> None:
-        self.cells = list(cells)
-        self.collapsed = collapsed
-        self.elapsed_label = elapsed_label
-        super().__init__("", **kwargs)
-
-    def on_click(self, event: events.Click) -> None:
-        event.stop()
-        self.toggle()
-
-    def on_key(self, event: events.Key) -> None:
-        if event.key == "escape" and hasattr(self.app, "action_focus_composer"):
-            event.stop()
-            self.app.action_focus_composer()
-
-    def set_cells(self, cells: list[TranscriptCell]) -> None:
-        self.cells = list(cells)
-        self._apply_visibility()
-        self._refresh()
-
-    def set_elapsed_label(self, elapsed_label: str) -> None:
-        self.elapsed_label = elapsed_label
-        self._refresh()
-
-    def set_collapsed(self, collapsed: bool) -> None:
-        self.collapsed = collapsed
-        self._apply_visibility()
-        self._refresh()
-        try:
-            self.app._process_fold_toggled(self, collapsed)
-        except Exception:
-            pass
-
-    def toggle(self) -> None:
-        self.set_collapsed(not self.collapsed)
-
-    def on_mount(self) -> None:
-        self._apply_visibility()
-        self._refresh()
-
-    def _apply_visibility(self) -> None:
-        for cell in self.cells:
-            try:
-                if self.collapsed:
-                    cell.add_class("process_fold_hidden")
-                else:
-                    cell.remove_class("process_fold_hidden")
-            except Exception:
-                continue
-
-    def _refresh(self) -> None:
-        def fallback_text(key: str) -> str:
-            return key
-
-        try:
-            text = getattr(self.app, "_text", fallback_text)
-        except Exception:
-            text = fallback_text
-        count = len(self.cells)
-        key = "process_fold_collapsed" if self.collapsed else "process_fold_expanded"
-        state = text(key)
-        step_label = text("process_fold_step" if count == 1 else "process_fold_steps")
-        hint = text("process_fold_expand_hint" if self.collapsed else "process_fold_collapse_hint")
-        elapsed = f" · {escape(self.elapsed_label)}" if self.elapsed_label else ""
-        self.update(
-            f"[dim]{escape(state)} · {count} {escape(step_label)}{elapsed}[/dim] "
-            f"[dim]{escape(hint)}[/dim]"
-        )
-
-
-class ImageAttachmentCell(TranscriptCell, can_focus=True):
-    """Transcript cell that opens image attachments in the preview panel."""
-
-    def __init__(self, attachment: dict[str, Any], **kwargs: Any) -> None:
-        self.attachment = attachment
-        super().__init__("", **kwargs)
-
-    def on_mount(self) -> None:
-        self._refresh_content()
-
-    def _refresh_content(self) -> None:
-        text = getattr(self.app, "_text", lambda key: key)
-        self.update(image_attachment_markup(self.attachment, label=text("image_attached")))
-
-    def on_click(self, event: events.Click) -> None:
-        event.stop()
-        self.open_preview()
-
-    def on_key(self, event: events.Key) -> None:
-        app = self.app
-        if event.key in {"enter", "space"}:
-            event.stop()
-            self.open_preview()
-        elif event.key == "j" and hasattr(app, "_focus_relative_image_cell"):
-            event.stop()
-            app._focus_relative_image_cell(self, 1)
-        elif event.key == "k" and hasattr(app, "_focus_relative_image_cell"):
-            event.stop()
-            app._focus_relative_image_cell(self, -1)
-        elif event.key == "escape" and hasattr(app, "action_focus_composer"):
-            event.stop()
-            app.action_focus_composer()
-
-    def open_preview(self) -> None:
-        app = self.app
-        if hasattr(app, "_open_image_preview_for_cell"):
-            app._open_image_preview_for_cell(self)
-
-
-class LoadOlderHistoryCell(TranscriptCell, can_focus=True):
-    """Transcript cell that pages in older events for the active thread."""
-
-    def __init__(self, *, has_more: bool, **kwargs: Any) -> None:
-        self.has_more = has_more
-        super().__init__("", **kwargs)
-
-    def on_mount(self) -> None:
-        self._refresh_content()
-
-    def _refresh_content(self) -> None:
-        text = getattr(self.app, "_text", lambda key: key)
-        label = text("load_older_history") if self.has_more else text("history_start")
-        self.update(f"[dim]{escape(label)}[/dim]")
-
-    def on_click(self, event: events.Click) -> None:
-        event.stop()
-        self.load_more()
-
-    def on_key(self, event: events.Key) -> None:
-        if event.key in {"enter", "space"}:
-            event.stop()
-            self.load_more()
-
-    def load_more(self) -> None:
-        if self.has_more and hasattr(self.app, "_load_older_thread_history"):
-            self.app._load_older_thread_history()
-
-
-class ToolDetailsPanel(FullscreenPanel):
-    """Full-screen tool detail panel with j/k navigation between tool results."""
-
-    BINDINGS = [
-        Binding("j", "next_detail", "Next", priority=True, show=False),
-        Binding("k", "previous_detail", "Previous", priority=True, show=False),
-        Binding("e", "toggle_events", "Toggle events", priority=True, show=False),
-        Binding("ctrl+d", "dismiss_panel", "Close", priority=True, show=False),
-        *FullscreenPanel.BINDINGS,
-    ]
-
-    def __init__(self, cell: ExpandableTranscriptCell) -> None:
-        self.current_cell = cell
-        # events fold state, persisted across j/k navigation within the panel
-        self.events_collapsed = False
-        super().__init__(title="", body=cell.details, subtitle="")
-
-    def on_mount(self) -> None:
-        self._refresh_current()
-        try:
-            self.query_one("#panel-body", VerticalScroll).focus()
-        except NoMatches:
-            pass
-
-    def on_key(self, event: events.Key) -> None:
-        if event.key == "j":
-            event.stop()
-            self.action_next_detail()
-            return
-        if event.key == "k":
-            event.stop()
-            self.action_previous_detail()
-            return
-        if event.key == "e":
-            event.stop()
-            self.action_toggle_events()
-            return
-        if event.key == "ctrl+d":
-            event.stop()
-            self.action_dismiss_panel()
-            return
-        super().on_key(event)
-
-    def action_next_detail(self) -> None:
-        self._move(1)
-
-    def action_previous_detail(self) -> None:
-        self._move(-1)
-
-    def action_toggle_events(self) -> None:
-        if self.current_cell.tool_payload is None:
-            return
-        self.events_collapsed = not self.events_collapsed
-        self._refresh_current()
-
-    def _move(self, step: int) -> None:
-        app = self.app
-        if not hasattr(app, "_relative_expandable_cell"):
-            return
-        self.current_cell = app._relative_expandable_cell(self.current_cell, step)
-        self._refresh_current()
-
-    def _refresh_current(self) -> None:
-        text = getattr(self.app, "_text", lambda key: key)
-        self.panel_title = text(self.current_cell.detail_title)
-        self.subtitle = text(self.current_cell.detail_hint)
-        payload = self.current_cell.tool_payload
-        if payload is not None:
-            self.body = tool_detail_markup(payload, events_collapsed=self.events_collapsed)
-        else:
-            self.body = self.current_cell.details
-        try:
-            self.query_one("#panel-header", Static).update(self.panel_title)
-            self.query_one("#panel-subtitle", Static).update(self.subtitle)
-            self.query_one("#panel-body-content", Static).update(self.body)
-            self.query_one("#panel-body", VerticalScroll).scroll_to(y=0, animate=False)
-        except NoMatches:
-            pass
-
-
-def _update_static_if_changed(widget: Static, markup: str) -> None:
-    """Call ``Static.update`` only when the rendered markup actually changes.
-
-    ``Static.update`` always triggers a repaint, even if the new content is
-    identical to the previous one. For widgets sharing the screen with a
-    :class:`TerminalImage`, every redundant repaint becomes a visible image
-    flicker on terminals using sixel / TGP encoding. The previous value is
-    cached as an attribute on the widget instance (``Static`` keeps its
-    internal content under a name-mangled attribute, so storing our own copy
-    is the simplest stable comparison).
-    """
-
-    if getattr(widget, "_uv_last_markup", None) == markup:
-        return
-    widget._uv_last_markup = markup  # type: ignore[attr-defined]
-    widget.update(markup)
-
-
-class StableTerminalImage(TerminalImage, Renderable=TerminalImage._Renderable):
-    """A :class:`TerminalImage` that caches its renderable across renders.
-
-    The upstream widget rebuilds the renderable (and so re-encodes / retransmits
-    the image bytes) on every :py:meth:`render` call. Textual invokes
-    :py:meth:`render` for many unrelated reasons (focus changes, layout
-    invalidation, scroll updates), and the repeated re-encode is what users
-    perceive as the image preview "flickering" when navigating with j/k or
-    scrolling. We memoize the renderable keyed by ``(image identity, styled
-    size)`` and only recreate it when one of those actually changes. The
-    ``image`` setter already clears ``self._renderable``, so swapping images
-    naturally invalidates the cache without extra wiring.
-    """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._stable_size: tuple[Any, Any] | None = None
-
-    def render(self) -> Any:
-        if not self._image:
-            self._stable_size = None
-            return ""
-        size = self._get_styled_size()
-        if self._renderable is not None and self._stable_size == size:
-            return self._renderable
-        if self._renderable is not None:
-            self._renderable.cleanup()
-        self._renderable = self._Renderable(self._image, *size)
-        self._stable_size = size
-        return self._renderable
-
-
-class ImagePreviewPanel(FullscreenPanel):
-    """Full-screen image attachment panel with j/k navigation."""
-
-    BINDINGS = [
-        Binding("j", "next_image", "Next", priority=True, show=False),
-        Binding("k", "previous_image", "Previous", priority=True, show=False),
-        Binding("right", "next_image", "Next", priority=True, show=False),
-        Binding("down", "next_image", "Next", priority=True, show=False),
-        Binding("left", "previous_image", "Previous", priority=True, show=False),
-        Binding("up", "previous_image", "Previous", priority=True, show=False),
-        Binding("f3", "dismiss_panel", "Close", priority=True, show=False),
-        *FullscreenPanel.BINDINGS,
-    ]
-
-    def __init__(self, attachments: list[dict[str, Any]], index: int = 0) -> None:
-        self.attachments = attachments
-        self.index = max(0, min(index, len(attachments) - 1)) if attachments else 0
-        super().__init__(title="", body="", subtitle="")
-
-    def compose(self) -> ComposeResult:
-        # The meta line lives INSIDE the scroll container so the whole panel
-        # interior (meta + image) scrolls as a single unit when the image is
-        # taller than the viewport, instead of giving the image its own
-        # standalone scrollbar.
-        with Vertical(id="panel-shell"):
-            with Horizontal(id="panel-titlebar"):
-                yield Static(self.panel_title, id="panel-header")
-                yield Static(self.subtitle, id="panel-subtitle")
-            with VerticalScroll(id="image-preview-scroll"):
-                yield Static("", markup=True, id="image-preview-meta")
-                yield StableTerminalImage(id="image-preview")
-            yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
-
-    def _render_page(self, *, filter_value: str = "", highlighted: int | None = None) -> None:
-        self._refresh_current()
-
-    def on_mount(self) -> None:
-        self._refresh_current()
-        try:
-            self.query_one("#image-preview-scroll", VerticalScroll).focus()
-        except NoMatches:
-            pass
-
-    def on_key(self, event: events.Key) -> None:
-        if event.key in {"j", "right", "down"}:
-            event.stop()
-            self.action_next_image()
-            return
-        if event.key in {"k", "left", "up"}:
-            event.stop()
-            self.action_previous_image()
-            return
-        if event.key == "f3":
-            event.stop()
-            self.action_dismiss_panel()
-            return
-        super().on_key(event)
-
-    def action_next_image(self) -> None:
-        self._move(1)
-
-    def action_previous_image(self) -> None:
-        self._move(-1)
-
-    def action_cursor_up(self) -> None:
-        self.query_one("#image-preview-scroll", VerticalScroll).action_scroll_up()
-
-    def action_cursor_down(self) -> None:
-        self.query_one("#image-preview-scroll", VerticalScroll).action_scroll_down()
-
-    def action_page_up(self) -> None:
-        self.query_one("#image-preview-scroll", VerticalScroll).action_page_up()
-
-    def action_page_down(self) -> None:
-        self.query_one("#image-preview-scroll", VerticalScroll).action_page_down()
-
-    def _move(self, step: int) -> None:
-        if not self.attachments:
-            return
-        self.index = (self.index + step) % len(self.attachments)
-        self._refresh_current()
-
-    def _refresh_current(self) -> None:
-        text = getattr(self.app, "_text", lambda key: key)
-        self.panel_title = text("image_preview")
-        self.subtitle = text("image_preview_hint")
-        attachment = self._current_attachment()
-        path = Path(str(attachment.get("stored_path") or "")) if attachment else None
-        try:
-            # Batch all updates so Textual emits one composite paint instead of
-            # several, and guard each ``Static.update`` so unchanged labels do
-            # not force a redundant repaint that the terminal would render as a
-            # flicker over the image.
-            with self.app.batch_update():
-                _update_static_if_changed(self.query_one("#panel-header", Static), self.panel_title)
-                _update_static_if_changed(self.query_one("#panel-subtitle", Static), self.subtitle)
-                _update_static_if_changed(
-                    self.query_one("#image-preview-meta", Static), self._attachment_markup()
-                )
-                image_widget = self.query_one("#image-preview", TerminalImage)
-                new_image = path if path and path.exists() else None
-                # The upstream setter unconditionally calls ``refresh(layout=True)``
-                # (and on Sixel, ``refresh(recompose=True)``), so we skip the
-                # assignment whenever the path has not changed.
-                if image_widget.image != new_image:
-                    image_widget.image = new_image
-                self.query_one("#image-preview-scroll", VerticalScroll).scroll_to(y=0, animate=False)
-        except NoMatches:
-            pass
-
-    def _current_attachment(self) -> dict[str, Any] | None:
-        if not self.attachments:
-            return None
-        return self.attachments[self.index]
-
-    def _attachment_markup(self) -> str:
-        text = getattr(self.app, "_text", lambda key: key)
-        attachment = self._current_attachment()
-        if attachment is None:
-            return f"[dim]{escape(text('no_images'))}[/dim]"
-        path = Path(str(attachment.get("stored_path") or ""))
-        source = str(attachment.get("source_path") or "")
-        note = str(attachment.get("note") or "").strip()
-        size = int(attachment.get("size_bytes") or 0)
-        # Display name prefers the user-supplied source filename so tests and
-        # users see the file as they know it; the stored path appears dimmed at
-        # the end for traceability.
-        display_name = Path(source).name if source else (path.name or str(path))
-        mime = str(attachment.get("mime_type") or "").strip()
-        parts = [
-            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold]",
-            f"[cyan]{escape(display_name)}[/cyan]",
-        ]
-        if mime:
-            parts.append(escape(mime))
-        if size:
-            parts.append(f"{format_tokens(size)}B")
-        parts.append(f"[dim]{escape(str(path))}[/dim]")
-        line = " · ".join(parts)
-        if note:
-            line += f"  [dim]{escape(text('image_note'))}: {escape(note)}[/dim]"
-        return line
-
-
-class PendingImagePreviewPanel(ImagePreviewPanel):
-    """Full-screen preview panel for images queued in the composer."""
-
-    BINDINGS = [
-        Binding("delete", "delete_current_image", "Delete", priority=True, show=False),
-        Binding("backspace", "delete_current_image", "Delete", priority=True, show=False),
-        *ImagePreviewPanel.BINDINGS,
-    ]
-
-    def __init__(self, pending_images: list[PendingImage], index: int = 0) -> None:
-        self.pending_images = pending_images
-        super().__init__([image.to_attachment() for image in pending_images], index)
-
-    def compose(self) -> ComposeResult:
-        # Delete button stays outside the scroll so it remains reachable even
-        # when a tall image scrolls; meta moves into the scroll alongside the
-        # image so the panel interior scrolls as one unit.
-        with Vertical(id="panel-shell"):
-            with Horizontal(id="panel-titlebar"):
-                yield Static(self.panel_title, id="panel-header")
-                yield Static(self.subtitle, id="panel-subtitle")
-            yield Button("", variant="error", id="pending-image-delete", compact=True)
-            with VerticalScroll(id="image-preview-scroll"):
-                yield Static("", markup=True, id="image-preview-meta")
-                yield StableTerminalImage(id="image-preview")
-            yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
-
-    def _refresh_current(self) -> None:
-        super()._refresh_current()
-        text = getattr(self.app, "_text", lambda key: key)
-        self.panel_title = text("pending_image_preview")
-        self.subtitle = text("pending_image_preview_hint")
-        try:
-            with self.app.batch_update():
-                _update_static_if_changed(self.query_one("#panel-header", Static), self.panel_title)
-                _update_static_if_changed(self.query_one("#panel-subtitle", Static), self.subtitle)
-                delete_button = self.query_one("#pending-image-delete", Button)
-                new_label = text("delete_pending_image")
-                if str(delete_button.label) != new_label:
-                    delete_button.label = new_label
-        except NoMatches:
-            pass
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id != "pending-image-delete":
-            return
-        event.stop()
-        self.action_delete_current_image()
-
-    def action_delete_current_image(self) -> None:
-        if not self.pending_images:
-            self.dismiss(None)
-            return
-        deleted = self.pending_images.pop(self.index)
-        app = self.app
-        delete = getattr(app, "_delete_pending_image", None)
-        if callable(delete):
-            delete(deleted)
-        if not self.pending_images:
-            self.dismiss(None)
-            return
-        self.index = min(self.index, len(self.pending_images) - 1)
-        self.attachments = [image.to_attachment() for image in self.pending_images]
-        self._refresh_current()
-
-    def _attachment_markup(self) -> str:
-        attachment = self._current_attachment()
-        if attachment is None:
-            text = getattr(self.app, "_text", lambda key: key)
-            return f"[dim]{escape(text('no_pending_images'))}[/dim]"
-        path = Path(str(attachment.get("stored_path") or ""))
-        size = int(attachment.get("size_bytes") or 0)
-        width = int(attachment.get("width") or 0)
-        height = int(attachment.get("height") or 0)
-        parts = [
-            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold]",
-            f"[cyan]{escape(path.name or str(path))}[/cyan]",
-        ]
-        if width and height:
-            parts.append(f"{width}×{height}")
-        if size:
-            parts.append(f"{format_tokens(size)}B")
-        parts.append(f"[dim]{escape(str(path))}[/dim]")
-        return " · ".join(parts)
-
-
 class TranscriptScreen(Screen[None]):
     """Default screen with tighter transcript selection behavior."""
 
@@ -1618,7 +222,7 @@ class TranscriptScreen(Screen[None]):
         return end + (1, 0)
 
 
-class UvAgentApp(App[None]):
+class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     ENABLE_COMMAND_PALETTE = False
     CLICK_CHAIN_TIME_THRESHOLD = 0.25
 
@@ -2035,122 +639,7 @@ class UvAgentApp(App[None]):
                 turn_kwargs["image_paths"] = image_paths
             turn_stream = self.engine.retry_turn(**turn_kwargs) if retry else self.engine.run_turn(**turn_kwargs)
             async for item in turn_stream:
-                item_thread_id = str(item.get("thread_id") or thread_id)
-                event_type = item["type"]
-                if event_type == "image.attachment":
-                    await self._handle_thread_event(item_thread_id, "image.attachment", item, run_state)
-                elif event_type == "assistant.delta":
-                    await self._handle_thread_event(item_thread_id, "assistant.delta", item, run_state)
-                elif event_type == "assistant.reasoning_delta":
-                    await self._handle_thread_event(item_thread_id, "assistant.reasoning_delta", item, run_state)
-                elif event_type == "tool.delta":
-                    await self._handle_thread_event(item_thread_id, "tool.delta", item, run_state)
-                elif event_type == "model.response":
-                    response = item.get("response")
-                    reasoning_text = str(
-                        item.get("reasoning_text")
-                        or getattr(response, "reasoning_text", "")
-                        or ""
-                    )
-                    if reasoning_text:
-                        await self._handle_thread_event(
-                            item_thread_id,
-                            "assistant.reasoning_completed",
-                            {
-                                "type": "assistant.reasoning_completed",
-                                "thread_id": item_thread_id,
-                                "turn_id": item.get("turn_id"),
-                                "turn_started_at": item.get("turn_started_at"),
-                                "text": reasoning_text,
-                            },
-                            run_state,
-                        )
-                    else:
-                        await self._handle_thread_event(
-                            item_thread_id,
-                            "assistant.reasoning_absent",
-                            {
-                                "type": "assistant.reasoning_absent",
-                                "thread_id": item_thread_id,
-                                "turn_id": item.get("turn_id"),
-                                "turn_started_at": item.get("turn_started_at"),
-                            },
-                            run_state,
-                        )
-                    output = list(getattr(response, "output", []) or [])
-                    has_tool_call = any(entry.get("type") == "function_call" for entry in output)
-                    if has_tool_call:
-                        await self._handle_thread_event(
-                            item_thread_id,
-                            "assistant.response_with_tools",
-                            {
-                                "type": "assistant.response_with_tools",
-                                "thread_id": item_thread_id,
-                                "turn_id": item.get("turn_id"),
-                                "turn_started_at": item.get("turn_started_at"),
-                                "assistant_text": run_state.assistant_buffer,
-                            },
-                            run_state,
-                        )
-                    else:
-                        if "assistant_text" not in item:
-                            item["assistant_text"] = run_state.assistant_buffer
-                        await self._handle_thread_event(
-                            item_thread_id,
-                            "assistant.final_response_started",
-                            {
-                                "type": "assistant.final_response_started",
-                                "thread_id": item_thread_id,
-                                "turn_id": item.get("turn_id"),
-                                "turn_started_at": item.get("turn_started_at"),
-                                "assistant_text": item.get("assistant_text"),
-                            },
-                            run_state,
-                        )
-                    run_state.status = self._text("reading")
-                    if self._is_active_thread(item_thread_id):
-                        self._refresh_status(self._text("reading"))
-                elif event_type == "thread.title":
-                    if self._is_active_thread(item_thread_id):
-                        self._refresh_status(self._text("idle"))
-                elif event_type == "tool.started":
-                    await self._handle_thread_event(item_thread_id, "tool.started", item, run_state)
-                elif event_type == "tool.output":
-                    await self._handle_thread_event(item_thread_id, "tool.output", item, run_state)
-                elif event_type == "compaction.completed":
-                    await self._handle_thread_event(item_thread_id, "compaction.completed", item, run_state)
-                elif event_type == "turn.completed":
-                    self._update_turn_timestamps(item, run_state)
-                    text = item["final_text"] or run_state.assistant_buffer
-                    was_active_thread = self._is_active_thread(item_thread_id)
-                    if text and was_active_thread and self._assistant_cell is None:
-                        self._append_assistant_text(text)
-                    if was_active_thread:
-                        # Match re-entry behavior: every turn end folds its
-                        # process cells, not just turns that emitted
-                        # assistant.final_response_started.
-                        self._finalize_turn_render()
-                        self._sync_run_state_from_active(run_state)
-                    elif run_state.process_cells:
-                        run_state.process_collapsed = True
-                    run_state.status = self._text("idle")
-                    self._notify_turn_completed(item_thread_id, text, active_thread=was_active_thread)
-                    if was_active_thread:
-                        self._refresh_status(self._text("idle"))
-                elif event_type == "turn.interrupted":
-                    self._update_turn_timestamps(item, run_state)
-                    self._record_live_thread_event(run_state, "turn.interrupted", item)
-                    run_state.status = self._text("interrupted")
-                    if self._is_active_thread(item_thread_id):
-                        self._apply_thread_event_to_active("turn.interrupted", item)
-                        self._refresh_status(self._text("interrupted"))
-                elif event_type == "turn.error":
-                    self._update_turn_timestamps(item, run_state)
-                    self._mark_run_error_state(run_state, item)
-                    self._record_live_thread_event(run_state, "turn.error", item)
-                    if self._is_active_thread(item_thread_id):
-                        self._apply_thread_event_to_active("turn.error", item)
-                        self._refresh_status(self._text("error"))
+                await self._handle_engine_stream_item(item, thread_id, run_state)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2204,6 +693,161 @@ class UvAgentApp(App[None]):
                     self.query_one("#composer", TextArea).focus()
                 if self._default_screen_mounted():
                     self._refresh_active_run_state()
+
+    async def _handle_engine_stream_item(
+        self,
+        item: dict[str, Any],
+        default_thread_id: str,
+        run_state: ThreadRunState,
+    ) -> None:
+        item_thread_id = str(item.get("thread_id") or default_thread_id)
+        event_type = item["type"]
+        if event_type in {
+            "image.attachment",
+            "assistant.delta",
+            "assistant.reasoning_delta",
+            "tool.delta",
+            "tool.started",
+            "tool.output",
+            "compaction.completed",
+        }:
+            await self._handle_thread_event(item_thread_id, event_type, item, run_state)
+            return
+        if event_type == "model.response":
+            await self._handle_model_response_item(item_thread_id, item, run_state)
+            return
+        if event_type == "thread.title":
+            if self._is_active_thread(item_thread_id):
+                self._refresh_status(self._text("idle"))
+            return
+        if event_type == "turn.completed":
+            self._handle_turn_completed_item(item_thread_id, item, run_state)
+            return
+        if event_type == "turn.interrupted":
+            self._handle_turn_interrupted_item(item_thread_id, item, run_state)
+            return
+        if event_type == "turn.error":
+            self._handle_turn_error_item(item_thread_id, item, run_state)
+
+    async def _handle_model_response_item(
+        self,
+        item_thread_id: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        response = item.get("response")
+        reasoning_text = str(
+            item.get("reasoning_text")
+            or getattr(response, "reasoning_text", "")
+            or ""
+        )
+        if reasoning_text:
+            await self._handle_thread_event(
+                item_thread_id,
+                "assistant.reasoning_completed",
+                {
+                    "type": "assistant.reasoning_completed",
+                    "thread_id": item_thread_id,
+                    "turn_id": item.get("turn_id"),
+                    "turn_started_at": item.get("turn_started_at"),
+                    "text": reasoning_text,
+                },
+                run_state,
+            )
+        else:
+            await self._handle_thread_event(
+                item_thread_id,
+                "assistant.reasoning_absent",
+                {
+                    "type": "assistant.reasoning_absent",
+                    "thread_id": item_thread_id,
+                    "turn_id": item.get("turn_id"),
+                    "turn_started_at": item.get("turn_started_at"),
+                },
+                run_state,
+            )
+        output = list(getattr(response, "output", []) or [])
+        has_tool_call = any(entry.get("type") == "function_call" for entry in output)
+        if has_tool_call:
+            await self._handle_thread_event(
+                item_thread_id,
+                "assistant.response_with_tools",
+                {
+                    "type": "assistant.response_with_tools",
+                    "thread_id": item_thread_id,
+                    "turn_id": item.get("turn_id"),
+                    "turn_started_at": item.get("turn_started_at"),
+                    "assistant_text": run_state.assistant_buffer,
+                },
+                run_state,
+            )
+        else:
+            if "assistant_text" not in item:
+                item["assistant_text"] = run_state.assistant_buffer
+            await self._handle_thread_event(
+                item_thread_id,
+                "assistant.final_response_started",
+                {
+                    "type": "assistant.final_response_started",
+                    "thread_id": item_thread_id,
+                    "turn_id": item.get("turn_id"),
+                    "turn_started_at": item.get("turn_started_at"),
+                    "assistant_text": item.get("assistant_text"),
+                },
+                run_state,
+            )
+        run_state.status = self._text("reading")
+        if self._is_active_thread(item_thread_id):
+            self._refresh_status(self._text("reading"))
+
+    def _handle_turn_completed_item(
+        self,
+        item_thread_id: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        self._update_turn_timestamps(item, run_state)
+        text = item["final_text"] or run_state.assistant_buffer
+        was_active_thread = self._is_active_thread(item_thread_id)
+        if text and was_active_thread and self._assistant_cell is None:
+            self._append_assistant_text(text)
+        if was_active_thread:
+            # Match re-entry behavior: every turn end folds its process cells,
+            # not just turns that emitted assistant.final_response_started.
+            self._finalize_turn_render()
+            self._sync_run_state_from_active(run_state)
+        elif run_state.process_cells:
+            run_state.process_collapsed = True
+        run_state.status = self._text("idle")
+        self._notify_turn_completed(item_thread_id, text, active_thread=was_active_thread)
+        if was_active_thread:
+            self._refresh_status(self._text("idle"))
+
+    def _handle_turn_interrupted_item(
+        self,
+        item_thread_id: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        self._update_turn_timestamps(item, run_state)
+        self._record_live_thread_event(run_state, "turn.interrupted", item)
+        run_state.status = self._text("interrupted")
+        if self._is_active_thread(item_thread_id):
+            self._apply_thread_event_to_active("turn.interrupted", item)
+            self._refresh_status(self._text("interrupted"))
+
+    def _handle_turn_error_item(
+        self,
+        item_thread_id: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        self._update_turn_timestamps(item, run_state)
+        self._mark_run_error_state(run_state, item)
+        self._record_live_thread_event(run_state, "turn.error", item)
+        if self._is_active_thread(item_thread_id):
+            self._apply_thread_event_to_active("turn.error", item)
+            self._refresh_status(self._text("error"))
 
     def action_clear_input(self) -> None:
         composer = self.query_one("#composer", TextArea)
@@ -2957,76 +1601,6 @@ class UvAgentApp(App[None]):
         self.copy_to_clipboard(text)
         self._last_auto_copied_selection = text
         self.notify(self._text("copied"), timeout=1.5)
-
-    def _refresh_pending_images(self) -> None:
-        try:
-            button = self.query_one("#pending-images-btn", Static)
-        except NoMatches:
-            return
-        count = len(self._pending_images)
-        if count:
-            button.update(f"📎 {self._pending_image_count_label(count)}")
-        else:
-            button.update("")
-        self._refresh_composer_overlay()
-
-    def _pending_image_count_label(self, count: int) -> str:
-        if self.language == "zh":
-            return f"{self._text('pending')} {count} {self._text('images')}"
-        image_word = "image" if count == 1 else self._text("images")
-        return f"{self._text('pending')} {count} {image_word}"
-
-    def _refresh_composer_overlay(self) -> None:
-        try:
-            pending_button = self.query_one("#pending-images-btn", Static)
-            bottom_button = self.query_one("#scroll-to-bottom-btn", Static)
-            composer = self.query_one("#composer", TextArea)
-            transcript = self.query_one("#transcript", TranscriptScroll)
-        except NoMatches:
-            return
-        show_pending = bool(self._pending_images)
-        near_bottom = self._transcript_is_near_bottom(transcript)
-        if transcript.near_bottom != near_bottom:
-            transcript.near_bottom = near_bottom
-        show_bottom = not near_bottom
-        pending_button.set_class(not show_pending, "hidden")
-        bottom_button.set_class(not show_bottom, "hidden")
-        if not (show_pending or show_bottom):
-            pending_button.refresh(layout=True)
-            bottom_button.refresh(layout=True)
-            return
-        overlay_y = max(0, composer.region.y - 1)
-        left_x = composer.region.x
-        right_width = self._overlay_button_width(bottom_button)
-        right_x = max(left_x, composer.region.x + composer.region.width - right_width)
-        if show_pending:
-            pending_button.absolute_offset = Offset(left_x, overlay_y)
-        if show_bottom:
-            bottom_button.absolute_offset = Offset(right_x, overlay_y)
-        pending_button.refresh(layout=True)
-        bottom_button.refresh(layout=True)
-
-    def _transcript_is_near_bottom(self, transcript: TranscriptScroll) -> bool:
-        if transcript.max_scroll_y <= 0:
-            return True
-        return (transcript.max_scroll_y - transcript.scroll_y) <= transcript._BOTTOM_THRESHOLD
-
-    def _overlay_button_width(self, button: Static) -> int:
-        return max(1, cell_len(str(button.render())) + 4)
-
-    def _open_pending_image_preview(self) -> None:
-        if not self._pending_images:
-            self._flash(self._text("no_pending_images"))
-            return
-        self.push_screen(PendingImagePreviewPanel(list(self._pending_images), len(self._pending_images) - 1))
-
-    def _delete_pending_image(self, image: PendingImage) -> None:
-        try:
-            self._pending_images.remove(image)
-        except ValueError:
-            return
-        self._refresh_pending_images()
-        self._flash(f"{self._text('deleted_pending_image')}: {image.path.name}")
 
     def _queued_turn_markup(self, prompt: str, image_paths: list[Path]) -> str:
         suffix = ""
@@ -3858,428 +2432,6 @@ class UvAgentApp(App[None]):
             subtitle=self._text("thread_search_hint"),
         )
 
-    def _maybe_open_mention_picker(self, composer: TextArea, *, previous: str, current: str) -> None:
-        if len(current) <= len(previous):
-            return
-        trigger = self._mention_trigger_at_cursor(composer)
-        if trigger is None:
-            return
-        inserted = current[len(previous) :]
-        if not inserted or not trigger.endswith(inserted):
-            return
-        kind = "thread" if trigger == "@@" else "file"
-        self._open_mention_picker(kind)
-
-    def _mention_trigger_at_cursor(self, composer: TextArea) -> str | None:
-        row, column = composer.cursor_location
-        lines = composer.text.split("\n")
-        if row >= len(lines):
-            return None
-        prefix = lines[row][:column]
-        if prefix.endswith("@@"):
-            return "@@"
-        if prefix.endswith("@"):
-            return "@"
-        return None
-
-    def _open_mention_picker(self, kind: str) -> None:
-        try:
-            composer = self.query_one("#composer", TextArea)
-        except NoMatches:
-            return
-        expected_triggers = {"thread": ("@@",), "file": ("@",)}.get(kind, ("@",))
-        if self._mention_trigger_at_cursor(composer) not in expected_triggers:
-            return
-        if kind == "thread":
-            self._open_thread_mention_picker()
-            return
-        self._open_file_mention_picker()
-
-    def _open_file_mention_picker(self) -> None:
-        title, items, subtitle = self._mention_picker_items("file")
-        self._open_picker(
-            title,
-            items,
-            self._choose_file_mention,
-            subtitle=subtitle,
-            mention_kind="file",
-            mention_items=self._mention_picker_items,
-        )
-        self._start_file_mention_scan()
-
-    def _open_thread_mention_picker(self) -> None:
-        title, items, subtitle = self._mention_picker_items("thread")
-        self._open_picker(
-            title,
-            items,
-            self._choose_thread_mention,
-            subtitle=subtitle,
-            mention_kind="thread",
-            mention_items=self._mention_picker_items,
-            initial_filter="@",
-        )
-        self._start_thread_mention_scan()
-
-    def _mention_picker_items(self, kind: str) -> tuple[str, list[PickerItem], str]:
-        if kind == "thread":
-            return (
-                self._text("mention_threads"),
-                self._mention_thread_cache.items,
-                self._mention_cache_subtitle("thread"),
-            )
-        return (
-            self._text("mention_files"),
-            self._mention_file_cache.items,
-            self._mention_cache_subtitle("file"),
-        )
-
-    def _mention_cache_subtitle(self, kind: str) -> str:
-        if kind == "thread":
-            hint = self._text("mention_threads_hint")
-            cache = self._mention_thread_cache
-        else:
-            hint = self._text("mention_files_hint")
-            cache = self._mention_file_cache
-        if cache.worker is not None and not cache.complete:
-            return f"{hint} · {self._text('mention_scanning')}"
-        if cache.complete:
-            return f"{hint} · {self._text('mention_cached')}"
-        return hint
-
-    def _thread_mention_items(self) -> list[PickerItem]:
-        threads = self.engine.thread_store.list_threads()
-        items = []
-        for thread in threads:
-            thread_id = str(thread.get("thread_id") or "")
-            title = str(thread.get("title") or self._text("new_thread"))
-            last_text = str(thread.get("last_text") or "").replace("\n", " ")
-            if len(last_text) > 120:
-                last_text = last_text[:117].rstrip() + "..."
-            marker = f"{self._text('current')} " if thread_id == self.thread_id else ""
-            items.append(
-                PickerItem(
-                    id=thread_id,
-                    title=f"{marker}{title}",
-                    description=last_text or self._text("no_messages"),
-                    meta=f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} {self._text('turns')}",
-                )
-            )
-        return items
-
-    def _file_mention_items(self) -> list[PickerItem]:
-        return list(self._iter_file_mention_items(self.project_root.resolve(), generation=None))
-
-    def _start_file_mention_scan(self) -> None:
-        cache = self._mention_file_cache
-        if cache.complete and not self._mention_file_cache_dirty:
-            self._refresh_active_mention_panel("file", cache.generation)
-            return
-        if cache.worker is not None and not cache.complete:
-            if not cache.worker.is_finished:
-                return
-            cache.worker = None
-        cache.generation += 1
-        cache.complete = False
-        self._mention_file_cache_dirty = False
-        generation = cache.generation
-        cache.worker = self.run_worker(
-            lambda: self._scan_file_mentions_worker(generation),
-            name="mention-files",
-            group="mention-files",
-            exit_on_error=False,
-            exclusive=True,
-            thread=True,
-        )
-        self._refresh_active_mention_panel("file", generation)
-
-    def _scan_file_mentions_worker(self, generation: int) -> None:
-        root = self.project_root.resolve()
-        items: list[PickerItem] = []
-        pending: list[PickerItem] = []
-        try:
-            for item in self._iter_file_mention_items(root, generation=generation):
-                if generation != self._mention_file_cache.generation:
-                    return
-                items.append(item)
-                pending.append(item)
-                if len(pending) >= MENTION_SCAN_BATCH_SIZE:
-                    batch = list(items)
-                    self.call_from_thread(self._apply_file_mention_scan_update, generation, batch, False)
-                    pending.clear()
-        finally:
-            self.call_from_thread(self._apply_file_mention_scan_update, generation, items, True)
-
-    def _apply_file_mention_scan_update(self, generation: int, items: list[PickerItem], complete: bool) -> None:
-        cache = self._mention_file_cache
-        if generation != cache.generation:
-            return
-        cache.items = list(items)
-        cache.complete = complete
-        if complete:
-            cache.worker = None
-            self._start_file_mention_watcher()
-        self._refresh_active_mention_panel("file", generation)
-
-    def _start_file_mention_watcher(self) -> None:
-        worker = self._mention_file_watcher_worker
-        if worker is not None and not worker.is_finished:
-            return
-        self._mention_file_watcher_stop.clear()
-        self._mention_file_watcher_worker = self.run_worker(
-            self._watch_file_mentions_worker,
-            name="mention-file-watch",
-            group="mention-file-watch",
-            exit_on_error=False,
-            exclusive=True,
-            thread=True,
-        )
-
-    def _watch_file_mentions_worker(self) -> None:
-        root = self.project_root.resolve()
-        for changes in watch(
-            root,
-            watch_filter=self._mention_watch_filter,
-            debounce=MENTION_WATCH_DEBOUNCE_MS,
-            step=MENTION_WATCH_POLL_DELAY_MS,
-            recursive=True,
-            ignore_permission_denied=True,
-            stop_event=self._mention_file_watcher_stop,
-        ):
-            if not changes:
-                continue
-            self.call_from_thread(self._mark_file_mention_cache_dirty)
-
-    def _mention_watch_filter(self, change: Change, path: str) -> bool:
-        try:
-            relative_parts = Path(path).resolve().relative_to(self.project_root.resolve()).parts
-        except (OSError, ValueError):
-            return False
-        for part in relative_parts[:-1]:
-            if part.startswith(".") or part in IGNORED_MENTION_DIRS:
-                return False
-        name = relative_parts[-1] if relative_parts else ""
-        if name.startswith("."):
-            return True
-        suffix = Path(name).suffix.lower()
-        return not suffix or suffix in CODE_FILE_SUFFIXES
-
-    def _mark_file_mention_cache_dirty(self) -> None:
-        cache = self._mention_file_cache
-        if cache.worker is not None and not cache.worker.is_finished:
-            return
-        self._mention_file_cache_dirty = True
-
-    def _start_thread_mention_scan(self) -> None:
-        cache = self._mention_thread_cache
-        if cache.complete:
-            self._refresh_active_mention_panel("thread", cache.generation)
-            return
-        if cache.worker is not None and not cache.complete:
-            if not cache.worker.is_finished:
-                return
-            cache.worker = None
-        cache.generation += 1
-        cache.complete = False
-        generation = cache.generation
-        cache.worker = self.run_worker(
-            lambda: self._scan_thread_mentions_worker(generation),
-            name="mention-threads",
-            group="mention-threads",
-            exit_on_error=False,
-            exclusive=True,
-            thread=True,
-        )
-        self._refresh_active_mention_panel("thread", generation)
-
-    def _start_mention_scan(self, kind: str) -> None:
-        if kind == "thread":
-            self._start_thread_mention_scan()
-        elif kind == "file":
-            self._start_file_mention_scan()
-
-    def _scan_thread_mentions_worker(self, generation: int) -> None:
-        items: list[PickerItem] = []
-        try:
-            items = self._thread_mention_items()
-        finally:
-            if generation == self._mention_thread_cache.generation:
-                self.call_from_thread(self._apply_thread_mention_scan_update, generation, items)
-
-    def _apply_thread_mention_scan_update(self, generation: int, items: list[PickerItem]) -> None:
-        cache = self._mention_thread_cache
-        if generation != cache.generation:
-            return
-        cache.items = list(items)
-        cache.complete = True
-        cache.worker = None
-        self._refresh_active_mention_panel("thread", generation)
-
-    def _refresh_active_mention_panel(self, kind: str, generation: int) -> None:
-        cache = self._mention_thread_cache if kind == "thread" else self._mention_file_cache
-        if generation != cache.generation:
-            return
-        panel = self._active_fullscreen_panel()
-        if panel is None or panel.mention_kind != kind:
-            return
-        panel.update_picker_items(cache.items, subtitle=self._mention_cache_subtitle(kind))
-
-    def _iter_file_mention_items(self, root: Path, *, generation: int | None) -> Any:
-        items: list[PickerItem] = []
-        directories_seen = 0
-        files_seen = 0
-        stack = deque([root])
-        while stack and len(items) < MAX_MENTION_ITEMS:
-            directory = stack.popleft()
-            if generation is not None and generation != self._mention_file_cache.generation:
-                return
-            if directories_seen >= MENTION_SCAN_DIRECTORY_LIMIT or files_seen >= MENTION_SCAN_FILE_LIMIT:
-                if generation is None:
-                    return
-                yield PickerItem(
-                    id="",
-                    title=self._text("mention_scan_truncated"),
-                    description=self._text("mention_scan_truncated_description"),
-                )
-                return
-            try:
-                with os.scandir(directory) as entries:
-                    children = sorted(entries, key=lambda item: (not item.is_dir(follow_symlinks=False), item.name.casefold()))
-            except OSError:
-                continue
-            directories_seen += 1
-            for entry in children:
-                if generation is not None and generation != self._mention_file_cache.generation:
-                    return
-                if len(items) >= MAX_MENTION_ITEMS:
-                    break
-                try:
-                    is_dir = entry.is_dir(follow_symlinks=False)
-                except OSError:
-                    continue
-                if is_dir:
-                    path = Path(entry.path)
-                    try:
-                        relative = path.relative_to(root)
-                    except ValueError:
-                        continue
-                    mention = relative.as_posix().rstrip("/") + "/"
-                    item = PickerItem(
-                        id=mention,
-                        title=mention,
-                        description=(
-                            self._text("mention_dot_dir_skipped")
-                            if entry.name.startswith(".")
-                            else self._text("mention_directory_description")
-                        ),
-                    )
-                    items.append(item)
-                    yield item
-                    if not entry.name.startswith(".") and entry.name not in IGNORED_MENTION_DIRS:
-                        stack.append(path)
-                    continue
-                try:
-                    is_file = entry.is_file(follow_symlinks=False)
-                except OSError:
-                    continue
-                files_seen += 1
-                if not is_file:
-                    continue
-                path = Path(entry.path)
-                if path.suffix.lower() not in CODE_FILE_SUFFIXES:
-                    continue
-                try:
-                    relative = path.relative_to(root)
-                except ValueError:
-                    continue
-                mention = relative.as_posix()
-                item = PickerItem(
-                    id=mention,
-                    title=mention,
-                    description=self._text("mention_file_description"),
-                )
-                items.append(item)
-                yield item
-        return items
-
-    def _mcp_mention_items(self) -> list[PickerItem]:
-        items: list[PickerItem] = []
-        for server in discover_mcp_servers(self.project_root):
-            items.append(
-                PickerItem(
-                    id=server.name,
-                    title=server.name,
-                    description=server.description,
-                    meta=f"{server.scope}" + (f" · {server.command}" if server.command else ""),
-                )
-            )
-        return items
-
-    def _skill_mention_items(self) -> list[PickerItem]:
-        items: list[PickerItem] = []
-        for skill in discover_skills(self.project_root):
-            items.append(
-                PickerItem(
-                    id=skill.name,
-                    title=skill.name,
-                    description=skill.description,
-                    meta=f"{skill.scope} · {skill.path}",
-                )
-            )
-        return items
-
-    def _choose_file_mention(self, path: str) -> None:
-        self._insert_mention(f"@{path}", "@")
-
-    def _choose_thread_mention(self, thread_id: str) -> None:
-        self._insert_mention(f"@thread:{thread_id}", ("@@", "@"))
-
-    def _choose_mcp_mention(self, name: str) -> None:
-        self._insert_mention(f"@mcp:{name}", "")
-
-    def _choose_skill_mention(self, name: str) -> None:
-        self._insert_mention(f"@skill:{name}", "")
-
-    def _insert_mention(self, mention: str, triggers: str | tuple[str, ...]) -> None:
-        composer = self.query_one("#composer", TextArea)
-        row, column = composer.cursor_location
-        lines = composer.text.split("\n")
-        replacement = mention + " "
-        trigger_options = (triggers,) if isinstance(triggers, str) else triggers
-        if row < len(lines) and mention.startswith("@thread:") and lines[row][:column].endswith("@"):
-            trigger_options = ("@",)
-        matched_trigger = next(
-            (
-                trigger
-                for trigger in sorted(trigger_options, key=len, reverse=True)
-                if row < len(lines) and lines[row][:column].endswith(trigger)
-            ),
-            "",
-        )
-        if matched_trigger:
-            composer.replace(
-                replacement,
-                (row, column - len(matched_trigger)),
-                (row, column),
-                maintain_selection_offset=False,
-            )
-        else:
-            end_trigger = next(
-                (
-                    trigger
-                    for trigger in sorted(trigger_options, key=len, reverse=True)
-                    if composer.text.endswith(trigger)
-                ),
-                "",
-            )
-            if end_trigger:
-                composer.load_text(composer.text[: -len(end_trigger)] + replacement)
-                composer.cursor_location = composer.document.end
-            else:
-                composer.insert(replacement)
-        self._last_composer_text = composer.text
-        self._resize_composer()
-        composer.focus()
-
     def _open_status_panel(self) -> None:
         self._open_panel(self._status_panel_markup(), "status", self._text("status"))
 
@@ -4369,350 +2521,6 @@ class UvAgentApp(App[None]):
                 )
         return "\n".join(lines)
 
-    def _open_config_panel(self, *, replace_current: bool = False) -> None:
-        self.engine.refresh_config()
-        default_level = self.engine.config.runtime.default_level
-        items = [
-            PickerItem(
-                id="default_level",
-                title=self._text("config_default_level"),
-                description=default_level,
-                meta=self._text("config_default_level_hint"),
-            ),
-            PickerItem(
-                id="language",
-                title=self._text("config_language"),
-                description=self.engine.config.ui.language,
-                meta=self._text("config_language_hint"),
-            ),
-            PickerItem(
-                id="completion_notification",
-                title=self._text("config_completion_notification"),
-                description=(
-                    "on" if self.engine.config.ui.completion_notification.enabled else "off"
-                ),
-                meta=self._text("config_completion_notification_hint"),
-            ),
-            PickerItem(
-                id="compression",
-                title=self._text("config_compression"),
-                description="on" if self.engine.config.runtime.compression.enabled else "off",
-                meta=self._text("config_compression_hint"),
-            ),
-            PickerItem(
-                id="models",
-                title=self._text("models"),
-                description=self._text("models_hint"),
-                meta=self._text("config_models_readonly_hint"),
-            ),
-            PickerItem(
-                id="sources",
-                title=self._text("config_sources"),
-                description=str(editable_config_path(self.project_root)),
-                meta=self._text("config_sources_hint"),
-            ),
-            PickerItem(
-                id="raw",
-                title=self._text("config_raw"),
-                description=self._text("config_raw_hint"),
-            ),
-        ]
-        subtitle = (
-            self._text("config_hint")
-            + " · "
-            + self._text("config_models_readonly_hint")
-        )
-        self._open_picker(
-            self._text("config"),
-            items,
-            self._choose_config_item,
-            subtitle=subtitle,
-            replace_current=replace_current,
-        )
-
-    def _choose_config_item(self, item_id: str) -> None:
-        if item_id == "default_level":
-            self._open_default_level_panel()
-        elif item_id == "language":
-            self._open_language_panel()
-        elif item_id == "completion_notification":
-            self._toggle_completion_notification()
-        elif item_id == "compression":
-            self._toggle_compression()
-        elif item_id == "models":
-            self._open_models_panel()
-        elif item_id == "sources":
-            self._open_config_sources_panel()
-        elif item_id == "raw":
-            self._open_config_raw_panel()
-
-    def _close_active_panel(self) -> None:
-        panel = self._active_fullscreen_panel()
-        if panel is not None:
-            panel.close_navigation()
-
-    def _open_default_level_panel(self) -> None:
-        items = []
-        current = self.engine.config.runtime.default_level
-        for name, level in self.engine.config.levels.items():
-            marker = self._text("current") if name == current else ""
-            items.append(
-                PickerItem(
-                    id=name,
-                    title=name,
-                    description=level.model,
-                    meta=marker,
-                )
-            )
-        self._open_picker(
-            self._text("config_default_level"),
-            items,
-            self._set_default_level,
-            subtitle=self._text("config_write_hint"),
-        )
-
-    def _open_current_level_panel(self) -> None:
-        items = []
-        current = self.level or self.engine.config.runtime.default_level
-        for name, level in self.engine.config.levels.items():
-            marker = self._text("current") if name == current else ""
-            items.append(
-                PickerItem(
-                    id=name,
-                    title=name,
-                    description=level.model,
-                    meta=marker,
-                )
-            )
-        self._open_picker(
-            self._text("config_current_level"),
-            items,
-            self._set_current_level,
-            subtitle=self._text("config_session_hint"),
-        )
-
-    def _open_language_panel(self) -> None:
-        current = self.engine.config.ui.language
-        items = [
-            PickerItem(id=value, title=label, description=self._text("current") if value == current else "")
-            for value, label in (("auto", "auto"), ("en", "English"), ("zh-CN", "中文"))
-        ]
-        self._open_picker(
-            self._text("config_language"),
-            items,
-            self._set_language,
-            subtitle=self._text("config_write_hint"),
-        )
-
-    def _toggle_compression(self) -> None:
-        current = self.engine.config.runtime.compression.enabled
-        self._write_user_config_patch({"runtime": {"compression": {"enabled": not current}}})
-        self._flash(
-            f"{self._text('config_compression')}: {'on' if not current else 'off'}",
-        )
-        self._open_config_panel(replace_current=True)
-
-    def _toggle_completion_notification(self) -> None:
-        current = self.engine.config.ui.completion_notification.enabled
-        self._write_user_config_patch({"ui": {"completion_notification": {"enabled": not current}}})
-        self._flash(
-            f"{self._text('config_completion_notification')}: {'on' if not current else 'off'}",
-        )
-        self._open_config_panel(replace_current=True)
-
-    def _open_config_sources_panel(self) -> None:
-        sources = config_sources(self.project_root)
-        lines = ["[bold]sources[/bold]"]
-        for source in sources:
-            exists = "yes" if source["exists"] else "no"
-            lines.append(
-                f"- {escape(source['scope'])}: {escape(source['path'])} [dim]exists={exists}[/dim]"
-            )
-        lines.append(f"\n[bold]editable[/bold]\n{escape(str(editable_config_path(self.project_root)))}")
-        self._open_panel("\n".join(lines), "config", self._text("config_sources"))
-
-    def _open_config_raw_panel(self) -> None:
-        redacted = redact_config(load_raw_config(self.project_root))
-        preview = json.dumps(redacted, ensure_ascii=False, indent=2)
-        if len(preview) > 3200:
-            preview = preview[:3200].rstrip() + "\n..."
-        self._open_panel(escape(preview), "config", self._text("config_raw"))
-
-    def _set_default_level(self, name: str) -> None:
-        if name not in self.engine.config.levels:
-            self._flash(f"{self._text('unknown_level')}: {name}", severity="error")
-            return
-        self._write_user_config_patch({"runtime": {"default_level": name}})
-        self._flash(f"{self._text('config_default_level')}: {name}")
-        if self.level is None:
-            self._refresh_status()
-        self._close_active_panel()
-
-    def _set_current_level(self, name: str) -> None:
-        self._handle_level_command(name)
-        self._close_active_panel()
-
-    def _set_language(self, value: str) -> None:
-        self._write_user_config_patch({"ui": {"language": value}})
-        self._flash(f"{self._text('config_language')}: {value}")
-        self._close_active_panel()
-
-    def _write_user_config_patch(self, patch: dict[str, Any]) -> None:
-        path = editable_config_path(self.project_root)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raw = {}
-        else:
-            raw = {}
-        updated = self._config_deep_merge(raw, patch)
-        path.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        self.engine.config = load_config(self.project_root)
-        self.engine.runner.config = self.engine.config.runner
-        if hasattr(self.engine.model_client, "reload_config"):
-            self.engine.model_client.reload_config(self.engine.config)  # type: ignore[attr-defined]
-        self.language = detect_user_language(self.engine.config.ui.language)
-        self._refresh_status()
-
-    def _config_deep_merge(self, base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-        merged = dict(base)
-        for key, value in patch.items():
-            current = merged.get(key)
-            if isinstance(current, dict) and isinstance(value, dict):
-                merged[key] = self._config_deep_merge(current, value)
-            else:
-                merged[key] = value
-        return merged
-
-    def _open_models_panel(self) -> None:
-        """Read-only models picker. Editing models lives in config.json."""
-        self.engine.refresh_config()
-        items: list[PickerItem] = []
-        # Show which level each configured model is referenced by so users can
-        # cross-reference without having to open config.json first.
-        levels_by_model: dict[str, list[str]] = {}
-        for level_name, level in self.engine.config.levels.items():
-            levels_by_model.setdefault(level.model, []).append(level_name)
-        for name, model in self.engine.config.models.items():
-            level_refs = ", ".join(levels_by_model.get(name, [])) or "-"
-            items.append(
-                PickerItem(
-                    id=name,
-                    title=name,
-                    description=f"{model.model}  ·  {model.api}",
-                    meta=(
-                        f"{self._text('models_provider')}: {model.provider}  ·  "
-                        f"{self._text('models_context_window')}: "
-                        f"{format_tokens(model.context_window_tokens)}  ·  "
-                        f"{self._text('level')}: {level_refs}"
-                    ),
-                )
-            )
-        if not items:
-            items.append(
-                PickerItem(
-                    id="",
-                    title=self._text("none"),
-                    description=self._text("models_edit_hint"),
-                    meta=str(editable_config_path(self.project_root)),
-                )
-            )
-        subtitle = (
-            self._text("models_hint")
-            + "  ·  "
-            + self._text("models_edit_hint")
-            + " "
-            + str(editable_config_path(self.project_root))
-        )
-        self._open_picker(
-            self._text("models"),
-            items,
-            self._open_model_detail_panel,
-            subtitle=subtitle,
-        )
-
-    def _open_model_detail_panel(self, name: str) -> None:
-        if not name:
-            return
-        model = self.engine.config.models.get(name)
-        if model is None:
-            self._flash(f"{self._text('models')}: {name}", severity="error")
-            return
-        try:
-            provider = self.engine.config.provider_for_model(model)
-        except ConfigError as exc:
-            self._flash(str(exc), severity="error")
-            return
-        lines = [
-            f"[bold cyan]{escape(name)}[/bold cyan]",
-            f"- {self._text('models_provider')}: {escape(provider.name)}",
-            f"- model: {escape(model.model)}",
-            f"- {self._text('models_api')}: {escape(model.api)}",
-            f"- {self._text('models_context_window')}: "
-            f"{format_tokens(model.context_window_tokens)}",
-        ]
-        lines.append("")
-        lines.append(
-            f"[dim]{escape(self._text('models_edit_hint'))} "
-            f"{escape(str(editable_config_path(self.project_root)))}[/dim]"
-        )
-        self._open_panel("\n".join(lines), "models", self._text("models"))
-
-    def _handle_level_command(self, name: str) -> None:
-        if not name:
-            self._open_models_panel()
-            return
-        if name not in self.engine.config.levels:
-            self._append_cell(f"[red]{escape(self._text('unknown_level'))}[/red] {escape(name)}", "error")
-            return
-        previous_level = self._current_level_for_thread(self.thread_id)
-        if (
-            self.thread_id is not None
-            and previous_level
-            and previous_level != name
-            and not self._levels_use_same_model(previous_level, name)
-        ):
-            self._append_model_switch_warning(
-                self.thread_id,
-                from_level=previous_level,
-                to_level=name,
-            )
-        self.level = name
-        if self.thread_id is not None:
-            self._persist_thread_level(self.thread_id, name)
-        self._append_cell(f"[dim]{escape(self._text('level'))}[/dim] [cyan]{escape(name)}[/cyan]", "event")
-        self._refresh_status()
-
-    def _open_mcp_panel(self) -> None:
-        self.engine.refresh_config()
-        panel = self._active_fullscreen_panel()
-        if panel is not None and panel.can_navigate:
-            panel.close_navigation()
-            self.call_after_refresh(self._open_mcp_panel)
-            return
-        self._open_picker(
-            self._text("mcp"),
-            self._mcp_mention_items(),
-            self._choose_mcp_mention,
-            subtitle=self._text("mention_mcp_hint"),
-        )
-
-    def _open_skills_panel(self) -> None:
-        self.engine.refresh_config()
-        panel = self._active_fullscreen_panel()
-        if panel is not None and panel.can_navigate:
-            panel.close_navigation()
-            self.call_after_refresh(self._open_skills_panel)
-            return
-        self._open_picker(
-            self._text("skills"),
-            self._skill_mention_items(),
-            self._choose_skill_mention,
-            subtitle=self._text("mention_skills_hint"),
-        )
-
-    def _noop_select(self, _value: str) -> None:
         """Callback used by inspect-only pickers."""
         return
 
@@ -5154,10 +2962,7 @@ class UvAgentApp(App[None]):
         if self.busy or self._any_thread_running():
             spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
             title = f"{spinner} {title}"
-        # Sanitize: OSC strings can't contain BEL/ESC/control chars.
-        title = "".join(ch for ch in title if ch >= " " and ch != "\x7f")
-        if len(title) > WINDOW_TITLE_MAX_LEN:
-            title = title[: WINDOW_TITLE_MAX_LEN - 1].rstrip() + "…"
+        title = sanitized_window_title(title)
         if title == self._last_window_title:
             return
         self._last_window_title = title
@@ -5166,19 +2971,7 @@ class UvAgentApp(App[None]):
         # the OSC sequence directly to the original stdout (which Textual leaves
         # untouched at the Python level) so Windows Terminal / xterm-style hosts
         # actually update their title bar.
-        sequence = f"\x1b]0;{title}\x07"
-        try:
-            stream = sys.__stdout__
-            if stream is not None:
-                stream.write(sequence)
-                stream.flush()
-                return
-        except Exception:
-            pass
-        try:
-            os.write(1, sequence.encode("utf-8", errors="replace"))
-        except Exception:
-            pass
+        write_window_title(title)
 
     def _scroll_end(self) -> None:
         transcript = self.query_one("#transcript", TranscriptScroll)
