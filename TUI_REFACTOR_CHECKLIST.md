@@ -16,5 +16,5 @@ Plan:
 - [x] Isolate config panel/write helpers from the app class.
 - [x] Isolate image attachment/preview app helpers where it reduces app state.
 - [x] Split turn event handling enough to reduce the `_run_turn` event chain.
-- [ ] Run the full test suite.
-- [ ] Commit the refactor in small, reviewable steps.
+- [x] Run the full test suite.
+- [x] Commit the refactor in small, reviewable steps.
