@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import anthropic
-import httpx
 import openai
 
 from uv_agent.config import ConfigError
@@ -27,15 +26,6 @@ def format_error(exc: BaseException) -> DisplayError:
             message=str(exc),
             hint="Open /config and check provider, model, level, and credentials.",
         )
-    if isinstance(exc, httpx.HTTPStatusError):
-        response = exc.response
-        preview = response.text[:800].replace("\n", " ").strip()
-        return DisplayError(
-            title=f"Provider HTTP {response.status_code}",
-            message=response.reason_phrase or "Provider request failed",
-            hint="Check the configured endpoint, API key, model name, and API format.",
-            detail=preview,
-        )
     if isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
         response = exc.response
         preview = str(getattr(exc, "body", "") or response.text)[:800].replace("\n", " ").strip()
@@ -45,23 +35,11 @@ def format_error(exc: BaseException) -> DisplayError:
             hint="Check the configured endpoint, API key, model name, and API format.",
             detail=preview,
         )
-    if isinstance(exc, httpx.TimeoutException):
-        return DisplayError(
-            title="Provider timeout",
-            message=str(exc) or "Provider request timed out",
-            hint="Try again, lower the level, or increase provider timeout later.",
-        )
     if isinstance(exc, (openai.APITimeoutError, anthropic.APITimeoutError)):
         return DisplayError(
             title="Provider timeout",
             message=str(exc) or "Provider request timed out",
             hint="Try again, lower the level, or increase provider timeout later.",
-        )
-    if isinstance(exc, httpx.RequestError):
-        return DisplayError(
-            title="Provider connection error",
-            message=str(exc),
-            hint="Check network connectivity and provider base_url.",
         )
     if isinstance(exc, (openai.APIConnectionError, anthropic.APIConnectionError)):
         return DisplayError(
@@ -79,13 +57,8 @@ def format_error(exc: BaseException) -> DisplayError:
 
 def is_retryable_provider_error(exc: BaseException) -> bool:
     """Return True for transient provider/network failures that can be retried."""
-    if isinstance(exc, httpx.HTTPStatusError):
-        status_code = exc.response.status_code
-        return status_code == 429 or 500 <= status_code < 600
     if isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
         return exc.status_code == 429 or 500 <= exc.status_code < 600
-    if isinstance(exc, (httpx.TimeoutException, httpx.RequestError)):
-        return True
     if isinstance(
         exc,
         (

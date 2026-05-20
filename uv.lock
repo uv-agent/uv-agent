@@ -1043,7 +1043,6 @@ version = "0.5.2"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
-    { name = "httpx" },
     { name = "mcp" },
     { name = "openai" },
     { name = "pillow" },
@@ -1065,7 +1064,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.103.1" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", specifier = ">=1.27.1" },
     { name = "openai", specifier = ">=2.36.0" },
     { name = "pillow", specifier = ">=12.0.0" },

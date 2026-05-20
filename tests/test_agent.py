@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import httpx
 import openai
 
 from uv_agent.agent import (
@@ -153,6 +153,28 @@ class FailingStreamClient(FakeModelClient):
         if False:
             yield None
         raise self.exc
+
+
+def openai_connection_error(message: str = "network down") -> openai.APIConnectionError:
+    exc = openai.APIConnectionError.__new__(openai.APIConnectionError)
+    Exception.__init__(exc, message)
+    exc.message = message
+    exc.body = None
+    return exc
+
+
+def openai_status_error(status_code: int, message: str, body: object | None) -> openai.APIStatusError:
+    exc = openai.APIStatusError.__new__(openai.APIStatusError)
+    Exception.__init__(exc, message)
+    exc.message = message
+    exc.body = body
+    exc.status_code = status_code
+    exc.response = SimpleNamespace(
+        status_code=status_code,
+        reason_phrase=message,
+        text=json.dumps(body or {}, ensure_ascii=False),
+    )
+    return exc
 
 
 class LookAtRunner:
@@ -1149,8 +1171,7 @@ async def test_agent_marks_provider_network_errors_retryable(tmp_path: Path) -> 
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
-    request = httpx.Request("POST", "https://example.com/v1/responses")
-    exc = httpx.ConnectError("network down", request=request)
+    exc = openai_connection_error()
     engine = AgentEngine(
         config=config,
         model_client=FailingStreamClient(exc),
@@ -1168,9 +1189,7 @@ async def test_agent_marks_provider_network_errors_retryable(tmp_path: Path) -> 
 
 
 def test_openai_sdk_status_errors_format_and_retry_like_provider_errors() -> None:
-    request = httpx.Request("POST", "https://example.com/v1/responses")
-    response = httpx.Response(429, request=request, json={"error": {"message": "rate limited"}})
-    exc = openai.APIStatusError("rate limited", response=response, body={"error": "rate limited"})
+    exc = openai_status_error(429, "rate limited", {"error": "rate limited"})
 
     error = format_error(exc)
 
@@ -1180,8 +1199,7 @@ def test_openai_sdk_status_errors_format_and_retry_like_provider_errors() -> Non
 
 
 def test_openai_sdk_connection_errors_are_retryable_provider_errors() -> None:
-    request = httpx.Request("POST", "https://example.com/v1/responses")
-    exc = openai.APIConnectionError(message="network down", request=request)
+    exc = openai_connection_error()
 
     error = format_error(exc)
 
@@ -1194,7 +1212,7 @@ async def test_agent_retry_turn_retries_model_request_without_new_user_message(t
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
-    first_client = FailingStreamClient(httpx.ConnectError("network down", request=httpx.Request("POST", "https://example.com")))
+    first_client = FailingStreamClient(openai_connection_error())
     engine = AgentEngine(
         config=config,
         model_client=first_client,
