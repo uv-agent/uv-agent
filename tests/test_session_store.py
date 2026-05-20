@@ -97,6 +97,34 @@ def test_thread_level_and_model_switch_warning_update_metadata(tmp_path: Path) -
     assert digest["latest_model_switch_warning"]["_jsonl_offset"] == warning["_jsonl_offset"]
 
 
+def test_billing_accumulated_events_update_thread_metadata(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Billing")
+
+    store.append(
+        thread_id,
+        "thread.billing_accumulated",
+        turn_id="turn_1",
+        amount="0.0001234",
+        currency="USD",
+        source="model_response",
+    )
+    store.append(
+        thread_id,
+        "thread.billing_accumulated",
+        turn_id="turn_2",
+        amount="0.0000006",
+        currency="USD",
+        source="compaction",
+    )
+
+    digest = store.thread_digest(thread_id)
+
+    assert digest["billing_currency"] == "USD"
+    assert digest["billing_total"] == "0.000124"
+    assert digest["billing_totals"] == {"USD": "0.000124"}
+
+
 def test_thread_digest_starts_after_latest_compaction_and_hides_tools(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Digest")

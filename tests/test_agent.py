@@ -18,11 +18,14 @@ from uv_agent.agent import (
     tool_attachment_context_items,
     usage_token_count,
 )
+from uv_agent.billing import billing_charge_for_usage, billing_token_breakdown, format_billing_total
 from uv_agent.config import (
     AppConfig,
     CompressionConfig,
     LevelConfig,
     ModelConfig,
+    ModelPricingConfig,
+    PricingConfig,
     ProviderConfig,
     RunnerConfig,
     RuntimeConfig,
@@ -301,6 +304,7 @@ def make_test_config(
     title_generation: TitleGenerationConfig | None = None,
     default_level: str = "medium",
     stream_retry: StreamRetryConfig | None = None,
+    pricing: PricingConfig | None = None,
 ) -> AppConfig:
     return AppConfig(
         providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
@@ -328,6 +332,7 @@ def make_test_config(
             runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
             runtime_package_name="uv-agent",
         ),
+        pricing=pricing or PricingConfig(),
     )
 
 
@@ -2486,6 +2491,153 @@ def test_usage_token_count_supports_provider_shapes() -> None:
     assert usage_token_count({"input_tokens": 10, "output_tokens": 3}) == 13
     assert usage_token_count({"prompt_tokens": 9, "completion_tokens": 2}) == 11
     assert usage_token_count({}) is None
+
+
+def test_billing_charge_uses_uncached_cached_and_output_tokens(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        pricing=PricingConfig(
+            currency="CNY",
+            unit="1M_tokens",
+            models={
+                "default": ModelPricingConfig(input=2.0, output=8.0, cached_input=0.5),
+            },
+        ),
+    )
+    model = config.model_for_level("medium")
+
+    charge = billing_charge_for_usage(
+        config,
+        model,
+        {
+            "input_tokens": 1_000,
+            "input_tokens_details": {"cached_tokens": 200},
+            "output_tokens": 300,
+        },
+        level="medium",
+    )
+
+    assert charge is not None
+    assert charge.input_tokens == 800
+    assert charge.cached_input_tokens == 200
+    assert charge.output_tokens == 300
+    assert format_billing_total(charge.amount, charge.currency, decimals=6) == "¥0.004100"
+
+
+def test_billing_token_breakdown_supports_anthropic_cache_tokens() -> None:
+    breakdown = billing_token_breakdown(
+        {
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 40,
+            "cache_read_input_tokens": 60,
+            "output_tokens": 20,
+        }
+    )
+
+    assert breakdown.input_tokens == 140
+    assert breakdown.cached_input_tokens == 60
+    assert breakdown.output_tokens == 20
+
+
+@pytest.mark.asyncio
+async def test_agent_accumulates_billing_for_model_response(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        pricing=PricingConfig(
+            currency="USD",
+            unit="1M_tokens",
+            models={
+                "default": ModelPricingConfig(input=1.0, output=2.0, cached_input=0.25),
+            },
+        ),
+    )
+    client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 1_000,
+                    "input_tokens_details": {"cached_tokens": 200},
+                    "output_tokens": 500,
+                },
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="hi")]
+    thread_id = events[-1]["thread_id"]
+    digest = engine.thread_store.thread_digest(thread_id)
+
+    assert digest["billing_currency"] == "USD"
+    assert digest["billing_total"] == "0.00185"
+    assert any(event["type"] == "thread.billing_accumulated" for event in engine.thread_store.read(thread_id))
+
+
+def test_subagent_billing_rolls_into_parent_thread(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        pricing=PricingConfig(
+            currency="USD",
+            unit="1M_tokens",
+            models={"default": ModelPricingConfig(input=1.0, output=2.0, cached_input=0.25)},
+        ),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    parent_id = engine.thread_store.create_thread()
+    subthread_id = engine.thread_store.create_thread(
+        "Subagent",
+        kind="subagent",
+        parent_thread_id=parent_id,
+        parent_turn_id="turn_parent",
+    )
+    engine.thread_store.append(
+        subthread_id,
+        "thread.billing_accumulated",
+        amount="0.00042",
+        currency="USD",
+        source="model_response",
+    )
+
+    _rules, visible = engine._process_runner_events(
+        [{"kind": "subagent.completed", "thread_id": subthread_id}],
+        thread_id=parent_id,
+        turn_id="turn_parent",
+    )
+    digest = engine.thread_store.thread_digest(parent_id)
+
+    assert visible == [{"kind": "subagent.completed", "thread_id": subthread_id}]
+    assert digest["billing_total"] == "0.00042"
+    event = engine.thread_store.latest_event(parent_id, "thread.billing_accumulated")
+    assert event is not None
+    assert event["source"] == "subagent"
+    assert event["subthread_id"] == subthread_id
 
 
 def test_context_percent_prefers_latest_usage(tmp_path: Path) -> None:

@@ -43,6 +43,17 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                         },
                     }
                 },
+                "pricing": {
+                    "currency": "CNY",
+                    "unit": "1M_tokens",
+                    "models": {
+                        "m": {
+                            "input": 2.0,
+                            "output": 8.0,
+                            "cached_input": 0.5,
+                        }
+                    },
+                },
                 "levels": {
                     "medium": {
                         "model": "m",
@@ -88,6 +99,11 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert config.runtime.stream_retry.factor == 3
     assert config.runtime.stream_retry.max == 10
     assert config.runtime.stream_retry.jitter == 0
+    assert config.pricing.currency == "CNY"
+    assert config.pricing.unit == "1M_tokens"
+    assert config.pricing.models["m"].input == 2.0
+    assert config.pricing.models["m"].output == 8.0
+    assert config.pricing.models["m"].cached_input == 0.5
     assert config.runner.runtime_dependency == f"uv-agent=={version('uv-agent')}"
     assert config.runner.default_uv_args == []
     assert config.runner.default_timeout_s == 7200

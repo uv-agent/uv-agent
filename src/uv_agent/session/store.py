@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from uv_agent.billing import decimal_or_none, decimal_or_zero, decimal_to_string, normalize_currency
 from uv_agent.context import usage_token_count
 from uv_agent.ids import new_id
 from uv_agent.jsonl import (
@@ -324,6 +325,9 @@ class ThreadStore:
             "active_level": metadata.get("active_level"),
             "active_model": metadata.get("active_model"),
             "latest_model_switch_warning": metadata.get("latest_model_switch_warning"),
+            "billing_total": metadata.get("billing_total"),
+            "billing_currency": metadata.get("billing_currency"),
+            "billing_totals": metadata.get("billing_totals"),
             "last_text": metadata.get("last_text") or "",
             "turn_count": int(metadata.get("turn_count") or 0),
             "interrupted_turn_count": int(metadata.get("interrupted_turn_count") or 0),
@@ -664,6 +668,27 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
         usage = usage_token_count(event.get("usage") or {})
         if usage is not None:
             metadata["latest_usage_tokens"] = usage
+    elif event_type == "thread.billing_accumulated":
+        _apply_billing_event(metadata, event)
+
+
+def _apply_billing_event(metadata: dict[str, Any], event: dict[str, Any]) -> None:
+    amount = decimal_or_none(event.get("amount"))
+    if amount is None:
+        return
+    currency = normalize_currency(str(event.get("currency") or metadata.get("billing_currency") or "USD"))
+    totals = metadata.get("billing_totals")
+    if not isinstance(totals, dict):
+        totals = {}
+    current = decimal_or_zero(totals.get(currency))
+    total = current + amount
+    totals[currency] = decimal_to_string(total)
+    metadata["billing_totals"] = totals
+    # Preserve the historical single-total fields for simple consumers while
+    # keeping per-currency totals above so a config currency change is additive
+    # instead of silently mixing USD and CNY.
+    metadata["billing_total"] = decimal_to_string(total)
+    metadata["billing_currency"] = currency
 
 
 def _compaction_summary(compaction: Any) -> dict[str, Any] | None:

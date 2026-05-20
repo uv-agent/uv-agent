@@ -106,6 +106,22 @@
       "bell": true
     }
   },
+  "pricing": {
+    "currency": "USD",
+    "unit": "1M_tokens",
+    "models": {
+      "main": {
+        "input": 2.0,
+        "output": 8.0,
+        "cached_input": 0.5
+      },
+      "fast": {
+        "input": 0.5,
+        "output": 1.5,
+        "cached_input": 0.1
+      }
+    }
+  },
   "runner": {
     "runtime_dependency": "uv-agent",
     "runtime_package_name": "uv-agent",

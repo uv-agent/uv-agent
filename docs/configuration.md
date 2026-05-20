@@ -159,6 +159,44 @@ Example for a Mimo-style OpenAI-compatible provider:
 `headers` values are static JSON strings. Keep custom provider keys in your
 untracked user or project config file.
 
+## Pricing Options
+
+Pricing is optional. When configured, uv-agent computes an incremental charge
+from provider-reported usage after every model call and stores only the running
+thread total. The footer shows the current thread total as a right-side compact
+amount with 4 decimal places; `/status` shows the same total with 6 decimals.
+If pricing is absent, the UI hides billing.
+
+Prices are configured per model and default to the vendor-standard unit of one
+million tokens:
+
+```json
+{
+  "pricing": {
+    "currency": "USD",
+    "unit": "1M_tokens",
+    "models": {
+      "main": {
+        "input": 2.0,
+        "output": 8.0,
+        "cached_input": 0.5
+      }
+    }
+  }
+}
+```
+
+The model key normally matches the local model name under `models`. The remote
+provider model id and level name are also accepted as fallbacks. Supported
+currency symbols are `USD`/`$` and `CNY`/`RMB`/`¥`; unknown currency codes are
+displayed before the amount (for example `EUR 0.1234`).
+
+Billable input is calculated as non-cached input plus cached input plus output.
+For OpenAI-compatible usage with `*_tokens_details.cached_tokens`, cached tokens
+are subtracted from input and charged at `cached_input`. Anthropic-style
+`cache_read_input_tokens` are charged as cached input; `cache_creation_input_tokens`
+are charged as ordinary input.
+
 ## Level Options
 
 Levels are named runtime choices. The TUI and `uv-agent ask --level <name>` use

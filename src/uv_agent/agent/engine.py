@@ -19,6 +19,7 @@ from uv_agent.agent.compaction import (
     retained_user_messages_after_compaction,
     retain_item_after_compaction,
 )
+from uv_agent.billing import billing_charge_for_usage, billing_total_from_metadata, decimal_to_string
 from uv_agent.config import AppConfig
 from uv_agent.agent.context_builder import (
     context_fingerprint,
@@ -702,7 +703,7 @@ class AgentEngine:
         level: str | None,
     ) -> str | None:
         try:
-            title = await self._generate_thread_title(user_text, level=level)
+            title = await self._generate_thread_title(thread_id, user_text, level=level)
         except Exception:
             return None
         if not title or not self._thread_title_is_pending(self.thread_store.snapshot(thread_id).metadata):
@@ -710,7 +711,7 @@ class AgentEngine:
         self.thread_store.update_title(thread_id, title, source="generated")
         return title
 
-    async def _generate_thread_title(self, user_text: str, *, level: str | None) -> str | None:
+    async def _generate_thread_title(self, thread_id: str, user_text: str, *, level: str | None) -> str | None:
         title_level = self.config.runtime.title_generation.model_level or level
         response = await self.model_client.create_response(
             input_items=[
@@ -724,6 +725,13 @@ class AgentEngine:
             level=title_level,
             tools=[],
             instructions="Generate a short thread title. Return only the title.",
+        )
+        self._record_billing_charge(
+            thread_id,
+            None,
+            response.usage,
+            level=title_level,
+            source="title_generation",
         )
         return clean_thread_title(response.output_text)
 
@@ -768,6 +776,13 @@ class AgentEngine:
             replacement_input=replacement_input,
             context_state=context_state,
             usage=response.usage,
+        )
+        self._record_billing_charge(
+            thread_id,
+            turn_id,
+            response.usage,
+            level=compact_level,
+            source="compaction",
         )
         self._reset_rule_epoch(thread_id)
         return True
@@ -1007,6 +1022,13 @@ class AgentEngine:
             usage=response.usage,
             reasoning_text=reasoning_text,
         )
+        billing_charge = self._record_billing_charge(
+            thread_id,
+            turn_id,
+            response.usage,
+            level=level,
+            source="model_response",
+        )
         yield {
             "type": "model.response",
             "thread_id": thread_id,
@@ -1014,7 +1036,41 @@ class AgentEngine:
             "turn_started_at": turn_started_at,
             "response": response,
             "reasoning_text": reasoning_text,
+            "billing_charge": billing_charge,
         }
+
+    def _record_billing_charge(
+        self,
+        thread_id: str,
+        turn_id: str | None,
+        usage: dict[str, Any],
+        *,
+        level: str | None,
+        source: str,
+    ) -> dict[str, Any] | None:
+        """Persist one incremental model-call charge when pricing is configured."""
+
+        try:
+            model = self.config.model_for_level(level)
+        except Exception:
+            return None
+        charge = billing_charge_for_usage(self.config, model, usage or {}, level=level)
+        if charge is None:
+            return None
+        payload = charge.to_event_payload(source=source, turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "thread.billing_accumulated",
+            **payload,
+        )
+        total = billing_total_from_metadata(
+            self.thread_store.snapshot(thread_id).metadata,
+            preferred_currency=charge.currency,
+        )
+        if total is not None:
+            payload["total"] = decimal_to_string(total[0])
+            payload["total_currency"] = total[1]
+        return payload
 
     async def _stream_model_response_with_retries(
         self,
@@ -1209,8 +1265,43 @@ class AgentEngine:
                         self._load_unseen_rules_for_dir(thread_id, entered, source="tool_result")
                     )
                 continue
+            if event.get("kind") == "subagent.completed":
+                self._record_subagent_billing_from_event(event, thread_id=thread_id, turn_id=turn_id)
             visible_events.append(event)
         return rules_loaded, visible_events
+
+    def _record_subagent_billing_from_event(
+        self,
+        event: dict[str, Any],
+        *,
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        """Roll retained ask/subagent model costs into the parent thread total."""
+
+        subthread_id = str(event.get("thread_id") or "")
+        if not subthread_id or subthread_id == thread_id:
+            return
+        try:
+            metadata = self.thread_store.snapshot(subthread_id).metadata
+        except (OSError, ValueError, FileNotFoundError):
+            return
+        total = billing_total_from_metadata(
+            metadata,
+            preferred_currency=self.config.pricing.currency,
+        )
+        if total is None or total[0] == 0:
+            return
+        amount, currency = total
+        self.thread_store.append(
+            thread_id,
+            "thread.billing_accumulated",
+            turn_id=turn_id,
+            source="subagent",
+            subthread_id=subthread_id,
+            amount=decimal_to_string(amount),
+            currency=currency,
+        )
 
     def _handle_enter_dir_event(
         self,

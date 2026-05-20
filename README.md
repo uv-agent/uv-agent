@@ -135,6 +135,22 @@ API keys in environment variables or ignored local config.
     "default_timeout_s": 7200,
     "max_output_bytes": 1000000
   },
+  "pricing": {
+    "currency": "RMB",
+    "unit": "1M_tokens",
+    "models": {
+      "deepseek-v4-flash": {
+        "input": 1,
+        "output": 2,
+        "cached_input": 0.02
+      },
+      "deepseek-v4-pro": {
+        "input": 3,
+        "output": 6,
+        "cached_input": 0.025
+      }
+    }
+  },
   "ui": {
     "completion_notification": {
       "enabled": true

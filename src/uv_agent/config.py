@@ -92,6 +92,21 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class ModelPricingConfig:
+    input: float = 0.0
+    output: float = 0.0
+    cached_input: float = 0.0
+    unit: str | None = None
+
+
+@dataclass(frozen=True)
+class PricingConfig:
+    currency: str = "USD"
+    unit: str = "1M_tokens"
+    models: dict[str, ModelPricingConfig] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class LevelConfig:
     name: str
     model: str
@@ -172,6 +187,7 @@ class AppConfig:
     runtime: RuntimeConfig
     runner: RunnerConfig
     ui: UiConfig = field(default_factory=UiConfig)
+    pricing: PricingConfig = field(default_factory=PricingConfig)
 
     def level(self, name: str | None = None) -> LevelConfig:
         level_name = name or self.runtime.default_level
@@ -250,6 +266,11 @@ def default_config(project_root: Path) -> dict[str, Any]:
             "default_timeout_s": 7200,
             "max_output_bytes": 1_000_000,
             "max_saved_scripts": 32,
+        },
+        "pricing": {
+            "currency": "USD",
+            "unit": "1M_tokens",
+            "models": {},
         },
     }
 
@@ -395,6 +416,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         max_saved_scripts=int(runner_raw.get("max_saved_scripts", 32)),
     )
     ui_raw = raw.get("ui", {})
+    pricing = parse_pricing(raw.get("pricing", {}))
     return AppConfig(
         providers=providers,
         models=models,
@@ -407,6 +429,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
                 ui_raw.get("completion_notification", {})
             ),
         ),
+        pricing=pricing,
     )
 
 
@@ -453,6 +476,33 @@ def parse_completion_notification(value: object) -> CompletionNotificationConfig
         enabled=bool(value.get("enabled", True)),
         terminal=bool(terminal),
         bell=bool(value.get("bell", True)),
+    )
+
+
+def parse_pricing(value: object) -> PricingConfig:
+    if not isinstance(value, dict):
+        return PricingConfig()
+    models: dict[str, ModelPricingConfig] = {}
+    raw_models = value.get("models", {})
+    if isinstance(raw_models, dict):
+        for name, raw_price in raw_models.items():
+            if not isinstance(name, str) or not isinstance(raw_price, dict):
+                continue
+            price_value = dict(raw_price)
+            # Model entries inherit the top-level unit unless they explicitly
+            # override it. The resolved unit is handled in billing.py so the raw
+            # config still reflects exactly what the user wrote.
+            unit = price_value.get("unit")
+            models[name] = ModelPricingConfig(
+                input=float(price_value.get("input", 0.0) or 0.0),
+                output=float(price_value.get("output", 0.0) or 0.0),
+                cached_input=float(price_value.get("cached_input", 0.0) or 0.0),
+                unit=str(unit) if unit is not None else None,
+            )
+    return PricingConfig(
+        currency=str(value.get("currency", "USD") or "USD"),
+        unit=str(value.get("unit", "1M_tokens") or "1M_tokens"),
+        models=models,
     )
 
 

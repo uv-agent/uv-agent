@@ -19,6 +19,8 @@ from uv_agent.config import (
     CompressionConfig,
     LevelConfig,
     ModelConfig,
+    ModelPricingConfig,
+    PricingConfig,
     ProviderConfig,
     RunnerConfig,
     RuntimeConfig,
@@ -199,6 +201,64 @@ class ErrorEngine(AgentEngine):
             "error_type": "RuntimeError",
             "message": "Chat completions stream ended before [DONE] without returning content",
         }
+
+
+class BillingEventEngine(AgentEngine):
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        thread_id = thread_id or self.thread_store.create_thread("Billing live")
+        turn_id = "turn_billing"
+        self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        self.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
+        )
+        yield {"type": "assistant.delta", "thread_id": thread_id, "turn_id": turn_id, "text": "done"}
+        response = ModelResponse(
+            id="resp_billing",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }
+            ],
+            output_text="done",
+            raw={"id": "resp_billing"},
+            usage={},
+        )
+        billing_charge = {
+            "amount": "0.1234567",
+            "currency": "USD",
+            "total": "0.1234567",
+            "total_currency": "USD",
+            "source": "model_response",
+        }
+        yield {
+            "type": "model.response",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "response": response,
+            "billing_charge": billing_charge,
+        }
+        self.thread_store.append(
+            thread_id,
+            "thread.billing_accumulated",
+            **billing_charge,
+        )
+        self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text="done")
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": "done"}
 
 
 class RetryableErrorEngine(AgentEngine):
@@ -2885,6 +2945,85 @@ async def test_tui_uses_chinese_when_configured(
         assert "medium" in str(footer.content)
         assert "0%" in str(footer.content)
         assert "输入" in placeholder
+
+
+@pytest.mark.asyncio
+async def test_tui_displays_billing_total_with_footer_and_status_precision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    engine.config = AppConfig(
+        providers=engine.config.providers,
+        models=engine.config.models,
+        levels=engine.config.levels,
+        runtime=engine.config.runtime,
+        runner=engine.config.runner,
+        ui=engine.config.ui,
+        pricing=PricingConfig(
+            currency="USD",
+            unit="1M_tokens",
+            models={"default": ModelPricingConfig(input=1.0, output=2.0, cached_input=0.25)},
+        ),
+    )
+    thread_id = engine.thread_store.create_thread("Billing")
+    engine.thread_store.append(
+        thread_id,
+        "thread.billing_accumulated",
+        amount="0.1234567",
+        currency="USD",
+        source="model_response",
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+    app.thread_id = thread_id
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        footer = app.query_one("#composer-footer", Static)
+        assert "$0.1235" in str(footer.content)
+        assert "$0.123456" not in str(footer.content)
+
+        app._open_status_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert "- billing: $0.123457" in panel.body
+
+
+@pytest.mark.asyncio
+async def test_tui_updates_billing_total_from_live_model_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = BillingEventEngine(fake_engine(project_root, tmp_path / "state"))
+    engine.config = AppConfig(
+        providers=engine.config.providers,
+        models=engine.config.models,
+        levels=engine.config.levels,
+        runtime=engine.config.runtime,
+        runner=engine.config.runner,
+        ui=engine.config.ui,
+        pricing=PricingConfig(
+            currency="USD",
+            unit="1M_tokens",
+            models={"default": ModelPricingConfig(input=1.0, output=2.0, cached_input=0.25)},
+        ),
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("bill this")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        footer = app.query_one("#composer-footer", Static)
+        assert "$0.1235" in str(footer.content)
 
 
 @pytest.mark.asyncio

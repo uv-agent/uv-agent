@@ -26,6 +26,7 @@ from textual.worker import Worker
 
 from uv_agent.agent import DEFAULT_THREAD_TITLES
 from uv_agent.app_factory import create_engine
+from uv_agent.billing import billing_total_from_metadata, format_billing_total
 from uv_agent.clipboard import ClipboardImageError, save_clipboard_image
 from uv_agent.config import ConfigError
 from uv_agent.environment import application_version, detect_user_language, host_environment_line
@@ -716,6 +717,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return
         if event_type == "model.response":
             await self._handle_model_response_item(item_thread_id, item, run_state)
+            billing_charge = item.get("billing_charge")
+            if isinstance(billing_charge, dict):
+                self._handle_billing_updated_item(item_thread_id, billing_charge, run_state)
             return
         if event_type == "thread.title":
             if self._is_active_thread(item_thread_id):
@@ -823,6 +827,17 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._notify_turn_completed(item_thread_id, text, active_thread=was_active_thread)
         if was_active_thread:
             self._refresh_status(self._text("idle"))
+
+    def _handle_billing_updated_item(
+        self,
+        item_thread_id: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        self._record_live_thread_event(run_state, "thread.billing_accumulated", item)
+        if self._is_active_thread(item_thread_id):
+            self._refresh_status()
+
 
     def _handle_turn_interrupted_item(
         self,
@@ -1219,6 +1234,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._append_stream_retry(item)
         elif event_type == "compaction.completed":
             self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
+        elif event_type == "thread.billing_accumulated":
+            self._refresh_status()
         elif event_type == "turn.interrupted":
             # Re-entry path renders no "interrupted" marker cell; mirror it
             # by only folding the turn's process cells. See _finalize_turn_render.
@@ -2468,6 +2485,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         level_name = self.level or self.engine.config.runtime.default_level
         rules = self.engine.project_rule_context()
         scripts = self.engine.runner.store.list_scripts(limit=5)
+        billing_line = self._thread_billing_status_line()
         try:
             model = self.engine.config.model_for_level(self.level)
             provider = self.engine.config.provider_for_model(model)
@@ -2506,16 +2524,22 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             f"- model: {model_line}",
             f"- provider/api: {provider_line}",
             f"- context: {context_line}",
-            f"- compaction: {compress_line}",
-            f"- rules: {escape(rules_line)}",
-            f"- scripts: {escape(script_line)}",
-            f"- thread: {escape(short_thread(self.thread_id))}",
-            f"- queued: {self._active_queue_length()}",
-            f"- user state: {escape(str(uv_agent_home()))}",
-            f"- project state: {escape(str(project_state_dir(self.project_root)))}",
-            f"- host: {escape(host_environment_line())}",
-            f"- language: {escape(self.language.name)}",
         ]
+        if billing_line:
+            lines.append(f"- billing: {billing_line}")
+        lines.extend(
+            [
+                f"- compaction: {compress_line}",
+                f"- rules: {escape(rules_line)}",
+                f"- scripts: {escape(script_line)}",
+                f"- thread: {escape(short_thread(self.thread_id))}",
+                f"- queued: {self._active_queue_length()}",
+                f"- user state: {escape(str(uv_agent_home()))}",
+                f"- project state: {escape(str(project_state_dir(self.project_root)))}",
+                f"- host: {escape(host_environment_line())}",
+                f"- language: {escape(self.language.name)}",
+            ]
+        )
         background_runs = self._background_run_states()
         if background_runs:
             lines.append(
@@ -2549,8 +2573,11 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 )
         return "\n".join(lines)
 
-        """Callback used by inspect-only pickers."""
-        return
+    def _thread_billing_status_line(self) -> str:
+        if not self.engine.config.pricing.models:
+            return ""
+        label = self._thread_billing_label(decimals=6)
+        return escape(label) if label else "-"
 
     def _open_command_palette(self, *, query: str = "") -> None:
         self._open_picker(
@@ -2915,6 +2942,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._last_status = state
         self.engine.refresh_config()
         self.language = detect_user_language(self.engine.config.ui.language)
+        billing_label = self._thread_billing_label(decimals=4)
         try:
             self.query_one("#composer", TextArea).placeholder = self._text("placeholder")
         except NoMatches:
@@ -2952,6 +2980,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 f"[dim]{escape(level_name)} · {escape(compact_context)} · "
                 f"{escape(short_thread(self.thread_id))}{queued}[/dim]"
             )
+        if billing_label:
+            footer += f" [dim]·[/dim] [cyan]{escape(billing_label)}[/cyan]"
         background_count = len(self._background_run_states())
         if background_count:
             footer += (
@@ -2964,6 +2994,31 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         except NoMatches:
             return
         self._refresh_pending_images()
+
+    def _thread_billing_label(self, *, decimals: int) -> str:
+        """Return the current thread's formatted cost, or empty when disabled."""
+
+        if self.thread_id is None or not self.engine.config.pricing.models:
+            return ""
+        run_state = self._thread_runs.get(self.thread_id)
+        if run_state is not None:
+            for event in reversed(run_state.live_events):
+                if event.get("event_type") != "thread.billing_accumulated":
+                    continue
+                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                amount = item.get("total")
+                currency = item.get("total_currency") or item.get("currency")
+                if amount is not None and currency:
+                    return format_billing_total(amount, str(currency), decimals=decimals)
+        metadata = self._thread_metadata(self.thread_id)
+        total = billing_total_from_metadata(
+            metadata,
+            preferred_currency=self.engine.config.pricing.currency,
+        )
+        if total is None:
+            return ""
+        amount, currency = total
+        return format_billing_total(amount, currency, decimals=decimals)
 
     def _any_thread_running(self) -> bool:
         return any(
