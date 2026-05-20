@@ -25,7 +25,7 @@ Principles:
 - [x] Split model provider protocol code out of `model_client.py`.
 - [x] Evaluate replacing hand-built Anthropic protocol code with the official SDK.
 - [x] Split runner stream/event parsing helpers out of `runner.py`.
-- [ ] Run full test suite and confirm behavior parity.
+- [x] Run full test suite and confirm behavior parity.
 
 ## Non-goals
 
