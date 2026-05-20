@@ -51,12 +51,13 @@ Endpoint config shape:
 }
 ```
 
-For `responses` and `chat_completions`, `path` is appended to `base_url`
-with no extra URL rewriting. For example, `base_url:
-"https://api.example.com/v1"` and `path: "/responses"` becomes
-`https://api.example.com/v1/responses`. Anthropic Messages requests use the
-official Anthropic SDK, which owns the `/v1/messages` path; endpoint `params`
-still participate in request parameter merging.
+Model requests use the official OpenAI and Anthropic SDKs. Endpoint `path`
+exists so existing configs can describe the target API shape, but SDK-backed
+requests strip the SDK-owned suffix from `base_url`: `/responses`,
+`/chat/completions`, and `/v1/messages` are owned by the corresponding SDK
+method. For example, `base_url: "https://api.example.com/v1"` and `path:
+"/responses"` creates an OpenAI SDK client with base URL
+`https://api.example.com/v1`.
 
 Secrets are redacted in config display paths, but committed config should still
 avoid direct `api_key` values.
@@ -80,10 +81,12 @@ Models bind a provider to a concrete remote model name and API format.
 | `message_passthrough` | object | provider default | Chat message fields to persist and replay for this model. |
 | `reasoning_display` | object | provider default | Provider-specific fields that should be shown as reasoning for this model. |
 
-Payload params are merged from provider, endpoint, model, and level settings.
-Later layers win when the same key appears. `message_passthrough` and
-`reasoning_display` are inherited from provider to model; model config overrides
-only the fields it names.
+Request params are merged from provider, endpoint, model, and level settings.
+Later layers win when the same key appears. Params accepted by the SDK method
+are passed as normal keyword arguments. Unknown params are merged into SDK
+`extra_body`; an explicit `extra_body` object in params is merged there too.
+`message_passthrough` and `reasoning_display` are inherited from provider to
+model; model config overrides only the fields it names.
 
 `message_passthrough` shape:
 

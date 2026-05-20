@@ -6,37 +6,17 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from anthropic import AsyncAnthropic
+from anthropic.resources.messages import AsyncMessages
 from anthropic.types import Message
 
 from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.model.content import chat_output_items
+from uv_agent.model.sdk import model_param_sources, object_dump, sdk_base_url, sdk_extra_body, sdk_kwargs, sdk_param_keys
 from uv_agent.model.types import ModelResponse, ModelStreamEvent
 
 
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
-ANTHROPIC_SDK_PARAM_KEYS = {
-    "cache_control",
-    "container",
-    "extra_headers",
-    "extra_query",
-    "inference_geo",
-    "max_tokens",
-    "messages",
-    "metadata",
-    "model",
-    "output_config",
-    "service_tier",
-    "stop_sequences",
-    "stream",
-    "system",
-    "temperature",
-    "thinking",
-    "timeout",
-    "tool_choice",
-    "tools",
-    "top_k",
-    "top_p",
-}
+ANTHROPIC_SDK_PARAM_KEYS = sdk_param_keys(AsyncMessages.create)
 
 
 def anthropic_payload(
@@ -183,11 +163,7 @@ def anthropic_client(provider: ProviderConfig) -> AsyncAnthropic:
 
 
 def anthropic_sdk_base_url(provider: ProviderConfig) -> str:
-    endpoint_path = provider.endpoint_for_api("anthropic_messages").path
-    messages_url = provider.base_url.rstrip("/") + endpoint_path
-    if messages_url.endswith(ANTHROPIC_MESSAGES_PATH):
-        return messages_url[: -len(ANTHROPIC_MESSAGES_PATH)] or provider.base_url.rstrip("/")
-    return provider.base_url
+    return sdk_base_url(provider, "anthropic_messages", ANTHROPIC_MESSAGES_PATH)
 
 
 def anthropic_create_kwargs(
@@ -200,22 +176,18 @@ def anthropic_create_kwargs(
 ) -> dict[str, Any]:
     payload = anthropic_payload(provider, model, input_items, tools, instructions, stream=False)
     payload.pop("stream", None)
-    kwargs = {key: value for key, value in payload.items() if key in ANTHROPIC_SDK_PARAM_KEYS}
-    extra_body = endpoint_extra_body(provider, model)
-    if extra_body:
-        kwargs["extra_body"] = extra_body
-    return kwargs
+    return sdk_kwargs(
+        payload,
+        model_param_sources(provider, model, "anthropic_messages"),
+        ANTHROPIC_SDK_PARAM_KEYS,
+    )
 
 
 def endpoint_extra_body(provider: ProviderConfig, model: ModelConfig) -> dict[str, Any] | None:
-    endpoint = provider.endpoint_for_api("anthropic_messages")
-    extra = {
-        key: value
-        for source in (provider.params, endpoint.params, model.params)
-        for key, value in source.items()
-        if key not in ANTHROPIC_SDK_PARAM_KEYS
-    }
-    return extra or None
+    return sdk_extra_body(
+        model_param_sources(provider, model, "anthropic_messages"),
+        ANTHROPIC_SDK_PARAM_KEYS,
+    )
 
 
 async def create_anthropic_response(
@@ -313,13 +285,3 @@ async def stream_anthropic_response(
 
 def parse_anthropic_message(message: Message) -> ModelResponse:
     return parse_anthropic_response(object_dump(message))
-
-
-def object_dump(value: object) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
-    if isinstance(value, dict):
-        return value
-    return dict(value) if hasattr(value, "__iter__") else {}

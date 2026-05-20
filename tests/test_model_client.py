@@ -3,38 +3,77 @@ from __future__ import annotations
 import pytest
 
 from uv_agent.config import (
-    AppConfig,
-    CompressionConfig,
     EndpointConfig,
-    LevelConfig,
     MessagePassthroughConfig,
     ModelConfig,
     ProviderConfig,
     ReasoningDisplayConfig,
-    RunnerConfig,
-    RuntimeConfig,
 )
 from uv_agent.model import (
     ModelStreamEvent,
-    SSE_DONE,
-    UnifiedModelClient,
     anthropic_image_source,
     anthropic_sdk_base_url,
     anthropic_messages,
     anthropic_payload,
-    create_anthropic_response,
+    chat_create_kwargs,
     chat_message_content,
     chat_messages,
     chat_payload,
+    create_anthropic_response,
+    create_chat_response,
+    create_responses_response,
     endpoint_extra_body,
+    openai_client,
     parse_anthropic_message,
     parse_anthropic_response,
     parse_chat_response,
     parse_chat_response_for_model,
     parse_responses_response,
-    parse_sse_event,
+    responses_create_kwargs,
     responses_payload,
+    stream_chat_response,
 )
+
+
+class FakeOpenAIStream:
+    def __init__(self, events):
+        self.events = events
+
+    def __aiter__(self):
+        self._iter = iter(self.events)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+
+class FakeChatCompletions:
+    def __init__(self, events):
+        self.events = events
+        self.kwargs = None
+
+    async def create(self, **kwargs):
+        self.kwargs = kwargs
+        if kwargs.get("stream"):
+            return FakeOpenAIStream(self.events)
+        return self.events[0]
+
+
+class FakeOpenAIClient:
+    def __init__(self, *, chat_events=None, response_events=None):
+        self.chat = type("Chat", (), {"completions": FakeChatCompletions(chat_events or [])})()
+        self.responses = type("Responses", (), {"create": self._create_response})()
+        self.response_events = response_events or []
+        self.response_kwargs = None
+
+    async def _create_response(self, **kwargs):
+        self.response_kwargs = kwargs
+        if kwargs.get("stream"):
+            return FakeOpenAIStream(self.response_events)
+        return self.response_events[0]
 
 
 def test_chat_messages_convert_responses_items() -> None:
@@ -220,6 +259,85 @@ def test_responses_payload_supports_previous_response_id() -> None:
     assert payload["stream"] is True
 
 
+def test_openai_client_strips_sdk_owned_endpoint_path_and_preserves_header_only_auth() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com/v1",
+        headers={"api-key": "test-key"},
+        responses=EndpointConfig(path="/responses"),
+    )
+
+    client = openai_client(provider, "responses", "/responses")
+
+    assert str(client.base_url) == "https://api.example.com/v1/"
+    assert client.auth_headers == {}
+    assert client.default_headers["api-key"] == "test-key"
+
+
+def test_responses_create_kwargs_passes_unknown_params_as_extra_body() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com/v1",
+        params={"temperature": 0.2, "vendor_flag": True},
+        responses=EndpointConfig(path="/responses", params={"extra_body": {"endpoint_flag": "yes"}}),
+    )
+    model = ModelConfig(name="m", provider="p", model="remote", params={"custom": "x"})
+
+    kwargs = responses_create_kwargs(
+        provider=provider,
+        model=model,
+        input_items=[],
+        tools=[],
+        instructions=None,
+        previous_response_id=None,
+    )
+
+    assert kwargs["temperature"] == 0.2
+    assert kwargs["extra_body"] == {
+        "vendor_flag": True,
+        "endpoint_flag": "yes",
+        "custom": "x",
+    }
+    assert "vendor_flag" not in kwargs
+    assert "custom" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_create_responses_response_uses_sdk_client() -> None:
+    provider = ProviderConfig(name="p", base_url="https://api.example.com/v1")
+    model = ModelConfig(name="m", provider="p", model="remote", api="responses")
+    sdk_client = FakeOpenAIClient(
+        response_events=[
+            {
+                "id": "resp_1",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            }
+        ]
+    )
+
+    response = await create_responses_response(
+        provider=provider,
+        model=model,
+        input_items=[],
+        tools=[],
+        instructions="system",
+        previous_response_id="resp_prev",
+        client=sdk_client,
+    )
+
+    assert response.output_text == "done"
+    assert sdk_client.response_kwargs["model"] == "remote"
+    assert sdk_client.response_kwargs["instructions"] == "system"
+    assert sdk_client.response_kwargs["previous_response_id"] == "resp_prev"
+
+
 def test_parse_chat_response_maps_tool_calls() -> None:
     response = parse_chat_response(
         {
@@ -275,10 +393,62 @@ def test_parse_chat_response_preserves_passthrough_and_reasoning_fields() -> Non
     assert response.reasoning_text == "I should introduce myself."
 
 
-def test_parse_sse_event_handles_done_and_json() -> None:
-    assert parse_sse_event(None, ["[DONE]"]) == {"type": SSE_DONE}
-    parsed = parse_sse_event("response.completed", ['{"response":{"id":"x"}}'])
-    assert parsed == {"type": "response.completed", "response": {"id": "x"}}
+def test_chat_create_kwargs_passes_unknown_params_as_extra_body() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com/v1",
+        params={"temperature": 0.2, "vendor_flag": True},
+        chat_completions=EndpointConfig(
+            path="/chat/completions",
+            params={"extra_body": {"endpoint_flag": "yes"}},
+        ),
+    )
+    model = ModelConfig(name="m", provider="p", model="remote", params={"custom": "x"})
+
+    kwargs = chat_create_kwargs(
+        provider=provider,
+        model=model,
+        input_items=[],
+        tools=[],
+        instructions=None,
+    )
+
+    assert kwargs["temperature"] == 0.2
+    assert kwargs["extra_body"] == {
+        "vendor_flag": True,
+        "endpoint_flag": "yes",
+        "custom": "x",
+    }
+    assert "vendor_flag" not in kwargs
+    assert "custom" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_create_chat_response_uses_sdk_client() -> None:
+    provider = ProviderConfig(name="p", base_url="https://api.example.com/v1")
+    model = ModelConfig(name="m", provider="p", model="remote", api="chat_completions")
+    sdk_client = FakeOpenAIClient(
+        chat_events=[
+            {
+                "id": "chat_1",
+                "choices": [{"message": {"content": "done"}}],
+                "usage": {"total_tokens": 2},
+            }
+        ]
+    )
+
+    response = await create_chat_response(
+        provider=provider,
+        model=model,
+        input_items=[],
+        tools=[],
+        instructions="system",
+        client=sdk_client,
+    )
+
+    assert response.output_text == "done"
+    assert sdk_client.chat.completions.kwargs["model"] == "remote"
+    assert sdk_client.chat.completions.kwargs["messages"] == [{"role": "system", "content": "system"}]
 
 
 def test_anthropic_payload_uses_messages_shape() -> None:
@@ -323,12 +493,16 @@ def test_anthropic_endpoint_extra_body_keeps_unknown_params() -> None:
     provider = ProviderConfig(
         name="p",
         base_url="https://api.anthropic.com",
-        params={"temperature": 0.2, "vendor_flag": True},
+        params={"temperature": 0.2, "vendor_flag": True, "extra_body": {"manual": "y"}},
         anthropic_messages=EndpointConfig(path="/v1/messages", params={"max_tokens": 99}),
     )
     model = ModelConfig(name="m", provider="p", model="claude", params={"custom": "x"})
 
-    assert endpoint_extra_body(provider, model) == {"vendor_flag": True, "custom": "x"}
+    assert endpoint_extra_body(provider, model) == {
+        "manual": "y",
+        "vendor_flag": True,
+        "custom": "x",
+    }
 
 
 def test_anthropic_messages_convert_tool_items() -> None:
@@ -452,7 +626,7 @@ async def test_create_anthropic_response_passes_unknown_params_as_extra_body() -
     provider = ProviderConfig(
         name="p",
         base_url="https://api.anthropic.com",
-        params={"temperature": 0.2, "vendor_flag": True},
+        params={"temperature": 0.2, "vendor_flag": True, "extra_body": {"manual": "y"}},
     )
     model = ModelConfig(name="m", provider="p", model="claude", params={"custom": "x"})
     client = Client()
@@ -467,7 +641,7 @@ async def test_create_anthropic_response_passes_unknown_params_as_extra_body() -
     )
 
     assert client.messages.kwargs["temperature"] == 0.2
-    assert client.messages.kwargs["extra_body"] == {"vendor_flag": True, "custom": "x"}
+    assert client.messages.kwargs["extra_body"] == {"manual": "y", "vendor_flag": True, "custom": "x"}
     assert "vendor_flag" not in client.messages.kwargs
     assert "custom" not in client.messages.kwargs
 
@@ -494,10 +668,10 @@ def test_image_parts_convert_for_chat_and_anthropic() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_chat_accumulates_passthrough_and_configured_reasoning(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_stream_sse(provider, api, payload):
-        yield {
+    sdk_client = FakeOpenAIClient(
+        chat_events=[
+            {
             "id": "chat_1",
             "choices": [
                 {
@@ -506,8 +680,8 @@ async def test_stream_chat_accumulates_passthrough_and_configured_reasoning(
                     }
                 }
             ],
-        }
-        yield {
+            },
+            {
             "id": "chat_1",
             "choices": [
                 {
@@ -517,37 +691,31 @@ async def test_stream_chat_accumulates_passthrough_and_configured_reasoning(
                     }
                 }
             ],
-        }
-
-    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
-    config = AppConfig(
-        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
-        models={
-            "m": ModelConfig(
-                name="m",
-                provider="p",
-                model="remote",
-                api="chat_completions",
-                message_passthrough=MessagePassthroughConfig(assistant=["reasoning_content"]),
-                reasoning_display=ReasoningDisplayConfig(
-                    stream_delta_fields=["reasoning_content"],
-                    assistant_message_fields=["reasoning_content"],
-                ),
-            )
-        },
-        levels={"medium": LevelConfig(name="medium", model="m", params={})},
-        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
-        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
+            },
+        ]
     )
-    client = UnifiedModelClient(config)
+    provider = ProviderConfig(name="p", base_url="https://example.com")
+    model = ModelConfig(
+        name="m",
+        provider="p",
+        model="remote",
+        api="chat_completions",
+        message_passthrough=MessagePassthroughConfig(assistant=["reasoning_content"]),
+        reasoning_display=ReasoningDisplayConfig(
+            stream_delta_fields=["reasoning_content"],
+            assistant_message_fields=["reasoning_content"],
+        ),
+    )
 
     events = [
         event
-        async for event in client.stream_response(
+        async for event in stream_chat_response(
+            provider=provider,
+            model=model,
             input_items=[],
-            level="medium",
             tools=[],
             instructions=None,
+            client=sdk_client,
         )
     ]
     reasoning = [event.text for event in events if event.type == "reasoning_delta"]
@@ -562,30 +730,25 @@ async def test_stream_chat_accumulates_passthrough_and_configured_reasoning(
 
 @pytest.mark.asyncio
 async def test_stream_chat_allows_empty_chunks_before_done(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_stream_sse(provider, api, payload):
-        yield {"id": "chat_1", "choices": []}
-        yield {"id": "chat_1", "choices": [{"delta": {}}]}
-        yield {"type": SSE_DONE}
-
-    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
-    config = AppConfig(
-        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
-        models={"m": ModelConfig(name="m", provider="p", model="remote", api="chat_completions")},
-        levels={"medium": LevelConfig(name="medium", model="m", params={})},
-        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
-        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
+    sdk_client = FakeOpenAIClient(
+        chat_events=[
+            {"id": "chat_1", "choices": []},
+            {"id": "chat_1", "choices": [{"delta": {}}]},
+        ]
     )
-    client = UnifiedModelClient(config)
+    provider = ProviderConfig(name="p", base_url="https://example.com")
+    model = ModelConfig(name="m", provider="p", model="remote", api="chat_completions")
 
     events = [
         event
-        async for event in client.stream_response(
+        async for event in stream_chat_response(
+            provider=provider,
+            model=model,
             input_items=[],
-            level="medium",
             tools=[],
             instructions=None,
+            client=sdk_client,
         )
     ]
 
@@ -597,67 +760,29 @@ async def test_stream_chat_allows_empty_chunks_before_done(
 
 
 @pytest.mark.asyncio
-async def test_stream_chat_errors_when_empty_stream_ends_without_done(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fake_stream_sse(provider, api, payload):
-        yield {"id": "chat_1", "choices": []}
-        yield {"id": "chat_1", "choices": [{"delta": {}}]}
-
-    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
-    config = AppConfig(
-        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
-        models={"m": ModelConfig(name="m", provider="p", model="remote", api="chat_completions")},
-        levels={"medium": LevelConfig(name="medium", model="m", params={})},
-        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
-        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
-    )
-    client = UnifiedModelClient(config)
-
-    with pytest.raises(RuntimeError, match="before \\[DONE\\]"):
-        [
-            event
-            async for event in client.stream_response(
-                input_items=[],
-                level="medium",
-                tools=[],
-                instructions=None,
-            )
-        ]
-
-
-@pytest.mark.asyncio
 async def test_stream_chat_can_treat_unknown_text_delta_as_reasoning(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_stream_sse(provider, api, payload):
-        yield {"id": "chat_1", "choices": [{"delta": {"vendor_thought": "hidden-ish"}}]}
-
-    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
-    config = AppConfig(
-        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
-        models={
-            "m": ModelConfig(
-                name="m",
-                provider="p",
-                model="remote",
-                api="chat_completions",
-                reasoning_display=ReasoningDisplayConfig(unknown_text_delta_as_reasoning=True),
-            )
-        },
-        levels={"medium": LevelConfig(name="medium", model="m", params={})},
-        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
-        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
+    sdk_client = FakeOpenAIClient(
+        chat_events=[{"id": "chat_1", "choices": [{"delta": {"vendor_thought": "hidden-ish"}}]}]
     )
-    client = UnifiedModelClient(config)
+    provider = ProviderConfig(name="p", base_url="https://example.com")
+    model = ModelConfig(
+        name="m",
+        provider="p",
+        model="remote",
+        api="chat_completions",
+        reasoning_display=ReasoningDisplayConfig(unknown_text_delta_as_reasoning=True),
+    )
 
     events = [
         event
-        async for event in client.stream_response(
+        async for event in stream_chat_response(
+            provider=provider,
+            model=model,
             input_items=[],
-            level="medium",
             tools=[],
             instructions=None,
+            client=sdk_client,
         )
     ]
 
@@ -669,37 +794,29 @@ async def test_stream_chat_can_treat_unknown_text_delta_as_reasoning(
 
 @pytest.mark.asyncio
 async def test_stream_chat_fallback_can_display_passthrough_field_as_reasoning(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_stream_sse(provider, api, payload):
-        yield {"id": "chat_1", "choices": [{"delta": {"reasoning_content": "think"}}]}
-
-    monkeypatch.setattr("uv_agent.model.client.stream_sse", fake_stream_sse)
-    config = AppConfig(
-        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
-        models={
-            "m": ModelConfig(
-                name="m",
-                provider="p",
-                model="remote",
-                api="chat_completions",
-                message_passthrough=MessagePassthroughConfig(assistant=["reasoning_content"]),
-                reasoning_display=ReasoningDisplayConfig(unknown_text_delta_as_reasoning=True),
-            )
-        },
-        levels={"medium": LevelConfig(name="medium", model="m", params={})},
-        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
-        runner=RunnerConfig(runtime_dependency="uv-agent==0.1.4"),
+    sdk_client = FakeOpenAIClient(
+        chat_events=[{"id": "chat_1", "choices": [{"delta": {"reasoning_content": "think"}}]}]
     )
-    client = UnifiedModelClient(config)
+    provider = ProviderConfig(name="p", base_url="https://example.com")
+    model = ModelConfig(
+        name="m",
+        provider="p",
+        model="remote",
+        api="chat_completions",
+        message_passthrough=MessagePassthroughConfig(assistant=["reasoning_content"]),
+        reasoning_display=ReasoningDisplayConfig(unknown_text_delta_as_reasoning=True),
+    )
 
     events = [
         event
-        async for event in client.stream_response(
+        async for event in stream_chat_response(
+            provider=provider,
+            model=model,
             input_items=[],
-            level="medium",
             tools=[],
             instructions=None,
+            client=sdk_client,
         )
     ]
 

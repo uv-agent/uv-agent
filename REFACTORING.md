@@ -23,6 +23,7 @@ Principles:
 - [x] Extract tool result projection/filtering from `agent.py`.
 - [x] Reduce duplicated turn/retry model-loop code in `agent.py`.
 - [x] Split model provider protocol code out of `model_client.py`.
+- [x] Replace hand-built OpenAI HTTP calls with the official SDK.
 - [x] Replace hand-built Anthropic HTTP calls with the official SDK.
 - [x] Remove the root `model_client.py` compatibility module.
 - [x] Split runner stream/event parsing helpers out of `runner.py`.

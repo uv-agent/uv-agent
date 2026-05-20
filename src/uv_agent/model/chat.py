@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, Callable
+from typing import Any
+
+from openai import AsyncOpenAI
+from openai.resources.chat.completions import AsyncCompletions
 
 from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.model.content import (
@@ -12,9 +15,11 @@ from uv_agent.model.content import (
     chat_tool,
     chat_tool_acc_from_message,
 )
-from uv_agent.model.http import SSE_DONE, post_json, stream_sse
+from uv_agent.model.openai_sdk import openai_client
+from uv_agent.model.sdk import model_param_sources, object_dump, sdk_kwargs, sdk_param_keys
 from uv_agent.model.types import ModelResponse, ModelStreamEvent, ToolCallDelta
 
+CHAT_COMPLETIONS_PATH = "/chat/completions"
 CHAT_DELTA_CONTROL_FIELDS = {
     "role",
     "content",
@@ -22,6 +27,7 @@ CHAT_DELTA_CONTROL_FIELDS = {
     "function_call",
     "refusal",
 }
+CHAT_COMPLETIONS_SDK_PARAM_KEYS = sdk_param_keys(AsyncCompletions.create)
 
 
 def chat_payload(
@@ -49,6 +55,24 @@ def chat_payload(
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
     return payload
+
+
+def chat_create_kwargs(
+    *,
+    provider: ProviderConfig,
+    model: ModelConfig,
+    input_items: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    instructions: str | None,
+) -> dict[str, Any]:
+    payload = chat_payload(provider, model, input_items, tools, instructions, stream=False)
+    payload.pop("stream", None)
+    payload.pop("stream_options", None)
+    return sdk_kwargs(
+        payload,
+        model_param_sources(provider, model, "chat_completions"),
+        CHAT_COMPLETIONS_SDK_PARAM_KEYS,
+    )
 
 
 def parse_chat_response(data: dict[str, Any]) -> ModelResponse:
@@ -79,10 +103,19 @@ async def create_chat_response(
     input_items: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     instructions: str | None,
+    client: AsyncOpenAI | None = None,
 ) -> ModelResponse:
-    payload = chat_payload(provider, model, input_items, tools, instructions, stream=False)
-    data = await post_json(provider, model.api, payload)
-    return parse_chat_response_for_model(data, model)
+    client = client or openai_client(provider, model.api, CHAT_COMPLETIONS_PATH)
+    response = await client.chat.completions.create(
+        **chat_create_kwargs(
+            provider=provider,
+            model=model,
+            input_items=input_items,
+            tools=tools,
+            instructions=instructions,
+        )
+    )
+    return parse_chat_response_for_model(object_dump(response), model)
 
 
 async def stream_chat_response(
@@ -92,23 +125,26 @@ async def stream_chat_response(
     input_items: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     instructions: str | None,
-    stream_events: Callable[[ProviderConfig, str, dict[str, Any]], AsyncIterator[dict[str, Any]]] = stream_sse,
+    client: AsyncOpenAI | None = None,
 ) -> AsyncIterator[ModelStreamEvent]:
+    client = client or openai_client(provider, model.api, CHAT_COMPLETIONS_PATH)
     payload = chat_payload(provider, model, input_items, tools, instructions, stream=True)
+    payload_kwargs = sdk_kwargs(
+        payload,
+        model_param_sources(provider, model, "chat_completions"),
+        CHAT_COMPLETIONS_SDK_PARAM_KEYS,
+    )
+    stream = await client.chat.completions.create(**payload_kwargs)
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     passthrough_acc: dict[str, str] = {}
     tool_acc: dict[int, dict[str, Any]] = {}
     response_id: str | None = None
     usage: dict[str, Any] = {}
-    done = False
-    saw_payload = False
     passthrough_fields = set(model.message_passthrough.fields_for_role("assistant"))
     reasoning_fields = set(model.reasoning_display.stream_delta_fields)
-    async for data in stream_events(provider, model.api, payload):
-        if data.get("type") == SSE_DONE:
-            done = True
-            break
+    async for event in stream:
+        data = object_dump(event)
         if not data:
             continue
         response_id = data.get("id") or response_id
@@ -120,19 +156,16 @@ async def stream_chat_response(
             if delta.get("content"):
                 text = delta["content"]
                 text_parts.append(text)
-                saw_payload = True
                 yield ModelStreamEvent(type="text_delta", text=text)
             for field in passthrough_fields:
                 value = delta.get(field)
                 if isinstance(value, str) and value:
                     passthrough_acc[field] = passthrough_acc.get(field, "") + value
-                    saw_payload = True
             for field in reasoning_fields:
                 value = delta.get(field)
                 if isinstance(value, str) and value:
                     reasoning_fields_seen.add(field)
                     reasoning_parts.append(value)
-                    saw_payload = True
                     yield ModelStreamEvent(type="reasoning_delta", text=value)
             if model.reasoning_display.unknown_text_delta_as_reasoning:
                 for field, value in delta.items():
@@ -140,10 +173,8 @@ async def stream_chat_response(
                         continue
                     if isinstance(value, str) and value:
                         reasoning_parts.append(value)
-                        saw_payload = True
                         yield ModelStreamEvent(type="reasoning_delta", text=value)
             for tool_call in delta.get("tool_calls") or []:
-                saw_payload = True
                 index = int(tool_call.get("index", 0))
                 existing = tool_acc.setdefault(index, {"arguments": ""})
                 if tool_call.get("id"):
@@ -163,9 +194,6 @@ async def stream_chat_response(
                         arguments_delta=function.get("arguments", ""),
                     ),
                 )
-    if not done and not saw_payload:
-        raise RuntimeError("Chat completions stream ended before [DONE] without returning content")
-
     output_text = "".join(text_parts)
     reasoning_text = "".join(reasoning_parts)
     output = chat_output_items(output_text, tool_acc, passthrough=passthrough_acc)

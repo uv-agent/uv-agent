@@ -7,7 +7,6 @@ from typing import Any
 from uv_agent.config import AppConfig
 from uv_agent.model.anthropic import create_anthropic_response, stream_anthropic_response
 from uv_agent.model.chat import create_chat_response, stream_chat_response
-from uv_agent.model.http import stream_sse
 from uv_agent.model.responses import (
     create_responses_response,
     parse_responses_response,
@@ -87,7 +86,6 @@ class UnifiedModelClient:
                 input_items=input_items,
                 tools=tools or [],
                 instructions=instructions,
-                stream_events=stream_sse,
             ):
                 yield event
             return
@@ -98,7 +96,6 @@ class UnifiedModelClient:
             tools=tools or [],
             instructions=instructions,
             previous_response_id=previous_response_id,
-            stream_events=stream_sse,
         ):
             yield event
 
