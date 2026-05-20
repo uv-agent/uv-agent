@@ -623,122 +623,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, App[None]):
                 turn_kwargs["image_paths"] = image_paths
             turn_stream = self.engine.retry_turn(**turn_kwargs) if retry else self.engine.run_turn(**turn_kwargs)
             async for item in turn_stream:
-                item_thread_id = str(item.get("thread_id") or thread_id)
-                event_type = item["type"]
-                if event_type == "image.attachment":
-                    await self._handle_thread_event(item_thread_id, "image.attachment", item, run_state)
-                elif event_type == "assistant.delta":
-                    await self._handle_thread_event(item_thread_id, "assistant.delta", item, run_state)
-                elif event_type == "assistant.reasoning_delta":
-                    await self._handle_thread_event(item_thread_id, "assistant.reasoning_delta", item, run_state)
-                elif event_type == "tool.delta":
-                    await self._handle_thread_event(item_thread_id, "tool.delta", item, run_state)
-                elif event_type == "model.response":
-                    response = item.get("response")
-                    reasoning_text = str(
-                        item.get("reasoning_text")
-                        or getattr(response, "reasoning_text", "")
-                        or ""
-                    )
-                    if reasoning_text:
-                        await self._handle_thread_event(
-                            item_thread_id,
-                            "assistant.reasoning_completed",
-                            {
-                                "type": "assistant.reasoning_completed",
-                                "thread_id": item_thread_id,
-                                "turn_id": item.get("turn_id"),
-                                "turn_started_at": item.get("turn_started_at"),
-                                "text": reasoning_text,
-                            },
-                            run_state,
-                        )
-                    else:
-                        await self._handle_thread_event(
-                            item_thread_id,
-                            "assistant.reasoning_absent",
-                            {
-                                "type": "assistant.reasoning_absent",
-                                "thread_id": item_thread_id,
-                                "turn_id": item.get("turn_id"),
-                                "turn_started_at": item.get("turn_started_at"),
-                            },
-                            run_state,
-                        )
-                    output = list(getattr(response, "output", []) or [])
-                    has_tool_call = any(entry.get("type") == "function_call" for entry in output)
-                    if has_tool_call:
-                        await self._handle_thread_event(
-                            item_thread_id,
-                            "assistant.response_with_tools",
-                            {
-                                "type": "assistant.response_with_tools",
-                                "thread_id": item_thread_id,
-                                "turn_id": item.get("turn_id"),
-                                "turn_started_at": item.get("turn_started_at"),
-                                "assistant_text": run_state.assistant_buffer,
-                            },
-                            run_state,
-                        )
-                    else:
-                        if "assistant_text" not in item:
-                            item["assistant_text"] = run_state.assistant_buffer
-                        await self._handle_thread_event(
-                            item_thread_id,
-                            "assistant.final_response_started",
-                            {
-                                "type": "assistant.final_response_started",
-                                "thread_id": item_thread_id,
-                                "turn_id": item.get("turn_id"),
-                                "turn_started_at": item.get("turn_started_at"),
-                                "assistant_text": item.get("assistant_text"),
-                            },
-                            run_state,
-                        )
-                    run_state.status = self._text("reading")
-                    if self._is_active_thread(item_thread_id):
-                        self._refresh_status(self._text("reading"))
-                elif event_type == "thread.title":
-                    if self._is_active_thread(item_thread_id):
-                        self._refresh_status(self._text("idle"))
-                elif event_type == "tool.started":
-                    await self._handle_thread_event(item_thread_id, "tool.started", item, run_state)
-                elif event_type == "tool.output":
-                    await self._handle_thread_event(item_thread_id, "tool.output", item, run_state)
-                elif event_type == "compaction.completed":
-                    await self._handle_thread_event(item_thread_id, "compaction.completed", item, run_state)
-                elif event_type == "turn.completed":
-                    self._update_turn_timestamps(item, run_state)
-                    text = item["final_text"] or run_state.assistant_buffer
-                    was_active_thread = self._is_active_thread(item_thread_id)
-                    if text and was_active_thread and self._assistant_cell is None:
-                        self._append_assistant_text(text)
-                    if was_active_thread:
-                        # Match re-entry behavior: every turn end folds its
-                        # process cells, not just turns that emitted
-                        # assistant.final_response_started.
-                        self._finalize_turn_render()
-                        self._sync_run_state_from_active(run_state)
-                    elif run_state.process_cells:
-                        run_state.process_collapsed = True
-                    run_state.status = self._text("idle")
-                    self._notify_turn_completed(item_thread_id, text, active_thread=was_active_thread)
-                    if was_active_thread:
-                        self._refresh_status(self._text("idle"))
-                elif event_type == "turn.interrupted":
-                    self._update_turn_timestamps(item, run_state)
-                    self._record_live_thread_event(run_state, "turn.interrupted", item)
-                    run_state.status = self._text("interrupted")
-                    if self._is_active_thread(item_thread_id):
-                        self._apply_thread_event_to_active("turn.interrupted", item)
-                        self._refresh_status(self._text("interrupted"))
-                elif event_type == "turn.error":
-                    self._update_turn_timestamps(item, run_state)
-                    self._mark_run_error_state(run_state, item)
-                    self._record_live_thread_event(run_state, "turn.error", item)
-                    if self._is_active_thread(item_thread_id):
-                        self._apply_thread_event_to_active("turn.error", item)
-                        self._refresh_status(self._text("error"))
+                await self._handle_engine_stream_item(item, thread_id, run_state)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -792,6 +677,161 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, App[None]):
                     self.query_one("#composer", TextArea).focus()
                 if self._default_screen_mounted():
                     self._refresh_active_run_state()
+
+    async def _handle_engine_stream_item(
+        self,
+        item: dict[str, Any],
+        default_thread_id: str,
+        run_state: ThreadRunState,
+    ) -> None:
+        item_thread_id = str(item.get("thread_id") or default_thread_id)
+        event_type = item["type"]
+        if event_type in {
+            "image.attachment",
+            "assistant.delta",
+            "assistant.reasoning_delta",
+            "tool.delta",
+            "tool.started",
+            "tool.output",
+            "compaction.completed",
+        }:
+            await self._handle_thread_event(item_thread_id, event_type, item, run_state)
+            return
+        if event_type == "model.response":
+            await self._handle_model_response_item(item_thread_id, item, run_state)
+            return
+        if event_type == "thread.title":
+            if self._is_active_thread(item_thread_id):
+                self._refresh_status(self._text("idle"))
+            return
+        if event_type == "turn.completed":
+            self._handle_turn_completed_item(item_thread_id, item, run_state)
+            return
+        if event_type == "turn.interrupted":
+            self._handle_turn_interrupted_item(item_thread_id, item, run_state)
+            return
+        if event_type == "turn.error":
+            self._handle_turn_error_item(item_thread_id, item, run_state)
+
+    async def _handle_model_response_item(
+        self,
+        item_thread_id: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        response = item.get("response")
+        reasoning_text = str(
+            item.get("reasoning_text")
+            or getattr(response, "reasoning_text", "")
+            or ""
+        )
+        if reasoning_text:
+            await self._handle_thread_event(
+                item_thread_id,
+                "assistant.reasoning_completed",
+                {
+                    "type": "assistant.reasoning_completed",
+                    "thread_id": item_thread_id,
+                    "turn_id": item.get("turn_id"),
+                    "turn_started_at": item.get("turn_started_at"),
+                    "text": reasoning_text,
+                },
+                run_state,
+            )
+        else:
+            await self._handle_thread_event(
+                item_thread_id,
+                "assistant.reasoning_absent",
+                {
+                    "type": "assistant.reasoning_absent",
+                    "thread_id": item_thread_id,
+                    "turn_id": item.get("turn_id"),
+                    "turn_started_at": item.get("turn_started_at"),
+                },
+                run_state,
+            )
+        output = list(getattr(response, "output", []) or [])
+        has_tool_call = any(entry.get("type") == "function_call" for entry in output)
+        if has_tool_call:
+            await self._handle_thread_event(
+                item_thread_id,
+                "assistant.response_with_tools",
+                {
+                    "type": "assistant.response_with_tools",
+                    "thread_id": item_thread_id,
+                    "turn_id": item.get("turn_id"),
+                    "turn_started_at": item.get("turn_started_at"),
+                    "assistant_text": run_state.assistant_buffer,
+                },
+                run_state,
+            )
+        else:
+            if "assistant_text" not in item:
+                item["assistant_text"] = run_state.assistant_buffer
+            await self._handle_thread_event(
+                item_thread_id,
+                "assistant.final_response_started",
+                {
+                    "type": "assistant.final_response_started",
+                    "thread_id": item_thread_id,
+                    "turn_id": item.get("turn_id"),
+                    "turn_started_at": item.get("turn_started_at"),
+                    "assistant_text": item.get("assistant_text"),
+                },
+                run_state,
+            )
+        run_state.status = self._text("reading")
+        if self._is_active_thread(item_thread_id):
+            self._refresh_status(self._text("reading"))
+
+    def _handle_turn_completed_item(
+        self,
+        item_thread_id: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        self._update_turn_timestamps(item, run_state)
+        text = item["final_text"] or run_state.assistant_buffer
+        was_active_thread = self._is_active_thread(item_thread_id)
+        if text and was_active_thread and self._assistant_cell is None:
+            self._append_assistant_text(text)
+        if was_active_thread:
+            # Match re-entry behavior: every turn end folds its process cells,
+            # not just turns that emitted assistant.final_response_started.
+            self._finalize_turn_render()
+            self._sync_run_state_from_active(run_state)
+        elif run_state.process_cells:
+            run_state.process_collapsed = True
+        run_state.status = self._text("idle")
+        self._notify_turn_completed(item_thread_id, text, active_thread=was_active_thread)
+        if was_active_thread:
+            self._refresh_status(self._text("idle"))
+
+    def _handle_turn_interrupted_item(
+        self,
+        item_thread_id: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        self._update_turn_timestamps(item, run_state)
+        self._record_live_thread_event(run_state, "turn.interrupted", item)
+        run_state.status = self._text("interrupted")
+        if self._is_active_thread(item_thread_id):
+            self._apply_thread_event_to_active("turn.interrupted", item)
+            self._refresh_status(self._text("interrupted"))
+
+    def _handle_turn_error_item(
+        self,
+        item_thread_id: str,
+        item: dict[str, Any],
+        run_state: ThreadRunState,
+    ) -> None:
+        self._update_turn_timestamps(item, run_state)
+        self._mark_run_error_state(run_state, item)
+        self._record_live_thread_event(run_state, "turn.error", item)
+        if self._is_active_thread(item_thread_id):
+            self._apply_thread_event_to_active("turn.error", item)
+            self._refresh_status(self._text("error"))
 
     def action_clear_input(self) -> None:
         composer = self.query_one("#composer", TextArea)
