@@ -2981,7 +2981,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 f"{escape(short_thread(self.thread_id))}{queued}[/dim]"
             )
         if billing_label:
-            footer += f" [dim]·[/dim] [cyan]{escape(billing_label)}[/cyan]"
+            footer += f" [dim]·[/dim] [dim]{escape(billing_label)}[/dim]"
         background_count = len(self._background_run_states())
         if background_count:
             footer += (
