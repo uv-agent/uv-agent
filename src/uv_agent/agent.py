@@ -47,7 +47,11 @@ COMPACTION_SUMMARIZATION_PROMPT = (
     "Be concise, structured, and focused on helping the next LLM seamlessly continue the work."
 )
 TITLE_GENERATION_PROMPT = (
-    "Create a concise title for this uv-agent thread from the user's first message. "
+    "Create a concise, title-like name for this uv-agent thread from the user's first message. "
+    "Capture the user's underlying task or intent, not a literal rewrite of the sentence. "
+    "For broad or vague questions, use an abstract noun-phrase style. For example, "
+    "a message asking what kind of project this is should become a title like "
+    "Project content inquiry. "
     "Return only the title, without quotes or punctuation. Prefer the user's language. "
     "Keep it under 8 words or 24 CJK characters."
 )
