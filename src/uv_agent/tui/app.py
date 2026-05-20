@@ -709,6 +709,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             "tool.delta",
             "tool.started",
             "tool.output",
+            "model.stream_retry",
             "compaction.completed",
         }:
             await self._handle_thread_event(item_thread_id, event_type, item, run_state)
@@ -1214,6 +1215,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._append_tool_started(item)
         elif event_type == "tool.output":
             self._append_tool_output(item)
+        elif event_type in {"model.stream_retry", "turn.stream_retry"}:
+            self._append_stream_retry(item)
         elif event_type == "compaction.completed":
             self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
         elif event_type == "turn.interrupted":
@@ -1333,6 +1336,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 delta_index = item.get("tool_call_index")
                 if isinstance(delta_index, int):
                     run_state.tool_delta_calls.pop(delta_index, None)
+                run_state.status = self._text("working")
+            elif event_type == "model.stream_retry":
                 run_state.status = self._text("working")
             elif event_type == "assistant.final_response_started" and run_state.process_cells:
                 run_state.process_collapsed = True
@@ -2231,6 +2236,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             if run_state is not None:
                 self._mark_run_error_state(run_state, event)
             mounted.append(self._append_turn_error(event, before=before))
+        elif event_type == "turn.stream_retry":
+            mounted.append(self._append_stream_retry(event, before=before))
         elif event_type == "item.compaction":
             mounted.append(self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event", before=before))
         elif event_type == "thread.model_switch_warning":
@@ -2274,6 +2281,27 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if retryable:
             self._append_retry_button(event, before=before)
         return cell
+
+    def _append_stream_retry(
+        self,
+        event: dict[str, Any],
+        *,
+        before: object | None = None,
+    ) -> TranscriptCell:
+        attempt = event.get("attempt")
+        max_attempts = event.get("max_attempts")
+        delay_s = event.get("delay_s")
+        error_type = str(event.get("error_type") or "stream")
+        try:
+            delay_text = f"{float(delay_s):.1f}s"
+        except (TypeError, ValueError):
+            delay_text = "?s"
+        markup = (
+            "[dim]⟳ stream empty, retrying "
+            f"{escape(str(attempt or '?'))}/{escape(str(max_attempts or '?'))} "
+            f"in {escape(delay_text)} ({escape(error_type)})[/dim]"
+        )
+        return self._append_cell(markup, "event", before=before)
 
     def _append_retry_button(self, event: dict[str, Any], *, before: object | None = None) -> RetryTurnButton:
         self._mark_transcript_content()

@@ -10,6 +10,7 @@ from uv_agent.config import (
     ProviderConfig,
     ReasoningDisplayConfig,
 )
+from uv_agent.errors import EmptyModelStreamError
 from uv_agent.model import (
     ModelStreamEvent,
     anthropic_image_source,
@@ -32,7 +33,9 @@ from uv_agent.model import (
     parse_responses_response,
     responses_create_kwargs,
     responses_payload,
+    stream_anthropic_response,
     stream_chat_response,
+    stream_responses_response,
 )
 
 
@@ -75,6 +78,21 @@ class FakeOpenAIClient:
         if kwargs.get("stream"):
             return FakeOpenAIStream(self.response_events)
         return self.response_events[0]
+
+
+class FakeAnthropicStream:
+    def __init__(self, events):
+        self.events = events
+
+    def __aiter__(self):
+        self._iter = iter(self.events)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
 def test_chat_messages_convert_responses_items() -> None:
@@ -347,6 +365,65 @@ async def test_create_responses_response_uses_sdk_client() -> None:
     assert sdk_client.response_kwargs["model"] == "remote"
     assert sdk_client.response_kwargs["instructions"] == "system"
     assert sdk_client.response_kwargs["previous_response_id"] == "resp_prev"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_allows_empty_events_until_valid_delta() -> None:
+    sdk_client = FakeOpenAIClient(
+        response_events=[
+            {"type": "response.created", "response": {"id": "resp_1"}},
+            {"type": "response.output_text.delta", "delta": "done"},
+            {"type": "response.completed", "response": {"id": "resp_1", "output": []}},
+        ]
+    )
+    provider = ProviderConfig(name="p", base_url="https://api.example.com/v1")
+    model = ModelConfig(name="m", provider="p", model="remote", api="responses")
+
+    events = [
+        event
+        async for event in stream_responses_response(
+            provider=provider,
+            model=model,
+            input_items=[],
+            tools=[],
+            instructions=None,
+            previous_response_id=None,
+            client=sdk_client,
+        )
+    ]
+
+    assert [event.type for event in events] == ["text_delta", "completed"]
+    assert events[0].text == "done"
+    completed = events[1]
+    assert completed.response is not None
+    assert completed.response.output_text == "done"
+    assert completed.response.output[0]["content"][0]["text"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_rejects_completed_without_output() -> None:
+    sdk_client = FakeOpenAIClient(
+        response_events=[
+            {"type": "response.created", "response": {"id": "resp_1"}},
+            {"type": "response.completed", "response": {"id": "resp_1", "output": []}},
+        ]
+    )
+    provider = ProviderConfig(name="p", base_url="https://api.example.com/v1")
+    model = ModelConfig(name="m", provider="p", model="remote", api="responses")
+
+    with pytest.raises(EmptyModelStreamError, match="without returning content"):
+        [
+            event
+            async for event in stream_responses_response(
+                provider=provider,
+                model=model,
+                input_items=[],
+                tools=[],
+                instructions=None,
+                previous_response_id=None,
+                client=sdk_client,
+            )
+        ]
 
 
 def test_parse_chat_response_maps_tool_calls() -> None:
@@ -657,6 +734,122 @@ async def test_create_anthropic_response_passes_unknown_params_as_extra_body() -
     assert "custom" not in client.messages.kwargs
 
 
+@pytest.mark.asyncio
+async def test_stream_anthropic_allows_empty_events_until_valid_delta() -> None:
+    class Messages:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        async def create(self, **kwargs):
+            self.kwargs = kwargs
+
+            class MessageStart:
+                type = "message_start"
+
+                class Message:
+                    id = "msg_1"
+                    usage = {}
+
+                message = Message()
+
+            class EmptyDelta:
+                type = "content_block_delta"
+                index = 0
+
+                class Delta:
+                    type = "text_delta"
+                    text = ""
+
+                delta = Delta()
+
+            class TextDelta:
+                type = "content_block_delta"
+                index = 0
+
+                class Delta:
+                    type = "text_delta"
+                    text = "done"
+
+                delta = Delta()
+
+            class MessageStop:
+                type = "message_stop"
+
+            return FakeAnthropicStream([MessageStart(), EmptyDelta(), TextDelta(), MessageStop()])
+
+    class Client:
+        def __init__(self) -> None:
+            self.messages = Messages()
+
+    provider = ProviderConfig(name="p", base_url="https://api.anthropic.com")
+    model = ModelConfig(name="m", provider="p", model="claude", api="anthropic_messages")
+    client = Client()
+
+    events = [
+        event
+        async for event in stream_anthropic_response(
+            provider=provider,
+            model=model,
+            input_items=[],
+            tools=[],
+            instructions=None,
+            client=client,
+        )
+    ]
+
+    assert [event.type for event in events] == ["text_delta", "text_delta", "completed"]
+    assert events[0].text == ""
+    assert events[1].text == "done"
+    completed = events[2]
+    assert completed.response is not None
+    assert completed.response.output_text == "done"
+
+
+@pytest.mark.asyncio
+async def test_stream_anthropic_rejects_message_stop_without_output() -> None:
+    class Messages:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        async def create(self, **kwargs):
+            self.kwargs = kwargs
+
+            class MessageStart:
+                type = "message_start"
+
+                class Message:
+                    id = "msg_1"
+                    usage = {}
+
+                message = Message()
+
+            class MessageStop:
+                type = "message_stop"
+
+            return FakeAnthropicStream([MessageStart(), MessageStop()])
+
+    class Client:
+        def __init__(self) -> None:
+            self.messages = Messages()
+
+    provider = ProviderConfig(name="p", base_url="https://api.anthropic.com")
+    model = ModelConfig(name="m", provider="p", model="claude", api="anthropic_messages")
+    client = Client()
+
+    with pytest.raises(EmptyModelStreamError, match="without returning content"):
+        [
+            event
+            async for event in stream_anthropic_response(
+                provider=provider,
+                model=model,
+                input_items=[],
+                tools=[],
+                instructions=None,
+                client=client,
+            )
+        ]
+
+
 def test_image_parts_convert_for_chat_and_anthropic() -> None:
     item = {
         "type": "message",
@@ -746,6 +939,7 @@ async def test_stream_chat_allows_empty_sdk_chunks(
         chat_events=[
             {"id": "chat_1", "choices": []},
             {"id": "chat_1", "choices": [{"delta": {}}]},
+            {"id": "chat_1", "choices": [{"delta": {"content": "done"}}]},
         ]
     )
     provider = ProviderConfig(name="p", base_url="https://example.com")
@@ -763,11 +957,37 @@ async def test_stream_chat_allows_empty_sdk_chunks(
         )
     ]
 
-    assert len(events) == 1
-    assert events[0].type == "completed"
-    assert events[0].response is not None
-    assert events[0].response.output_text == ""
-    assert events[0].response.output == []
+    assert [event.type for event in events] == ["text_delta", "completed"]
+    assert events[0].text == "done"
+    completed = events[1]
+    assert completed.response is not None
+    assert completed.response.output_text == "done"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_rejects_stream_with_only_empty_sdk_chunks(
+) -> None:
+    sdk_client = FakeOpenAIClient(
+        chat_events=[
+            {"id": "chat_1", "choices": []},
+            {"id": "chat_1", "choices": [{"delta": {}}]},
+        ]
+    )
+    provider = ProviderConfig(name="p", base_url="https://example.com")
+    model = ModelConfig(name="m", provider="p", model="remote", api="chat_completions")
+
+    with pytest.raises(EmptyModelStreamError, match="without returning content"):
+        [
+            event
+            async for event in stream_chat_response(
+                provider=provider,
+                model=model,
+                input_items=[],
+                tools=[],
+                instructions=None,
+                client=sdk_client,
+            )
+        ]
 
 
 @pytest.mark.asyncio

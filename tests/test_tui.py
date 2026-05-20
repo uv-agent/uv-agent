@@ -3603,6 +3603,44 @@ async def test_tui_renders_persisted_turn_error(
 
 
 @pytest.mark.asyncio
+async def test_tui_renders_stream_retry_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        thread_id = engine.thread_store.create_thread("Retrying")
+        app.thread_id = thread_id
+        run_state = app._run_state_for_thread(thread_id)
+        await app._handle_thread_event(
+            thread_id,
+            "model.stream_retry",
+            {
+                "type": "model.stream_retry",
+                "thread_id": thread_id,
+                "turn_id": "turn_1",
+                "attempt": 2,
+                "max_attempts": 5,
+                "delay_s": 2.0,
+                "error_type": "EmptyModelStreamError",
+                "message": "empty stream",
+            },
+            run_state,
+        )
+        await pilot.pause()
+
+        transcript_text = "\n".join(str(cell.render()) for cell in app.query(TranscriptCell).nodes)
+        assert "stream empty" in transcript_text
+        assert "retrying 2/5" in transcript_text
+        assert "EmptyModelStreamError" in transcript_text
+
+
+@pytest.mark.asyncio
 async def test_tui_retryable_turn_error_keeps_retry_button(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

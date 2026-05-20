@@ -9,6 +9,10 @@ import openai
 from uv_agent.config import ConfigError
 
 
+class EmptyModelStreamError(RuntimeError):
+    """Raised when a provider stream ends before any usable model output arrives."""
+
+
 @dataclass(frozen=True)
 class DisplayError:
     title: str
@@ -57,6 +61,8 @@ def format_error(exc: BaseException) -> DisplayError:
 
 def is_retryable_provider_error(exc: BaseException) -> bool:
     """Return True for transient provider/network failures that can be retried."""
+    if isinstance(exc, EmptyModelStreamError):
+        return True
     if isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
         return exc.status_code == 429 or 500 <= exc.status_code < 600
     if isinstance(

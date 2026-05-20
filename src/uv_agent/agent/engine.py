@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import random
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -28,7 +29,7 @@ from uv_agent.agent.context_builder import (
 )
 from uv_agent.context import ContextStats, estimate_tokens, usage_token_count
 from uv_agent.environment import detect_user_language, host_environment
-from uv_agent.errors import is_retryable_provider_error
+from uv_agent.errors import EmptyModelStreamError, is_retryable_provider_error
 from uv_agent.ids import new_id
 from uv_agent.agent.messages import assistant_output_item, message_item, message_item_text
 from uv_agent.mcp_config import McpInstructionsPreview, McpServerSummary, discover_mcp_servers, render_mcp_entry
@@ -57,6 +58,10 @@ from uv_agent.agent.tool_results import function_output, model_tool_payload
 
 
 DEFAULT_THREAD_TITLES = {"New thread", "new thread", "新会话"}
+
+
+async def _sleep_stream_retry(delay_s: float) -> None:
+    await asyncio.sleep(delay_s)
 
 
 class TurnInterrupted(Exception):
@@ -327,7 +332,7 @@ class AgentEngine:
             try:
                 for round_index in range(self.config.runtime.max_agent_rounds):
                     self._raise_if_cancelled(cancel_event)
-                    async for event in self._stream_and_persist_model_response(
+                    async for event in self._stream_model_response_with_retries(
                         thread_id=thread_id,
                         turn_id=turn_id,
                         turn_started_at=turn_started_event.get("created_at"),
@@ -539,7 +544,7 @@ class AgentEngine:
 
                 for _ in range(self.config.runtime.max_agent_rounds):
                     self._raise_if_cancelled(cancel_event)
-                    async for event in self._stream_and_persist_model_response(
+                    async for event in self._stream_model_response_with_retries(
                         thread_id=thread_id,
                         turn_id=turn_id,
                         turn_started_at=turn_started_event.get("created_at"),
@@ -1010,6 +1015,109 @@ class AgentEngine:
             "response": response,
             "reasoning_text": reasoning_text,
         }
+
+    async def _stream_model_response_with_retries(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        turn_started_at: object,
+        input_items: list[dict[str, Any]],
+        level: str | None,
+        instructions: str,
+        previous_response_id: str | None,
+        stream_state: StreamResponseState,
+        cancel_event: asyncio.Event | None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        retry = self.config.runtime.stream_retry
+        for retry_index in range(retry.max_retries + 1):
+            self._raise_if_cancelled(cancel_event)
+            try:
+                async for event in self._stream_and_persist_model_response(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    turn_started_at=turn_started_at,
+                    input_items=copy.deepcopy(input_items),
+                    level=level,
+                    instructions=instructions,
+                    previous_response_id=previous_response_id,
+                    stream_state=stream_state,
+                    cancel_event=cancel_event,
+                ):
+                    yield event
+                return
+            except Exception as exc:
+                if not self._should_retry_model_stream_error(exc) or retry_index >= retry.max_retries:
+                    raise
+                stream_state.reset()
+                attempt = retry_index + 1
+                delay_s = self._stream_retry_delay(attempt)
+                retry_event = self.thread_store.append(
+                    thread_id,
+                    "turn.stream_retry",
+                    turn_id=turn_id,
+                    attempt=attempt,
+                    max_attempts=retry.max_retries,
+                    delay_s=delay_s,
+                    error_type=exc.__class__.__name__,
+                    message=str(exc) or repr(exc),
+                )
+                yield {
+                    "type": "model.stream_retry",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "turn_started_at": turn_started_at,
+                    "created_at": retry_event.get("created_at"),
+                    "attempt": attempt,
+                    "max_attempts": retry.max_retries,
+                    "delay_s": delay_s,
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc) or repr(exc),
+                }
+                await self._sleep_stream_retry(delay_s, cancel_event=cancel_event)
+
+    @staticmethod
+    def _should_retry_model_stream_error(exc: BaseException) -> bool:
+        return isinstance(exc, EmptyModelStreamError) or is_retryable_provider_error(exc)
+
+    def _stream_retry_delay(self, attempt: int) -> float:
+        retry = self.config.runtime.stream_retry
+        delay = retry.base * (retry.factor ** (attempt - 1))
+        delay = min(delay, retry.max)
+        if retry.jitter:
+            jitter = max(0.0, retry.jitter)
+            delay *= random.uniform(1.0 - jitter, 1.0 + jitter)
+        return max(0.0, delay)
+
+    async def _sleep_stream_retry(
+        self,
+        delay_s: float,
+        *,
+        cancel_event: asyncio.Event | None,
+    ) -> None:
+        if delay_s <= 0:
+            self._raise_if_cancelled(cancel_event)
+            return
+        if cancel_event is None:
+            await _sleep_stream_retry(delay_s)
+            return
+        sleep_task = asyncio.create_task(_sleep_stream_retry(delay_s))
+        cancel_task = asyncio.create_task(cancel_event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                {sleep_task, cancel_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_task in done:
+                raise TurnInterrupted()
+            if sleep_task in done:
+                sleep_task.result()
+        finally:
+            for task in (sleep_task, cancel_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sleep_task, cancel_task, return_exceptions=True)
+        self._raise_if_cancelled(cancel_event)
 
     async def _stream_response_until_cancelled(
         self,

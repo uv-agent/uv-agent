@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 from openai.resources.responses import AsyncResponses
 
 from uv_agent.config import ModelConfig, ProviderConfig
+from uv_agent.errors import EmptyModelStreamError
 from uv_agent.model.content import extract_responses_text
 from uv_agent.model.openai_sdk import openai_client
 from uv_agent.model.sdk import model_param_sources, object_dump, sdk_kwargs, sdk_param_keys
@@ -15,6 +16,9 @@ from uv_agent.model.types import ModelResponse, ModelStreamEvent
 
 RESPONSES_PATH = "/responses"
 RESPONSES_SDK_PARAM_KEYS = sdk_param_keys(AsyncResponses.create)
+EMPTY_RESPONSES_STREAM_MESSAGE = (
+    "Responses stream ended without returning content, reasoning, or tool calls"
+)
 
 
 def responses_payload(
@@ -131,6 +135,7 @@ async def stream_responses_response(
         ),
     )
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     output: list[dict[str, Any]] = []
     async for event in stream:
         data = object_dump(event)
@@ -144,7 +149,10 @@ async def stream_responses_response(
             "response.output_item.reasoning.delta",
             "response.reasoning_summary_text.delta",
         }:
-            yield ModelStreamEvent(type="reasoning_delta", text=str(data.get("delta") or ""))
+            reasoning_text = str(data.get("delta") or "")
+            if reasoning_text:
+                reasoning_parts.append(reasoning_text)
+            yield ModelStreamEvent(type="reasoning_delta", text=reasoning_text)
         elif event_type == "response.output_item.done":
             item = data.get("item")
             if isinstance(item, dict):
@@ -152,13 +160,29 @@ async def stream_responses_response(
         elif event_type == "response.completed":
             response_data = data.get("response") or {}
             response = parse_responses_response(response_data)
-            if not response.output and output:
+            output_text = response.output_text or "".join(text_parts)
+            final_output = response.output
+            if not final_output and output:
+                final_output = output
+            if not final_output and output_text:
+                final_output = [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": output_text}],
+                    }
+                ]
+            reasoning_text = "".join(reasoning_parts)
+            if not final_output and not reasoning_text:
+                raise EmptyModelStreamError(EMPTY_RESPONSES_STREAM_MESSAGE)
+            if final_output != response.output or output_text != response.output_text or reasoning_text:
                 response = ModelResponse(
                     id=response.id,
-                    output=output,
-                    output_text=response.output_text or "".join(text_parts),
+                    output=final_output,
+                    output_text=output_text,
                     raw=response.raw,
                     usage=response.usage,
+                    reasoning_text=reasoning_text,
                 )
             yield ModelStreamEvent(type="completed", response=response)
             return

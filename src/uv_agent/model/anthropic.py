@@ -10,6 +10,7 @@ from anthropic.resources.messages import AsyncMessages
 from anthropic.types import Message
 
 from uv_agent.config import ModelConfig, ProviderConfig
+from uv_agent.errors import EmptyModelStreamError
 from uv_agent.model.content import chat_output_items
 from uv_agent.model.sdk import model_param_sources, object_dump, sdk_base_url, sdk_extra_body, sdk_kwargs, sdk_param_keys
 from uv_agent.model.types import ModelResponse, ModelStreamEvent
@@ -17,6 +18,9 @@ from uv_agent.model.types import ModelResponse, ModelStreamEvent
 
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
 ANTHROPIC_SDK_PARAM_KEYS = sdk_param_keys(AsyncMessages.create)
+EMPTY_ANTHROPIC_STREAM_MESSAGE = (
+    "Anthropic messages stream ended without returning content, reasoning, or tool calls"
+)
 
 
 def anthropic_payload(
@@ -223,6 +227,7 @@ async def stream_anthropic_response(
 ) -> AsyncIterator[ModelStreamEvent]:
     client = client or anthropic_client(provider)
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_acc: dict[int, dict[str, Any]] = {}
     response_id: str | None = None
     usage: dict[str, Any] = {}
@@ -253,7 +258,10 @@ async def stream_anthropic_response(
                 text_parts.append(text)
                 yield ModelStreamEvent(type="text_delta", text=text)
             elif delta_type in {"thinking_delta", "signature_delta"}:
-                yield ModelStreamEvent(type="reasoning_delta", text=str(getattr(delta, "thinking", "") or ""))
+                reasoning_text = str(getattr(delta, "thinking", "") or "")
+                if reasoning_text:
+                    reasoning_parts.append(reasoning_text)
+                yield ModelStreamEvent(type="reasoning_delta", text=reasoning_text)
             elif delta_type == "input_json_delta":
                 existing = tool_acc.setdefault(index, {"arguments": ""})
                 existing["arguments"] += getattr(delta, "partial_json", "")
@@ -270,6 +278,9 @@ async def stream_anthropic_response(
             usage = object_dump(getattr(event, "usage", None)) or usage
         elif event_type == "message_stop":
             output = chat_output_items("".join(text_parts), tool_acc)
+            reasoning_text = "".join(reasoning_parts)
+            if not output and not reasoning_text:
+                raise EmptyModelStreamError(EMPTY_ANTHROPIC_STREAM_MESSAGE)
             yield ModelStreamEvent(
                 type="completed",
                 response=ModelResponse(
@@ -278,6 +289,7 @@ async def stream_anthropic_response(
                     output_text="".join(text_parts),
                     raw={"id": response_id, "output": output},
                     usage=usage,
+                    reasoning_text=reasoning_text,
                 ),
             )
             return

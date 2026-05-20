@@ -26,10 +26,11 @@ from uv_agent.config import (
     ProviderConfig,
     RunnerConfig,
     RuntimeConfig,
+    StreamRetryConfig,
     TitleGenerationConfig,
     load_config,
 )
-from uv_agent.errors import format_error, is_retryable_provider_error
+from uv_agent.errors import EmptyModelStreamError, format_error, is_retryable_provider_error
 from uv_agent.mcp_config import McpInstructionsPreview
 from uv_agent.model import (
     FakeModelClient,
@@ -171,6 +172,45 @@ class FailingStreamClient(FakeModelClient):
         raise self.exc
 
 
+class EmptyThenSuccessStreamClient(FakeModelClient):
+    def __init__(self, failures: int) -> None:
+        super().__init__([])
+        self.failures = failures
+
+    async def stream_response(self, **kwargs):
+        self.requests.append(
+            {
+                "input": kwargs.get("input_items", []),
+                "level": kwargs.get("level"),
+                "tools": kwargs.get("tools") or [],
+                "instructions": kwargs.get("instructions"),
+                "stream": True,
+                "previous_response_id": kwargs.get("previous_response_id"),
+            }
+        )
+        if len(self.requests) <= self.failures:
+            if False:
+                yield None
+            raise EmptyModelStreamError("empty stream")
+        yield ModelStreamEvent(type="text_delta", text="done")
+        yield ModelStreamEvent(
+            type="completed",
+            response=parse_responses_response(
+                {
+                    "id": "resp_1",
+                    "output_text": "done",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done"}],
+                        }
+                    ],
+                }
+            ),
+        )
+
+
 def openai_connection_error(message: str = "network down") -> openai.APIConnectionError:
     exc = openai.APIConnectionError.__new__(openai.APIConnectionError)
     Exception.__init__(exc, message)
@@ -260,6 +300,7 @@ def make_test_config(
     compression: CompressionConfig | None = None,
     title_generation: TitleGenerationConfig | None = None,
     default_level: str = "medium",
+    stream_retry: StreamRetryConfig | None = None,
 ) -> AppConfig:
     return AppConfig(
         providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
@@ -281,6 +322,7 @@ def make_test_config(
             default_level=default_level,
             compression=compression or CompressionConfig(enabled=compression_enabled),
             title_generation=title_generation or TitleGenerationConfig(enabled=False),
+            stream_retry=stream_retry or StreamRetryConfig(),
         ),
         runner=RunnerConfig(
             runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
@@ -1183,11 +1225,20 @@ async def test_agent_persists_model_stream_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_marks_provider_network_errors_retryable(tmp_path: Path) -> None:
+async def test_agent_marks_provider_network_errors_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
     exc = openai_connection_error()
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay_s: float) -> None:
+        sleeps.append(delay_s)
+
+    monkeypatch.setattr("uv_agent.agent.engine._sleep_stream_retry", fake_sleep)
     engine = AgentEngine(
         config=config,
         model_client=FailingStreamClient(exc),
@@ -1198,10 +1249,187 @@ async def test_agent_marks_provider_network_errors_retryable(tmp_path: Path) -> 
 
     events = [event async for event in engine.run_turn(user_text="try provider")]
     stored_events = engine.thread_store.read(events[-1]["thread_id"])
+    retry_events = [event for event in events if event["type"] == "model.stream_retry"]
 
     assert events[-1]["type"] == "turn.error"
     assert events[-1]["retryable"] is True
     assert stored_events[-1]["retryable"] is True
+    assert len(retry_events) == 5
+    assert len(sleeps) == 5
+
+
+@pytest.mark.asyncio
+async def test_agent_retries_empty_model_stream_then_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        stream_retry=StreamRetryConfig(max_retries=5, base=1.0, factor=2.0, max=30.0, jitter=0.0),
+    )
+    client = EmptyThenSuccessStreamClient(failures=2)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay_s: float) -> None:
+        sleeps.append(delay_s)
+
+    monkeypatch.setattr("uv_agent.agent.engine._sleep_stream_retry", fake_sleep)
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="try provider")]
+    retry_events = [event for event in events if event["type"] == "model.stream_retry"]
+    stored_events = engine.thread_store.read(events[-1]["thread_id"])
+
+    assert events[-1]["type"] == "turn.completed"
+    assert events[-1]["final_text"] == "done"
+    assert len(client.requests) == 3
+    assert [event["attempt"] for event in retry_events] == [1, 2]
+    assert [event["delay_s"] for event in retry_events] == [1.0, 2.0]
+    assert sleeps == [1.0, 2.0]
+    assert [event["type"] for event in stored_events].count("turn.stream_retry") == 2
+    assert [event["type"] for event in stored_events].count("item.model_response") == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_retry_turn_retries_empty_model_stream_then_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        stream_retry=StreamRetryConfig(max_retries=5, base=1.0, factor=2.0, max=30.0, jitter=0.0),
+    )
+    thread_store = ThreadStore(tmp_path / "state")
+    thread_id = thread_store.create_thread("Retry")
+    thread_store.append(thread_id, "turn.started", turn_id="turn_old")
+    thread_store.append(thread_id, "item.user", turn_id="turn_old", item=message_item("user", "try provider"))
+    thread_store.append(
+        thread_id,
+        "turn.error",
+        turn_id="turn_old",
+        error_type="EmptyModelStreamError",
+        message="empty stream",
+        retryable=True,
+    )
+    client = EmptyThenSuccessStreamClient(failures=1)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay_s: float) -> None:
+        sleeps.append(delay_s)
+
+    monkeypatch.setattr("uv_agent.agent.engine._sleep_stream_retry", fake_sleep)
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=thread_store,
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.retry_turn(thread_id=thread_id)]
+    retry_events = [event for event in events if event["type"] == "model.stream_retry"]
+    stored_events = engine.thread_store.read(thread_id)
+
+    assert events[-1]["type"] == "turn.completed"
+    assert events[-1]["final_text"] == "done"
+    assert [event["attempt"] for event in retry_events] == [1]
+    assert sleeps == [1.0]
+    assert [event["type"] for event in stored_events].count("turn.stream_retry") == 1
+    assert [event["type"] for event in stored_events].count("item.model_response") == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_empty_model_stream_exhausts_auto_retries_then_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        stream_retry=StreamRetryConfig(max_retries=5, base=1.0, factor=2.0, max=30.0, jitter=0.0),
+    )
+    client = EmptyThenSuccessStreamClient(failures=6)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay_s: float) -> None:
+        sleeps.append(delay_s)
+
+    monkeypatch.setattr("uv_agent.agent.engine._sleep_stream_retry", fake_sleep)
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="try provider")]
+    retry_events = [event for event in events if event["type"] == "model.stream_retry"]
+    stored_events = engine.thread_store.read(events[-1]["thread_id"])
+
+    assert events[-1]["type"] == "turn.error"
+    assert events[-1]["error_type"] == "EmptyModelStreamError"
+    assert events[-1]["retryable"] is True
+    assert len(client.requests) == 6
+    assert len(retry_events) == 5
+    assert [event["delay_s"] for event in retry_events] == [1.0, 2.0, 4.0, 8.0, 16.0]
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0]
+    assert stored_events[-1]["type"] == "turn.error"
+    assert stored_events[-1]["retryable"] is True
+    assert [event["type"] for event in stored_events].count("turn.stream_retry") == 5
+    assert not any(event["type"] == "turn.completed" for event in stored_events)
+
+
+@pytest.mark.asyncio
+async def test_agent_stream_retry_sleep_can_be_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        stream_retry=StreamRetryConfig(max_retries=5, base=1.0, factor=2.0, max=30.0, jitter=0.0),
+    )
+    cancel_event = asyncio.Event()
+
+    async def fake_sleep(delay_s: float) -> None:
+        cancel_event.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("uv_agent.agent.engine._sleep_stream_retry", fake_sleep)
+    engine = AgentEngine(
+        config=config,
+        model_client=EmptyThenSuccessStreamClient(failures=5),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [
+        event
+        async for event in engine.run_turn(
+            user_text="try provider",
+            cancel_event=cancel_event,
+        )
+    ]
+    stored_events = engine.thread_store.read(events[-1]["thread_id"])
+
+    assert [event["type"] for event in events].count("model.stream_retry") == 1
+    assert events[-1]["type"] == "turn.interrupted"
+    assert len(engine.model_client.requests) == 1
+    assert stored_events[-1]["type"] == "turn.interrupted"
 
 
 def test_openai_sdk_status_errors_format_and_retry_like_provider_errors() -> None:

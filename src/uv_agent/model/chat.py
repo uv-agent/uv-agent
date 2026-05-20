@@ -7,6 +7,7 @@ from openai import AsyncOpenAI
 from openai.resources.chat.completions import AsyncCompletions
 
 from uv_agent.config import ModelConfig, ProviderConfig
+from uv_agent.errors import EmptyModelStreamError
 from uv_agent.model.content import (
     chat_message_passthrough,
     chat_message_reasoning_text,
@@ -28,6 +29,9 @@ CHAT_DELTA_CONTROL_FIELDS = {
     "refusal",
 }
 CHAT_COMPLETIONS_SDK_PARAM_KEYS = sdk_param_keys(AsyncCompletions.create)
+EMPTY_CHAT_COMPLETIONS_STREAM_MESSAGE = (
+    "Chat completions stream ended without returning content, reasoning, or tool calls"
+)
 
 
 def chat_payload(
@@ -195,6 +199,8 @@ async def stream_chat_response(
     output_text = "".join(text_parts)
     reasoning_text = "".join(reasoning_parts)
     output = chat_output_items(output_text, tool_acc, passthrough=passthrough_acc)
+    if not output and not reasoning_text:
+        raise EmptyModelStreamError(EMPTY_CHAT_COMPLETIONS_STREAM_MESSAGE)
     yield ModelStreamEvent(
         type="completed",
         response=ModelResponse(

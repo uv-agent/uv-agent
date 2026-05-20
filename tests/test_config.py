@@ -49,7 +49,16 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                         "params": {"reasoning": {"effort": "high"}},
                     }
                 },
-                "runtime": {"title_generation": {"model_level": "quick"}},
+                "runtime": {
+                    "title_generation": {"model_level": "quick"},
+                    "stream_retry": {
+                        "max_retries": 3,
+                        "base": 0.5,
+                        "factor": 3,
+                        "max": 10,
+                        "jitter": 0,
+                    },
+                },
             }
         ),
         encoding="utf-8",
@@ -74,6 +83,11 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert config.runtime.title_generation.enabled is True
     assert config.runtime.title_generation.model_level == "quick"
     assert config.runtime.compression.enabled is True
+    assert config.runtime.stream_retry.max_retries == 3
+    assert config.runtime.stream_retry.base == 0.5
+    assert config.runtime.stream_retry.factor == 3
+    assert config.runtime.stream_retry.max == 10
+    assert config.runtime.stream_retry.jitter == 0
     assert config.runner.runtime_dependency == f"uv-agent=={version('uv-agent')}"
     assert config.runner.default_uv_args == []
     assert config.runner.default_timeout_s == 7200

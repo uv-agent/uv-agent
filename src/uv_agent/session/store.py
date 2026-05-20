@@ -33,6 +33,7 @@ VISIBLE_HISTORY_EVENT_TYPES = {
     "item.reasoning_partial",
     "item.compaction",
     "thread.model_switch_warning",
+    "turn.stream_retry",
     "turn.interrupted",
     "turn.error",
     "turn.retry",

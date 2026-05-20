@@ -113,12 +113,22 @@ class TitleGenerationConfig:
 
 
 @dataclass(frozen=True)
+class StreamRetryConfig:
+    max_retries: int = 5
+    base: float = 1.0
+    factor: float = 2.0
+    max: float = 30.0
+    jitter: float = 0.2
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     default_level: str = "medium"
     store_provider_response: bool = False
     max_agent_rounds: int = 100
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     title_generation: TitleGenerationConfig = field(default_factory=TitleGenerationConfig)
+    stream_retry: StreamRetryConfig = field(default_factory=StreamRetryConfig)
 
 
 @dataclass(frozen=True)
@@ -216,6 +226,13 @@ def default_config(project_root: Path) -> dict[str, Any]:
             },
             "title_generation": {
                 "enabled": True,
+            },
+            "stream_retry": {
+                "max_retries": 5,
+                "base": 1.0,
+                "factor": 2.0,
+                "max": 30.0,
+                "jitter": 0.2,
             },
         },
         "ui": {
@@ -346,6 +363,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
     runtime_raw = raw.get("runtime", {})
     compression = CompressionConfig(**dict(runtime_raw.get("compression", {})))
     title_generation = TitleGenerationConfig(**dict(runtime_raw.get("title_generation", {})))
+    stream_retry = StreamRetryConfig(**dict(runtime_raw.get("stream_retry", {})))
     default_level = runtime_raw.get("default_level", "medium")
     if default_level not in levels and levels:
         default_level = next(iter(levels))
@@ -355,6 +373,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         max_agent_rounds=runtime_raw.get("max_agent_rounds", 100),
         compression=compression,
         title_generation=title_generation,
+        stream_retry=stream_retry,
     )
     runner_raw = raw.get("runner", {})
     runner_package_name = runner_raw.get("runtime_package_name", DEFAULT_PACKAGE_NAME)
