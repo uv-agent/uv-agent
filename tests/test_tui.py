@@ -3742,7 +3742,7 @@ async def test_tui_renders_persisted_turn_error(
 
 
 @pytest.mark.asyncio
-async def test_tui_renders_stream_retry_event(
+async def test_tui_hides_stream_retry_event_when_turn_recovers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3756,9 +3756,60 @@ async def test_tui_renders_stream_retry_event(
         thread_id = engine.thread_store.create_thread("Retrying")
         app.thread_id = thread_id
         run_state = app._run_state_for_thread(thread_id)
-        await app._handle_thread_event(
+        await app._handle_engine_stream_item(
+            {
+                "type": "model.stream_retry",
+                "thread_id": thread_id,
+                "turn_id": "turn_1",
+                "attempt": 1,
+                "max_attempts": 5,
+                "delay_s": 1.2,
+                "error_type": "EmptyModelStreamError",
+                "message": "empty stream",
+            },
             thread_id,
-            "model.stream_retry",
+            run_state,
+        )
+        await pilot.pause()
+
+        transcript_text = "\n".join(str(cell.render()) for cell in app.query(TranscriptCell).nodes)
+        assert "stream empty" not in transcript_text
+        assert "EmptyModelStreamError" not in transcript_text
+
+        await app._handle_engine_stream_item(
+            {
+                "type": "turn.completed",
+                "thread_id": thread_id,
+                "turn_id": "turn_1",
+                "final_text": "Recovered.",
+            },
+            thread_id,
+            run_state,
+        )
+        await pilot.pause()
+
+        transcript_text = "\n".join(app._cell_text(cell) for cell in app.query(TranscriptCell).nodes)
+        assert "Recovered." in transcript_text
+        assert "stream empty" not in transcript_text
+        assert "EmptyModelStreamError" not in transcript_text
+
+
+@pytest.mark.asyncio
+async def test_tui_shows_deferred_stream_retry_event_when_turn_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        thread_id = engine.thread_store.create_thread("Retrying")
+        app.thread_id = thread_id
+        run_state = app._run_state_for_thread(thread_id)
+        await app._handle_engine_stream_item(
             {
                 "type": "model.stream_retry",
                 "thread_id": thread_id,
@@ -3769,6 +3820,24 @@ async def test_tui_renders_stream_retry_event(
                 "error_type": "EmptyModelStreamError",
                 "message": "empty stream",
             },
+            thread_id,
+            run_state,
+        )
+        await pilot.pause()
+
+        transcript_text = "\n".join(str(cell.render()) for cell in app.query(TranscriptCell).nodes)
+        assert "stream empty" not in transcript_text
+
+        await app._handle_engine_stream_item(
+            {
+                "type": "turn.error",
+                "thread_id": thread_id,
+                "turn_id": "turn_1",
+                "error_type": "EmptyModelStreamError",
+                "message": "empty stream",
+                "retryable": True,
+            },
+            thread_id,
             run_state,
         )
         await pilot.pause()
@@ -3777,6 +3846,114 @@ async def test_tui_renders_stream_retry_event(
         assert "stream empty" in transcript_text
         assert "retrying 2/5" in transcript_text
         assert "EmptyModelStreamError" in transcript_text
+        assert len(app.query(RetryTurnButton).nodes) == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_history_hides_stream_retry_for_completed_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    thread_id = engine.thread_store.create_thread("Recovered")
+    turn_id = "turn_1"
+    engine.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id=turn_id,
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+    )
+    engine.thread_store.append(
+        thread_id,
+        "turn.stream_retry",
+        turn_id=turn_id,
+        attempt=1,
+        max_attempts=5,
+        delay_s=1.2,
+        error_type="EmptyModelStreamError",
+        message="empty stream",
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id=turn_id,
+        response_id="resp_ok",
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Recovered."}],
+            }
+        ],
+        usage={},
+        reasoning_text="",
+    )
+    engine.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text="Recovered.")
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._resume_thread(thread_id)
+        await pilot.pause()
+
+        transcript_text = "\n".join(app._cell_text(cell) for cell in app.query(TranscriptCell).nodes)
+        assert "Recovered." in transcript_text
+        assert "stream empty" not in transcript_text
+        assert "EmptyModelStreamError" not in transcript_text
+
+
+@pytest.mark.asyncio
+async def test_tui_history_shows_stream_retry_for_failed_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    thread_id = engine.thread_store.create_thread("Failed")
+    turn_id = "turn_1"
+    engine.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id=turn_id,
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+    )
+    engine.thread_store.append(
+        thread_id,
+        "turn.stream_retry",
+        turn_id=turn_id,
+        attempt=2,
+        max_attempts=5,
+        delay_s=2.0,
+        error_type="EmptyModelStreamError",
+        message="empty stream",
+    )
+    engine.thread_store.append(
+        thread_id,
+        "turn.error",
+        turn_id=turn_id,
+        error_type="EmptyModelStreamError",
+        message="empty stream",
+        retryable=True,
+    )
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._resume_thread(thread_id)
+        await pilot.pause()
+
+        transcript_text = "\n".join(str(cell.render()) for cell in app.query(TranscriptCell).nodes)
+        assert "stream empty" in transcript_text
+        assert "retrying 2/5" in transcript_text
+        assert "EmptyModelStreamError" in transcript_text
+        assert len(app.query(RetryTurnButton).nodes) == 1
 
 
 @pytest.mark.asyncio

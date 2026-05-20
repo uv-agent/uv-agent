@@ -660,6 +660,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._record_live_thread_event(run_state, "turn.error", item)
             run_state.status = self._text("error")
             if self._is_active_thread(thread_id):
+                self._flush_pending_stream_retries(run_state)
                 self._append_turn_error(item, display_markup=error_markup(error))
                 self._refresh_status(self._text("error"))
         finally:
@@ -814,6 +815,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._update_turn_timestamps(item, run_state)
         text = item["final_text"] or run_state.assistant_buffer
         was_active_thread = self._is_active_thread(item_thread_id)
+        run_state.pending_stream_retries.clear()
         if text and was_active_thread and self._assistant_cell is None:
             self._append_assistant_text(text)
         if was_active_thread:
@@ -848,6 +850,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._update_turn_timestamps(item, run_state)
         self._record_live_thread_event(run_state, "turn.interrupted", item)
         run_state.status = self._text("interrupted")
+        run_state.pending_stream_retries.clear()
         if self._is_active_thread(item_thread_id):
             self._apply_thread_event_to_active("turn.interrupted", item)
             self._refresh_status(self._text("interrupted"))
@@ -862,6 +865,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._mark_run_error_state(run_state, item)
         self._record_live_thread_event(run_state, "turn.error", item)
         if self._is_active_thread(item_thread_id):
+            self._flush_pending_stream_retries(run_state)
             self._apply_thread_event_to_active("turn.error", item)
             self._refresh_status(self._text("error"))
 
@@ -1189,6 +1193,23 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             run_state.turn_id = turn_id
         run_state.live_events.append({"event_type": event_type, "item": self._live_event_item(item)})
 
+    def _defer_stream_retry_event(self, run_state: ThreadRunState, item: dict[str, Any]) -> None:
+        retry_item = self._live_event_item(item)
+        turn_id = str(retry_item.get("turn_id") or "").strip()
+        if turn_id and run_state.pending_stream_retries:
+            last_turn_id = str(run_state.pending_stream_retries[-1].get("turn_id") or "").strip()
+            if last_turn_id and last_turn_id != turn_id:
+                run_state.pending_stream_retries.clear()
+        run_state.pending_stream_retries.append(retry_item)
+
+    def _flush_pending_stream_retries(self, run_state: ThreadRunState) -> None:
+        if not self._is_active_thread(run_state.thread_id):
+            return
+        retries = list(run_state.pending_stream_retries)
+        run_state.pending_stream_retries.clear()
+        for retry_event in retries:
+            self._append_stream_retry(retry_event)
+
     def _live_event_item(self, item: dict[str, Any]) -> dict[str, Any]:
         copy = dict(item)
         tool_call = copy.get("tool_call")
@@ -1230,8 +1251,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._append_tool_started(item)
         elif event_type == "tool.output":
             self._append_tool_output(item)
-        elif event_type in {"model.stream_retry", "turn.stream_retry"}:
+        elif event_type == "turn.stream_retry":
             self._append_stream_retry(item)
+        elif event_type == "model.stream_retry":
+            pass
         elif event_type == "compaction.completed":
             self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
         elif event_type == "thread.billing_accumulated":
@@ -1244,6 +1267,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             run_state = self._thread_state(str(item.get("thread_id") or self.thread_id or ""))
             if run_state is not None:
                 self._mark_run_error_state(run_state, item)
+                self._flush_pending_stream_retries(run_state)
             self._finalize_turn_render()
             self._append_turn_error(item)
 
@@ -1313,6 +1337,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     ) -> None:
         self._update_turn_timestamps(item, run_state)
         self._record_live_thread_event(run_state, event_type, item)
+        if event_type == "model.stream_retry":
+            self._defer_stream_retry_event(run_state, item)
+            run_state.status = self._text("working")
+            if self._is_active_thread(thread_id):
+                self._refresh_status(self._text("working"))
+            return
         if not self._is_active_thread(thread_id):
             if event_type == "assistant.delta":
                 run_state.assistant_buffer += str(item.get("text") or "")
@@ -1353,8 +1383,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 delta_index = item.get("tool_call_index")
                 if isinstance(delta_index, int):
                     run_state.tool_delta_calls.pop(delta_index, None)
-                run_state.status = self._text("working")
-            elif event_type == "model.stream_retry":
                 run_state.status = self._text("working")
             elif event_type == "assistant.final_response_started" and run_state.process_cells:
                 run_state.process_collapsed = True
@@ -2157,11 +2185,14 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         process_cells: list[TranscriptCell] = []
         anchor_cell: TranscriptCell | None = None
         seen_user = False
+        show_stream_retries = self._history_turn_ended_with_error(events)
         for event in events:
             if event.get("type") == "item.user":
                 if seen_user:
                     continue
                 seen_user = True
+            if event.get("type") == "turn.stream_retry" and not show_stream_retries:
+                continue
             for cell in self._mount_history_event(event, before=before) or []:
                 if event.get("type") == "item.user":
                     anchor_cell = cell
@@ -2175,6 +2206,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 after=anchor_cell,
                 elapsed_label=self._history_turn_elapsed_label(events),
             )
+
+    def _history_turn_ended_with_error(self, events: list[dict[str, Any]]) -> bool:
+        for event in reversed(events):
+            if event.get("type") in {"turn.completed", "turn.interrupted", "turn.error"}:
+                return event.get("type") == "turn.error"
+        return False
 
     def _history_turn_elapsed_label(self, events: list[dict[str, Any]]) -> str:
         started_at = ""

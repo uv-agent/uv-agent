@@ -90,6 +90,7 @@ class ThreadRunState:
     retryable_error: bool = False
     terminal_error: bool = False
     live_events: list[dict[str, Any]] = field(default_factory=list)
+    pending_stream_retries: list[dict[str, Any]] = field(default_factory=list)
     assistant_buffer: str = ""
     assistant_cell: TranscriptCell | None = None
     reasoning_buffer: str = ""
