@@ -24,7 +24,7 @@ Principles:
 - [x] Reduce duplicated turn/retry model-loop code in `agent.py`.
 - [x] Split model provider protocol code out of `model_client.py`.
 - [x] Evaluate replacing hand-built Anthropic protocol code with the official SDK.
-- [ ] Split runner stream/event parsing helpers out of `runner.py`.
+- [x] Split runner stream/event parsing helpers out of `runner.py`.
 - [ ] Run full test suite and confirm behavior parity.
 
 ## Non-goals
