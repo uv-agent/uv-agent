@@ -18,6 +18,7 @@ from uv_agent_runtime import (
     connect_declared,
     connect_named,
     connect_stdio,
+    connect_url,
     convert_patch,
     emit_event,
     emit_progress,
@@ -423,6 +424,7 @@ def test_runtime_mcp_stdio_client() -> None:
     assert init.value["serverInfo"]["name"] == "echo"
     assert tools[0]["name"] == "echo"
     assert result.value["content"][0]["text"] == "hello"
+    assert result.raw.content[0].text == "hello"
 
 
 def test_runtime_mcp_connect_declared(tmp_path: Path) -> None:
@@ -453,7 +455,7 @@ def test_runtime_mcp_lists_and_connects_named(tmp_path: Path) -> None:
     agents.mkdir()
     write_json(
         agents / "mcp.json",
-        {"servers": {"echo": {"command": sys.executable, "args": [str(server)]}}},
+        {"servers": {"echo": {"transport": "stdio", "command": sys.executable, "args": [str(server)]}}},
     )
 
     declared = list_declared_servers(cwd=tmp_path)
@@ -462,7 +464,55 @@ def test_runtime_mcp_lists_and_connects_named(tmp_path: Path) -> None:
         result = client.call_tool("echo", {"text": "named"})
 
     assert declared[0]["name"] == "echo"
+    assert declared[0]["transport"] == "stdio"
     assert result.value["content"][0]["text"] == "named"
+
+
+def test_runtime_mcp_lists_http_declarations(tmp_path: Path) -> None:
+    agents = tmp_path / ".agents"
+    agents.mkdir()
+    write_json(
+        agents / "mcp.json",
+        {"servers": {"web": {"transport": "streamable_http", "url": "http://localhost:3001/mcp"}}},
+    )
+
+    declared = list_declared_servers(cwd=tmp_path)
+
+    assert declared == [
+        {
+            "name": "web",
+            "scope": "project",
+            "path": str(agents / "mcp.json"),
+            "description": "",
+            "transport": "streamable_http",
+            "command": None,
+            "url": "http://localhost:3001/mcp",
+        }
+    ]
+
+
+def test_runtime_mcp_defaults_to_runtime_project_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    nested = project / "nested"
+    agents = project / ".agents"
+    nested.mkdir(parents=True)
+    agents.mkdir()
+    write_json(
+        agents / "mcp.json",
+        {"servers": {"web": {"transport": "streamable_http", "url": "http://localhost:3001/mcp"}}},
+    )
+    monkeypatch.setenv("UV_AGENT_RUNTIME_PROJECT_ROOT", str(project))
+    monkeypatch.chdir(nested)
+
+    declared = list_declared_servers()
+
+    assert declared[0]["name"] == "web"
+    assert declared[0]["path"] == str(agents / "mcp.json")
+
+
+def test_runtime_mcp_connect_url_rejects_stdio_transport() -> None:
+    with pytest.raises(ValueError, match="streamable_http or sse"):
+        connect_url("http://localhost:3001/mcp", transport="stdio")
 
 
 def test_runtime_subagent_ask_with_custom_executable() -> None:

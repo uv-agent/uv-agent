@@ -10,7 +10,8 @@ from typing import Any
 class McpServerSummary:
     name: str
     scope: str
-    command: str | None
+    transport: str
+    endpoint: str | None
     description: str
     path: Path
 
@@ -36,7 +37,8 @@ def discover_mcp_servers(project_root: Path, *, home: Path | None = None) -> lis
                 McpServerSummary(
                     name=str(name),
                     scope=scope,
-                    command=command_summary(value),
+                    transport=transport_summary(value),
+                    endpoint=endpoint_summary(value),
                     description=str(value.get("description") or "No description"),
                     path=path,
                 )
@@ -44,7 +46,19 @@ def discover_mcp_servers(project_root: Path, *, home: Path | None = None) -> lis
     return servers
 
 
-def command_summary(value: dict[str, Any]) -> str | None:
+def transport_summary(value: dict[str, Any]) -> str:
+    if isinstance(value.get("transport"), str):
+        transport = str(value["transport"])
+        return "streamable_http" if transport == "http" else transport
+    if url_summary(value):
+        return "streamable_http"
+    return "stdio"
+
+
+def endpoint_summary(value: dict[str, Any]) -> str | None:
+    url = url_summary(value)
+    if url:
+        return url
     command = value.get("command")
     if isinstance(command, str):
         args = value.get("args")
@@ -54,15 +68,22 @@ def command_summary(value: dict[str, Any]) -> str | None:
     return None
 
 
+def url_summary(value: dict[str, Any]) -> str | None:
+    for key in ("url", "httpUrl", "serverUrl"):
+        item = value.get(key)
+        if isinstance(item, str) and item:
+            return item
+    return None
+
+
 def render_mcp_summary(servers: list[McpServerSummary], *, limit: int = 10) -> str:
     """Render MCP declarations for the system prompt."""
     if not servers:
         return "None declared."
     lines = []
     for server in servers[:limit]:
-        command = f"; command: {server.command}" if server.command else ""
         lines.append(
-            f"- {server.name} ({server.scope}): {server.description}{command}; config {server.path}"
+            f"- {server.name} ({server.scope}): {server.description}; config {server.path}"
         )
     if len(servers) > limit:
         lines.append(f"- ... {len(servers) - limit} more MCP servers declared")

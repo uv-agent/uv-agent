@@ -118,7 +118,7 @@ Available helper groups:
 | `saved_scripts` | Inspect recent managed scripts. |
 | `thread_digest`, `list_thread_digests` | Read compact thread summaries from project state. |
 | `ask` | Launch a nested `uv-agent ask` subagent. |
-| `connect_stdio`, `connect_declared`, `connect_named`, `list_declared_servers` | MCP stdio helpers. |
+| `connect_stdio`, `connect_url`, `connect_declared`, `connect_named`, `list_declared_servers` | MCP helpers backed by the official SDK. |
 
 ## Structured Events
 
@@ -214,8 +214,27 @@ with connect_named("filesystem") as client:
 ```
 
 `connect_named` searches user/project MCP declarations such as
-`.agents/mcp.json`. `connect_stdio` can connect to an explicit stdio server
-command when a script needs a one-off server.
+`.agents/mcp.json`. Declarations may use stdio, Streamable HTTP, or SSE:
+
+```json
+{
+  "servers": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["server.py"]
+    },
+    "web": {
+      "transport": "streamable_http",
+      "url": "http://localhost:3001/mcp"
+    }
+  }
+}
+```
+
+`connect_stdio` can connect to an explicit stdio server command when a script
+needs a one-off server. `connect_url("http://localhost:3001/mcp")` connects to
+a Streamable HTTP MCP endpoint; pass `transport="sse"` for older SSE servers.
 
 ## Environment
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import asyncio
+import os
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +46,38 @@ async def test_runner_executes_script_and_records_jsonl(tmp_path: Path) -> None:
         "uv-agent",
     ]
     assert "--with" not in events[0]["argv"]
+
+
+@pytest.mark.asyncio
+async def test_runner_passes_project_root_without_polluting_parent_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = Path.cwd()
+    runner = PythonRunner(
+        project_root=project_root,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(
+            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
+            runtime_package_name="uv-agent",
+            default_timeout_s=30,
+        ),
+    )
+
+    monkeypatch.delenv("UV_AGENT_RUNTIME_PROJECT_ROOT", raising=False)
+    result = await runner.run(
+        PythonRunRequest(
+            code=(
+                "import os\n"
+                "print(os.environ['UV_AGENT_RUNTIME_PROJECT_ROOT'])\n"
+            ),
+            cwd=tmp_path,
+        )
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == str(project_root.resolve())
+    assert "UV_AGENT_RUNTIME_PROJECT_ROOT" not in os.environ
 
 
 @pytest.mark.asyncio

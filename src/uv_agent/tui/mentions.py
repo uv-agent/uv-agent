@@ -425,7 +425,8 @@ class MentionMixin:
                     id=server.name,
                     title=server.name,
                     description=server.description,
-                    meta=f"{server.scope}" + (f" · {server.command}" if server.command else ""),
+                    meta=f"{server.scope} · {server.transport}"
+                    + (f" · {server.endpoint}" if server.endpoint else ""),
                 )
             )
         return items

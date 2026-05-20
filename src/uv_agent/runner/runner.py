@@ -162,6 +162,7 @@ class PythonRunner:
         # stops depending on the host code page.
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
+        env["UV_AGENT_RUNTIME_PROJECT_ROOT"] = str(self.project_root)
         env["UV_AGENT_RUNTIME_STATE_DIR"] = str(self.store.data_dir)
         if thread_id:
             env["UV_AGENT_RUNTIME_THREAD_ID"] = thread_id

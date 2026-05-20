@@ -19,11 +19,12 @@ from .cwd import enter_dir
 from .events import emit_event, emit_progress, emit_result
 from .files import list_files, read_json, read_text, resolve_workspace_path, write_json, write_text
 from .mcp import (
+    McpClient,
     McpResult,
-    McpStdioClient,
     connect_declared,
     connect_named,
     connect_stdio,
+    connect_url,
     list_declared_servers,
 )
 from .patch import PatchResult, apply_patch
@@ -65,7 +66,7 @@ __all__ = [
     "Snapshot",
     "Submatch",
     "Symbol",
-    "McpStdioClient",
+    "McpClient",
     "SubagentResult",
     "TextComparison",
     "TextFile",
@@ -77,6 +78,7 @@ __all__ = [
     "connect_declared",
     "connect_named",
     "connect_stdio",
+    "connect_url",
     "convert_patch",
     "emit_event",
     "emit_progress",

@@ -176,6 +176,7 @@ from uv_agent_runtime import (
     list_declared_servers,
     connect_named,
     connect_declared,
+    connect_url,
     search_text,
     find_files,
     find_symbols,
@@ -381,12 +382,16 @@ if threads:
 ]]></example>
 </helper>
 <helper name="mcp">
-<description>Use to discover and call declared stdio MCP servers from Python. Call list_declared_servers(), connect_named(name), or connect_declared(name, config_path); MCP is not a direct model tool.</description>
+<description>Use to discover and call declared MCP servers from Python through the official MCP SDK. Declarations may use stdio, streamable_http, or sse transport. Call list_declared_servers(), connect_named(name), connect_declared(name, config_path), or connect_url(url); MCP is not a direct model tool.</description>
 <example><![CDATA[
-from uv_agent_runtime import connect_named, list_declared_servers
+from uv_agent_runtime import connect_named, connect_url, list_declared_servers
 
 print(list_declared_servers())
 with connect_named("server-name") as client:
+    client.initialize()
+    print(client.list_tools())
+
+with connect_url("http://localhost:3001/mcp") as client:
     client.initialize()
     print(client.list_tools())
 ]]></example>
