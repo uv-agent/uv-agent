@@ -1417,9 +1417,12 @@ class AgentEngine:
         state = self._rule_state(thread_id)
         texts: list[str] = []
         if not state.index_emitted:
-            index_root = state.active_cwd
+            project_rules = self._project_rule_reload_text(state)
+            if project_rules:
+                texts.append(project_rules)
+            index_root = self.project_root
             index = discover_workspace_rule_index(index_root)
-            rendered = index.render(label="working directory")
+            rendered = index.render(label="project directory")
             if rendered:
                 texts.append(rendered)
             state.index_emitted = True
@@ -1433,10 +1436,34 @@ class AgentEngine:
                 truncated=index.truncated_entries or index.depth_limited,
                 paths=[str(path) for path in index.paths],
             )
+            if state.active_cwd.resolve() != self.project_root.resolve():
+                texts.extend(
+                    message["text"]
+                    for message in self._load_unseen_rules_for_dir(
+                        thread_id,
+                        state.active_cwd,
+                        source="active_cwd",
+                    )
+                    if message.get("text")
+                )
         cwd_notice = self._active_cwd_notice(thread_id)
         if cwd_notice:
             texts.append(cwd_notice)
         return texts
+
+    def _project_rule_reload_text(self, state: RuleRuntimeState) -> str:
+        context = load_project_rules(self.project_root)
+        new_rules = [rule for rule in context.rules if rule.path not in state.loaded_rule_paths]
+        if not new_rules:
+            return ""
+        for rule in new_rules:
+            state.loaded_rule_paths.add(rule.path)
+        filtered = ProjectRuleContext(
+            rules=new_rules,
+            truncated=context.truncated,
+            omitted_files=context.omitted_files,
+        )
+        return filtered.render(root=self.project_root)
 
     def _active_cwd_notice(self, thread_id: str) -> str:
         state = self._rule_state(thread_id)
