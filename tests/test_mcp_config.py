@@ -31,8 +31,9 @@ def test_discover_mcp_servers_from_agents_dir(tmp_path: Path) -> None:
     assert servers[0].transport == "stdio"
     assert servers[0].endpoint == "python server.py"
     summary = render_mcp_summary(servers)
-    assert "files (project): File helpers" in summary
-    assert f"config {agents_dir / 'mcp.json'}" in summary
+    assert '<mcp_server name="files" scope="project"' in summary
+    assert f'config="{agents_dir / "mcp.json"}"' in summary
+    assert ">File helpers</mcp_server>" in summary
     assert "stdio" not in summary
     assert "endpoint:" not in summary
 
@@ -60,7 +61,31 @@ def test_discover_mcp_servers_from_http_declaration(tmp_path: Path) -> None:
     assert servers[0].transport == "streamable_http"
     assert servers[0].endpoint == "http://localhost:3001/mcp"
     summary = render_mcp_summary(servers)
-    assert "web (project): Web tools" in summary
-    assert f"config {agents_dir / 'mcp.json'}" in summary
+    assert '<mcp_server name="web" scope="project"' in summary
+    assert f'config="{agents_dir / "mcp.json"}"' in summary
+    assert ">Web tools</mcp_server>" in summary
     assert "streamable_http" not in summary
     assert "endpoint:" not in summary
+
+
+def test_render_mcp_summary_escapes_xml_text(tmp_path: Path) -> None:
+    agents_dir = tmp_path / ".agents"
+    agents_dir.mkdir()
+    (agents_dir / "mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": {
+                    "web&files": {
+                        "command": "python",
+                        "description": "Read & write <files>",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = render_mcp_summary(discover_mcp_servers(tmp_path))
+
+    assert '<mcp_server name="web&amp;files"' in summary
+    assert ">Read &amp; write &lt;files&gt;</mcp_server>" in summary

@@ -2172,8 +2172,10 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "enter_dir" in turn_context
     assert "demo (project)" not in prompt
 
-    assert "demo (project)" in turn_context
+    assert '<skill name="demo" scope="project"' in turn_context
     assert "available_mcp_servers" in turn_context
+    assert '<mcp_server name="demo" scope="project"' in turn_context
+    assert ">Demo MCP</mcp_server>" in turn_context
     assert "Use these skills when one matches the task" in turn_context
     assert "Use these MCP servers when they fit the task" in turn_context
 
@@ -2728,8 +2730,8 @@ def test_runtime_context_reappears_after_compaction_epoch(tmp_path: Path) -> Non
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
     second = engine._runtime_context_items(thread_id)
 
-    assert "demo (project)" in str(first)
-    assert "demo (project)" in str(second)
+    assert '<skill name="demo" scope="project"' in str(first)
+    assert '<skill name="demo" scope="project"' in str(second)
     assert "<runtime_environment>" in str(second)
     assert "<model_levels>" in str(second)
     assert "<runtime_helpers>" in str(second)
@@ -2755,7 +2757,7 @@ def test_runtime_context_is_not_repeated_after_compaction_epoch_update(tmp_path:
     after_compaction = engine._runtime_context_items(thread_id)
     repeated = engine._runtime_context_items(thread_id)
 
-    assert "demo (project)" in str(after_compaction)
+    assert '<skill name="demo" scope="project"' in str(after_compaction)
     assert repeated == []
 
 
@@ -2784,7 +2786,7 @@ def test_runtime_context_skill_change_sends_incremental_section_only(tmp_path: P
     text = str(second)
     assert "changed: skills" in text
     assert "<available_skills>" in text
-    assert "demo (project)" in text
+    assert '<skill name="demo" scope="project"' in text
     assert "<runtime_environment>" not in text
     assert "<model_levels>" not in text
     assert "<runtime_helpers>" not in text

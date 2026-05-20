@@ -15,7 +15,10 @@ def test_discover_project_skills(tmp_path: Path) -> None:
     assert len(skills) == 1
     assert skills[0].name == "demo"
     assert skills[0].description == "Use this skill for demos."
-    assert "demo (project)" in render_skill_summary(skills)
+    summary = render_skill_summary(skills)
+    assert '<skill name="demo" scope="project"' in summary
+    assert f'path="{skill_dir / "SKILL.md"}"' in summary
+    assert ">Use this skill for demos.</skill>" in summary
 
 
 def test_skill_description_reads_yaml_frontmatter(tmp_path: Path) -> None:
@@ -55,3 +58,18 @@ def test_skill_description_supports_block_scalar(tmp_path: Path) -> None:
     skills = discover_skills(tmp_path, home=tmp_path / "home")
 
     assert skills[0].description == "First line of description. Second line gets joined."
+
+
+def test_render_skill_summary_escapes_xml_text(tmp_path: Path) -> None:
+    skill_dir = tmp_path / ".agents" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "description: Research & compare <tools>\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    summary = render_skill_summary(discover_skills(tmp_path, home=tmp_path / "home"))
+
+    assert ">Research &amp; compare &lt;tools&gt;</skill>" in summary

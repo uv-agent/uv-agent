@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape as xml_escape
 from pathlib import Path
 
 
@@ -112,8 +113,17 @@ def render_skill_summary(skills: list[SkillSummary], *, limit: int = 10) -> str:
     lines = []
     for skill in skills[:limit]:
         lines.append(
-            f"- {skill.name} ({skill.scope}): {skill.description}; read {skill.path}"
+            f'<skill name="{_xml_attr(skill.name)}" scope="{_xml_attr(skill.scope)}" '
+            f'path="{_xml_attr(skill.path)}">{_xml_text(skill.description)}</skill>'
         )
     if len(skills) > limit:
-        lines.append(f"- ... {len(skills) - limit} more skills available")
+        lines.append(f'<omitted_skills count="{len(skills) - limit}" />')
     return "\n".join(lines)
+
+
+def _xml_attr(value: object) -> str:
+    return xml_escape(str(value), quote=True)
+
+
+def _xml_text(value: object) -> str:
+    return xml_escape(str(value), quote=False)

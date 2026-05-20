@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from html import escape as xml_escape
 from pathlib import Path
 from typing import Any
 
@@ -83,8 +84,17 @@ def render_mcp_summary(servers: list[McpServerSummary], *, limit: int = 10) -> s
     lines = []
     for server in servers[:limit]:
         lines.append(
-            f"- {server.name} ({server.scope}): {server.description}; config {server.path}"
+            f'<mcp_server name="{_xml_attr(server.name)}" scope="{_xml_attr(server.scope)}" '
+            f'config="{_xml_attr(server.path)}">{_xml_text(server.description)}</mcp_server>'
         )
     if len(servers) > limit:
-        lines.append(f"- ... {len(servers) - limit} more MCP servers declared")
+        lines.append(f'<omitted_mcp_servers count="{len(servers) - limit}" />')
     return "\n".join(lines)
+
+
+def _xml_attr(value: object) -> str:
+    return xml_escape(str(value), quote=True)
+
+
+def _xml_text(value: object) -> str:
+    return xml_escape(str(value), quote=False)
