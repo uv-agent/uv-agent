@@ -98,10 +98,10 @@ for script in saved_scripts(limit=5):
 Import helpers from `uv_agent_runtime` inside managed scripts:
 
 ```python
-from uv_agent_runtime import read_text, write_text, run_command, emit_result
+from uv_agent_runtime import read_text, run_process_text, emit_result
 
 content = read_text("README.md")
-result = run_command(["python3", "--version"])
+result = run_process_text(["python3", "--version"], check=True)
 emit_result(readme_bytes=len(content.encode()), python=result.stdout.strip())
 ```
 
@@ -110,7 +110,7 @@ Available helper groups:
 | Helper | Purpose |
 | --- | --- |
 | `read_text`, `write_text`, `read_json`, `write_json`, `list_files`, `resolve_workspace_path` | Workspace-relative file helpers. |
-| `run_command`, `check_command` | Argv-list subprocess helpers. |
+| `run_process_text` | Argv-list subprocess helper with explicit text decoding, env/env_patch support, timeouts, and optional `check=True`. |
 | `apply_patch` | Codex-style `*** Begin Patch` file edit helper. |
 | `enter_dir` | Change the active working directory and trigger directory rule loading. |
 | `emit_event`, `emit_progress`, `emit_result` | Structured events rendered by the host; each returns the emitted event dict. |

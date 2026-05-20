@@ -387,11 +387,11 @@ print(make_unified_diff("old\n", "new\n", path="src/app.py"))
 ]]></example>
 </helper>
 <helper name="run_process_text">
-<description>Use to run external commands with explicit stdout/stderr decoding, env patching, and timeout control. Prefer it over raw subprocess for ordinary command execution.</description>
+<description>Use to run external commands with explicit stdout/stderr decoding, env/env_patch support, timeout control, and optional check=True failure raising. Prefer it over raw subprocess for ordinary command execution. The result has args, returncode, stdout, stderr, ok, and raise_for_error().</description>
 <example><![CDATA[
 from uv_agent_runtime import run_process_text
 
-result = run_process_text(["git", "status", "--short"], encoding="utf-8")
+result = run_process_text(["git", "status", "--short"], encoding="utf-8", check=True)
 print(result.stdout)
 ]]></example>
 </helper>
@@ -434,7 +434,7 @@ with connect_named("server-name") as client:
 ]]></example>
 </helper>
 <helper name="search_text">
-<description>Use for grep-like content search across the workspace instead of broad file reads or manual scanning. It wraps the system `rg` (ripgrep), honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `fixed_string=True` to disable regex, and `max_count_per_file`/`max_total` to bound output.</description>
+<description>Use for grep-like content search across the workspace instead of broad file reads or manual scanning. It wraps the system `rg` (ripgrep), honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `literal=True` or `fixed_string=True` to disable regex, `case_sensitive=False` for case-insensitive search, and `max_count_per_file`/`max_total` to bound output.</description>
 <example><![CDATA[
 from uv_agent_runtime import search_text
 
@@ -452,12 +452,12 @@ for path in find_files("src", globs=["*.py", "!**/migrations/**"]):
 ]]></example>
 </helper>
 <helper name="find_symbols">
-<description>Use to locate function/class/method/struct/interface/... definitions across the workspace via tree-sitter. Results are cached per file in ~/.uv-agent/cache/codequery so repeat calls only re-parse files whose (mtime, size) changed. Filter with `languages=[...]`, `kinds=["function","class","method"]`, or `name_pattern=r"^test_"`. Built-in language support: see supported_symbol_languages().</description>
+<description>Use to locate function/class/method/struct/interface/... definitions across the workspace via tree-sitter. Results are cached per file in ~/.uv-agent/cache/codequery so repeat calls only re-parse files whose (mtime, size) changed. Filter with `language="python"` or `languages=[...]`, `kind="class"` or `kinds=[...]`, exact `name="Engine"`, substring `contains="Engine"`, or regex `name_pattern=r"^test_"`. Built-in language support: see supported_symbol_languages().</description>
 <example><![CDATA[
 from uv_agent_runtime import find_symbols, supported_symbol_languages
 
 print(supported_symbol_languages())
-for sym in find_symbols("src", kinds=["class"], name_pattern=r"Engine$"):
+for sym in find_symbols("src", kind="class", contains="Engine"):
     print(sym.path, sym.start_row, sym.name)
 ]]></example>
 </helper>

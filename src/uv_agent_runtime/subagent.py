@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from .events import emit_event
-from .process import run_command
+from .textops import run_process_text
 
 NESTED_ASK_BLOCKED_MESSAGE = (
     "ask is unavailable inside a subagent thread. This project only permits one "
@@ -100,14 +100,14 @@ def ask(
             args.extend(["--project-state-dir", state_dir])
         else:
             subagent_env["UV_AGENT_RUNTIME_PROJECT_STATE_DIR"] = state_dir
-        result = run_command(args + ["ask", prompt], cwd=cwd, env=subagent_env, timeout_s=timeout_s)
+        result = run_process_text(args + ["ask", prompt], cwd=cwd, env=subagent_env, timeout_s=timeout_s)
     else:
         with tempfile.TemporaryDirectory(prefix="uv-agent-subagent-") as temporary_state_dir:
             if using_default_executable:
                 args.extend(["--project-state-dir", temporary_state_dir])
             else:
                 subagent_env["UV_AGENT_RUNTIME_PROJECT_STATE_DIR"] = temporary_state_dir
-            result = run_command(args + ["ask", prompt], cwd=cwd, env=subagent_env, timeout_s=timeout_s)
+            result = run_process_text(args + ["ask", prompt], cwd=cwd, env=subagent_env, timeout_s=timeout_s)
     thread_id = _extract_subagent_thread_id(result.stderr)
     emit_event(
         "subagent.completed",

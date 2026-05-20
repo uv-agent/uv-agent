@@ -71,6 +71,20 @@ class CommandTextResult:
     stdout: str
     stderr: str
 
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+    def raise_for_error(self) -> "CommandTextResult":
+        """Raise RuntimeError if the command exited non-zero."""
+        if self.returncode != 0:
+            detail = self.stderr or self.stdout
+            raise RuntimeError(
+                f"command failed with exit {self.returncode}: {self.args!r}"
+                + (f"\n{detail}" if detail else "")
+            )
+        return self
+
 
 def path_info(path: str | Path, *, base: str | Path | None = None) -> PathInfo:
     """Return resolved path metadata without mutating the filesystem."""
@@ -346,31 +360,36 @@ def run_process_text(
     cwd: str | Path | None = None,
     encoding: str = "utf-8",
     errors: str = "replace",
+    env: Mapping[str, str] | None = None,
     env_patch: Mapping[str, str | None] | None = None,
     timeout_s: float | None = None,
+    check: bool = False,
 ) -> CommandTextResult:
     """Run a command and decode stdout/stderr with explicit encoding policy."""
 
-    env = os.environ.copy()
+    process_env = os.environ.copy() if env is None else dict(env)
     for key, value in (env_patch or {}).items():
         if value is None:
-            env.pop(key, None)
+            process_env.pop(key, None)
         else:
-            env[key] = value
+            process_env[key] = value
     completed = subprocess.run(
         list(args),
         cwd=None if cwd is None else str(resolve_workspace_path(cwd)),
-        env=env,
+        env=process_env,
         timeout=timeout_s,
         capture_output=True,
         check=False,
     )
-    return CommandTextResult(
+    result = CommandTextResult(
         args=list(args),
         returncode=completed.returncode,
         stdout=completed.stdout.decode(encoding, errors=errors),
         stderr=completed.stderr.decode(encoding, errors=errors),
     )
+    if check:
+        result.raise_for_error()
+    return result
 
 
 def _coerce_text_file(value: TextFile | str | Path) -> TextFile:

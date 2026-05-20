@@ -27,7 +27,6 @@ from .mcp import (
     list_declared_servers,
 )
 from .patch import PatchResult, apply_patch
-from .process import check_command, run_command
 from .scripts import saved_scripts
 from .subagent import SubagentResult, ask
 from .textops import (
@@ -73,7 +72,6 @@ __all__ = [
     "apply_patch",
     "apply_patch_any",
     "ask",
-    "check_command",
     "clear_codequery_cache",
     "compare_text",
     "connect_declared",
@@ -100,7 +98,6 @@ __all__ = [
     "replace_exact",
     "resolve_workspace_path",
     "restore_snapshot",
-    "run_command",
     "run_process_text",
     "saved_scripts",
     "search_text",

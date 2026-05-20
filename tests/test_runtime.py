@@ -12,7 +12,6 @@ from uv_agent_runtime import (
     apply_patch,
     apply_patch_any,
     ask,
-    check_command,
     clear_codequery_cache,
     compare_text,
     connect_declared,
@@ -37,7 +36,6 @@ from uv_agent_runtime import (
     read_text_lossless,
     replace_exact,
     restore_snapshot,
-    run_command,
     run_process_text,
     saved_scripts,
     search_text,
@@ -210,12 +208,29 @@ def test_runtime_apply_patch_helper_rejects_paths_outside_workdir(tmp_path: Path
     assert not (tmp_path.parent / "outside.txt").exists()
 
 
-def test_runtime_command_helpers() -> None:
-    result = run_command(["python", "-c", "print('ok')"])
+def test_runtime_run_process_text_check_and_result_helpers() -> None:
+    result = run_process_text([sys.executable, "-c", "print('ok')"], check=True)
 
     assert result.returncode == 0
+    assert result.ok is True
     assert result.stdout.strip() == "ok"
-    assert check_command(["python", "-c", "print('checked')"]).stdout.strip() == "checked"
+    assert result.raise_for_error() is result
+
+    with pytest.raises(RuntimeError, match="command failed with exit 3"):
+        run_process_text([sys.executable, "-c", "raise SystemExit(3)"], check=True)
+
+
+def test_runtime_run_process_text_accepts_env_and_env_patch() -> None:
+    code = "import os; print(os.environ.get('UV_AGENT_TEST_VALUE', 'missing'))"
+
+    result = run_process_text(
+        [sys.executable, "-c", code],
+        env={},
+        env_patch={"UV_AGENT_TEST_VALUE": "patched"},
+        check=True,
+    )
+
+    assert result.stdout.strip() == "patched"
 
 
 def test_runtime_lossless_text_helpers_preserve_metadata(tmp_path: Path) -> None:
@@ -721,6 +736,17 @@ def test_codesearch_search_text_fixed_string_and_max_total(tmp_path: Path) -> No
 
 
 @requires_rg
+def test_codesearch_search_text_accepts_literal_and_case_sensitive_aliases(tmp_path: Path) -> None:
+    _make_python_workspace(tmp_path)
+
+    literal_hits = search_text("hello(", root=tmp_path, literal=True, max_total=1)
+    case_hits = search_text("HELLO", root=tmp_path, case_sensitive=False, max_total=1)
+
+    assert literal_hits[0].submatches[0].text == "hello("
+    assert case_hits[0].submatches[0].text == "hello"
+
+
+@requires_rg
 def test_codequery_supported_languages_includes_python() -> None:
     langs = supported_symbol_languages()
     assert "python" in langs
@@ -756,6 +782,12 @@ def test_codequery_find_symbols_filters_by_kind_and_name(
 
     named = find_symbols(tmp_path, name_pattern=r"^h")
     assert [s.name for s in named] == ["hello"]
+
+    exact = find_symbols(tmp_path, kind="function", name="world")
+    assert [s.name for s in exact] == ["world"]
+
+    contained = find_symbols(tmp_path, language="python", contains="oo")
+    assert [s.name for s in contained] == ["Foo"]
 
 
 @requires_rg

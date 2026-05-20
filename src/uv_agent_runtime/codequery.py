@@ -428,8 +428,12 @@ def find_symbols(
     root: str | Path = ".",
     *,
     languages: Sequence[str] | None = None,
+    language: str | None = None,
     kinds: Sequence[str] | None = None,
+    kind: str | None = None,
     name_pattern: str | None = None,
+    name: str | None = None,
+    contains: str | None = None,
     max_count: int | None = None,
     hidden: bool = False,
     no_ignore: bool = False,
@@ -439,13 +443,18 @@ def find_symbols(
 
     Uses pre-baked tree-sitter queries per supported language. ``kinds``
     filters by capture kind (``function``, ``class``, ``method``, ...).
-    ``name_pattern`` is a regular expression matched against the symbol name.
+    ``name`` filters by exact symbol name, ``contains`` by substring, and
+    ``name_pattern`` by regular expression.
     """
     import re
 
     root_path = resolve_workspace_path(root)
     root_key = str(root_path)
-    lang_set = set(languages) if languages else set(_SYMBOL_QUERIES)
+    lang_set = set(languages or [])
+    if language:
+        lang_set.add(language)
+    if not lang_set:
+        lang_set = set(_SYMBOL_QUERIES)
     available = lang_set & set(_SYMBOL_QUERIES)
     if not available:
         return []
@@ -457,7 +466,10 @@ def find_symbols(
         hidden=hidden,
         no_ignore=no_ignore,
     )
-    kind_filter = {k for k in kinds} if kinds else None
+    kind_filter = {k for k in kinds} if kinds else set()
+    if kind:
+        kind_filter.add(kind)
+    kind_filter = kind_filter or None
     pattern = re.compile(name_pattern) if name_pattern else None
 
     # Group candidates by language so each language runs against its own query.
@@ -489,6 +501,10 @@ def find_symbols(
                         names.append(cap)
                 for cap in names:
                     if kind_filter and cap["name"] not in kind_filter:
+                        continue
+                    if name is not None and cap["text"] != name:
+                        continue
+                    if contains is not None and contains not in cap["text"]:
                         continue
                     if pattern and not pattern.search(cap["text"]):
                         continue

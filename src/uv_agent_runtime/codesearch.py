@@ -114,7 +114,9 @@ def search_text(
     globs: Sequence[str] | None = None,
     file_types: Sequence[str] | None = None,
     ignore_case: bool = False,
+    case_sensitive: bool | None = None,
     fixed_string: bool = False,
+    literal: bool | None = None,
     multiline: bool = False,
     word: bool = False,
     max_count_per_file: int | None = None,
@@ -134,13 +136,15 @@ def search_text(
     if not pattern:
         raise ValueError("pattern must be non-empty")
     resolved = resolve_workspace_path(root)
+    effective_ignore_case = ignore_case if case_sensitive is None else not case_sensitive
+    effective_fixed_string = fixed_string if literal is None else literal
     args = _build_args(
         pattern=pattern,
         files_only=False,
         globs=globs,
         file_types=file_types,
-        ignore_case=ignore_case,
-        fixed_string=fixed_string,
+        ignore_case=effective_ignore_case,
+        fixed_string=effective_fixed_string,
         multiline=multiline,
         word=word,
         max_count=max_count_per_file,
