@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 
@@ -30,6 +31,11 @@ for line in sys.stdin:
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "echo", "version": "0.1"},
+                **(
+                    {"instructions": os.environ["UV_AGENT_TEST_MCP_INSTRUCTIONS"]}
+                    if os.environ.get("UV_AGENT_TEST_MCP_INSTRUCTIONS")
+                    else {}
+                ),
             },
         )
     elif method == "tools/list":

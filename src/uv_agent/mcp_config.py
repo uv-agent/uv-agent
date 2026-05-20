@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from html import escape as xml_escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,16 @@ class McpServerSummary:
     endpoint: str | None
     description: str
     path: Path
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.scope, self.name, str(self.path))
+
+
+@dataclass(frozen=True)
+class McpInstructionsPreview:
+    text: str
+    truncated: bool = False
 
 
 def discover_mcp_servers(project_root: Path, *, home: Path | None = None) -> list[McpServerSummary]:
@@ -77,19 +87,42 @@ def url_summary(value: dict[str, Any]) -> str | None:
     return None
 
 
-def render_mcp_summary(servers: list[McpServerSummary], *, limit: int = 10) -> str:
+def render_mcp_summary(
+    servers: list[McpServerSummary],
+    *,
+    instructions: Mapping[tuple[str, str, str], McpInstructionsPreview] | None = None,
+    limit: int = 10,
+) -> str:
     """Render MCP declarations for the system prompt."""
     if not servers:
         return "None declared."
     lines = []
     for server in servers[:limit]:
-        lines.append(
-            f'<mcp_server name="{_xml_attr(server.name)}" scope="{_xml_attr(server.scope)}" '
-            f'config="{_xml_attr(server.path)}">{_xml_text(server.description)}</mcp_server>'
-        )
+        lines.append(render_mcp_entry(server, instructions.get(server.key) if instructions else None))
     if len(servers) > limit:
         lines.append(f'<omitted_mcp_servers count="{len(servers) - limit}" />')
     return "\n".join(lines)
+
+
+def render_mcp_entry(
+    server: McpServerSummary,
+    instructions: McpInstructionsPreview | None = None,
+) -> str:
+    attrs = (
+        f'name="{_xml_attr(server.name)}" scope="{_xml_attr(server.scope)}" '
+        f'config="{_xml_attr(server.path)}"'
+    )
+    if instructions is None:
+        return f"<mcp_server {attrs}>{_xml_text(server.description)}</mcp_server>"
+    truncated = "true" if instructions.truncated else "false"
+    return "\n".join(
+        [
+            f"<mcp_server {attrs}>",
+            f"<description>{_xml_text(server.description)}</description>",
+            f'<instructions truncated="{truncated}">{_xml_text(instructions.text)}</instructions>',
+            "</mcp_server>",
+        ]
+    )
 
 
 def _xml_attr(value: object) -> str:

@@ -382,13 +382,16 @@ if threads:
 ]]></example>
 </helper>
 <helper name="mcp">
-<description>Use to discover and call declared MCP servers from Python through the official MCP SDK. Declarations may use stdio, streamable_http, or sse transport. Call list_declared_servers(), connect_named(name), connect_declared(name, config_path), or connect_url(url); MCP is not a direct model tool.</description>
+<description>Use to discover and call declared MCP servers from Python through the official MCP SDK. Declarations may use stdio, streamable_http, or sse transport. Call list_declared_servers(), connect_named(name), connect_declared(name, config_path), or connect_url(url); MCP is not a direct model tool. When using an MCP server, call client.initialize() first and inspect its returned instructions before listing or calling tools. The available_mcp_servers context may include only a truncated instructions preview.</description>
 <example><![CDATA[
 from uv_agent_runtime import connect_named, connect_url, list_declared_servers
 
 print(list_declared_servers())
 with connect_named("server-name") as client:
-    client.initialize()
+    init = client.initialize()
+    instructions = init.value.get("instructions")
+    if instructions:
+        print(instructions)
     print(client.list_tools())
 
 with connect_url("http://localhost:3001/mcp") as client:

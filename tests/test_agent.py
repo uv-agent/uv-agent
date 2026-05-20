@@ -30,6 +30,7 @@ from uv_agent.config import (
     load_config,
 )
 from uv_agent.errors import format_error, is_retryable_provider_error
+from uv_agent.mcp_config import McpInstructionsPreview
 from uv_agent.model import (
     FakeModelClient,
     ModelStreamEvent,
@@ -117,6 +118,21 @@ class ReasoningStreamClient(FakeModelClient):
                 }
             ),
         )
+
+
+class FakeMcpInstructionsProbe:
+    def __init__(
+        self,
+        instructions: dict[tuple[str, str, str], McpInstructionsPreview] | None = None,
+    ) -> None:
+        self.instructions = instructions or {}
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def snapshot(self) -> dict[tuple[str, str, str], McpInstructionsPreview]:
+        return dict(self.instructions)
 
 
 class CompletedOnlyStreamClient(FakeModelClient):
@@ -2040,9 +2056,18 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     skill_dir = project_root / ".agents" / "skills" / "demo"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
-    (project_root / ".agents" / "mcp.json").write_text(
+    mcp_path = project_root / ".agents" / "mcp.json"
+    mcp_path.write_text(
         "{\"servers\":{\"demo\":{\"command\":\"python\",\"description\":\"Demo MCP\"}}}",
         encoding="utf-8",
+    )
+    mcp_probe = FakeMcpInstructionsProbe(
+        {
+            ("project", "demo", str(mcp_path)): McpInstructionsPreview(
+                "Use demo tools carefully.",
+                truncated=False,
+            )
+        }
     )
     config = load_config(project_root, [])
     runner = PythonRunner(
@@ -2059,6 +2084,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
         runner=runner,
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
+        mcp_instructions_probe=mcp_probe,
     )
 
     prompt = engine.system_instructions()
@@ -2161,6 +2187,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "*** Update File: src/app.py" in turn_context
     assert "connect_named(\"server-name\")" in turn_context
     assert "client.initialize()" in turn_context
+    assert "inspect its returned instructions" in turn_context
     assert "nested uv-agent subagent" in turn_context
     assert 'level="small"' not in prompt
     assert "pathlib" in prompt
@@ -2175,7 +2202,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert '<skill name="demo" scope="project"' in turn_context
     assert "available_mcp_servers" in turn_context
     assert '<mcp_server name="demo" scope="project"' in turn_context
-    assert ">Demo MCP</mcp_server>" in turn_context
+    assert "<description>Demo MCP</description>" in turn_context
+    assert '<instructions truncated="false">Use demo tools carefully.</instructions>' in turn_context
+    assert mcp_probe.started is True
     assert "Use these skills when one matches the task" in turn_context
     assert "Use these MCP servers when they fit the task" in turn_context
 
@@ -2210,6 +2239,7 @@ def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_p
         runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
+        mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
 
     prompt = engine.system_instructions()
@@ -2784,8 +2814,9 @@ def test_runtime_context_skill_change_sends_incremental_section_only(tmp_path: P
     assert "<model_levels>" in str(first)
     assert "<runtime_helpers>" in str(first)
     text = str(second)
-    assert "changed: skills" in text
-    assert "<available_skills>" in text
+    assert "changed:" not in text
+    assert "fingerprint:" not in text
+    assert "<available_skills>" not in text
     assert '<skill name="demo" scope="project"' in text
     assert "<runtime_environment>" not in text
     assert "<model_levels>" not in text
@@ -2808,6 +2839,7 @@ def test_runtime_context_mcp_removal_sends_removal_only(tmp_path: Path) -> None:
         runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
+        mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
     thread_id = engine.thread_store.create_thread()
 
@@ -2817,12 +2849,107 @@ def test_runtime_context_mcp_removal_sends_removal_only(tmp_path: Path) -> None:
 
     assert "<available_mcp_servers>" in str(first)
     text = str(second)
-    assert "removed: mcp" in text
+    assert "removed:" not in text
+    assert "fingerprint:" not in text
     assert "<context_update_removed id=\"runtime_context\">" in text
+    assert '<removed_mcp_server name="demo" scope="project"' in text
     assert "<available_mcp_servers>" not in text
+    assert '<mcp_server name="demo"' not in text
     assert "<runtime_environment>" not in text
     assert "<model_levels>" not in text
     assert "<runtime_helpers>" not in text
+
+
+def test_runtime_context_mcp_instruction_change_sends_single_server_only(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    agents_dir = project_root / ".agents"
+    agents_dir.mkdir(parents=True)
+    mcp_path = agents_dir / "mcp.json"
+    mcp_path.write_text(
+        json.dumps(
+            {
+                "servers": {
+                    "first": {"command": "python", "description": "First MCP"},
+                    "second": {"command": "python", "description": "Second MCP"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = make_test_config(project_root)
+    probe = FakeMcpInstructionsProbe()
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+        mcp_instructions_probe=probe,
+    )
+    thread_id = engine.thread_store.create_thread()
+
+    first = engine._runtime_context_items(thread_id)
+    probe.instructions[("project", "second", str(mcp_path))] = McpInstructionsPreview(
+        "Use the second MCP carefully.",
+        truncated=False,
+    )
+    second = engine._runtime_context_items(thread_id)
+
+    assert '<mcp_server name="first"' in str(first)
+    assert '<mcp_server name="second"' in str(first)
+    text = str(second)
+    assert "changed:" not in text
+    assert "fingerprint:" not in text
+    assert '<mcp_server name="second" scope="project"' in text
+    assert '<instructions truncated="false">Use the second MCP carefully.</instructions>' in text
+    assert '<mcp_server name="first"' not in text
+    assert "<available_mcp_servers>" not in text
+
+
+def test_runtime_context_restart_preserves_mcp_instructions_until_probe_refresh(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    agents_dir = project_root / ".agents"
+    agents_dir.mkdir(parents=True)
+    mcp_path = agents_dir / "mcp.json"
+    mcp_path.write_text(
+        json.dumps(
+            {"servers": {"demo": {"command": "python", "description": "Demo MCP"}}}
+        ),
+        encoding="utf-8",
+    )
+    config = make_test_config(project_root)
+    store = ThreadStore(tmp_path / "state")
+    probe = FakeMcpInstructionsProbe(
+        {
+            ("project", "demo", str(mcp_path)): McpInstructionsPreview(
+                "Use persisted MCP instructions.",
+                truncated=False,
+            )
+        }
+    )
+    first_engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=store,
+        project_root=project_root,
+        mcp_instructions_probe=probe,
+    )
+    thread_id = store.create_thread()
+
+    first = first_engine._runtime_context_items(thread_id)
+    restarted_engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+        mcp_instructions_probe=FakeMcpInstructionsProbe(),
+    )
+    second = restarted_engine._runtime_context_items(thread_id)
+
+    assert '<instructions truncated="false">Use persisted MCP instructions.</instructions>' in str(first)
+    assert second == []
 
 
 def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> None:

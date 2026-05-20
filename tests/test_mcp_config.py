@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from uv_agent.mcp_config import discover_mcp_servers, render_mcp_summary
+from uv_agent.mcp_config import McpInstructionsPreview, discover_mcp_servers, render_mcp_summary
 
 
 def test_discover_mcp_servers_from_agents_dir(tmp_path: Path) -> None:
@@ -89,3 +89,35 @@ def test_render_mcp_summary_escapes_xml_text(tmp_path: Path) -> None:
 
     assert '<mcp_server name="web&amp;files"' in summary
     assert ">Read &amp; write &lt;files&gt;</mcp_server>" in summary
+
+
+def test_render_mcp_summary_includes_instruction_preview(tmp_path: Path) -> None:
+    agents_dir = tmp_path / ".agents"
+    agents_dir.mkdir()
+    (agents_dir / "mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": {
+                    "files": {
+                        "command": "python",
+                        "description": "File helpers",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    servers = discover_mcp_servers(tmp_path)
+
+    summary = render_mcp_summary(
+        servers,
+        instructions={
+            servers[0].key: McpInstructionsPreview(
+                "Use & inspect <paths>",
+                truncated=True,
+            )
+        },
+    )
+
+    assert "<description>File helpers</description>" in summary
+    assert '<instructions truncated="true">Use &amp; inspect &lt;paths&gt;</instructions>' in summary

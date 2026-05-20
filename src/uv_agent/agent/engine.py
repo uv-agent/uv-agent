@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from html import escape as xml_escape
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -30,7 +31,8 @@ from uv_agent.environment import detect_user_language, host_environment
 from uv_agent.errors import is_retryable_provider_error
 from uv_agent.ids import new_id
 from uv_agent.agent.messages import assistant_output_item, message_item, message_item_text
-from uv_agent.mcp_config import discover_mcp_servers, render_mcp_summary
+from uv_agent.mcp_config import McpInstructionsPreview, McpServerSummary, discover_mcp_servers, render_mcp_entry
+from uv_agent.mcp_probe import McpInstructionsProbe
 from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
 from uv_agent.agent.prompts import (
@@ -50,7 +52,7 @@ from uv_agent.project_rules import (
 )
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
 from uv_agent.session.store import ThreadSnapshot, ThreadStore
-from uv_agent.skills import discover_skills, render_skill_summary
+from uv_agent.skills import SkillSummary, discover_skills, render_skill_entry
 from uv_agent.agent.tool_results import function_output, model_tool_payload
 
 
@@ -59,6 +61,80 @@ DEFAULT_THREAD_TITLES = {"New thread", "new thread", "新会话"}
 
 class TurnInterrupted(Exception):
     """Raised internally when the active turn is interrupted by the user."""
+
+
+def _context_item_id(key: tuple[str, str, str]) -> str:
+    scope, name, path = key
+    return f"{scope}:{name}:{context_fingerprint(path)}"
+
+
+def _context_state_parts(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not state:
+        return {}
+    raw_parts = state.get("parts")
+    if not isinstance(raw_parts, dict):
+        return {}
+    parts: dict[str, dict[str, Any]] = {}
+    for key, value in raw_parts.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, dict):
+            fingerprint = value.get("fingerprint")
+            if isinstance(fingerprint, str):
+                parts[key] = {
+                    "fingerprint": fingerprint,
+                    "kind": str(value.get("kind") or ""),
+                    "dynamic": bool(value.get("dynamic")),
+                    "metadata": value.get("metadata") if isinstance(value.get("metadata"), dict) else {},
+                }
+        elif isinstance(value, str):
+            parts[key] = {
+                "fingerprint": value,
+                "kind": key,
+                "dynamic": key in {"skills", "mcp"},
+                "metadata": {},
+            }
+    return parts
+
+
+def _removed_context_text(removed: list[str], previous_parts: dict[str, dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for item_id in removed:
+        metadata = previous_parts.get(item_id, {}).get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        kind = str(metadata.get("kind") or "")
+        name = metadata.get("name")
+        scope = metadata.get("scope")
+        path = metadata.get("path") or metadata.get("config")
+        if kind == "skill" and name and scope:
+            lines.append(
+                f'\n<removed_skill name="{_xml_attr(name)}" scope="{_xml_attr(scope)}" path="{_xml_attr(path or "")}" />'
+            )
+        elif kind == "mcp" and name and scope:
+            lines.append(
+                f'\n<removed_mcp_server name="{_xml_attr(name)}" scope="{_xml_attr(scope)}" config="{_xml_attr(path or "")}" />'
+            )
+    return "".join(lines)
+
+
+def _xml_attr(value: object) -> str:
+    return xml_escape(str(value), quote=True)
+
+
+def _mcp_preview_from_metadata(value: object) -> McpInstructionsPreview | None:
+    if not isinstance(value, dict):
+        return None
+    text = value.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    return McpInstructionsPreview(text=text, truncated=bool(value.get("truncated")))
+
+
+def _mcp_preview_metadata(preview: McpInstructionsPreview | None) -> dict[str, Any] | None:
+    if preview is None:
+        return None
+    return {"text": preview.text, "truncated": preview.truncated}
 
 
 @dataclass
@@ -140,6 +216,15 @@ class ToolCallTurnResult:
     output_event: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ContextPart:
+    id: str
+    kind: str
+    text: str
+    dynamic: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 class AgentEngine:
     def __init__(
         self,
@@ -150,6 +235,7 @@ class AgentEngine:
         thread_store: ThreadStore,
         project_root: Path,
         config_loader: Callable[[], AppConfig] | None = None,
+        mcp_instructions_probe: McpInstructionsProbe | None = None,
     ) -> None:
         self.config = config
         self.model_client = model_client
@@ -161,6 +247,8 @@ class AgentEngine:
         self._config_loader = config_loader
         self._host_environment = host_environment()
         self._rule_states: dict[str, RuleRuntimeState] = {}
+        self._mcp_instructions_probe = mcp_instructions_probe or McpInstructionsProbe(self.project_root)
+        self._mcp_instructions_probe.start()
 
     def refresh_config(self, *, force: bool = False) -> None:
         """Reload user/project config for long-running sessions."""
@@ -1622,38 +1710,66 @@ class AgentEngine:
         return "." if not relative.parts else relative.as_posix()
 
     def _turn_context_update(self, thread_id: str | None) -> dict[str, Any] | None:
-        parts = self._turn_context_parts()
-        full_rendered = "\n\n".join(parts.values())
-        fingerprint = context_fingerprint(full_rendered)
-        state = {key: context_fingerprint(value) for key, value in parts.items()}
         previous = self._latest_context_state(thread_id) if thread_id else None
+        previous_parts = _context_state_parts(previous)
+        parts = self._turn_context_parts(previous_parts=previous_parts)
+        full_rendered = "\n\n".join(part.text for part in parts)
+        fingerprint = context_fingerprint(full_rendered)
+        state_parts = {
+            part.id: {
+                "fingerprint": context_fingerprint(part.text),
+                "kind": part.kind,
+                "dynamic": part.dynamic,
+                "metadata": part.metadata,
+            }
+            for part in parts
+        }
         previous_fingerprint = previous.get("fingerprint") if previous else None
         if previous_fingerprint == fingerprint:
             return None
-        previous_parts = previous.get("parts", {}) if previous else {}
-        dynamic_kinds = {"skills", "mcp"}
         initial = previous_fingerprint is None
         if initial:
-            removed = [key for key in previous_parts if key not in state]
-            changed = [key for key in state if previous_parts.get(key) != state[key]]
+            removed = [key for key in previous_parts if key not in state_parts]
+            changed = [
+                part.id
+                for part in parts
+                if previous_parts.get(part.id, {}).get("fingerprint")
+                != state_parts[part.id]["fingerprint"]
+            ]
             rendered_parts = parts
         else:
-            removed = [key for key in previous_parts if key in dynamic_kinds and key not in state]
-            changed = [
+            current_kinds = {part.kind for part in parts}
+            previous_dynamic = {
                 key
-                for key in parts
-                if key in dynamic_kinds and previous_parts.get(key) != state[key]
+                for key, value in previous_parts.items()
+                if value.get("dynamic")
+                or key in {"skills", "mcp"}
+                or (value.get("kind") in {"skills", "mcp"} and value.get("kind") not in current_kinds)
+            }
+            current_dynamic = {part.id for part in parts if part.dynamic}
+            changed = [
+                part.id
+                for part in parts
+                if part.dynamic
+                and previous_parts.get(part.id, {}).get("fingerprint")
+                != state_parts[part.id]["fingerprint"]
+            ]
+            removed = [
+                key
+                for key in previous_dynamic
+                if key not in current_dynamic
             ]
             if not changed and not removed:
                 return None
-            rendered_parts = {key: parts[key] for key in changed}
-        rendered = "\n\n".join(rendered_parts.values())
+            changed_set = set(changed)
+            rendered_parts = [part for part in parts if part.id in changed_set]
+        rendered = "\n\n".join(part.text for part in rendered_parts)
         if not full_rendered:
             if previous_fingerprint is None:
                 return None
             return {
                 "fingerprint": fingerprint,
-                "state": {"fingerprint": fingerprint, "parts": state},
+                "state": {"fingerprint": fingerprint, "parts": state_parts},
                 "removed": removed or sorted(previous_parts),
                 "text": (
                     "<context_update id=\"runtime_context\" status=\"removed\">\n"
@@ -1665,24 +1781,23 @@ class AgentEngine:
         if removed:
             removed_text = (
                 "\n\n<context_update_removed id=\"runtime_context\">\n"
-                f"Removed context kinds: {', '.join(removed)}. "
-                "Do not rely on older appended content for these kinds unless it appears again.\n"
+                "Some previously available runtime context is no longer present. "
+                "Do not rely on older appended content for removed skills or MCP servers unless they appear again.\n"
+                + _removed_context_text(removed, previous_parts)
+                + "\n"
                 "</context_update_removed>"
             )
         else:
             removed_text = ""
         prefix = (
             "<context_update id=\"runtime_context\" status=\"current\">\n"
-            "The following runtime context sections are current. This update replaces older content for the listed sections.\n"
-            f"fingerprint: {fingerprint}\n"
-            + (f"removed: {', '.join(removed)}\n" if removed else "")
-            + (f"changed: {', '.join(changed)}\n" if changed else "")
+            "The following runtime context is current. It updates only the listed content; prior runtime context remains current unless explicitly removed.\n"
             + "</context_update>"
         )
         text = prefix + removed_text + ("\n\n" + rendered if rendered else "")
         return {
             "fingerprint": fingerprint,
-            "state": {"fingerprint": fingerprint, "parts": state},
+            "state": {"fingerprint": fingerprint, "parts": state_parts},
             "removed": removed,
             "text": text,
         }
@@ -1701,32 +1816,122 @@ class AgentEngine:
         return None
 
     def _turn_context_text(self) -> str:
-        return "\n\n".join(self._turn_context_parts().values())
+        return "\n\n".join(part.text for part in self._turn_context_parts())
 
-    def _turn_context_parts(self) -> dict[str, str]:
-        sections: dict[str, str] = {
-            "runtime_environment": self._runtime_environment_context(),
-            "model_levels": self._model_levels_context(),
-            "runtime_helpers": self._runtime_helpers_context(),
-        }
-        skills = render_skill_summary(discover_skills(self.project_root))
-        if skills != "None discovered.":
-            sections["skills"] = (
-                "<available_skills>\n"
-                "Use these skills when one matches the task; read the listed SKILL.md with Python before applying it.\n"
-                f"{skills}\n"
-                "</available_skills>"
-            )
+    def _turn_context_parts(
+        self,
+        *,
+        previous_parts: dict[str, dict[str, Any]] | None = None,
+    ) -> list[ContextPart]:
+        previous_parts = previous_parts or {}
+        parts: list[ContextPart] = [
+            ContextPart("runtime_environment", "runtime_environment", self._runtime_environment_context()),
+            ContextPart("model_levels", "model_levels", self._model_levels_context()),
+            ContextPart("runtime_helpers", "runtime_helpers", self._runtime_helpers_context()),
+        ]
+        skills = discover_skills(self.project_root)
+        if skills:
+            parts.extend(self._skill_context_parts(skills))
 
-        mcp_servers = render_mcp_summary(discover_mcp_servers(self.project_root))
-        if mcp_servers != "None declared.":
-            sections["mcp"] = (
-                "<available_mcp_servers>\n"
-                "Use these MCP servers when they fit the task; inspect and call them through uv_agent_runtime MCP helpers from Python.\n"
-                f"{mcp_servers}\n"
-                "</available_mcp_servers>"
+        mcp_servers = discover_mcp_servers(self.project_root)
+        if mcp_servers:
+            parts.extend(self._mcp_context_parts(mcp_servers, previous_parts=previous_parts))
+        return parts
+
+    def _skill_context_parts(self, skills: list[SkillSummary]) -> list[ContextPart]:
+        parts = [
+            ContextPart(
+                "skills/header",
+                "skills",
+                (
+                    "<available_skills>\n"
+                    "Use these skills when one matches the task; read the listed SKILL.md with Python before applying it."
+                ),
             )
-        return sections
+        ]
+        for skill in skills[:10]:
+            parts.append(
+                ContextPart(
+                    f"skills/{_context_item_id(skill.key)}",
+                    "skills",
+                    render_skill_entry(skill),
+                    dynamic=True,
+                    metadata={
+                        "kind": "skill",
+                        "name": skill.name,
+                        "scope": skill.scope,
+                        "path": str(skill.path),
+                    },
+                )
+            )
+        if len(skills) > 10:
+            parts.append(
+                ContextPart(
+                    "skills/omitted",
+                    "skills",
+                    f'<omitted_skills count="{len(skills) - 10}" />',
+                    dynamic=True,
+                )
+            )
+        parts.append(ContextPart("skills/footer", "skills", "</available_skills>"))
+        return parts
+
+    def _mcp_context_parts(
+        self,
+        servers: list[McpServerSummary],
+        *,
+        previous_parts: dict[str, dict[str, Any]],
+    ) -> list[ContextPart]:
+        instructions = self._mcp_instructions_probe.snapshot()
+        parts = [
+            ContextPart(
+                "mcp/header",
+                "mcp",
+                (
+                    "<available_mcp_servers>\n"
+                    "Use these MCP servers when they fit the task; inspect and call them through uv_agent_runtime MCP helpers from Python."
+                ),
+            )
+        ]
+        for server in servers[:10]:
+            part_id = f"mcp/{_context_item_id(server.key)}"
+            previous_metadata = previous_parts.get(part_id, {}).get("metadata")
+            previous_instructions = _mcp_preview_from_metadata(
+                previous_metadata.get("instructions")
+                if isinstance(previous_metadata, dict)
+                else None
+            )
+            preview = instructions.get(server.key) or (
+                previous_instructions
+                if previous_instructions is not None
+                else None
+            )
+            parts.append(
+                ContextPart(
+                    part_id,
+                    "mcp",
+                    render_mcp_entry(server, preview),
+                    dynamic=True,
+                    metadata={
+                        "kind": "mcp",
+                        "name": server.name,
+                        "scope": server.scope,
+                        "config": str(server.path),
+                        "instructions": _mcp_preview_metadata(preview),
+                    },
+                )
+            )
+        if len(servers) > 10:
+            parts.append(
+                ContextPart(
+                    "mcp/omitted",
+                    "mcp",
+                    f'<omitted_mcp_servers count="{len(servers) - 10}" />',
+                    dynamic=True,
+                )
+            )
+        parts.append(ContextPart("mcp/footer", "mcp", "</available_mcp_servers>"))
+        return parts
 
     def project_rule_context(self) -> ProjectRuleContext:
         """Load AGENTS.md context for status/debug display."""
