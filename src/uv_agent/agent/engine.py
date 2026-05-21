@@ -55,11 +55,8 @@ from uv_agent.project_rules import (
 from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
 from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.skills import SkillSummary, discover_skills, render_skill_entry
+from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.agent.tool_results import function_output, model_tool_payload
-
-
-DEFAULT_THREAD_TITLES = {"New thread", "new thread", "新会话"}
-
 
 async def _sleep_stream_retry(delay_s: float) -> None:
     await asyncio.sleep(delay_s)

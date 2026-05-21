@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from functools import lru_cache
 from typing import Any
-
-from openai import AsyncOpenAI
-from openai.resources.chat.completions import AsyncCompletions
 
 from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.errors import EmptyModelStreamError
@@ -16,7 +14,6 @@ from uv_agent.model.content import (
     chat_tool,
     chat_tool_acc_from_message,
 )
-from uv_agent.model.openai_sdk import openai_client
 from uv_agent.model.sdk import model_param_sources, object_dump, sdk_kwargs, sdk_param_keys
 from uv_agent.model.types import ModelResponse, ModelStreamEvent, ToolCallDelta
 
@@ -28,10 +25,18 @@ CHAT_DELTA_CONTROL_FIELDS = {
     "function_call",
     "refusal",
 }
-CHAT_COMPLETIONS_SDK_PARAM_KEYS = sdk_param_keys(AsyncCompletions.create)
 EMPTY_CHAT_COMPLETIONS_STREAM_MESSAGE = (
     "Chat completions stream ended without returning content, reasoning, or tool calls"
 )
+
+
+@lru_cache(maxsize=1)
+def chat_completions_sdk_param_keys() -> set[str]:
+    """Return Chat Completions SDK parameter names, importing OpenAI lazily."""
+
+    from openai.resources.chat.completions import AsyncCompletions
+
+    return sdk_param_keys(AsyncCompletions.create)
 
 
 def chat_payload(
@@ -75,7 +80,7 @@ def chat_create_kwargs(
     return sdk_kwargs(
         payload,
         model_param_sources(provider, model, "chat_completions"),
-        CHAT_COMPLETIONS_SDK_PARAM_KEYS,
+        chat_completions_sdk_param_keys(),
     )
 
 
@@ -107,8 +112,10 @@ async def create_chat_response(
     input_items: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     instructions: str | None,
-    client: AsyncOpenAI | None = None,
+    client: Any | None = None,
 ) -> ModelResponse:
+    from uv_agent.model.openai_sdk import openai_client
+
     client = client or openai_client(provider, model.api, CHAT_COMPLETIONS_PATH)
     response = await client.chat.completions.create(
         **chat_create_kwargs(
@@ -129,14 +136,16 @@ async def stream_chat_response(
     input_items: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     instructions: str | None,
-    client: AsyncOpenAI | None = None,
+    client: Any | None = None,
 ) -> AsyncIterator[ModelStreamEvent]:
+    from uv_agent.model.openai_sdk import openai_client
+
     client = client or openai_client(provider, model.api, CHAT_COMPLETIONS_PATH)
     payload = chat_payload(provider, model, input_items, tools, instructions, stream=True)
     payload_kwargs = sdk_kwargs(
         payload,
         model_param_sources(provider, model, "chat_completions"),
-        CHAT_COMPLETIONS_SDK_PARAM_KEYS,
+        chat_completions_sdk_param_keys(),
     )
     stream = await client.chat.completions.create(**payload_kwargs)
     text_parts: list[str] = []

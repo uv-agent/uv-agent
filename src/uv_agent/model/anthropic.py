@@ -3,11 +3,8 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator
+from functools import lru_cache
 from typing import Any
-
-from anthropic import AsyncAnthropic
-from anthropic.resources.messages import AsyncMessages
-from anthropic.types import Message
 
 from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.errors import EmptyModelStreamError
@@ -17,10 +14,18 @@ from uv_agent.model.types import ModelResponse, ModelStreamEvent
 
 
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
-ANTHROPIC_SDK_PARAM_KEYS = sdk_param_keys(AsyncMessages.create)
 EMPTY_ANTHROPIC_STREAM_MESSAGE = (
     "Anthropic messages stream ended without returning content, reasoning, or tool calls"
 )
+
+
+@lru_cache(maxsize=1)
+def anthropic_sdk_param_keys() -> set[str]:
+    """Return Anthropic SDK parameter names, importing the SDK lazily."""
+
+    from anthropic.resources.messages import AsyncMessages
+
+    return sdk_param_keys(AsyncMessages.create)
 
 
 def anthropic_payload(
@@ -158,7 +163,9 @@ def anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def anthropic_client(provider: ProviderConfig) -> AsyncAnthropic:
+def anthropic_client(provider: ProviderConfig) -> Any:
+    from anthropic import AsyncAnthropic
+
     return AsyncAnthropic(
         api_key=provider.resolved_api_key(),
         base_url=anthropic_sdk_base_url(provider),
@@ -183,14 +190,14 @@ def anthropic_create_kwargs(
     return sdk_kwargs(
         payload,
         model_param_sources(provider, model, "anthropic_messages"),
-        ANTHROPIC_SDK_PARAM_KEYS,
+        anthropic_sdk_param_keys(),
     )
 
 
 def endpoint_extra_body(provider: ProviderConfig, model: ModelConfig) -> dict[str, Any] | None:
     return sdk_extra_body(
         model_param_sources(provider, model, "anthropic_messages"),
-        ANTHROPIC_SDK_PARAM_KEYS,
+        anthropic_sdk_param_keys(),
     )
 
 
@@ -201,7 +208,7 @@ async def create_anthropic_response(
     input_items: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     instructions: str | None,
-    client: AsyncAnthropic | None = None,
+    client: Any | None = None,
 ) -> ModelResponse:
     client = client or anthropic_client(provider)
     response = await client.messages.create(
@@ -223,7 +230,7 @@ async def stream_anthropic_response(
     input_items: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     instructions: str | None,
-    client: AsyncAnthropic | None = None,
+    client: Any | None = None,
 ) -> AsyncIterator[ModelStreamEvent]:
     client = client or anthropic_client(provider)
     text_parts: list[str] = []
@@ -295,5 +302,5 @@ async def stream_anthropic_response(
             return
 
 
-def parse_anthropic_message(message: Message) -> ModelResponse:
+def parse_anthropic_message(message: Any) -> ModelResponse:
     return parse_anthropic_response(object_dump(message))

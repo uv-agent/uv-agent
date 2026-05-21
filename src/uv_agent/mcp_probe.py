@@ -8,11 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamable_http_client
-
 from uv_agent.mcp_config import McpInstructionsPreview, McpServerSummary, discover_mcp_servers
 
 MCP_INSTRUCTIONS_PREVIEW_CHARS = 500
@@ -90,6 +85,14 @@ def _probe_server(server: McpServerSummary, *, cwd: Path) -> McpProbeResult | No
 
 
 async def _initialize_server(config: McpProbeServerConfig) -> Any:
+    # The MCP SDK imports a sizeable stack. The probe already runs in a daemon
+    # thread and only needs the SDK when a declared server is actually probed,
+    # so defer these imports to keep normal TUI startup lightweight.
+    from mcp import ClientSession
+    from mcp.client.sse import sse_client
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp.client.streamable_http import streamable_http_client
+
     async def run_initialize() -> Any:
         async with AsyncExitStack() as stack:
             if config.transport == "stdio":

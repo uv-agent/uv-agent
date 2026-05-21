@@ -14,7 +14,6 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets._option_list import Option
-from textual_image.widget import Image as TerminalImage
 
 from uv_agent.tui.formatting import format_tokens, tool_detail_markup
 from uv_agent.tui.state import PanelPage, PendingImage, PickerItem
@@ -509,36 +508,67 @@ def _update_static_if_changed(widget: Static, markup: str) -> None:
     widget.update(markup)
 
 
-class StableTerminalImage(TerminalImage, Renderable=TerminalImage._Renderable):
-    """A :class:`TerminalImage` that caches its renderable across renders.
+_TERMINAL_IMAGE_CLASS: type[Any] | None = None
+_STABLE_TERMINAL_IMAGE_CLASS: type[Any] | None = None
 
-    The upstream widget rebuilds the renderable (and so re-encodes / retransmits
-    the image bytes) on every :py:meth:`render` call. Textual invokes
-    :py:meth:`render` for many unrelated reasons (focus changes, layout
-    invalidation, scroll updates), and the repeated re-encode is what users
-    perceive as the image preview "flickering" when navigating with j/k or
-    scrolling. We memoize the renderable keyed by ``(image identity, styled
-    size)`` and only recreate it when one of those actually changes. The
-    ``image`` setter already clears ``self._renderable``, so swapping images
-    naturally invalidates the cache without extra wiring.
+
+def _terminal_image_class() -> type[Any]:
+    """Return textual-image's widget class, importing it only for previews."""
+
+    global _TERMINAL_IMAGE_CLASS
+    if _TERMINAL_IMAGE_CLASS is None:
+        from textual_image.widget import Image as TerminalImage
+
+        _TERMINAL_IMAGE_CLASS = TerminalImage
+    return _TERMINAL_IMAGE_CLASS
+
+
+def _stable_terminal_image_class() -> type[Any]:
+    """Build the cached image widget class lazily.
+
+    ``textual_image`` is optional until a user opens an image preview. Creating
+    this subclass on demand preserves the existing flicker fix without importing
+    the image backend during ordinary text-only startup.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._stable_size: tuple[Any, Any] | None = None
+    global _STABLE_TERMINAL_IMAGE_CLASS
+    if _STABLE_TERMINAL_IMAGE_CLASS is not None:
+        return _STABLE_TERMINAL_IMAGE_CLASS
+    TerminalImage = _terminal_image_class()
 
-    def render(self) -> Any:
-        if not self._image:
-            self._stable_size = None
-            return ""
-        size = self._get_styled_size()
-        if self._renderable is not None and self._stable_size == size:
+    class StableTerminalImage(TerminalImage, Renderable=TerminalImage._Renderable):  # type: ignore[misc, valid-type]
+        """A :class:`TerminalImage` that caches its renderable across renders.
+
+        The upstream widget rebuilds the renderable (and so re-encodes /
+        retransmits the image bytes) on every :py:meth:`render` call. Textual
+        invokes :py:meth:`render` for many unrelated reasons (focus changes,
+        layout invalidation, scroll updates), and the repeated re-encode is what
+        users perceive as the image preview "flickering" when navigating with
+        j/k or scrolling. We memoize the renderable keyed by ``(image identity,
+        styled size)`` and only recreate it when one of those actually changes.
+        The ``image`` setter already clears ``self._renderable``, so swapping
+        images naturally invalidates the cache without extra wiring.
+        """
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._stable_size: tuple[Any, Any] | None = None
+
+        def render(self) -> Any:
+            if not self._image:
+                self._stable_size = None
+                return ""
+            size = self._get_styled_size()
+            if self._renderable is not None and self._stable_size == size:
+                return self._renderable
+            if self._renderable is not None:
+                self._renderable.cleanup()
+            self._renderable = self._Renderable(self._image, *size)
+            self._stable_size = size
             return self._renderable
-        if self._renderable is not None:
-            self._renderable.cleanup()
-        self._renderable = self._Renderable(self._image, *size)
-        self._stable_size = size
-        return self._renderable
+
+    _STABLE_TERMINAL_IMAGE_CLASS = StableTerminalImage
+    return StableTerminalImage
 
 
 class ImagePreviewPanel(FullscreenPanel):
@@ -571,7 +601,7 @@ class ImagePreviewPanel(FullscreenPanel):
                 yield Static(self.subtitle, id="panel-subtitle")
             with VerticalScroll(id="image-preview-scroll"):
                 yield Static("", markup=True, id="image-preview-meta")
-                yield StableTerminalImage(id="image-preview")
+                yield _stable_terminal_image_class()(id="image-preview")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def _render_page(self, *, filter_value: str = "", highlighted: int | None = None) -> None:
@@ -640,7 +670,7 @@ class ImagePreviewPanel(FullscreenPanel):
                 _update_static_if_changed(
                     self.query_one("#image-preview-meta", Static), self._attachment_markup()
                 )
-                image_widget = self.query_one("#image-preview", TerminalImage)
+                image_widget = self.query_one("#image-preview", _terminal_image_class())
                 new_image = path if path and path.exists() else None
                 # The upstream setter unconditionally calls ``refresh(layout=True)``
                 # (and on Sixel, ``refresh(recompose=True)``), so we skip the
@@ -709,7 +739,7 @@ class PendingImagePreviewPanel(ImagePreviewPanel):
             yield Button("", variant="error", id="pending-image-delete", compact=True)
             with VerticalScroll(id="image-preview-scroll"):
                 yield Static("", markup=True, id="image-preview-meta")
-                yield StableTerminalImage(id="image-preview")
+                yield _stable_terminal_image_class()(id="image-preview")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def _refresh_current(self) -> None:

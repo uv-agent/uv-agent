@@ -5,7 +5,6 @@ import asyncio
 import sys
 from pathlib import Path
 
-from uv_agent.app_factory import create_engine
 from uv_agent.tui.formatting import parse_tool_payload, short_thread
 
 
@@ -75,6 +74,11 @@ async def _ask(
     parent_script_id: str | None = None,
     project_state_dir: Path | None = None,
 ) -> None:
+    # Ask mode needs the full engine/model stack. Import it here instead of at
+    # CLI module import time so ``uv-agent`` can parse and start TUI mode before
+    # provider SDKs are loaded.
+    from uv_agent.app_factory import create_engine
+
     engine = create_engine(Path.cwd(), data_dir=project_state_dir)
     if thread_id is None and thread_kind == "subagent":
         title = prompt.splitlines()[0].strip()

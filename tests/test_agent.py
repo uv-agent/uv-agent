@@ -222,8 +222,17 @@ def openai_connection_error(message: str = "network down") -> openai.APIConnecti
     return exc
 
 
-def openai_status_error(status_code: int, message: str, body: object | None) -> openai.APIStatusError:
-    exc = openai.APIStatusError.__new__(openai.APIStatusError)
+def openai_status_error(
+    status_code: int,
+    message: str,
+    body: object | None,
+    *,
+    error_cls: type[openai.APIStatusError] = openai.APIStatusError,
+) -> openai.APIStatusError:
+    # Construct SDK exceptions without calling their network-response-heavy
+    # initializers; the error formatter only needs the public attributes real
+    # SDK instances expose.
+    exc = error_cls.__new__(error_cls)
     Exception.__init__(exc, message)
     exc.message = message
     exc.body = body
@@ -1444,6 +1453,21 @@ def test_openai_sdk_status_errors_format_and_retry_like_provider_errors() -> Non
 
     assert error.title == "Provider HTTP 429"
     assert "rate limited" in error.detail
+    assert is_retryable_provider_error(exc) is True
+
+
+def test_openai_sdk_status_error_subclasses_are_retryable_provider_errors() -> None:
+    exc = openai_status_error(
+        502,
+        "bad gateway",
+        {"error": "bad gateway"},
+        error_cls=openai.InternalServerError,
+    )
+
+    error = format_error(exc)
+
+    assert error.title == "Provider HTTP 502"
+    assert "bad gateway" in error.detail
     assert is_retryable_provider_error(exc) is True
 
 

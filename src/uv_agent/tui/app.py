@@ -10,7 +10,6 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
-from rich.markdown import Markdown
 from rich.markup import escape
 from textual import events
 from textual.app import App, ComposeResult
@@ -24,10 +23,7 @@ from textual.selection import Selection
 from textual.widgets import Button, Static, TextArea
 from textual.worker import Worker
 
-from uv_agent.agent import DEFAULT_THREAD_TITLES
-from uv_agent.app_factory import create_engine
 from uv_agent.billing import billing_total_from_metadata, format_billing_total
-from uv_agent.clipboard import ClipboardImageError, save_clipboard_image
 from uv_agent.config import ConfigError
 from uv_agent.environment import application_version, detect_user_language, host_environment_line
 from uv_agent.errors import (
@@ -40,6 +36,7 @@ from uv_agent.i18n import command_description, tr
 from uv_agent.notifications import play_completion_sound
 from uv_agent.paths import project_state_dir, uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
+from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.time import utc_now_iso
 from uv_agent.tui.config_panels import ConfigPanelMixin
 from uv_agent.tui.formatting import (
@@ -108,6 +105,48 @@ __all__ = [
     "TranscriptScroll",
     "UvAgentApp",
 ]
+
+
+def create_engine(project_root: Path | None = None, *, data_dir: Path | None = None):
+    """Create the agent engine without importing it at TUI module import time.
+
+    Importing ``uv_agent.app_factory`` pulls in the full agent/model stack. This
+    wrapper keeps the existing test monkeypatch seam
+    (``uv_agent.tui.app.create_engine``) while allowing the Textual app module
+    itself to load with fewer provider/MCP dependencies before first paint.
+    """
+
+    from uv_agent.app_factory import create_engine as _create_engine
+
+    return _create_engine(project_root, data_dir=data_dir)
+
+
+def _markdown(text: str):
+    """Return a Rich Markdown renderable, importing Markdown on demand.
+
+    Markdown rendering is only needed once assistant/history text exists. The
+    import pulls markdown-it/Pygments through Rich, so deferring it keeps the
+    first empty composer screen lighter without changing transcript rendering.
+    The leading underscore avoids colliding with common ``markdown`` symbols
+    other modules might re-export here in the future.
+    """
+
+    from rich.markdown import Markdown
+
+    return Markdown(text)
+
+
+def save_clipboard_image(target_dir: Path):
+    """Save a clipboard image while preserving the historical patch seam.
+
+    Tests and external embedders monkeypatch ``uv_agent.tui.app.save_clipboard_image``.
+    Keeping this lightweight wrapper avoids importing Pillow at TUI startup while
+    preserving that module-level hook.
+    """
+
+    from uv_agent.clipboard import save_clipboard_image as _save_clipboard_image
+
+    return _save_clipboard_image(target_dir)
 
 
 COMMAND_SPECS = [
@@ -1479,6 +1518,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if model.supports_images is False:
             self._flash(self._text("image_model_disabled"), severity="error")
             return
+        from uv_agent.clipboard import ClipboardImageError
+
         try:
             image = save_clipboard_image(project_state_dir(self.project_root) / "clipboard")
         except ClipboardImageError as exc:
@@ -1761,7 +1802,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._mark_transcript_content()
             self._assistant_cell = TranscriptCell(classes="assistant")
             self.query_one("#transcript", VerticalScroll).mount(self._assistant_cell)
-        self._assistant_cell.update(Markdown(self._assistant_buffer), copy_text=self._assistant_buffer)
+        self._assistant_cell.update(_markdown(self._assistant_buffer), copy_text=self._assistant_buffer)
         self._scroll_end()
 
     async def _append_assistant_delta(self, text: str) -> None:
@@ -2264,7 +2305,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 if item_type == "message":
                     text = self._message_item_text(item)
                     if text:
-                        mounted.append(self._append_cell(Markdown(text), "assistant", before=before, copy_text=text))
+                        mounted.append(self._append_cell(_markdown(text), "assistant", before=before, copy_text=text))
                 elif item_type == "function_call":
                     mounted.append(self._append_tool_call_history(item, before=before))
         elif event_type == "item.runner_result":

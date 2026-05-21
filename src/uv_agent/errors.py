@@ -3,9 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import anthropic
-import openai
-
 from uv_agent.config import ConfigError
 
 
@@ -30,22 +27,26 @@ def format_error(exc: BaseException) -> DisplayError:
             message=str(exc),
             hint="Open /config and check provider, model, level, and credentials.",
         )
-    if isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
-        response = exc.response
-        preview = str(getattr(exc, "body", "") or response.text)[:800].replace("\n", " ").strip()
+    provider_kind = _provider_error_kind(exc)
+    if provider_kind == "status":
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", getattr(exc, "status_code", "?"))
+        reason = getattr(response, "reason_phrase", "") or "Provider request failed"
+        response_text = getattr(response, "text", "")
+        preview = str(getattr(exc, "body", "") or response_text)[:800].replace("\n", " ").strip()
         return DisplayError(
-            title=f"Provider HTTP {response.status_code}",
-            message=response.reason_phrase or "Provider request failed",
+            title=f"Provider HTTP {status_code}",
+            message=reason,
             hint="Check the configured endpoint, API key, model name, and API format.",
             detail=preview,
         )
-    if isinstance(exc, (openai.APITimeoutError, anthropic.APITimeoutError)):
+    if provider_kind == "timeout":
         return DisplayError(
             title="Provider timeout",
             message=str(exc) or "Provider request timed out",
             hint="Try again, lower the level, or increase provider timeout later.",
         )
-    if isinstance(exc, (openai.APIConnectionError, anthropic.APIConnectionError)):
+    if provider_kind == "connection":
         return DisplayError(
             title="Provider connection error",
             message=str(exc),
@@ -63,19 +64,40 @@ def is_retryable_provider_error(exc: BaseException) -> bool:
     """Return True for transient provider/network failures that can be retried."""
     if isinstance(exc, EmptyModelStreamError):
         return True
-    if isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
-        return exc.status_code == 429 or 500 <= exc.status_code < 600
-    if isinstance(
-        exc,
-        (
-            openai.APITimeoutError,
-            openai.APIConnectionError,
-            anthropic.APITimeoutError,
-            anthropic.APIConnectionError,
-        ),
-    ):
+    provider_kind = _provider_error_kind(exc)
+    if provider_kind == "status":
+        status_code = getattr(exc, "status_code", None)
+        if not isinstance(status_code, int):
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        return status_code == 429 or (isinstance(status_code, int) and 500 <= status_code < 600)
+    if provider_kind in {"timeout", "connection"}:
         return True
     return False
+
+
+def _provider_error_kind(exc: BaseException) -> str:
+    """Classify OpenAI/Anthropic errors without importing provider SDKs.
+
+    The concrete SDK exception classes live in large packages. Importing those
+    packages merely to format an error made TUI startup pay provider import cost
+    even before any model request. Real SDK errors carry distinctive class names,
+    module paths, and base classes; walking the MRO keeps subclasses such as
+    ``openai.InternalServerError`` equivalent to the old ``isinstance`` checks
+    without loading the SDK during startup.
+    """
+
+    for cls in exc.__class__.__mro__:
+        module = cls.__module__.lower()
+        if not (module == "openai" or module.startswith("openai.") or module.startswith("anthropic")):
+            continue
+        name = cls.__name__
+        if name == "APITimeoutError":
+            return "timeout"
+        if name == "APIConnectionError":
+            return "connection"
+        if name == "APIStatusError":
+            return "status"
+    return ""
 
 
 def error_markup(error: DisplayError) -> str:

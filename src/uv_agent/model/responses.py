@@ -2,23 +2,28 @@ from __future__ import annotations
 
 import copy
 from collections.abc import AsyncIterator
+from functools import lru_cache
 from typing import Any
-
-from openai import AsyncOpenAI
-from openai.resources.responses import AsyncResponses
 
 from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.errors import EmptyModelStreamError
 from uv_agent.model.content import extract_responses_text
-from uv_agent.model.openai_sdk import openai_client
 from uv_agent.model.sdk import model_param_sources, object_dump, sdk_kwargs, sdk_param_keys
 from uv_agent.model.types import ModelResponse, ModelStreamEvent
 
 RESPONSES_PATH = "/responses"
-RESPONSES_SDK_PARAM_KEYS = sdk_param_keys(AsyncResponses.create)
 EMPTY_RESPONSES_STREAM_MESSAGE = (
     "Responses stream ended without returning content, reasoning, or tool calls"
 )
+
+
+@lru_cache(maxsize=1)
+def responses_sdk_param_keys() -> set[str]:
+    """Return OpenAI Responses SDK parameter names, importing the SDK lazily."""
+
+    from openai.resources.responses import AsyncResponses
+
+    return sdk_param_keys(AsyncResponses.create)
 
 
 def responses_payload(
@@ -72,7 +77,7 @@ def responses_create_kwargs(
     return sdk_kwargs(
         payload,
         model_param_sources(provider, model, "responses"),
-        RESPONSES_SDK_PARAM_KEYS,
+        responses_sdk_param_keys(),
     )
 
 
@@ -96,8 +101,10 @@ async def create_responses_response(
     tools: list[dict[str, Any]],
     instructions: str | None,
     previous_response_id: str | None,
-    client: AsyncOpenAI | None = None,
+    client: Any | None = None,
 ) -> ModelResponse:
+    from uv_agent.model.openai_sdk import openai_client
+
     client = client or openai_client(provider, model.api, RESPONSES_PATH)
     response = await client.responses.create(
         **responses_create_kwargs(
@@ -120,8 +127,10 @@ async def stream_responses_response(
     tools: list[dict[str, Any]],
     instructions: str | None,
     previous_response_id: str | None,
-    client: AsyncOpenAI | None = None,
+    client: Any | None = None,
 ) -> AsyncIterator[ModelStreamEvent]:
+    from uv_agent.model.openai_sdk import openai_client
+
     client = client or openai_client(provider, model.api, RESPONSES_PATH)
     stream = await client.responses.create(
         stream=True,

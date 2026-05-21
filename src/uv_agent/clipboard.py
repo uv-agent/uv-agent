@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PIL import ImageGrab
-
 from uv_agent.ids import new_id
 
 
@@ -22,6 +20,11 @@ class ClipboardImage:
 
 def save_clipboard_image(target_dir: Path) -> ClipboardImage:
     """Save the current clipboard image as a PNG under target_dir."""
+    # Pillow is only required when the user explicitly attaches a clipboard
+    # image. Deferring this import avoids paying image-support startup cost for
+    # text-only sessions.
+    from PIL import ImageGrab
+
     grabbed = ImageGrab.grabclipboard()
     if grabbed is None:
         raise ClipboardImageError("Clipboard does not contain an image")

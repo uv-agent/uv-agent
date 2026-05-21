@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from typing import Any
-
-from pygments import lex as _pyg_lex
-from pygments.lexers.python import PythonLexer as _PythonLexer
-from pygments.token import Token as _Token
 
 
 # Runtime event sentinel keys. These mirror values in
@@ -146,32 +143,40 @@ def tool_call_detail_highlight_markup(call: dict[str, Any]) -> str:
 # so e.g. ``Token.Literal.String.Single in Token.Literal.String`` matches.
 # Colors intentionally extend the previous tokenize-based palette so existing
 # tests around keyword / string highlight continue to hold.
-_PYG_STYLE_MAP: tuple[tuple[Any, str], ...] = (
-    (_Token.Comment, "#94a3b8 italic"),
-    (_Token.Keyword.Constant, "bold #f472b6"),
-    (_Token.Operator.Word, "bold #7dd3fc"),
-    (_Token.Keyword, "bold #7dd3fc"),
-    (_Token.Name.Builtin.Pseudo, "italic #a78bfa"),
-    (_Token.Name.Builtin, "#a78bfa"),
-    (_Token.Name.Function, "#facc15"),
-    (_Token.Name.Class, "bold #facc15"),
-    (_Token.Name.Decorator, "#fde68a"),
-    (_Token.Name.Exception, "bold #f87171"),
-    (_Token.Literal.String.Doc, "#94a3b8 italic"),
-    (_Token.Literal.String.Escape, "#fb923c"),
-    (_Token.Literal.String.Interpol, "#fb923c"),
-    (_Token.Literal.String, "#fbbf24"),
-    (_Token.Literal.Number, "#fb923c"),
-    (_Token.Operator, "#94a3b8"),
-)
+@lru_cache(maxsize=1)
+def _pygments_helpers() -> tuple[Any, Any, tuple[tuple[Any, str], ...]]:
+    """Return Pygments lexer/style helpers, importing Pygments on first use."""
 
-# Reuse a single lexer instance. ``stripnl``/``ensurenl`` off so trailing
-# whitespace round-trips exactly.
-_PY_LEXER = _PythonLexer(stripnl=False, ensurenl=False)
+    from pygments import lex as pyg_lex
+    from pygments.lexers.python import PythonLexer
+    from pygments.token import Token
+
+    style_map: tuple[tuple[Any, str], ...] = (
+        (Token.Comment, "#94a3b8 italic"),
+        (Token.Keyword.Constant, "bold #f472b6"),
+        (Token.Operator.Word, "bold #7dd3fc"),
+        (Token.Keyword, "bold #7dd3fc"),
+        (Token.Name.Builtin.Pseudo, "italic #a78bfa"),
+        (Token.Name.Builtin, "#a78bfa"),
+        (Token.Name.Function, "#facc15"),
+        (Token.Name.Class, "bold #facc15"),
+        (Token.Name.Decorator, "#fde68a"),
+        (Token.Name.Exception, "bold #f87171"),
+        (Token.Literal.String.Doc, "#94a3b8 italic"),
+        (Token.Literal.String.Escape, "#fb923c"),
+        (Token.Literal.String.Interpol, "#fb923c"),
+        (Token.Literal.String, "#fbbf24"),
+        (Token.Literal.Number, "#fb923c"),
+        (Token.Operator, "#94a3b8"),
+    )
+    # Reuse a single lexer instance. ``stripnl``/``ensurenl`` off so trailing
+    # whitespace round-trips exactly.
+    return pyg_lex, PythonLexer(stripnl=False, ensurenl=False), style_map
 
 
 def _pyg_style(token_type: Any) -> str:
-    for parent, style in _PYG_STYLE_MAP:
+    _, _, style_map = _pygments_helpers()
+    for parent, style in style_map:
         if token_type in parent:
             return style
     return ""
@@ -204,7 +209,8 @@ def python_syntax_markup(code: str) -> str:
         pending_text = ""
 
     try:
-        for token_type, token_text in _pyg_lex(code, _PY_LEXER):
+        pyg_lex, py_lexer, _ = _pygments_helpers()
+        for token_type, token_text in pyg_lex(code, py_lexer):
             if not token_text:
                 continue
             style = _pyg_style(token_type)

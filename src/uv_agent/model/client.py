@@ -5,13 +5,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from uv_agent.config import AppConfig
-from uv_agent.model.anthropic import create_anthropic_response, stream_anthropic_response
-from uv_agent.model.chat import create_chat_response, stream_chat_response
-from uv_agent.model.responses import (
-    create_responses_response,
-    parse_responses_response,
-    stream_responses_response,
-)
 from uv_agent.model.types import ModelResponse, ModelStreamEvent
 
 
@@ -34,6 +27,11 @@ class UnifiedModelClient:
         model = self.config.model_for_level(level)
         provider = self.config.provider_for_model(model)
         if model.api == "anthropic_messages":
+            # Provider SDKs are comparatively expensive to import. Resolve the
+            # concrete backend only when a request actually targets it so the
+            # TUI can reach first paint without loading every provider.
+            from uv_agent.model.anthropic import create_anthropic_response
+
             return await create_anthropic_response(
                 provider=provider,
                 model=model,
@@ -42,6 +40,8 @@ class UnifiedModelClient:
                 instructions=instructions,
             )
         if model.api == "chat_completions":
+            from uv_agent.model.chat import create_chat_response
+
             return await create_chat_response(
                 provider=provider,
                 model=model,
@@ -49,6 +49,8 @@ class UnifiedModelClient:
                 tools=tools or [],
                 instructions=instructions,
             )
+        from uv_agent.model.responses import create_responses_response
+
         return await create_responses_response(
             provider=provider,
             model=model,
@@ -70,6 +72,8 @@ class UnifiedModelClient:
         model = self.config.model_for_level(level)
         provider = self.config.provider_for_model(model)
         if model.api == "anthropic_messages":
+            from uv_agent.model.anthropic import stream_anthropic_response
+
             async for event in stream_anthropic_response(
                 provider=provider,
                 model=model,
@@ -80,6 +84,8 @@ class UnifiedModelClient:
                 yield event
             return
         if model.api == "chat_completions":
+            from uv_agent.model.chat import stream_chat_response
+
             async for event in stream_chat_response(
                 provider=provider,
                 model=model,
@@ -89,6 +95,8 @@ class UnifiedModelClient:
             ):
                 yield event
             return
+        from uv_agent.model.responses import stream_responses_response
+
         async for event in stream_responses_response(
             provider=provider,
             model=model,
@@ -128,6 +136,8 @@ class FakeModelClient:
         )
         if not self.responses:
             raise RuntimeError("FakeModelClient has no responses left")
+        from uv_agent.model.responses import parse_responses_response
+
         return parse_responses_response(self.responses.pop(0))
 
     async def stream_response(
