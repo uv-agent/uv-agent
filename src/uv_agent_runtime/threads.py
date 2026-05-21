@@ -49,7 +49,7 @@ def list_thread_digests(
 ) -> list[dict[str, Any]]:
     """Return compact digests for recent stored threads."""
     base = _state_dir(state_dir)
-    metadata_dir = base / ("subthread_metadata" if kind == "subagent" else "thread_metadata")
+    metadata_dir = base / ("subthreads" if kind == "subagent" else "threads")
     summaries: list[dict[str, Any]] = []
     for path in metadata_dir.glob("*.json"):
         try:
@@ -113,13 +113,13 @@ def _read_after_latest_compaction(
 
 def _metadata_path(base: Path, thread_id: str, *, kind: str | None) -> Path:
     if kind == "subagent":
-        return base / "subthread_metadata" / f"{thread_id}.json"
+        return base / "subthreads" / f"{thread_id}.json"
     if kind == "thread":
-        return base / "thread_metadata" / f"{thread_id}.json"
-    thread_path = base / "thread_metadata" / f"{thread_id}.json"
+        return base / "threads" / f"{thread_id}.json"
+    thread_path = base / "threads" / f"{thread_id}.json"
     if thread_path.exists():
         return thread_path
-    subthread_path = base / "subthread_metadata" / f"{thread_id}.json"
+    subthread_path = base / "subthreads" / f"{thread_id}.json"
     if subthread_path.exists():
         return subthread_path
     return thread_path

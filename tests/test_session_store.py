@@ -350,12 +350,13 @@ def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -
         parent_thread_id=parent,
         parent_turn_id="turn_1",
         parent_run_id="run_1",
-        parent_script_id="scr_1",
     )
     store.append(child, "turn.completed", turn_id="turn_child", final_text="done")
 
     assert (tmp_path / "threads" / f"{parent}.jsonl").exists()
+    assert (tmp_path / "threads" / f"{parent}.json").exists()
     assert (tmp_path / "subthreads" / f"{child}.jsonl").exists()
+    assert (tmp_path / "subthreads" / f"{child}.json").exists()
     assert [thread["thread_id"] for thread in store.list_threads()] == [parent]
 
     subthreads = store.list_subthreads(parent)

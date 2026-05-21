@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import json
 import os
-from importlib.metadata import PackageNotFoundError, version
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,7 +11,6 @@ from uv_agent.paths import project_config_path, project_local_dir, user_config_p
 
 
 SENSITIVE_KEYS = {"api_key", "authorization", "token", "secret", "password"}
-DEFAULT_PACKAGE_NAME = "uv-agent"
 
 
 class ConfigError(ValueError):
@@ -163,20 +161,9 @@ class UiConfig:
 
 @dataclass(frozen=True)
 class RunnerConfig:
-    runtime_dependency: str
-    runtime_package_name: str = "uv-agent"
-    default_uv_args: list[str] = field(default_factory=list)
     default_timeout_s: float = 7200.0
     max_output_bytes: int = 1_000_000
-    max_saved_scripts: int = 32
-
-    def __post_init__(self) -> None:
-        if not self.default_uv_args:
-            object.__setattr__(
-                self,
-                "default_uv_args",
-                default_runtime_uv_args(self.runtime_dependency, self.runtime_package_name),
-            )
+    max_run_logs: int = 200
 
 
 @dataclass(frozen=True)
@@ -222,7 +209,6 @@ class AppConfig:
             raise ConfigError(f"Unknown provider for model {model.name}: {model.provider}") from exc
 
 def default_config(project_root: Path) -> dict[str, Any]:
-    runtime_dependency = default_runtime_dependency(DEFAULT_PACKAGE_NAME)
     return {
         "providers": {},
         "models": {},
@@ -261,11 +247,9 @@ def default_config(project_root: Path) -> dict[str, Any]:
             },
         },
         "runner": {
-            "runtime_dependency": runtime_dependency,
-            "runtime_package_name": DEFAULT_PACKAGE_NAME,
             "default_timeout_s": 7200,
             "max_output_bytes": 1_000_000,
-            "max_saved_scripts": 32,
+            "max_run_logs": 200,
         },
         "pricing": {
             "currency": "USD",
@@ -397,23 +381,10 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         stream_retry=stream_retry,
     )
     runner_raw = raw.get("runner", {})
-    runner_package_name = runner_raw.get("runtime_package_name", DEFAULT_PACKAGE_NAME)
-    runner_dependency = runner_raw.get(
-        "runtime_dependency",
-        default_runtime_dependency(runner_package_name),
-    )
-    runner_uv_args = (
-        list(runner_raw["default_uv_args"])
-        if "default_uv_args" in runner_raw
-        else default_runtime_uv_args(runner_dependency, runner_package_name)
-    )
     runner = RunnerConfig(
-        runtime_dependency=runner_dependency,
-        runtime_package_name=runner_package_name,
-        default_uv_args=runner_uv_args,
         default_timeout_s=float(runner_raw.get("default_timeout_s", 7200)),
         max_output_bytes=int(runner_raw.get("max_output_bytes", 1_000_000)),
-        max_saved_scripts=int(runner_raw.get("max_saved_scripts", 32)),
+        max_run_logs=int(runner_raw.get("max_run_logs", 200)),
     )
     ui_raw = raw.get("ui", {})
     pricing = parse_pricing(raw.get("pricing", {}))
@@ -588,19 +559,3 @@ def editable_config_path(project_root: Path) -> Path:
     if user_path.exists():
         return user_path
     return project_config_path(project_root)
-
-
-def default_runtime_uv_args(runtime_dependency: str, package_name: str) -> list[str]:
-    """Return uv args that keep local file dependencies fresh during development."""
-    if " @ file:" not in runtime_dependency:
-        return []
-    return ["--reinstall-package", package_name]
-
-
-def default_runtime_dependency(package_name: str = DEFAULT_PACKAGE_NAME) -> str:
-    """Return the installable package spec injected into managed scripts."""
-    try:
-        package_version = version(package_name)
-    except PackageNotFoundError:
-        return package_name
-    return f"{package_name}=={package_version}"

@@ -52,7 +52,7 @@ from uv_agent.project_rules import (
     load_directory_rules,
     load_project_rules,
 )
-from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
+from uv_agent.runner import PythonRunRequest, PythonRunner
 from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.skills import SkillSummary, discover_skills, render_skill_entry
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
@@ -236,6 +236,7 @@ class AgentEngine:
         model_client: ModelClient,
         runner: PythonRunner,
         thread_store: ThreadStore,
+        attachments_dir: Path | None = None,
         project_root: Path,
         config_loader: Callable[[], AppConfig] | None = None,
         mcp_instructions_probe: McpInstructionsProbe | None = None,
@@ -245,7 +246,7 @@ class AgentEngine:
         self.runner = runner
         self.thread_store = thread_store
         self.project_root = project_root
-        self.attachments = AttachmentStore(thread_store.data_dir)
+        self.attachments = AttachmentStore(attachments_dir or thread_store.data_dir / "attachments")
         self._last_config_refresh_at = 0.0
         self._config_loader = config_loader
         self._host_environment = host_environment()
@@ -821,41 +822,23 @@ class AgentEngine:
             return tool_output, [], tool_output
 
         thread_kind = str(self.thread_store.snapshot(thread_id).metadata.get("kind") or "thread")
-        if args.get("script_id") or args.get("run_id"):
-            result = await self.runner.rerun(
-                RerunRequest(
-                    script_id=args.get("script_id"),
-                    run_id=args.get("run_id"),
-                    mode="replay" if args.get("rerun_mode") == "replay" else "rerun",
-                    uv_args=list(args.get("uv_args") or []),
-                    script_args=list(args.get("script_args") or []),
-                    timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
-                    cwd=self._active_cwd(thread_id),
-                    thread_id=thread_id,
-                    thread_kind=thread_kind,
-                    turn_id=turn_id,
-                    cancel_event=cancel_event,
-                )
+        code = args.get("code")
+        if not isinstance(code, str) or not code.strip():
+            output = {"error": "run_python requires code"}
+            tool_output = function_output(call, output)
+            return tool_output, [], tool_output
+        result = await self.runner.run(
+            PythonRunRequest(
+                code=code,
+                script_args=list(args.get("script_args") or []),
+                timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
+                cwd=self._active_cwd(thread_id),
+                thread_id=thread_id,
+                thread_kind=thread_kind,
+                turn_id=turn_id,
+                cancel_event=cancel_event,
             )
-        else:
-            code = args.get("code")
-            if not isinstance(code, str) or not code.strip():
-                output = {"error": "run_python requires code, script_id, or run_id"}
-                tool_output = function_output(call, output)
-                return tool_output, [], tool_output
-            result = await self.runner.run(
-                PythonRunRequest(
-                    code=code,
-                    uv_args=list(args.get("uv_args") or []),
-                    script_args=list(args.get("script_args") or []),
-                    timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
-                    cwd=self._active_cwd(thread_id),
-                    thread_id=thread_id,
-                    thread_kind=thread_kind,
-                    turn_id=turn_id,
-                    cancel_event=cancel_event,
-                )
-            )
+        )
         if result.interrupted:
             raise TurnInterrupted()
         rule_events, visible_events = self._process_runner_events(
@@ -864,7 +847,6 @@ class AgentEngine:
             turn_id=turn_id,
         )
         payload = {
-            "script_id": result.script_id,
             "run_id": result.run_id,
             "returncode": result.returncode,
             "timed_out": result.timed_out,

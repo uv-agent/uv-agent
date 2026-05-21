@@ -28,7 +28,6 @@ def main() -> None:
     parser.add_argument("--parent-thread", default=None, help="Parent thread id for subagent ask mode.")
     parser.add_argument("--parent-turn", default=None, help="Parent turn id for subagent ask mode.")
     parser.add_argument("--parent-run", default=None, help="Parent run id for subagent ask mode.")
-    parser.add_argument("--parent-script", default=None, help="Parent script id for subagent ask mode.")
     parser.add_argument(
         "--project-state-dir",
         default=None,
@@ -51,7 +50,6 @@ def main() -> None:
                 parent_thread_id=args.parent_thread,
                 parent_turn_id=args.parent_turn,
                 parent_run_id=args.parent_run,
-                parent_script_id=args.parent_script,
                 project_state_dir=Path(args.project_state_dir) if args.project_state_dir else None,
             )
         )
@@ -71,7 +69,6 @@ async def _ask(
     parent_thread_id: str | None = None,
     parent_turn_id: str | None = None,
     parent_run_id: str | None = None,
-    parent_script_id: str | None = None,
     project_state_dir: Path | None = None,
 ) -> None:
     # Ask mode needs the full engine/model stack. Import it here instead of at
@@ -90,7 +87,6 @@ async def _ask(
             parent_thread_id=parent_thread_id,
             parent_turn_id=parent_turn_id,
             parent_run_id=parent_run_id,
-            parent_script_id=parent_script_id,
         )
         print(f"[subagent-thread] {thread_id}", file=sys.stderr)
     saw_delta = False

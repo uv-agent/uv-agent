@@ -28,7 +28,6 @@ async def pump_stream(
     sink: list[str],
     structured_events: list[dict],
     run_id: str,
-    script_id: str,
     max_output_bytes: int,
     capture: OutputCapture,
 ) -> None:
@@ -58,7 +57,6 @@ async def pump_stream(
                     sink=sink,
                     event_parser=event_parser,
                     run_id=run_id,
-                    script_id=script_id,
                 )
                 tail = decoder.decode(b"", final=True)
                 record_output_text(
@@ -68,7 +66,6 @@ async def pump_stream(
                     sink=sink,
                     event_parser=event_parser,
                     run_id=run_id,
-                    script_id=script_id,
                 )
             capture.byte_count += len(chunk)
             capture.truncated = True
@@ -78,7 +75,6 @@ async def pump_stream(
                     "type": "run.output_truncated",
                     "created_at": utc_now_iso(),
                     "run_id": run_id,
-                    "script_id": script_id,
                     "max_output_bytes": max_output_bytes,
                 }
             )
@@ -93,7 +89,6 @@ async def pump_stream(
             sink=sink,
             event_parser=event_parser,
             run_id=run_id,
-            script_id=script_id,
         )
 
     if not capture.truncated:
@@ -106,7 +101,6 @@ async def pump_stream(
                 sink=sink,
                 event_parser=event_parser,
                 run_id=run_id,
-                script_id=script_id,
             )
         if stream_name == "stdout":
             event_parser.finish()
@@ -120,7 +114,6 @@ def record_output_text(
     sink: list[str],
     event_parser: StructuredEventLineParser,
     run_id: str,
-    script_id: str,
 ) -> None:
     if not text:
         return
@@ -132,7 +125,6 @@ def record_output_text(
             "type": f"run.{stream_name}",
             "created_at": utc_now_iso(),
             "run_id": run_id,
-            "script_id": script_id,
             "text": text,
         }
     )

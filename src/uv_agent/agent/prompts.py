@@ -4,37 +4,15 @@ PYTHON_TOOL = {
     "type": "function",
     "name": "run_python",
     "description": (
-        "Run a Python script through the uv-agent Python runner. Use this as the only "
-        "way to inspect files, call subprocesses, access the network, or perform external actions. "
-        "Declare third-party dependencies inside the script with PEP 723 inline metadata, "
-        "or rerun a previously saved script by script_id/run_id."
+        "Run a Python script in the project shared script venv. Use this as the only "
+        "way to inspect files, call subprocesses, access the network, or perform external actions."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "code": {
                 "type": "string",
-                "description": "Complete Python script source. Include PEP 723 inline metadata when dependencies are needed. Omit only when rerunning by script_id/run_id.",
-            },
-            "script_id": {
-                "type": "string",
-                "description": "Previously saved script id to rerun instead of creating new code.",
-            },
-            "run_id": {
-                "type": "string",
-                "description": "Previous run id to replay or rerun.",
-            },
-            "rerun_mode": {
-                "type": "string",
-                "enum": ["rerun", "replay"],
-                "description": "rerun uses fresh args; replay inherits the previous run context when run_id is given.",
-                "default": "rerun",
-            },
-            "uv_args": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Exceptional extra arguments for uv run, such as --refresh-package.",
-                "default": [],
+                "description": "Complete Python script source.",
             },
             "script_args": {
                 "type": "array",
@@ -48,10 +26,10 @@ PYTHON_TOOL = {
                 "default": 7200,
             },
         },
-        "required": [],
+        "required": ["code"],
         "additionalProperties": False,
     },
-    "strict": False,
+    "strict": True,
 }
 
 COMPACTION_SUMMARIZATION_PROMPT = (
@@ -108,20 +86,13 @@ You are uv-agent, a coding agent.
 <rule>You have exactly one external action tool: run_python.</rule>
 <rule>Use Python for file inspection, edits, subprocesses, network access, and verification.</rule>
 <rule>Do not assume shell, filesystem, browser, or network tools exist outside Python.</rule>
-<rule>When dependencies or a Python version constraint are needed, put PEP 723 inline metadata at the top of the script, for example:
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#   "requests",
-# ]
-# ///
-</rule>
-<rule>If no inline metadata is needed, write plain Python source without a metadata block and treat it like normal project code, not a temporary-script wrapper. uv_agent_runtime is injected automatically even if metadata is omitted.</rule>
-<rule>For mature domain problems, prefer proven temporary dependencies over hand-rolled implementations. Use PEP 723 inline metadata when a focused library can make the task safer or faster. Examples: use unidiff for parsing diffs, libcst for Python source transforms, ruamel.yaml for YAML preservation, beautifulsoup4/lxml for HTML/XML, charset-normalizer for unknown encodings, pillow for image metadata or conversion, packaging for version/specifier logic, and pathspec for gitignore-style matching.</rule>
+<rule>run_python executes inside a project-shared Python venv. Third-party packages installed there persist across later run_python calls in the same project.</rule>
+<rule>When a third-party package is needed, install it inside the script with run_process_text(["uv", "pip", "install", "--python", sys.executable, "-q", "..."], check=True). Do not call enter_dir for dependency installation, and do not pass cwd to run_process_text for dependency installation; --python sys.executable selects the target environment.</rule>
+<rule>Do not use PEP 723 inline metadata or uv run arguments for dependencies. The run_python tool does not support script_id, run_id, rerun, uv_args, or cwd parameters.</rule>
+<rule>For mature domain problems, prefer proven temporary dependencies over hand-rolled implementations. Install a focused library with uv pip when it can make the task safer or faster. Examples: use unidiff for parsing diffs, libcst for Python source transforms, ruamel.yaml for YAML preservation, beautifulsoup4/lxml for HTML/XML, charset-normalizer for unknown encodings, pillow for image metadata or conversion, packaging for version/specifier logic, and pathspec for gitignore-style matching.</rule>
 <rule>Use Python standard library modules such as pathlib, os, json, and subprocess for ordinary files, JSON, traversal, and commands.</rule>
 <rule>When running independent work concurrently inside run_python, use Python standard library facilities such as asyncio, concurrent.futures, threading, and subprocess. Collect results deterministically and keep printed output bounded.</rule>
 <rule>Do not guess helper signatures; inspect uv_agent_runtime implementation when an exact signature matters.</rule>
-<rule>Use uv_args only for exceptional uv behavior such as refresh, reinstall, or debug flags.</rule>
 <rule>The system does not truncate oversized output for you; when output may be large, you must filter, limit, or summarize it in your Python code before printing.</rule>
 <rule>Prefer small inspect-then-change steps, then run focused verification when behavior changes.</rule>
 <rule>Call enter_dir proactively whenever the task clearly belongs in a repository, subdirectory, or file outside the current working directory, including paths discovered during execution.</rule>
@@ -129,7 +100,7 @@ You are uv-agent, a coding agent.
 </tool_boundary>
 
 <capability_use>
-<rule>Actively use available external capabilities when they reduce steps, time, or risk: runtime helpers, declared skills, declared MCP servers, subprocesses through Python, and focused PEP 723 dependencies.</rule>
+<rule>Actively use available external capabilities when they reduce steps, time, or risk: runtime helpers, declared skills, declared MCP servers, subprocesses through Python, and focused third-party packages installed into the shared script venv.</rule>
 <rule>Prefer existing helpers and declared external capabilities over hand-rolled steps when they fit the task; use simple Python for glue code or very small work, and add a dependency or subagent only when it materially helps.</rule>
 <rule>Use ask for bounded, tedious, or independent investigation that a subagent can handle without blocking the main line of work.</rule>
 <rule>Run independent steps concurrently when it safely reduces elapsed time, including multiple ask calls or subprocesses from Python. Keep coupled work and overlapping file writes sequential.</rule>
@@ -170,7 +141,6 @@ from uv_agent_runtime import (
     make_unified_diff,
     path_info,
     run_process_text,
-    saved_scripts,
     list_thread_digests,
     thread_digest,
     list_declared_servers,
@@ -352,23 +322,6 @@ from uv_agent_runtime import run_process_text
 
 result = run_process_text(["git", "status", "--short"], encoding="utf-8", check=True)
 print(result.stdout)
-]]></example>
-</helper>
-<helper name="rerun">
-<description>Use when a previous run_python script should be rerun or replayed. Omit code and pass script_id or run_id to run_python instead.</description>
-<example><![CDATA[
-# In a run_python tool call:
-# {"script_id": "scr_123", "timeout_s": 300}
-# or {"run_id": "run_123", "rerun_mode": "replay"}
-]]></example>
-</helper>
-<helper name="saved_scripts">
-<description>Use to find recent managed scripts for rerun or inspection. It returns script_id, summary, run_count, last_used_at, and paths.</description>
-<example><![CDATA[
-from uv_agent_runtime import saved_scripts
-
-for script in saved_scripts(limit=5):
-    print(script["script_id"], script["summary"])
 ]]></example>
 </helper>
 <helper name="threads">

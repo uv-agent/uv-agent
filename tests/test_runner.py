@@ -2,29 +2,40 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from uv_agent.config import RunnerConfig
 from uv_agent.jsonl import read_jsonl
-from uv_agent.runner import PythonRunRequest, PythonRunner, RerunRequest
-from uv_agent.runner.runner import parse_structured_event, uv_run_argv
-from uv_agent.runner.store import ScriptStore
+from uv_agent.runner import PythonRunRequest, PythonRunner
+from uv_agent.runner.runner import parse_structured_event
+from uv_agent.runner.scriptenv import ensure_venv
+
+
+def make_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    config: RunnerConfig | None = None,
+) -> PythonRunner:
+    monkeypatch.setattr("uv_agent.runner.runner.ensure_venv", lambda _path: Path(sys.executable))
+    return PythonRunner(
+        project_root=Path.cwd(),
+        data_dir=tmp_path / ".uv-agent",
+        config=config or RunnerConfig(default_timeout_s=30),
+    )
 
 
 @pytest.mark.asyncio
-async def test_runner_executes_script_and_records_jsonl(tmp_path: Path) -> None:
+async def test_runner_executes_script_and_records_jsonl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-        ),
-    )
+    runner = make_runner(tmp_path, monkeypatch)
 
     result = await runner.run(
         PythonRunRequest(
@@ -35,17 +46,12 @@ async def test_runner_executes_script_and_records_jsonl(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert '"kind": "hello"' in result.stdout
+    assert result.script_path.exists()
     events = read_jsonl(result.run_log_path)
     assert events[0]["type"] == "run.started"
     assert events[-1]["type"] == "run.completed"
-    assert events[0]["argv"][0:5] == [
-        "uv",
-        "run",
-        "--quiet",
-        "--reinstall-package",
-        "uv-agent",
-    ]
-    assert "--with" not in events[0]["argv"]
+    assert events[0]["argv"][0].endswith(("python.exe", "python"))
+    assert events[0]["script_path"] == str(result.script_path)
 
 
 @pytest.mark.asyncio
@@ -54,15 +60,7 @@ async def test_runner_passes_project_root_without_polluting_parent_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-        ),
-    )
+    runner = make_runner(tmp_path, monkeypatch)
 
     monkeypatch.delenv("UV_AGENT_RUNTIME_PROJECT_ROOT", raising=False)
     result = await runner.run(
@@ -81,38 +79,12 @@ async def test_runner_passes_project_root_without_polluting_parent_env(
 
 
 @pytest.mark.asyncio
-async def test_runner_reruns_by_script_id(tmp_path: Path) -> None:
+async def test_runner_truncates_large_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-        ),
-    )
-    first = await runner.run(PythonRunRequest(code="print('again')\n", cwd=project_root))
-    second = await runner.rerun(RerunRequest(script_id=first.script_id, cwd=project_root))
-
-    assert second.script_id == first.script_id
-    assert second.run_id != first.run_id
-    assert second.stdout == first.stdout
-
-
-@pytest.mark.asyncio
-async def test_runner_truncates_large_output(tmp_path: Path) -> None:
-    project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-            max_output_bytes=10,
-        ),
-    )
+    runner = make_runner(tmp_path, monkeypatch, config=RunnerConfig(default_timeout_s=30, max_output_bytes=10))
     result = await runner.run(PythonRunRequest(code="print('x' * 100)\n", cwd=project_root))
 
     assert result.truncated is True
@@ -121,18 +93,12 @@ async def test_runner_truncates_large_output(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_handles_long_single_line_output(tmp_path: Path) -> None:
+async def test_runner_handles_long_single_line_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-            max_output_bytes=200_000,
-        ),
-    )
+    runner = make_runner(tmp_path, monkeypatch, config=RunnerConfig(default_timeout_s=30, max_output_bytes=200_000))
 
     result = await runner.run(PythonRunRequest(code="print('x' * 70_000)\n", cwd=project_root))
 
@@ -142,18 +108,12 @@ async def test_runner_handles_long_single_line_output(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_parses_structured_event_across_read_chunks(tmp_path: Path) -> None:
+async def test_runner_parses_structured_event_across_read_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-            max_output_bytes=200_000,
-        ),
-    )
+    runner = make_runner(tmp_path, monkeypatch, config=RunnerConfig(default_timeout_s=30, max_output_bytes=200_000))
 
     result = await runner.run(
         PythonRunRequest(
@@ -171,18 +131,12 @@ async def test_runner_parses_structured_event_across_read_chunks(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_runner_does_not_parse_json_in_middle_of_long_line(tmp_path: Path) -> None:
+async def test_runner_does_not_parse_json_in_middle_of_long_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-            max_output_bytes=200_000,
-        ),
-    )
+    runner = make_runner(tmp_path, monkeypatch, config=RunnerConfig(default_timeout_s=30, max_output_bytes=200_000))
 
     result = await runner.run(
         PythonRunRequest(
@@ -204,17 +158,10 @@ async def test_runner_does_not_parse_json_in_middle_of_long_line(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_runner_parses_threaded_runtime_events_without_line_interleaving(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-        ),
-    )
+    runner = make_runner(tmp_path, monkeypatch)
 
     result = await runner.run(
         PythonRunRequest(
@@ -243,17 +190,12 @@ async def test_runner_parses_threaded_runtime_events_without_line_interleaving(
 
 
 @pytest.mark.asyncio
-async def test_runner_interrupts_script_when_cancelled(tmp_path: Path) -> None:
+async def test_runner_interrupts_script_when_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-        ),
-    )
+    runner = make_runner(tmp_path, monkeypatch)
     cancel_event = asyncio.Event()
     task = asyncio.create_task(
         runner.run(
@@ -302,55 +244,28 @@ def test_parse_structured_event_reads_runtime_json_line() -> None:
     assert parse_structured_event("plain text\n") is None
 
 
-def test_uv_run_argv_defaults_to_quiet() -> None:
-    argv = uv_run_argv(["--python", "3.12"], Path("script.py"), ["--flag"])
-
-    assert argv == ["uv", "run", "--quiet", "--python", "3.12", "script.py", "--flag"]
-
-
-def test_uv_run_argv_respects_explicit_log_level() -> None:
-    assert uv_run_argv(["--verbose"], Path("script.py"), []) == [
-        "uv",
-        "run",
-        "--verbose",
-        "script.py",
-    ]
-    assert uv_run_argv(["-q"], Path("script.py"), []) == ["uv", "run", "-q", "script.py"]
-
-
 @pytest.mark.asyncio
-async def test_runner_prunes_old_scripts(tmp_path: Path) -> None:
+async def test_runner_prunes_old_run_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project_root = Path.cwd()
-    runner = PythonRunner(
-        project_root=project_root,
-        data_dir=tmp_path / ".uv-agent",
-        config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-            max_saved_scripts=2,
-        ),
-    )
+    runner = make_runner(tmp_path, monkeypatch, config=RunnerConfig(default_timeout_s=30, max_run_logs=2))
 
     for index in range(3):
         await runner.run(PythonRunRequest(code=f"print({index})\n", cwd=project_root))
 
-    scripts = runner.store.list_scripts()
+    logs = sorted(runner.runs_dir.glob("*.jsonl"))
+    scripts = sorted(runner.runs_dir.glob("*.py"))
 
+    assert len(logs) == 2
     assert len(scripts) == 2
-    assert all(script["summary"].startswith("print(") for script in scripts)
+    assert {path.stem for path in logs} == {path.stem for path in scripts}
 
 
-def test_script_store_summary_ignores_inline_metadata(tmp_path: Path) -> None:
-    store = ScriptStore(tmp_path, max_saved_scripts=32)
-    script_id, _, _ = store.create_script(
-        original_code="",
-        final_code="# /// script\n# dependencies=['x']\n# ///\n\nprint('real')\n",
-        thread_id=None,
-        turn_id=None,
-    )
+def test_ensure_venv_installs_runtime_package(tmp_path: Path) -> None:
+    python = ensure_venv(tmp_path / "scriptenv")
 
-    summaries = store.list_scripts()
-
-    assert summaries[0]["script_id"] == script_id
-    assert summaries[0]["summary"] == "print('real')"
+    assert python.exists()
+    result = subprocess.run([str(python), "-c", "import uv_agent_runtime"], check=False)
+    assert result.returncode == 0

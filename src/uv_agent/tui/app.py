@@ -34,7 +34,7 @@ from uv_agent.errors import (
 )
 from uv_agent.i18n import command_description, tr
 from uv_agent.notifications import play_completion_sound
-from uv_agent.paths import project_state_dir, uv_agent_home
+from uv_agent.paths import project_state_dir, project_tui_clipboard_dir, uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.time import utc_now_iso
@@ -1521,7 +1521,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         from uv_agent.clipboard import ClipboardImageError
 
         try:
-            image = save_clipboard_image(project_state_dir(self.project_root) / "clipboard")
+            image = save_clipboard_image(project_tui_clipboard_dir(self.project_root))
         except ClipboardImageError as exc:
             self._flash(str(exc), severity="warning")
             return
@@ -2562,7 +2562,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self.engine.refresh_config()
         level_name = self.level or self.engine.config.runtime.default_level
         rules = self.engine.project_rule_context()
-        scripts = self.engine.runner.store.list_scripts(limit=5)
         billing_line = self._thread_billing_status_line()
         try:
             model = self.engine.config.model_for_level(self.level)
@@ -2590,11 +2589,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             rules_line += f" · {self._text('truncated')}"
         if rules.omitted_files:
             rules_line += f" · {rules.omitted_files} {self._text('status_rules_omitted')}"
-        script_line = (
-            f"{len(scripts)} {self._text('status_scripts_saved')}"
-            if scripts
-            else self._text("no_scripts")
-        )
         lines = [
             f"- state: [cyan]{escape(self._last_status)}[/cyan]",
             f"- version: [cyan]{escape(application_version())}[/cyan]",
@@ -2609,7 +2603,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             [
                 f"- compaction: {compress_line}",
                 f"- rules: {escape(rules_line)}",
-                f"- scripts: {escape(script_line)}",
                 f"- thread: {escape(short_thread(self.thread_id))}",
                 f"- queued: {self._active_queue_length()}",
                 f"- user state: {escape(str(uv_agent_home()))}",
@@ -2639,16 +2632,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 lines.append(f"- {escape(rule.scope)}: {escape(str(rule.path))}{suffix}")
             if len(rules.rules) > 6:
                 lines.append(f"- ... {len(rules.rules) - 6} more")
-        if scripts:
-            lines.append("")
-            lines.append(f"[bold]{escape(self._text('scripts'))}[/bold]")
-            for script in scripts:
-                summary = str(script.get("summary") or "")
-                if len(summary) > 96:
-                    summary = summary[:93].rstrip() + "..."
-                lines.append(
-                    f"- {escape(str(script.get('script_id') or ''))}: {escape(summary)}"
-                )
         return "\n".join(lines)
 
     def _thread_billing_status_line(self) -> str:

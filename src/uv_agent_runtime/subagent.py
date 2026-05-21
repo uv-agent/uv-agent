@@ -75,7 +75,6 @@ def ask(
     parent_thread_id = os.environ.get("UV_AGENT_RUNTIME_THREAD_ID")
     parent_turn_id = os.environ.get("UV_AGENT_RUNTIME_TURN_ID")
     parent_run_id = os.environ.get("UV_AGENT_RUNTIME_RUN_ID")
-    parent_script_id = os.environ.get("UV_AGENT_RUNTIME_SCRIPT_ID")
     state_dir = os.environ.get("UV_AGENT_RUNTIME_STATE_DIR")
     using_default_executable = executable is None
     if retain and using_default_executable:
@@ -86,8 +85,6 @@ def ask(
             args.extend(["--parent-turn", parent_turn_id])
         if parent_run_id:
             args.extend(["--parent-run", parent_run_id])
-        if parent_script_id:
-            args.extend(["--parent-script", parent_script_id])
     emit_event(
         "subagent.started",
         level=selected_level,

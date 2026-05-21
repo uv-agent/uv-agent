@@ -335,7 +335,6 @@ def tool_result_markup(payload: dict[str, Any]) -> str:
     returncode = payload.get("returncode")
     timed_out = bool(payload.get("timed_out"))
     truncated = bool(payload.get("truncated"))
-    script_id = str(payload.get("script_id") or "-")
     run_id = str(payload.get("run_id") or "-")
     glyph, color = _tool_status_glyph(returncode, timed_out)
     status = "timeout" if timed_out else f"exit {returncode}"
@@ -344,7 +343,7 @@ def tool_result_markup(payload: dict[str, Any]) -> str:
 
     header = (
         f"[{color}]{glyph}[/{color}] [bold]python[/bold] "
-        f"[dim]{escape(script_id)} · {escape(run_id)} ·[/dim] "
+        f"[dim]{escape(run_id)} ·[/dim] "
         f"[{color}]{status}[/{color}]{elapsed_suffix}"
     )
     lines = [header]
@@ -370,13 +369,12 @@ def tool_timeline_markup(payload: dict[str, Any]) -> str:
     timed_out = bool(payload.get("timed_out"))
     glyph, color = _tool_status_glyph(returncode, timed_out)
     status = "timeout" if timed_out else f"exit {returncode}"
-    script_id = str(payload.get("script_id") or "-")
     run_id = str(payload.get("run_id") or "-")
     elapsed = _payload_elapsed(payload)
     elapsed_suffix = f" [dim]· {escape(elapsed)}[/dim]" if elapsed else ""
     lines = [
         f"[{color}]{glyph}[/{color}] [bold]python[/bold] "
-        f"[dim]{escape(script_id)} · {escape(run_id)}[/dim] "
+        f"[dim]{escape(run_id)}[/dim] "
         f"[{color}]{status}[/{color}]{elapsed_suffix}"
     ]
     events = payload.get("events") if isinstance(payload.get("events"), list) else []
@@ -415,7 +413,6 @@ def tool_detail_markup(
     """
     lines = [
         "[dim]details[/dim]",
-        f"script_id: {escape(str(payload.get('script_id') or '-'))}",
         f"run_id: {escape(str(payload.get('run_id') or '-'))}",
     ]
     elapsed = _payload_elapsed(payload)

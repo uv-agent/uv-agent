@@ -41,3 +41,31 @@ def project_id(project_root: Path) -> str:
 def project_state_dir(project_root: Path) -> Path:
     """Return the user-level state directory for one workspace."""
     return uv_agent_home() / "projects" / project_id(project_root)
+
+
+def project_threads_dir(project_root: Path) -> Path:
+    return project_state_dir(project_root) / "threads"
+
+
+def project_subthreads_dir(project_root: Path) -> Path:
+    return project_state_dir(project_root) / "subthreads"
+
+
+def project_attachments_dir(project_root: Path) -> Path:
+    return project_state_dir(project_root) / "attachments"
+
+
+def project_runner_dir(project_root: Path) -> Path:
+    return project_state_dir(project_root) / "runner"
+
+
+def project_run_logs_dir(project_root: Path) -> Path:
+    return project_runner_dir(project_root) / "runs"
+
+
+def project_scriptenv_dir(project_root: Path) -> Path:
+    return project_runner_dir(project_root) / "scriptenv"
+
+
+def project_tui_clipboard_dir(project_root: Path) -> Path:
+    return project_state_dir(project_root) / "tui" / "clipboard"

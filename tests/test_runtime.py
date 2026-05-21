@@ -39,7 +39,6 @@ from uv_agent_runtime import (
     replace_exact,
     restore_snapshot,
     run_process_text,
-    saved_scripts,
     search_text,
     snapshot_files,
     supported_symbol_languages,
@@ -602,28 +601,6 @@ def test_runtime_subagent_events_do_not_include_prompt(capsys, monkeypatch: pyte
 
 def test_extract_subagent_thread_id_from_stderr() -> None:
     assert _extract_subagent_thread_id("noise\n[subagent-thread] thr_123\n") == "thr_123"
-
-
-def test_runtime_saved_scripts_reads_state_dir(tmp_path: Path) -> None:
-    script = tmp_path / "scripts" / "scr_1"
-    script.mkdir(parents=True)
-    final = script / "script.py"
-    final.write_text("# /// script\n# dependencies=[]\n# ///\n\nprint('hello')\n", encoding="utf-8")
-    (script / "metadata.json").write_text(
-        json.dumps(
-            {
-                "script_id": "scr_1",
-                "created_at": "2026-01-01T00:00:00Z",
-                "final_path": str(final),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    summaries = saved_scripts(state_dir=tmp_path)
-
-    assert summaries[0]["script_id"] == "scr_1"
-    assert summaries[0]["summary"] == "print('hello')"
 
 
 def test_runtime_thread_digest_reads_state_dir(tmp_path: Path) -> None:

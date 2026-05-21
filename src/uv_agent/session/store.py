@@ -72,20 +72,22 @@ class ThreadLockedError(RuntimeError):
 
 
 class ThreadStore:
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        threads_dir: Path | None = None,
+        subthreads_dir: Path | None = None,
+    ) -> None:
         self.data_dir = data_dir
-        self.threads_dir = data_dir / "threads"
-        self.subthreads_dir = data_dir / "subthreads"
-        self.thread_metadata_dir = data_dir / "thread_metadata"
-        self.subthread_metadata_dir = data_dir / "subthread_metadata"
+        self.threads_dir = threads_dir or data_dir / "threads"
+        self.subthreads_dir = subthreads_dir or data_dir / "subthreads"
         self._lock_owner_id = new_id("owner")
         self._held_thread_locks: dict[str, str] = {}
         self._held_thread_lock_depth: dict[str, int] = {}
         self._history_segment_cache: dict[tuple[Any, ...], ThreadHistorySegment] = {}
         self.threads_dir.mkdir(parents=True, exist_ok=True)
         self.subthreads_dir.mkdir(parents=True, exist_ok=True)
-        self.thread_metadata_dir.mkdir(parents=True, exist_ok=True)
-        self.subthread_metadata_dir.mkdir(parents=True, exist_ok=True)
 
     def create_thread(
         self,
@@ -95,7 +97,6 @@ class ThreadStore:
         parent_thread_id: str | None = None,
         parent_turn_id: str | None = None,
         parent_run_id: str | None = None,
-        parent_script_id: str | None = None,
     ) -> str:
         thread_id = new_id("thr")
         created = {
@@ -111,8 +112,6 @@ class ThreadStore:
             created["parent_turn_id"] = parent_turn_id
         if parent_run_id:
             created["parent_run_id"] = parent_run_id
-        if parent_script_id:
-            created["parent_script_id"] = parent_script_id
         self._write_event(thread_id, created, kind=kind)
         return thread_id
 
@@ -134,16 +133,16 @@ class ThreadStore:
 
     def metadata_path(self, thread_id: str, *, kind: str | None = None) -> Path:
         if kind == "subagent":
-            return self.subthread_metadata_dir / f"{thread_id}.json"
+            return self.subthreads_dir / f"{thread_id}.json"
         if kind == "thread":
-            return self.thread_metadata_dir / f"{thread_id}.json"
-        thread_path = self.thread_metadata_dir / f"{thread_id}.json"
+            return self.threads_dir / f"{thread_id}.json"
+        thread_path = self.threads_dir / f"{thread_id}.json"
         if thread_path.exists():
             return thread_path
-        subthread_path = self.subthread_metadata_dir / f"{thread_id}.json"
+        subthread_path = self.subthreads_dir / f"{thread_id}.json"
         if subthread_path.exists():
             return subthread_path
-        return self.thread_metadata_dir / f"{thread_id}.json"
+        return self.threads_dir / f"{thread_id}.json"
 
     def lock_path(self, thread_id: str, *, kind: str | None = None) -> Path:
         return self.path(thread_id, kind=kind).with_suffix(".lock")
@@ -292,10 +291,10 @@ class ThreadStore:
         return events[0] if events else None
 
     def list_threads(self) -> list[dict[str, Any]]:
-        return self._list_from_metadata_dir(self.thread_metadata_dir)
+        return self._list_from_metadata_dir(self.threads_dir)
 
     def list_subthreads(self, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
-        subthreads = self._list_from_metadata_dir(self.subthread_metadata_dir)
+        subthreads = self._list_from_metadata_dir(self.subthreads_dir)
         if parent_thread_id is not None:
             subthreads = [
                 thread
@@ -597,7 +596,7 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
                 "kind": event.get("kind") or metadata.get("kind") or "thread",
             }
         )
-        for key in ("parent_thread_id", "parent_turn_id", "parent_run_id", "parent_script_id"):
+        for key in ("parent_thread_id", "parent_turn_id", "parent_run_id"):
             if event.get(key):
                 metadata[key] = event[key]
         return

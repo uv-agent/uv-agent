@@ -28,7 +28,6 @@ from .mcp import (
     list_declared_servers,
 )
 from .patch import PatchResult, apply_patch
-from .scripts import saved_scripts
 from .subagent import SubagentResult, ask
 from .textops import (
     CommandTextResult,
@@ -101,7 +100,6 @@ __all__ = [
     "resolve_workspace_path",
     "restore_snapshot",
     "run_process_text",
-    "saved_scripts",
     "search_text",
     "snapshot_files",
     "supported_symbol_languages",
