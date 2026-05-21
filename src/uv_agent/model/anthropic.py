@@ -279,12 +279,13 @@ async def stream_anthropic_response(
                 tool_acc[index] = {
                     "call_id": getattr(block, "id", None),
                     "name": getattr(block, "name", None),
-                    "arguments": json.dumps(object_dump(getattr(block, "input", None)) or {}, ensure_ascii=False),
+                    "arguments": "",
+                    "_input": object_dump(getattr(block, "input", None)),
                 }
         elif event_type == "message_delta":
             usage = object_dump(getattr(event, "usage", None)) or usage
         elif event_type == "message_stop":
-            output = chat_output_items("".join(text_parts), tool_acc)
+            output = chat_output_items("".join(text_parts), _finalize_anthropic_stream_tools(tool_acc))
             reasoning_text = "".join(reasoning_parts)
             if not output and not reasoning_text:
                 raise EmptyModelStreamError(EMPTY_ANTHROPIC_STREAM_MESSAGE)
@@ -300,6 +301,20 @@ async def stream_anthropic_response(
                 ),
             )
             return
+
+
+def _finalize_anthropic_stream_tools(tool_acc: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    finalized: dict[int, dict[str, Any]] = {}
+    for index, call in tool_acc.items():
+        arguments = call.get("arguments", "")
+        if not arguments and "_input" in call:
+            arguments = json.dumps(call.get("_input") or {}, ensure_ascii=False)
+        finalized[index] = {
+            "call_id": call.get("call_id"),
+            "name": call.get("name"),
+            "arguments": arguments,
+        }
+    return finalized
 
 
 def parse_anthropic_message(message: Any) -> ModelResponse:

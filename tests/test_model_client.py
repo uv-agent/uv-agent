@@ -806,6 +806,83 @@ async def test_stream_anthropic_allows_empty_events_until_valid_delta() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_anthropic_tool_use_does_not_prefix_empty_start_input() -> None:
+    class Messages:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        async def create(self, **kwargs):
+            self.kwargs = kwargs
+
+            class MessageStart:
+                type = "message_start"
+
+                class Message:
+                    id = "msg_1"
+                    usage = {}
+
+                message = Message()
+
+            class ToolStart:
+                type = "content_block_start"
+                index = 0
+
+                class ContentBlock:
+                    type = "tool_use"
+                    id = "toolu_1"
+                    name = "run_python"
+                    input = {}
+
+                content_block = ContentBlock()
+
+            class ToolInputDelta:
+                type = "content_block_delta"
+                index = 0
+
+                class Delta:
+                    type = "input_json_delta"
+                    partial_json = "{\"code\":\"print(1)\"}"
+
+                delta = Delta()
+
+            class MessageStop:
+                type = "message_stop"
+
+            return FakeAnthropicStream([MessageStart(), ToolStart(), ToolInputDelta(), MessageStop()])
+
+    class Client:
+        def __init__(self) -> None:
+            self.messages = Messages()
+
+    provider = ProviderConfig(name="p", base_url="https://api.anthropic.com")
+    model = ModelConfig(name="m", provider="p", model="claude", api="anthropic_messages")
+    client = Client()
+
+    events = [
+        event
+        async for event in stream_anthropic_response(
+            provider=provider,
+            model=model,
+            input_items=[],
+            tools=[],
+            instructions=None,
+            client=client,
+        )
+    ]
+
+    completed = events[-1]
+    assert completed.response is not None
+    assert completed.response.output == [
+        {
+            "type": "function_call",
+            "call_id": "toolu_1",
+            "name": "run_python",
+            "arguments": "{\"code\":\"print(1)\"}",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_anthropic_rejects_message_stop_without_output() -> None:
     class Messages:
         def __init__(self) -> None:
