@@ -179,12 +179,13 @@ See [configuration](docs/configuration.md) for all supported options and
 ## Core Ideas
 
 - The agent has exactly one external action surface: `run_python`.
-- Managed scripts declare third-party dependencies with PEP 723 inline metadata.
+- Managed scripts run in a project-shared venv; scripts install third-party
+  dependencies into that venv with `uv pip --python sys.executable`.
 - The distributed package includes both `uv_agent` and `uv_agent_runtime`; managed
   scripts import helpers from `uv_agent_runtime`.
 - Workspace rules, skills, and MCP declarations are progressively disclosed as
   context. MCP calls happen from Python runtime helpers, not direct model tools.
-- Thread state, run logs, saved scripts, and attachments live under
+- Thread state, run logs, the shared script venv, and attachments live under
   `~/.uv-agent/projects/<project-id>/`.
 
 ## Development

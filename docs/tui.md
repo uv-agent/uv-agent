@@ -2,7 +2,7 @@
 
 `uv-agent` opens a Textual TUI by default. The interface is a single transcript
 with a bottom composer, compact status footer, and full-screen panels for focused
-views such as threads, config, model levels, MCP declarations, and saved scripts.
+views such as threads, config, model levels, and MCP declarations.
 
 ```powershell
 uvx uv-agent@latest
@@ -53,7 +53,7 @@ and Esc to close.
 | Command | Action |
 | --- | --- |
 | `/threads` | Open recent threads and resume history. |
-| `/status` | Show runtime status, model level, context usage, config paths, rules, and saved scripts. |
+| `/status` | Show runtime status, model level, context usage, config paths, and rules. |
 | `/config` | Edit user-facing settings and inspect redacted config. |
 | `/models` | Show configured models. This panel is read-only. |
 | `/level [name]` | Switch the active model level for the current thread. |

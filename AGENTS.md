@@ -5,7 +5,7 @@ This repository builds `uv-agent`, an experimental coding agent with a Textual T
 ## Project Shape
 
 - `src/uv_agent/`: host application, configuration, model clients, session store, Python runner, project rules, skills/MCP discovery, and TUI.
-- `src/uv_agent_runtime/`: helper package injected into managed Python scripts so scripts can access file helpers, subprocess helpers, structured events, image attachment, saved script summaries, subagent launch helpers, and MCP clients.
+- `src/uv_agent_runtime/`: helper package installed into the project script venv so scripts can access file helpers, subprocess helpers, structured events, image attachment, subagent launch helpers, and MCP clients.
 - `tests/`: pytest coverage for runner, runtime, model clients, project rules, sessions, config, and Textual UI behavior.
 - `docs/design.md`: product semantics and longer design notes. Keep it aligned when changing architecture or user-visible behavior.
 
@@ -14,7 +14,7 @@ This repository builds `uv-agent`, an experimental coding agent with a Textual T
 - The agent has exactly one external action surface: `run_python`.
 - `run_python` executes Python through the managed runner. Do not add direct shell, filesystem, browser, network, or MCP model tools.
 - Python scripts may call `subprocess`; that capability must stay inside the Python runner boundary.
-- Managed scripts declare third-party dependencies with PEP 723 inline metadata. Do not add a separate dependency argument to the tool API.
+- Managed scripts install third-party dependencies into the shared script venv from inside Python, typically with `run_process_text(["uv", "pip", "install", "--python", sys.executable, ...])`. Do not add a separate dependency argument to the tool API.
 - `uv_agent_runtime` must work as a package dependency for managed scripts; scripts must not rely on the repository checkout, current `.venv`, or implicit import paths.
 - MCP and skills are progressively disclosed context. MCP calls happen through Python runtime helpers, not direct model tool calls.
 
