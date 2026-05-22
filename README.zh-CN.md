@@ -7,7 +7,8 @@ Windows 体验设计，尽量避免许多 coding agent 在 PowerShell 引号、s
 Unix-first 假设上经常“水土不服”的问题。它对外只有一个动作面：`run_python`：
 模型把 Python 脚本提交给受管理的 `uv run` runner，再由脚本完成实际工作，而不是
 依赖脆弱的 shell 片段。这种单一工具面的设计让 agent 在 Windows 上行为更可预期，
-同时仍可移植到任何安装了 Python 和 uv 的操作系统。
+同时仍可移植到任何安装了 Python 和 uv 的操作系统。内置成熟的上下文管理机制，
+见 [上下文管理](#上下文管理)。
 
 公开 API、配置字段和 runtime 行为可能随项目演进而继续调整。
 
@@ -209,19 +210,7 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 
 ## 上下文管理
 
-虽然只有一个工具 (`run_python`)，agent 仍然需要感知运行时环境、可用 helper、
-workspace rules、skills 和 MCP 服务器。这些信息通过基于指纹的增量更新机制渐进披露：
-
-- **指纹增量。** 每个上下文块（runtime env、model levels、helpers、skills、MCP）
-  都计算 SHA-256 指纹。只有内容变化的部分才会在下一轮重新发送，没变的保持静默。
-- **Epoch 生命周期。** 上下文压缩（compaction）后 epoch 重置，所有块重新全量发送，
-  因为模型已丢失了之前的上下文。
-- **自描述信封。** 更新以 `<context_update status="current|removed">` 块的形式
-  发送。skills 或 MCP 服务器被移除时会有显式的移除通知。
-- **稳定的 system prompt。** system prompt 始终保持不变，所有动态上下文通过
-  user message 追加，指令遵循质量不随轮次漂移。
-- **规则渐进加载。** workspace rules（AGENTS.md 文件）先以索引形式披露，
-  仅在 agent 进入对应目录时才内联具体文件内容。
+uv-agent 使用**成熟的上下文管理系统**：基于指纹的增量更新机制确保只有变化的上下文块（runtime env、model levels、helpers、skills、MCP servers）才会重新发送；system prompt 始终稳定，所有动态上下文通过 user message 追加。上下文压缩后 epoch 重置，所有块重新全量发送。更新以 `<context_update status="current|removed">` 信封形式传递，workspace rules 按需渐进加载。
 
 ## 开发
 

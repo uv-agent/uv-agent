@@ -8,7 +8,8 @@ quoting, shell semantics, or Unix-first assumptions. Its only external action
 surface is `run_python`: the model submits Python scripts to a managed `uv run`
 runner, and those scripts do the actual work instead of relying on fragile
 shell snippets. This single-tool design keeps behavior predictable on Windows
-and portable to any OS with Python and uv.
+and portable to any OS with Python and uv. It includes a mature context management
+system — see [Context Management](#context-management) for details.
 
 Public APIs, config fields, and runtime behavior may still change as the
 project evolves.
@@ -213,26 +214,7 @@ See [configuration](docs/configuration.md) for all supported options and
 
 ## Context Management
 
-With only one tool (`run_python`), the agent still needs to know about the
-runtime environment, available helpers, workspace rules, skills, and MCP
-servers. This information is disclosed progressively through a
-fingerprint-based update mechanism:
-
-- **Fingerprint diffing.** Each context block (runtime env, model levels,
-  helpers, skills, MCP) is SHA-256 fingerprinted. Only blocks whose content
-  changed since the last turn are re-sent; static blocks stay silent.
-- **Epoch lifecycle.** After context compression (compaction), the epoch
-  resets and all blocks are re-sent fresh, since the model lost earlier
-  context.
-- **Self-describing envelopes.** Updates arrive as `<context_update
-  status="current|removed">` blocks. Explicit removal notices tell the model
-  when skills or MCP servers disappear.
-- **Stable system prompt.** The system prompt never changes. All dynamic
-  context is appended through user messages, so instruction-following
-  quality doesn't drift across turns.
-- **Progressive rule loading.** Workspace rules (AGENTS.md files) are first
-  disclosed as an index; individual rule files are inlined only when the
-  agent enters their directory.
+uv-agent uses a **mature context management system** with fingerprint-based incremental updates: only context blocks (runtime env, model levels, helpers, skills, MCP servers) that have changed are re-sent, while the system prompt stays stable and all dynamic context is appended via user messages. After compaction, the epoch resets and all blocks are re-sent fresh. Updates arrive as explicit `<context_update status="current|removed">` envelopes, and workspace rules are progressively loaded on demand.
 
 ## Development
 
