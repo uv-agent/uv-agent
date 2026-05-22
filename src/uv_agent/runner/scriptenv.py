@@ -9,6 +9,8 @@ import tomllib
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
+import tomlkit
+
 
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _READY_LOCK = threading.Lock()
@@ -93,7 +95,7 @@ def _ensure_runtime_package(scriptenv_dir: Path, python: Path) -> None:
     _add_runtime_package(scriptenv_dir)
 
 
-def _add_runtime_package(scriptenv_dir: Path, spec: str = "uv-agent") -> None:
+def _add_runtime_package(scriptenv_dir: Path) -> None:
     subprocess.run(
         [
             uv_binary(),
@@ -101,7 +103,7 @@ def _add_runtime_package(scriptenv_dir: Path, spec: str = "uv-agent") -> None:
             "--project",
             str(scriptenv_dir),
             "-q",
-            spec,
+            "uv-agent",
         ],
         env=_uv_env(),
         check=True,
@@ -115,7 +117,57 @@ def _ensure_runtime_version(scriptenv_dir: Path, python: Path) -> None:
     installed = _installed_runtime_version(python)
     if not installed or installed == target:
         return
-    _add_runtime_package(scriptenv_dir, f"{_HOST_PACKAGE}=={target}")
+    pyproject = scriptenv_dir / "pyproject.toml"
+    try:
+        original = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if not _pin_dependency(pyproject, _HOST_PACKAGE, target):
+        return
+    result = subprocess.run(
+        [
+            uv_binary(),
+            "sync",
+            "--project",
+            str(scriptenv_dir),
+            "-q",
+        ],
+        env=_uv_env(),
+    )
+    if result.returncode != 0:
+        # Restore the previous pyproject so the scriptenv is not left in a
+        # broken state (e.g. host pins a version not yet on the index).
+        pyproject.write_text(original, encoding="utf-8")
+
+
+def _pin_dependency(pyproject: Path, package: str, version: str) -> bool:
+    try:
+        document = tomlkit.parse(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomlkit.exceptions.TOMLKitError):
+        return False
+    project = document.get("project")
+    if project is None:
+        return False
+    dependencies = project.get("dependencies")
+    if not isinstance(dependencies, list):
+        return False
+    normalized = _normalize_name(package)
+    pinned = f"{package}=={version}"
+    changed = False
+    for index, entry in enumerate(dependencies):
+        if not isinstance(entry, str):
+            continue
+        match = _REQ_NAME_RE.match(entry)
+        if not match or _normalize_name(match.group(1)) != normalized:
+            continue
+        if entry == pinned:
+            continue
+        dependencies[index] = pinned
+        changed = True
+    if not changed:
+        return False
+    pyproject.write_text(tomlkit.dumps(document), encoding="utf-8")
+    return True
 
 
 def _host_runtime_version() -> str | None:
