@@ -385,17 +385,7 @@ class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
             app._open_tool_details_panel(self)
 
     def _content(self) -> object:
-        if isinstance(self.summary, Text):
-            lines = list(self.summary.split(allow_blank=True)) or [Text()]
-            lines[0].append(" ")
-            lines[0].append("[details]", style="dim")
-            return join_lines(lines)
-        summary_text = renderable_plain(self.summary)
-        if summary_text is not None:
-            lines = summary_text.splitlines() or [""]
-            lines[0] = f"{lines[0]} [details]"
-            return "\n".join(lines)
-        return join_lines([self.summary, plain("[details]", style="dim")])
+        return self.summary
 
 
 class FoldedProcessCell(TranscriptCell, can_focus=True):
