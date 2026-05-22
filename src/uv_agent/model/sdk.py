@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from uv_agent.config import ModelConfig, ProviderConfig
 
@@ -64,8 +64,15 @@ def model_param_sources(
 def object_dump(value: object) -> dict[str, Any]:
     if value is None:
         return {}
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(mode="json")
+        return dumped if isinstance(dumped, dict) else {}
     if isinstance(value, dict):
         return value
-    return dict(value) if hasattr(value, "__iter__") else {}
+    if not hasattr(value, "__iter__"):
+        return {}
+    try:
+        return dict(cast(Any, value))
+    except (TypeError, ValueError):
+        return {}

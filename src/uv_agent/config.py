@@ -305,8 +305,11 @@ def load_raw_config(project_root: Path | None = None, paths: list[Path] | None =
 
 
 def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
-    providers = {}
-    for name, value in raw.get("providers", {}).items():
+    providers: dict[str, ProviderConfig] = {}
+    providers_raw = _object_dict(raw.get("providers", {}))
+    for name, value in providers_raw.items():
+        if not isinstance(value, dict):
+            continue
         provider_value = dict(value)
         provider_value.pop("name", None)
         legacy_endpoint = provider_value.pop("endpoint", None)
@@ -321,21 +324,27 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         provider_value["reasoning_display"] = parse_reasoning_display(
             provider_value.pop("reasoning_display", {})
         )
-        if responses_raw is None:
-            responses_raw = {"path": legacy_endpoint or "/responses"}
-        if chat_raw is None:
-            chat_raw = {"path": "/chat/completions"}
-        if anthropic_raw is None:
-            anthropic_raw = {"path": "/v1/messages"}
-        provider_value["responses"] = EndpointConfig(**responses_raw)
-        provider_value["chat_completions"] = EndpointConfig(**chat_raw)
-        provider_value["anthropic_messages"] = EndpointConfig(**anthropic_raw)
+        provider_value["responses"] = parse_endpoint_config(
+            responses_raw,
+            default_path=str(legacy_endpoint or "/responses"),
+        )
+        provider_value["chat_completions"] = parse_endpoint_config(
+            chat_raw,
+            default_path="/chat/completions",
+        )
+        provider_value["anthropic_messages"] = parse_endpoint_config(
+            anthropic_raw,
+            default_path="/v1/messages",
+        )
         if legacy_api and legacy_api != "responses":
             # Older experimental configs used provider-level api_format. Models now own API choice.
             provider_value.setdefault("params", {})
         providers[name] = ProviderConfig(name=name, **provider_value)
-    models = {}
-    for name, value in raw.get("models", {}).items():
+    models: dict[str, ModelConfig] = {}
+    models_raw = _object_dict(raw.get("models", {}))
+    for name, value in models_raw.items():
+        if not isinstance(value, dict):
+            continue
         model_value = dict(value)
         model_value.setdefault("api", model_value.pop("api_format", "responses"))
         model_value.pop("reasoning_options", None)
@@ -361,15 +370,18 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
             model_reasoning_display,
         )
         models[name] = ModelConfig(name=name, **model_value)
-    levels = {}
-    for name, value in raw.get("levels", {}).items():
+    levels: dict[str, LevelConfig] = {}
+    levels_raw = _object_dict(raw.get("levels", {}))
+    for name, value in levels_raw.items():
+        if not isinstance(value, dict):
+            continue
         level_value = dict(value)
         level_value.pop("reasoning", None)
         levels[name] = LevelConfig(name=name, **level_value)
-    runtime_raw = raw.get("runtime", {})
-    compression = CompressionConfig(**dict(runtime_raw.get("compression", {})))
-    title_generation = TitleGenerationConfig(**dict(runtime_raw.get("title_generation", {})))
-    stream_retry = StreamRetryConfig(**dict(runtime_raw.get("stream_retry", {})))
+    runtime_raw = _object_dict(raw.get("runtime", {}))
+    compression = CompressionConfig(**_object_dict(runtime_raw.get("compression", {})))
+    title_generation = TitleGenerationConfig(**_object_dict(runtime_raw.get("title_generation", {})))
+    stream_retry = StreamRetryConfig(**_object_dict(runtime_raw.get("stream_retry", {})))
     default_level = runtime_raw.get("default_level", "medium")
     if default_level not in levels and levels:
         default_level = next(iter(levels))
@@ -388,13 +400,13 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         title_generation=title_generation,
         stream_retry=stream_retry,
     )
-    runner_raw = raw.get("runner", {})
+    runner_raw = _object_dict(raw.get("runner", {}))
     runner = RunnerConfig(
         default_timeout_s=float(runner_raw.get("default_timeout_s", 7200)),
         max_output_bytes=int(runner_raw.get("max_output_bytes", 1_000_000)),
         max_run_logs=int(runner_raw.get("max_run_logs", 200)),
     )
-    ui_raw = raw.get("ui", {})
+    ui_raw = _object_dict(raw.get("ui", {}))
     pricing = parse_pricing(raw.get("pricing", {}))
     return AppConfig(
         providers=providers,
@@ -422,26 +434,57 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return result
 
 
+def _object_dict(value: object) -> dict[str, Any]:
+    """Return a shallow dict only for JSON object values.
+
+    Config files are user-controlled JSON. Narrowing at module boundaries keeps
+    parser code from accidentally calling ``dict(...)`` on strings/lists, which
+    would either crash with confusing errors or be interpreted as iterable pairs.
+    """
+
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def parse_endpoint_config(value: object, *, default_path: str) -> EndpointConfig:
+    """Parse one provider endpoint block with a stable fallback path."""
+
+    if value is None:
+        return EndpointConfig(path=default_path)
+    if isinstance(value, str):
+        # Accept a compact string form as a forgiving shorthand for path-only
+        # endpoints. Older configs already used provider-level endpoint strings.
+        return EndpointConfig(path=value or default_path)
+    data = _object_dict(value)
+    path = data.get("path", default_path)
+    params = data.get("params", {})
+    return EndpointConfig(
+        path=str(path or default_path),
+        params=_object_dict(params),
+    )
+
+
 def parse_message_passthrough(value: object) -> MessagePassthroughConfig:
     if isinstance(value, list):
         return MessagePassthroughConfig(assistant=[str(field) for field in value])
     if not isinstance(value, dict):
         return MessagePassthroughConfig()
+    data = dict(value)
     return MessagePassthroughConfig(
-        assistant=string_list(value.get("assistant")),
-        user=string_list(value.get("user")),
-        system=string_list(value.get("system")),
-        tool=string_list(value.get("tool")),
+        assistant=string_list(data.get("assistant")),
+        user=string_list(data.get("user")),
+        system=string_list(data.get("system")),
+        tool=string_list(data.get("tool")),
     )
 
 
 def parse_reasoning_display(value: object) -> ReasoningDisplayConfig:
     if not isinstance(value, dict):
         return ReasoningDisplayConfig()
+    data = dict(value)
     return ReasoningDisplayConfig(
-        assistant_message_fields=string_list(value.get("assistant_message_fields")),
-        stream_delta_fields=string_list(value.get("stream_delta_fields")),
-        unknown_text_delta_as_reasoning=bool(value.get("unknown_text_delta_as_reasoning", False)),
+        assistant_message_fields=string_list(data.get("assistant_message_fields")),
+        stream_delta_fields=string_list(data.get("stream_delta_fields")),
+        unknown_text_delta_as_reasoning=bool(data.get("unknown_text_delta_as_reasoning", False)),
     )
 
 
@@ -450,19 +493,21 @@ def parse_completion_notification(value: object) -> CompletionNotificationConfig
         return CompletionNotificationConfig(enabled=value)
     if not isinstance(value, dict):
         return CompletionNotificationConfig()
-    terminal = value.get("terminal", value.get("toast", True))
+    data = dict(value)
+    terminal = data.get("terminal", data.get("toast", True))
     return CompletionNotificationConfig(
-        enabled=bool(value.get("enabled", True)),
+        enabled=bool(data.get("enabled", True)),
         terminal=bool(terminal),
-        bell=bool(value.get("bell", True)),
+        bell=bool(data.get("bell", True)),
     )
 
 
 def parse_pricing(value: object) -> PricingConfig:
     if not isinstance(value, dict):
         return PricingConfig()
+    data = dict(value)
     models: dict[str, ModelPricingConfig] = {}
-    raw_models = value.get("models", {})
+    raw_models = data.get("models", {})
     if isinstance(raw_models, dict):
         for name, raw_price in raw_models.items():
             if not isinstance(name, str) or not isinstance(raw_price, dict):
@@ -479,8 +524,8 @@ def parse_pricing(value: object) -> PricingConfig:
                 unit=str(unit) if unit is not None else None,
             )
     return PricingConfig(
-        currency=str(value.get("currency", "USD") or "USD"),
-        unit=str(value.get("unit", "1M_tokens") or "1M_tokens"),
+        currency=str(data.get("currency", "USD") or "USD"),
+        unit=str(data.get("unit", "1M_tokens") or "1M_tokens"),
         models=models,
     )
 
@@ -495,11 +540,12 @@ def merge_message_passthrough(
         return MessagePassthroughConfig(assistant=[str(field) for field in override])
     if not isinstance(override, dict):
         return base
+    data = dict(override)
     return MessagePassthroughConfig(
-        assistant=string_list(override["assistant"]) if "assistant" in override else base.assistant,
-        user=string_list(override["user"]) if "user" in override else base.user,
-        system=string_list(override["system"]) if "system" in override else base.system,
-        tool=string_list(override["tool"]) if "tool" in override else base.tool,
+        assistant=string_list(data.get("assistant")) if "assistant" in data else base.assistant,
+        user=string_list(data.get("user")) if "user" in data else base.user,
+        system=string_list(data.get("system")) if "system" in data else base.system,
+        tool=string_list(data.get("tool")) if "tool" in data else base.tool,
     )
 
 
@@ -509,15 +555,16 @@ def merge_reasoning_display(
 ) -> ReasoningDisplayConfig:
     if override is None or not isinstance(override, dict):
         return base
+    data = dict(override)
     return ReasoningDisplayConfig(
-        assistant_message_fields=string_list(override["assistant_message_fields"])
-        if "assistant_message_fields" in override
+        assistant_message_fields=string_list(data.get("assistant_message_fields"))
+        if "assistant_message_fields" in data
         else base.assistant_message_fields,
-        stream_delta_fields=string_list(override["stream_delta_fields"])
-        if "stream_delta_fields" in override
+        stream_delta_fields=string_list(data.get("stream_delta_fields"))
+        if "stream_delta_fields" in data
         else base.stream_delta_fields,
-        unknown_text_delta_as_reasoning=bool(override["unknown_text_delta_as_reasoning"])
-        if "unknown_text_delta_as_reasoning" in override
+        unknown_text_delta_as_reasoning=bool(data.get("unknown_text_delta_as_reasoning"))
+        if "unknown_text_delta_as_reasoning" in data
         else base.unknown_text_delta_as_reasoning,
     )
 

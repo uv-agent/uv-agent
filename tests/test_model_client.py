@@ -37,6 +37,7 @@ from uv_agent.model import (
     stream_chat_response,
     stream_responses_response,
 )
+from uv_agent.model.sdk import object_dump
 
 
 class FakeOpenAIStream:
@@ -78,6 +79,10 @@ class FakeOpenAIClient:
         if kwargs.get("stream"):
             return FakeOpenAIStream(self.response_events)
         return self.response_events[0]
+
+
+def test_object_dump_ignores_non_mapping_iterables() -> None:
+    assert object_dump(["not", "pairs"]) == {}
 
 
 class FakeAnthropicStream:
@@ -187,6 +192,43 @@ def test_chat_messages_keep_assistant_tool_calls_together_across_unknown_items()
     assert messages[0]["content"] == "I will inspect the files."
     assert messages[0]["tool_calls"][0]["id"] == "call_1"
     assert messages[1]["role"] == "tool"
+
+
+def test_chat_messages_replaces_invalid_passthrough_tool_calls_field() -> None:
+    model = ModelConfig(
+        name="m",
+        provider="p",
+        model="remote",
+        api="chat_completions",
+        message_passthrough=MessagePassthroughConfig(assistant=["tool_calls"]),
+    )
+
+    messages = chat_messages(
+        [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will run it."}],
+                "tool_calls": "provider-specific-text",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_python",
+                "arguments": "{}",
+            },
+        ],
+        None,
+        model,
+    )
+
+    assert messages[0]["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "run_python", "arguments": "{}"},
+        }
+    ]
 
 
 def test_responses_refusal_content_is_treated_as_visible_text() -> None:

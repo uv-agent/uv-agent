@@ -137,11 +137,7 @@ def _probe_config(server: McpServerSummary, *, fallback_cwd: str) -> McpProbeSer
         raise ValueError(f"MCP server not declared: {server.name}")
 
     url = _first_string(value, "url", "httpUrl", "serverUrl")
-    transport = str(value.get("transport") or ("streamable_http" if url else "stdio"))
-    if transport == "http":
-        transport = "streamable_http"
-    if transport not in {"stdio", "streamable_http", "sse"}:
-        raise ValueError(f"Unsupported MCP transport for {server.name}: {transport}")
+    transport = _probe_transport(value.get("transport"), has_url=bool(url), server_name=server.name)
 
     command = value.get("command")
     args = value.get("args")
@@ -163,9 +159,24 @@ def _probe_config(server: McpServerSummary, *, fallback_cwd: str) -> McpProbeSer
         raise ValueError(f"MCP {transport} declaration requires url: {server.name}")
     return McpProbeServerConfig(
         name=server.name,
-        transport=transport,  # type: ignore[arg-type]
+        transport=transport,
         url=url,
     )
+
+
+def _probe_transport(value: object, *, has_url: bool, server_name: str) -> McpProbeTransport:
+    """Normalize MCP transport aliases into the probe transport literal set."""
+
+    transport = str(value or ("streamable_http" if has_url else "stdio"))
+    if transport == "http":
+        transport = "streamable_http"
+    if transport == "stdio":
+        return "stdio"
+    if transport == "streamable_http":
+        return "streamable_http"
+    if transport == "sse":
+        return "sse"
+    raise ValueError(f"Unsupported MCP transport for {server_name}: {transport}")
 
 
 def _first_string(value: dict[str, Any], *keys: str) -> str | None:

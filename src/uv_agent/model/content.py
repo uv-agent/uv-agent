@@ -50,7 +50,15 @@ def chat_messages(
         elif item_type == "function_call":
             if pending_assistant is None:
                 pending_assistant = {"role": "assistant", "content": ""}
-            pending_assistant.setdefault("tool_calls", []).append(chat_tool_call_message(item))
+            tool_calls = pending_assistant.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                # Provider passthrough fields can legally add arbitrary keys to
+                # assistant messages. If one collides with OpenAI's tool_calls
+                # shape, prefer preserving a valid chat-completions payload over
+                # appending to a non-list and crashing during replay.
+                tool_calls = []
+                pending_assistant["tool_calls"] = tool_calls
+            tool_calls.append(chat_tool_call_message(item))
         elif item_type == "function_call_output":
             flush_pending_assistant()
             messages.append(

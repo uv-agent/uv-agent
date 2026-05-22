@@ -107,6 +107,34 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert config.runner.max_run_logs == 200
 
 
+def test_endpoint_config_string_shorthand_and_bad_nested_values(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "p": {
+                        "base_url": "https://example.com",
+                        "responses": "/v1/responses",
+                        "chat_completions": ["not", "a", "dict"],
+                    }
+                },
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {"medium": {"model": "m"}},
+                "runtime": {"compression": "not-a-dict"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+    provider = config.providers["p"]
+
+    assert provider.responses.path == "/v1/responses"
+    assert provider.chat_completions.path == "/chat/completions"
+    assert config.runtime.compression.enabled is True
+
+
 def test_runner_max_run_logs_can_be_configured(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

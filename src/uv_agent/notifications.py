@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class _BellStream(Protocol):
+    """Small stream protocol needed for terminal-bell output."""
+
+    def write(self, text: str) -> object: ...
+
+    def flush(self) -> object: ...
 
 
 def play_completion_sound() -> bool:
@@ -36,13 +46,14 @@ def ring_terminal_bell() -> bool:
 
 
 def _write_bell(stream: object) -> bool:
-    if not hasattr(stream, "write") or not hasattr(stream, "flush"):
+    if not isinstance(stream, _BellStream):
         return False
     try:
-        if hasattr(stream, "isatty") and not stream.isatty():
+        isatty = getattr(stream, "isatty", None)
+        if callable(isatty) and not isatty():
             return False
-        stream.write("\a")  # type: ignore[attr-defined]
-        stream.flush()  # type: ignore[attr-defined]
+        stream.write("\a")
+        stream.flush()
     except OSError:
         return False
     return True
