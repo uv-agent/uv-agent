@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import importlib
 import json
 import random
 import re
@@ -221,6 +222,19 @@ class ToolCallTurnResult:
 
 
 @dataclass(frozen=True)
+class RunTurnPrelude:
+    thread_id: str
+    turn_id: str
+    system_instructions: str
+    should_generate_title: bool
+    turn_input: TurnInputState
+    input_items: list[dict[str, Any]]
+    request_input_items: list[dict[str, Any]]
+    turn_started_event: dict[str, Any]
+    image_events: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class ContextPart:
     id: str
     kind: str
@@ -277,55 +291,30 @@ class AgentEngine:
         image_paths: list[str | Path] | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        self.refresh_config(force=True)
-        thread_id = thread_id or self.thread_store.create_thread("New thread")
+        thread_id = thread_id or await asyncio.to_thread(self.thread_store.create_thread, "New thread")
         with self.thread_store.lock_thread(thread_id):
-            system_instructions = self._system_instructions_for_turn(thread_id)
-            turn_id = new_id("turn")
-            should_generate_title = self._should_generate_title(thread_id)
-            turn_input = self._prepare_turn_input(thread_id, level=level)
-            input_items = turn_input.input_items
-            request_input_items = turn_input.request_input_items()
-            pre_user_items = self._pre_user_context_items(thread_id)
-            turn_started_event = self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
-            user_item = message_item("user", user_text)
-            self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
+            prelude = await asyncio.to_thread(
+                self._prepare_run_turn_prelude,
+                user_text=user_text,
+                thread_id=thread_id,
+                level=level,
+                image_paths=image_paths,
+                cancel_event=cancel_event,
+            )
+            turn_id = prelude.turn_id
+            system_instructions = prelude.system_instructions
+            turn_input = prelude.turn_input
+            input_items = prelude.input_items
+            request_input_items = prelude.request_input_items
+            turn_started_event = prelude.turn_started_event
             title_task = self._start_title_generation_task(
                 thread_id,
                 user_text,
-                should_generate=should_generate_title,
+                should_generate=prelude.should_generate_title,
                 level=level,
             )
-            input_items.extend(pre_user_items)
-            request_input_items.extend(pre_user_items)
-            turn_input.pending_items.extend(pre_user_items)
-            input_items.append(user_item)
-            request_input_items.append(user_item)
-            turn_input.pending_items.append(user_item)
-            for image_path in image_paths or []:
-                attachment = self.attachments.register_image(
-                    image_path,
-                    cwd=self.project_root,
-                    thread_id=thread_id,
-                    note="pasted from clipboard",
-                )
-                payload = attachment.to_event_payload()
-                self.thread_store.append(
-                    thread_id,
-                    "item.image_attachment",
-                    turn_id=turn_id,
-                    attachment=payload,
-                )
-                image_item = image_message_item(payload)
-                input_items.append(image_item)
-                request_input_items.append(image_item)
-                turn_input.pending_items.append(image_item)
-                yield {
-                    "type": "image.attachment",
-                    "thread_id": thread_id,
-                    "turn_id": turn_id,
-                    "attachment": payload,
-                }
+            for event in prelude.image_events:
+                yield event
 
             final_text = ""
             stream_state = StreamResponseState()
@@ -491,6 +480,112 @@ class AgentEngine:
                 "completed_at": turn_completed_event.get("created_at"),
                 "final_text": final_text,
             }
+
+    def _prepare_run_turn_prelude(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None,
+        level: str | None,
+        image_paths: list[str | Path] | None,
+        cancel_event: asyncio.Event | None,
+    ) -> RunTurnPrelude:
+        self._raise_if_cancelled(cancel_event)
+        self.refresh_config(force=True)
+        if thread_id is None:
+            raise ValueError("thread_id is required after run_turn creates the thread")
+        system_instructions = self._system_instructions_for_turn(thread_id)
+        turn_id = new_id("turn")
+        should_generate_title = self._should_generate_title(thread_id)
+        turn_input = self._prepare_turn_input(thread_id, level=level)
+        input_items = turn_input.input_items
+        request_input_items = turn_input.request_input_items()
+        pre_user_items = self._pre_user_context_items(thread_id)
+        turn_started_event = self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        user_item = message_item("user", user_text)
+        self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
+
+        input_items.extend(pre_user_items)
+        request_input_items.extend(pre_user_items)
+        turn_input.pending_items.extend(pre_user_items)
+        input_items.append(user_item)
+        request_input_items.append(user_item)
+        turn_input.pending_items.append(user_item)
+
+        image_events: list[dict[str, Any]] = []
+        for image_path in image_paths or []:
+            attachment = self.attachments.register_image(
+                image_path,
+                cwd=self.project_root,
+                thread_id=thread_id,
+                note="pasted from clipboard",
+            )
+            payload = attachment.to_event_payload()
+            self.thread_store.append(
+                thread_id,
+                "item.image_attachment",
+                turn_id=turn_id,
+                attachment=payload,
+            )
+            image_item = image_message_item(payload)
+            input_items.append(image_item)
+            request_input_items.append(image_item)
+            turn_input.pending_items.append(image_item)
+            image_events.append(
+                {
+                    "type": "image.attachment",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "attachment": payload,
+                }
+            )
+
+        self._warm_model_backend_for_level(level)
+        if should_generate_title:
+            title_level = self.config.runtime.title_generation.model_level or level
+            self._warm_model_backend_for_level(title_level)
+
+        return RunTurnPrelude(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            system_instructions=system_instructions,
+            should_generate_title=should_generate_title,
+            turn_input=turn_input,
+            input_items=input_items,
+            request_input_items=request_input_items,
+            turn_started_event=turn_started_event,
+            image_events=image_events,
+        )
+
+    def _warm_model_backend_for_level(self, level: str | None) -> None:
+        if not self._model_client_uses_builtin_lazy_provider_imports():
+            return
+        try:
+            api = self.config.model_for_level(level).api
+        except Exception:
+            return
+        try:
+            if api == "anthropic_messages":
+                module = importlib.import_module("uv_agent.model.anthropic")
+                module.anthropic_sdk_param_keys()
+                return
+            if api == "chat_completions":
+                module = importlib.import_module("uv_agent.model.chat")
+                importlib.import_module("uv_agent.model.openai_sdk")
+                module.chat_completions_sdk_param_keys()
+                return
+            module = importlib.import_module("uv_agent.model.responses")
+            importlib.import_module("uv_agent.model.openai_sdk")
+            module.responses_sdk_param_keys()
+        except Exception:
+            return
+
+    def _model_client_uses_builtin_lazy_provider_imports(self) -> bool:
+        client_type = type(self.model_client)
+        return (
+            client_type.__module__ == "uv_agent.model.client"
+            and client_type.__name__ == "UnifiedModelClient"
+        )
 
     async def retry_turn(
         self,
