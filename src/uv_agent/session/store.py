@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from uv_agent.atomic import atomic_replace
 from uv_agent.billing import decimal_or_none, decimal_or_zero, decimal_to_string, normalize_currency
 from uv_agent.context import usage_token_count
 from uv_agent.ids import new_id
@@ -432,7 +433,7 @@ class ThreadStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         tmp_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(path)
+        atomic_replace(tmp_path, path)
 
     def _update_metadata(self, thread_id: str, event: dict[str, Any], *, kind: str) -> None:
         path = self.metadata_path(thread_id, kind=kind)

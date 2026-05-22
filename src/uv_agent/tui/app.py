@@ -23,6 +23,7 @@ from textual.selection import Selection
 from textual.widgets import Button, Static, TextArea
 from textual.worker import Worker
 
+from uv_agent.atomic import atomic_replace
 from uv_agent.billing import billing_total_from_metadata, format_billing_total
 from uv_agent.config import ConfigError
 from uv_agent.environment import application_version, detect_user_language, host_environment_line
@@ -218,7 +219,7 @@ def save_composer_history(items: list[str]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    tmp_path.replace(path)
+    atomic_replace(tmp_path, path)
 
 
 def _event_offset(event: dict[str, Any] | None) -> int | None:
