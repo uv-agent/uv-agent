@@ -442,7 +442,9 @@ def _object_dict(value: object) -> dict[str, Any]:
     would either crash with confusing errors or be interpreted as iterable pairs.
     """
 
-    return dict(value) if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    return {key: item for key, item in value.items() if isinstance(key, str)}
 
 
 def parse_endpoint_config(value: object, *, default_path: str) -> EndpointConfig:
@@ -455,6 +457,9 @@ def parse_endpoint_config(value: object, *, default_path: str) -> EndpointConfig
         # endpoints. Older configs already used provider-level endpoint strings.
         return EndpointConfig(path=value or default_path)
     data = _object_dict(value)
+    unexpected = sorted(set(data) - {"path", "params"})
+    if unexpected:
+        raise TypeError(f"unknown endpoint config fields: {', '.join(unexpected)}")
     path = data.get("path", default_path)
     params = data.get("params", {})
     return EndpointConfig(
@@ -468,7 +473,7 @@ def parse_message_passthrough(value: object) -> MessagePassthroughConfig:
         return MessagePassthroughConfig(assistant=[str(field) for field in value])
     if not isinstance(value, dict):
         return MessagePassthroughConfig()
-    data = dict(value)
+    data = _object_dict(value)
     return MessagePassthroughConfig(
         assistant=string_list(data.get("assistant")),
         user=string_list(data.get("user")),
@@ -480,7 +485,7 @@ def parse_message_passthrough(value: object) -> MessagePassthroughConfig:
 def parse_reasoning_display(value: object) -> ReasoningDisplayConfig:
     if not isinstance(value, dict):
         return ReasoningDisplayConfig()
-    data = dict(value)
+    data = _object_dict(value)
     return ReasoningDisplayConfig(
         assistant_message_fields=string_list(data.get("assistant_message_fields")),
         stream_delta_fields=string_list(data.get("stream_delta_fields")),
@@ -493,7 +498,7 @@ def parse_completion_notification(value: object) -> CompletionNotificationConfig
         return CompletionNotificationConfig(enabled=value)
     if not isinstance(value, dict):
         return CompletionNotificationConfig()
-    data = dict(value)
+    data = _object_dict(value)
     terminal = data.get("terminal", data.get("toast", True))
     return CompletionNotificationConfig(
         enabled=bool(data.get("enabled", True)),
@@ -505,14 +510,14 @@ def parse_completion_notification(value: object) -> CompletionNotificationConfig
 def parse_pricing(value: object) -> PricingConfig:
     if not isinstance(value, dict):
         return PricingConfig()
-    data = dict(value)
+    data = _object_dict(value)
     models: dict[str, ModelPricingConfig] = {}
     raw_models = data.get("models", {})
     if isinstance(raw_models, dict):
         for name, raw_price in raw_models.items():
             if not isinstance(name, str) or not isinstance(raw_price, dict):
                 continue
-            price_value = dict(raw_price)
+            price_value = _object_dict(raw_price)
             # Model entries inherit the top-level unit unless they explicitly
             # override it. The resolved unit is handled in billing.py so the raw
             # config still reflects exactly what the user wrote.
@@ -540,7 +545,7 @@ def merge_message_passthrough(
         return MessagePassthroughConfig(assistant=[str(field) for field in override])
     if not isinstance(override, dict):
         return base
-    data = dict(override)
+    data = _object_dict(override)
     return MessagePassthroughConfig(
         assistant=string_list(data.get("assistant")) if "assistant" in data else base.assistant,
         user=string_list(data.get("user")) if "user" in data else base.user,
@@ -555,7 +560,7 @@ def merge_reasoning_display(
 ) -> ReasoningDisplayConfig:
     if override is None or not isinstance(override, dict):
         return base
-    data = dict(override)
+    data = _object_dict(override)
     return ReasoningDisplayConfig(
         assistant_message_fields=string_list(data.get("assistant_message_fields"))
         if "assistant_message_fields" in data
