@@ -13,6 +13,10 @@ _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _READY_LOCK = threading.Lock()
 _READY_DIRS: set[Path] = set()
 
+# Default Python version for the shared scriptenv. uv will download a matching
+# interpreter if none is available on the host.
+DEFAULT_PYTHON_VERSION = "3.12"
+
 
 def uv_binary() -> str:
     return shutil.which("uv") or "uv"
@@ -58,6 +62,8 @@ def ensure_project(scriptenv_dir: Path) -> None:
                 "--name",
                 "uv-agent-scriptenv",
                 "--no-pin-python",
+                "--python",
+                DEFAULT_PYTHON_VERSION,
                 str(scriptenv_dir),
             ],
             env=_uv_env(),
