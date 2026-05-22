@@ -524,8 +524,22 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if not self.app_focus:
             self.app_focus = True
 
+        previous = self._last_composer_text
         result = composer.replace(event.text, *composer.selection, maintain_selection_offset=False)
         composer.move_cursor(result.end_location)
+
+        # TextArea.Changed is not delivered for this fallback path because the
+        # paste is handled by the screen while no widget has focus. Apply the
+        # same composer bookkeeping that normally happens in
+        # on_text_area_changed(), otherwise large multi-line pastes remain in a
+        # collapsed composer until the next edit.
+        current = composer.text
+        if self._composer_history_index is not None and current != self._composer_history_text():
+            self._reset_composer_history_navigation()
+        self._last_composer_text = current
+        self._resize_composer()
+        self._refresh_status()
+        self._maybe_open_mention_picker(composer, previous=previous, current=current)
         composer.focus()
 
     def _tick(self) -> None:

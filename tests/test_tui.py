@@ -2338,13 +2338,16 @@ async def test_tui_large_paste_recovers_composer_after_terminal_blur(
         await pilot.pause()
         assert app.screen.focused is None
 
-        pasted_text = "x" * 6000
+        pasted_text = "one\ntwo\nthree"
         app.post_message(events.Paste(pasted_text))
         await pilot.pause()
 
         assert composer.text == pasted_text
         assert app.screen.focused is composer
         assert app.app_focus is True
+        assert app._last_composer_text == pasted_text
+        assert app._composer_expanded is True
+        assert composer.styles.height.value == 8
 
 
 @pytest.mark.asyncio
