@@ -82,6 +82,16 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
           "reasoning_content"
         ]
       }
+    },
+    "minimax": {
+      "base_url": "https://api.minimaxi.com",
+      "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "chat_completions": {
+        "path": "/v1/chat/completions"
+      },
+      "anthropic_messages": {
+        "path": "/anthropic/v1/messages"
+      }
     }
   },
   "models": {
@@ -104,6 +114,13 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
       "params": {
         "reasoning_effort": "max"
       }
+    },
+    "MiniMax-M2.7": {
+      "provider": "minimax",
+      "model": "MiniMax-M2.7-highspeed",
+      "api": "anthropic_messages",
+      "supports_images": false,
+      "context_window_tokens": 204800
     }
   },
   "levels": {
@@ -112,6 +129,9 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
     },
     "deepseek-pro": {
       "model": "deepseek-v4-pro"
+    },
+    "MiniMax-M2.7": {
+      "model": "MiniMax-M2.7"
     }
   },
   "runtime": {

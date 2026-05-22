@@ -85,6 +85,16 @@ API keys in environment variables or ignored local config.
           "reasoning_content"
         ]
       }
+    },
+    "minimax": {
+      "base_url": "https://api.minimaxi.com",
+      "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "chat_completions": {
+        "path": "/v1/chat/completions"
+      },
+      "anthropic_messages": {
+        "path": "/anthropic/v1/messages"
+      }
     }
   },
   "models": {
@@ -107,6 +117,13 @@ API keys in environment variables or ignored local config.
       "params": {
         "reasoning_effort": "max"
       }
+    },
+    "MiniMax-M2.7": {
+      "provider": "minimax",
+      "model": "MiniMax-M2.7-highspeed",
+      "api": "anthropic_messages",
+      "supports_images": false,
+      "context_window_tokens": 204800
     }
   },
   "levels": {
@@ -115,6 +132,9 @@ API keys in environment variables or ignored local config.
     },
     "deepseek-pro": {
       "model": "deepseek-v4-pro"
+    },
+    "MiniMax-M2.7": {
+      "model": "MiniMax-M2.7"
     }
   },
   "runtime": {
