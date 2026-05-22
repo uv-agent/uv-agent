@@ -40,13 +40,34 @@ def apply_patch(patch: str, *, cwd: str | Path | None = None, check: bool = True
     try:
         ops = _parse_patch(patch)
         changed_files = _changed_files(ops)
-        _apply_ops(workdir, ops)
+        _apply_ops(workdir, ops, write=True)
     except Exception as exc:
         result = PatchResult(returncode=1, stdout="", stderr=str(exc), changed_files=[])
         if check:
             raise RuntimeError(f"patch failed with exit 1:\n{result.stderr}") from exc
         return result
 
+    return PatchResult(returncode=0, stdout="", stderr="", changed_files=sorted(changed_files))
+
+
+def dry_run_patch(patch: str, *, cwd: str | Path | None = None, check: bool = True) -> PatchResult:
+    """Validate a patch without writing any filesystem changes.
+
+    This shares the real apply path up to the final write phase, so hunk context,
+    path escaping, add/delete/move conflicts, and changed file reporting match
+    ``apply_patch`` while avoiding the old whole-workspace snapshot/restore cost.
+    """
+
+    workdir = Path(cwd).resolve() if cwd is not None else Path.cwd()
+    try:
+        ops = _parse_patch(patch)
+        changed_files = _changed_files(ops)
+        _apply_ops(workdir, ops, write=False)
+    except Exception as exc:
+        result = PatchResult(returncode=1, stdout="", stderr=str(exc), changed_files=[])
+        if check:
+            raise RuntimeError(f"patch failed with exit 1:\n{result.stderr}") from exc
+        return result
     return PatchResult(returncode=0, stdout="", stderr="", changed_files=sorted(changed_files))
 
 
@@ -147,7 +168,7 @@ def _changed_files(ops: list[_FileOp]) -> set[str]:
     return changed
 
 
-def _apply_ops(workdir: Path, ops: list[_FileOp]) -> None:
+def _apply_ops(workdir: Path, ops: list[_FileOp], *, write: bool) -> None:
     pending: dict[Path, str | None] = {}
     for op in ops:
         if isinstance(op, _AddFile):
@@ -188,6 +209,9 @@ def _apply_ops(workdir: Path, ops: list[_FileOp]) -> None:
                     raise FileExistsError(f"move target already exists: {op.move_to}")
                 pending[source] = None
                 pending[target] = text
+
+    if not write:
+        return
 
     for path, text in pending.items():
         if text is None:

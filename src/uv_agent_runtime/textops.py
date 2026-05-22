@@ -15,7 +15,7 @@ from unidiff import PatchSet
 from unidiff.patch import PatchedFile
 
 from .files import resolve_workspace_path
-from .patch import PatchResult, apply_patch
+from .patch import PatchResult, apply_patch, dry_run_patch
 
 
 @dataclass(frozen=True)
@@ -572,17 +572,9 @@ def _detect_patch_format(patch: str) -> Literal["apply_patch", "unified"]:
 
 
 def _dry_run_apply_patch(patch: str, *, cwd: str | Path | None, check: bool) -> PatchResult:
-    root = resolve_workspace_path(cwd or ".")
-    before_paths = _file_paths_under(root)
-    snapshot = snapshot_files(["."], root=root)
-    try:
-        result = apply_patch(patch, cwd=cwd, check=check)
-    finally:
-        restore_snapshot(snapshot)
-        for path in sorted(_file_paths_under(root) - before_paths, key=lambda item: len(item.parts), reverse=True):
-            path.unlink()
-            _remove_empty_parents(path.parent, root)
-    return result
+    """Validate a patch without snapshotting unrelated workspace files."""
+
+    return dry_run_patch(patch, cwd=cwd, check=check)
 
 
 def _file_paths_under(root: Path) -> set[Path]:
