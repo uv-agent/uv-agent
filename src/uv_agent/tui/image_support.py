@@ -18,45 +18,75 @@ class ImageSupportMixin:
             return
         count = len(self._pending_images)
         if count:
-            button.update(f"📎 {self._pending_image_count_label(count)}")
+            button.update(self._pending_image_count_label(count))
+        else:
+            button.update("")
+        self._refresh_composer_overlay()
+
+    def _refresh_pending_turns(self) -> None:
+        try:
+            button = self.query_one("#pending-turns-btn", Static)
+        except NoMatches:
+            return
+        count = self._active_queue_length()
+        if count:
+            button.update(self._pending_turn_count_label(count))
         else:
             button.update("")
         self._refresh_composer_overlay()
 
     def _pending_image_count_label(self, count: int) -> str:
         if self.language == "zh":
-            return f"{self._text('pending')} {count} {self._text('images')}"
+            return f"{self._text('image_label')} {count}"
         image_word = "image" if count == 1 else self._text("images")
-        return f"{self._text('pending')} {count} {image_word}"
+        return f"{count} {image_word}"
+
+    def _pending_turn_count_label(self, count: int) -> str:
+        if self.language == "zh":
+            return f"{self._text('pending')} {count}"
+        return f"{self._text('queued_title')} {count}"
 
     def _refresh_composer_overlay(self) -> None:
         try:
-            pending_button = self.query_one("#pending-images-btn", Static)
+            turn_button = self.query_one("#pending-turns-btn", Static)
+            image_button = self.query_one("#pending-images-btn", Static)
             bottom_button = self.query_one("#scroll-to-bottom-btn", Static)
             composer = self.query_one("#composer", TextArea)
             transcript = self.query_one("#transcript", TranscriptScroll)
         except NoMatches:
             return
-        show_pending = bool(self._pending_images)
+        show_turns = self._active_queue_length() > 0
+        show_images = bool(self._pending_images)
         near_bottom = self._transcript_is_near_bottom(transcript)
         if transcript.near_bottom != near_bottom:
             transcript.near_bottom = near_bottom
         show_bottom = not near_bottom
-        pending_button.set_class(not show_pending, "hidden")
+        turn_button.set_class(not show_turns, "hidden")
+        image_button.set_class(not show_images, "hidden")
         bottom_button.set_class(not show_bottom, "hidden")
-        if not (show_pending or show_bottom):
-            pending_button.refresh(layout=True)
+        if not (show_turns or show_images or show_bottom):
+            turn_button.refresh(layout=True)
+            image_button.refresh(layout=True)
             bottom_button.refresh(layout=True)
             return
         overlay_y = max(0, composer.region.y - 1)
         left_x = composer.region.x
-        right_width = self._overlay_button_width(bottom_button)
-        right_x = max(left_x, composer.region.x + composer.region.width - right_width)
-        if show_pending:
-            pending_button.absolute_offset = Offset(left_x, overlay_y)
+        gap = 1
+        current_x = left_x
+        # New pending-send controls are intentionally grouped on the left edge
+        # of the composer overlay; the existing scroll-to-bottom affordance
+        # stays right-aligned so muscle memory is unaffected.
+        for button, show in ((turn_button, show_turns), (image_button, show_images)):
+            if not show:
+                continue
+            button.absolute_offset = Offset(current_x, overlay_y)
+            current_x += self._overlay_button_width(button) + gap
         if show_bottom:
+            right_width = self._overlay_button_width(bottom_button)
+            right_x = max(left_x, composer.region.x + composer.region.width - right_width)
             bottom_button.absolute_offset = Offset(right_x, overlay_y)
-        pending_button.refresh(layout=True)
+        turn_button.refresh(layout=True)
+        image_button.refresh(layout=True)
         bottom_button.refresh(layout=True)
 
     def _transcript_is_near_bottom(self, transcript: TranscriptScroll) -> bool:

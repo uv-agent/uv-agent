@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
+from uv_agent.ids import new_id
+
 if TYPE_CHECKING:
     from textual.worker import Worker
 
@@ -72,9 +74,17 @@ class PendingImage:
 
 @dataclass(frozen=True)
 class QueuedTurn:
+    """A user send that is waiting behind the active turn.
+
+    ``queue_id`` is generated when the item is enqueued so list-panel edits can
+    safely target the same item even if other queued sends are reordered or
+    deleted. It is intentionally UI-local and is not persisted.
+    """
+
     prompt: str
     level: str | None = None
     image_paths: list[Path] = field(default_factory=list)
+    queue_id: str = field(default_factory=lambda: new_id("queue"))
 
 
 @dataclass

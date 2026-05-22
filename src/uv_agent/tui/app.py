@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 import threading
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
@@ -60,6 +60,7 @@ from uv_agent.tui.panels import (
     FullscreenPanel,
     ImagePreviewPanel,
     PendingImagePreviewPanel,
+    PendingSendQueuePanel,
     ToolDetailsPanel,
 )
 from uv_agent.tui.state import (
@@ -103,6 +104,7 @@ __all__ = [
     "ImagePreviewPanel",
     "PendingImage",
     "PendingImagePreviewPanel",
+    "PendingSendQueuePanel",
     "RetryTurnButton",
     "ToolDetailsPanel",
     "TranscriptCell",
@@ -371,7 +373,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._last_auto_copied_selection = ""
         self._composer_height_override: str | None = None
         self._composer_expanded = False
-        self._pending_images: list[PendingImage] = []
+        self._pending_images_by_thread: dict[str | None, list[PendingImage]] = {}
         self._tool_delta_calls: dict[int, dict[str, Any]] = {}
         self._mention_file_cache = MentionScanCache()
         self._mention_thread_cache = MentionScanCache()
@@ -385,6 +387,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         with Vertical(id="main-column"):
             with TranscriptScroll(id="transcript"):
                 yield EmptyState()
+            yield Static("", id="pending-turns-btn", classes="hidden")
             yield Static("", id="pending-images-btn", classes="hidden")
             yield Static(
                 plain(f"↓ {tr(self.language, 'back_to_bottom')}"),
@@ -410,6 +413,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self.query_one("#composer", TextArea).focus()
         transcript = self.query_one("#transcript", TranscriptScroll)
         self.watch(transcript, "near_bottom", self._on_near_bottom_changed)
+        self._refresh_pending_turns()
         self._refresh_pending_images()
         self._refresh_composer_overlay()
 
@@ -423,7 +427,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
 
     def on_click(self, event: events.Click) -> None:
         widget = getattr(event, "widget", None)
-        if widget is not None and widget.id == "pending-images-btn":
+        if widget is not None and widget.id == "pending-turns-btn":
+            event.stop()
+            self._open_pending_send_queue()
+        elif widget is not None and widget.id == "pending-images-btn":
             event.stop()
             self._open_pending_image_preview()
         elif widget is not None and widget.id == "scroll-to-bottom-btn":
@@ -576,6 +583,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def action_submit_composer(self) -> None:
         composer = self.query_one("#composer", TextArea)
         prompt = composer.text.strip()
+        pending_images_thread_id = self.thread_id
         pending_images = list(self._pending_images)
         if not prompt and not pending_images:
             self._flash(self._text("write_first"))
@@ -600,10 +608,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             prompt = self._text("image_only_prompt")
         if "\n" not in prompt and self._handle_command(prompt):
             return
-        image_paths = [image.path for image in pending_images]
-        self._pending_images.clear()
-        self._refresh_pending_images()
         thread_id = self._ensure_active_thread()
+        image_paths = [image.path for image in pending_images]
+        self._clear_pending_images_for_thread(pending_images_thread_id)
+        self._refresh_pending_images()
         level = self._current_level_for_thread(thread_id)
         self._persist_thread_level(thread_id, level)
         active_run = self._active_run_state()
@@ -615,6 +623,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                     self._queued_turn_markup(prompt, image_paths),
                     "event",
                 )
+            self._refresh_pending_turns()
             self._refresh_status()
             return
         self._start_turn(prompt, level=level, image_paths=image_paths)
@@ -783,6 +792,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                     image_paths=next_turn.image_paths,
                     queue=remaining_queue,
                 )
+                if self._default_screen_mounted():
+                    self._refresh_pending_turns()
             else:
                 keep_state = run_state.retryable_error or run_state.terminal_error
                 if keep_state:
@@ -802,6 +813,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                     self.query_one("#composer", TextArea).focus()
                 if self._default_screen_mounted():
                     self._refresh_active_run_state()
+                    self._refresh_pending_turns()
 
     async def _handle_engine_stream_item(
         self,
@@ -1051,9 +1063,86 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return None
         return run_state
 
+    @property
+    def _pending_images(self) -> list[PendingImage]:
+        """Composer images for the currently visible thread.
+
+        The composer itself is shared UI, but pasted images should belong to the
+        thread draft the user is looking at. Keeping the storage keyed by
+        thread id prevents an image pasted in one thread from following the user
+        into another thread's next send.
+        """
+
+        return self._pending_images_for_thread(self.thread_id)
+
+    def _pending_images_for_thread(self, thread_id: str | None) -> list[PendingImage]:
+        return self._pending_images_by_thread.setdefault(thread_id, [])
+
+    def _clear_pending_images_for_thread(self, thread_id: str | None) -> None:
+        self._pending_images_by_thread.pop(thread_id, None)
+
     def _active_queue_length(self) -> int:
-        run_state = self._active_run_state()
-        return len(run_state.queue) if run_state is not None else 0
+        return len(self._queued_turns_for_thread(self.thread_id))
+
+    def _queued_turns_for_thread(self, thread_id: str | None) -> list[QueuedTurn]:
+        run_state = self._thread_state(thread_id)
+        if run_state is None or run_state.worker is None:
+            return []
+        return list(run_state.queue)
+
+    def _queued_turn_location(self, thread_id: str | None, queue_id: str) -> tuple[ThreadRunState, int] | None:
+        run_state = self._thread_state(thread_id)
+        if run_state is None or run_state.worker is None:
+            return None
+        for index, queued_turn in enumerate(run_state.queue):
+            if queued_turn.queue_id == queue_id:
+                return run_state, index
+        return None
+
+    def _update_queued_turn_prompt(self, thread_id: str | None, queue_id: str, prompt: str) -> str:
+        location = self._queued_turn_location(thread_id, queue_id)
+        if location is None:
+            self._flash(self._text("pending_turn_started"), severity="warning")
+            return "missing"
+        run_state, index = location
+        queued_turn = run_state.queue[index]
+        normalized = prompt.strip()
+        if not normalized:
+            if queued_turn.image_paths:
+                normalized = self._text("image_only_prompt")
+            else:
+                self._flash(self._text("write_first"), severity="warning")
+                return "empty"
+        run_state.queue[index] = replace(queued_turn, prompt=normalized)
+        self._refresh_pending_turns()
+        self._refresh_status()
+        return "updated"
+
+    def _delete_queued_turn(self, thread_id: str | None, queue_id: str) -> str:
+        location = self._queued_turn_location(thread_id, queue_id)
+        if location is None:
+            self._flash(self._text("pending_turn_started"), severity="warning")
+            return "missing"
+        run_state, index = location
+        del run_state.queue[index]
+        self._refresh_pending_turns()
+        self._refresh_status()
+        return "deleted"
+
+    def _move_queued_turn(self, thread_id: str | None, queue_id: str, step: int) -> str:
+        location = self._queued_turn_location(thread_id, queue_id)
+        if location is None:
+            self._flash(self._text("pending_turn_started"), severity="warning")
+            return "missing"
+        run_state, index = location
+        target = max(0, min(len(run_state.queue) - 1, index + step))
+        if target == index:
+            return "unchanged"
+        queued_turn = run_state.queue.pop(index)
+        run_state.queue.insert(target, queued_turn)
+        self._refresh_pending_turns()
+        self._refresh_status()
+        return "moved"
 
     def _ensure_active_thread(self) -> str:
         if self.thread_id is None:
@@ -1708,6 +1797,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _open_tool_details_panel(self, cell: ExpandableTranscriptCell) -> None:
         self.push_screen(ToolDetailsPanel(cell))
 
+    def _open_pending_send_queue(self) -> None:
+        if not self._queued_turns_for_thread(self.thread_id):
+            self._flash(self._text("no_pending_turns"))
+            return
+        self.push_screen(PendingSendQueuePanel(self.thread_id))
+
     def _thread_image_attachments(self) -> list[dict[str, Any]]:
         if not self.thread_id:
             return []
@@ -1784,6 +1879,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _handle_command(self, prompt: str) -> bool:
         command, _, rest = prompt.partition(" ")
         if command == "/clear":
+            old_thread_id = self.thread_id
             active_run = self._active_run_state()
             if active_run is not None:
                 self._sync_run_state_from_active(active_run)
@@ -1792,7 +1888,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self.thread_id = None
             self.level = None
             self._reset_live_view_state()
-            self._pending_images.clear()
+            self._clear_pending_images_for_thread(old_thread_id)
             self._reset_transcript()
             self._refresh_pending_images()
             self._refresh_active_run_state()
@@ -2707,9 +2803,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 Text.assemble("- background: ", (f"{len(background_runs)} {self._text('active_threads')}", "cyan"))
             )
             for run_state in background_runs[:6]:
-                queue = f" · q{len(run_state.queue)}" if run_state.queue else ""
                 lines.append(
-                    Text.assemble("  - ", short_thread(run_state.thread_id), ": ", run_state.status, queue)
+                    Text.assemble("  - ", short_thread(run_state.thread_id), ": ", run_state.status)
                 )
             if len(background_runs) > 6:
                 lines.append(Text(f"  - ... {len(background_runs) - 6} more"))
@@ -2812,6 +2907,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if not self._transcript_has_content:
             self._reset_transcript()
         self._refresh_active_run_state()
+        self._refresh_pending_images()
+        self._refresh_pending_turns()
         self._refresh_status(run_state.status if run_state is not None and run_state.worker is None else self._text("resumed"))
         self._close_active_panel()
 
@@ -3108,8 +3205,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         state_text = self._last_status
         if self.busy and state_text == self._text("idle"):
             state_text = self._text("working")
-        queue_length = self._active_queue_length()
-        queued = f" · q{queue_length}" if queue_length else ""
         spinner = ""
         elapsed_suffix = ""
         if self.busy:
@@ -3126,10 +3221,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 (f"{spinner}{state_text}", "cyan"),
                 (elapsed_suffix, "dim"),
                 " ",
-                (f"{level_name} · {compact_context} · {short_thread(self.thread_id)}{queued}", "dim"),
+                (f"{level_name} · {compact_context} · {short_thread(self.thread_id)}", "dim"),
             )
         else:
-            footer = Text(f"{level_name} · {compact_context} · {short_thread(self.thread_id)}{queued}", style="dim")
+            footer = Text(f"{level_name} · {compact_context} · {short_thread(self.thread_id)}", style="dim")
         if billing_label:
             footer.append(" · ", style="dim")
             footer.append(billing_label, style="dim")
@@ -3143,6 +3238,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         except NoMatches:
             return
         self._refresh_pending_images()
+        self._refresh_pending_turns()
 
     def _thread_billing_label(self, *, decimals: int) -> str:
         """Return the current thread's formatted cost, or empty when disabled."""

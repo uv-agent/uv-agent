@@ -30,7 +30,8 @@ FULLSCREEN_PANEL_CSS = f"""
 FullscreenPanel,
 ToolDetailsPanel,
 ImagePreviewPanel,
-PendingImagePreviewPanel {{
+PendingImagePreviewPanel,
+PendingSendQueuePanel {{
     align: center middle;
     background: {t.BG_CANVAS};
 }}
@@ -158,6 +159,44 @@ PendingImagePreviewPanel {{
     width: auto;
     height: 1;
     margin: 0 0 0 1;
+}}
+
+#pending-turn-actions {{
+    height: 1;
+    margin: 1 0 0 0;
+}}
+
+#pending-turn-actions Button {{
+    width: auto;
+    height: 1;
+    margin: 0 1 0 0;
+}}
+
+#pending-turn-layout {{
+    height: 1fr;
+    margin: 1 0 0 0;
+}}
+
+#pending-turn-list {{
+    width: 2fr;
+    min-width: 24;
+    margin: 0 1 0 0;
+}}
+
+#pending-turn-editor {{
+    width: 3fr;
+    min-width: 30;
+    border: round {t.BORDER};
+    background: {t.BG_CANVAS};
+    color: {t.TEXT_STRONG};
+    padding: 0 1;
+}}
+
+#pending-turn-meta {{
+    height: 1;
+    margin: 1 0 0 0;
+    color: {t.TEXT_MUTED};
+    padding: 0 1;
 }}
 
 #panel-footer {{
@@ -330,6 +369,7 @@ ToastRack {{
     background: {t.BG_CANVAS};
 }}
 
+#pending-turns-btn,
 #pending-images-btn,
 #scroll-to-bottom-btn {{
     position: absolute;
@@ -343,15 +383,21 @@ ToastRack {{
     text-style: bold;
 }}
 
+#pending-turns-btn {{
+    color: #fbbf24;
+}}
+
 #pending-images-btn {{
     color: #c4b5fd;
 }}
 
+#pending-turns-btn.hidden,
 #pending-images-btn.hidden,
 #scroll-to-bottom-btn.hidden {{
     display: none;
 }}
 
+#pending-turns-btn:hover,
 #pending-images-btn:hover,
 #scroll-to-bottom-btn:hover {{
     background: {t.BORDER};

@@ -25,13 +25,15 @@ Complete the pending-send queue UX with the smallest durable change set:
 ## Checklist
 
 - [x] Create this plan file at the repository root.
-- [ ] Add stable queue item identity for edit/delete/reorder operations.
-- [ ] Add active-thread queue helpers in the TUI app.
-- [ ] Add the pending queued-message overlay button and keep layout compatible with the existing image and back-to-bottom buttons.
-- [ ] Scope composer pending images by thread.
-- [ ] Add a pending-send list panel with edit, delete, move up, and move down controls.
-- [ ] Wire panel callbacks to queue mutation helpers with out-of-queue safeguards.
-- [ ] Update i18n text for English and Chinese.
-- [ ] Update focused TUI tests for queue overlay, edit/delete/reorder, out-of-queue saves, and per-thread images.
-- [ ] Run targeted tests, then the full test suite if feasible.
-- [ ] Commit logical steps on the feature branch.
+- [x] Add stable queue item identity for edit/delete/reorder operations.
+- [x] Add active-thread queue helpers in the TUI app.
+- [x] Add the pending queued-message overlay button and keep layout compatible with the existing image and back-to-bottom buttons.
+- [x] Scope composer pending images by thread.
+- [x] Add a pending-send list panel with edit, delete, move up, and move down controls.
+- [x] Wire panel callbacks to queue mutation helpers with out-of-queue safeguards.
+- [x] Update i18n text for English and Chinese.
+- [x] Update focused TUI tests for queue overlay, edit/delete/reorder, out-of-queue saves, and per-thread images.
+- [x] Run targeted tests, then the full test suite if feasible.
+  - Targeted TUI tests passed: `uv run pytest tests/test_tui.py -k "pending_send or pending_images_overlay_counts or f2_attaches_clipboard_image" -q`.
+  - Full TUI suite passed: `uv run pytest tests/test_tui.py -q` (108 passed).
+- [x] Commit logical steps on the feature branch.
