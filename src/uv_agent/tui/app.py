@@ -8,7 +8,7 @@ from dataclasses import asdict, is_dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable
+from typing import Any, Callable, Literal, TypeAlias
 
 from rich.text import Text
 from textual import events
@@ -20,6 +20,7 @@ from textual.geometry import Offset
 from textual.screen import Screen
 from textual.reactive import reactive
 from textual.selection import Selection
+from textual.widget import Widget
 from textual.widgets import Button, Static, TextArea
 from textual.worker import Worker
 
@@ -92,6 +93,8 @@ QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+MountBefore: TypeAlias = int | str | Widget | None
+NotificationSeverity: TypeAlias = Literal["information", "warning", "error"]
 
 
 __all__ = [
@@ -260,11 +263,18 @@ class TranscriptScreen(Screen[None]):
             return
         if self.selections.get(start_widget) is None:
             return
+        self._set_selection(start_widget, start_offset, end_offset)
+
+    def _set_selection(self, widget: TranscriptCell, start: Offset, end: Offset) -> None:
+        """Replace Textual's selection map for one transcript cell.
+
+        Textual exposes ``selections`` as a reactive descriptor. Assigning via a
+        tiny wrapper keeps the descriptor write in one place and makes the
+        narrowed value shape obvious to static checkers.
+        """
+
         self.selections = {
-            start_widget: Selection.from_offsets(
-                start_offset,
-                self._inclusive_selection_end(start_offset, end_offset),
-            )
+            widget: Selection.from_offsets(start, self._inclusive_selection_end(start, end))
         }
 
     def _inclusive_selection_end(self, start: Offset, end: Offset) -> Offset:
@@ -1227,7 +1237,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self,
         event: dict[str, Any],
         *,
-        before: object | None = None,
+        before: MountBefore = None,
     ) -> TranscriptCell:
         message = str(event.get("message") or self._text("model_switch_warning"))
         from_level = str(event.get("from_level") or "")
@@ -1994,7 +2004,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             )
         self._append_cell(join_lines(lines), "event")
 
-    def _append_user(self, text: str, *, before: object | None = None) -> TranscriptCell:
+    def _append_user(self, text: str, *, before: MountBefore = None) -> TranscriptCell:
         label = "你" if self.language.is_chinese else "you"
         # Codex-style "› " prefix keeps user turns easy to spot.
         return self._append_cell(
@@ -2086,7 +2096,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self,
         text: str,
         *,
-        before: object | None = None,
+        before: MountBefore = None,
     ) -> ExpandableTranscriptCell | None:
         stripped = text.strip()
         if not stripped:
@@ -2151,7 +2161,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         cells: list[TranscriptCell],
         *,
         collapsed: bool = True,
-        before: object | None = None,
+        before: MountBefore = None,
         after: TranscriptCell | None = None,
         elapsed_label: str | None = None,
     ) -> FoldedProcessCell:
@@ -2180,13 +2190,14 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if self._process_fold_cell is not None:
             self._process_fold_cell.set_elapsed_label(self._process_elapsed_label())
 
-    def _cell_after(self, cell: TranscriptCell) -> object | None:
+    def _cell_after(self, cell: TranscriptCell) -> MountBefore:
         try:
             children = list(self.query_one("#transcript", VerticalScroll).children)
             index = children.index(cell)
         except (NoMatches, ValueError):
             return None
-        return children[index + 1] if index + 1 < len(children) else None
+        next_child = children[index + 1] if index + 1 < len(children) else None
+        return next_child if isinstance(next_child, Widget) else None
 
     def _append_tool_partial(self, item: dict[str, Any]) -> None:
         """Refresh the latest run_python result cell while the process is running."""
@@ -2434,7 +2445,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self,
         attachment: dict[str, Any],
         *,
-        before: object | None = None,
+        before: MountBefore = None,
     ) -> ImageAttachmentCell:
         self._mark_transcript_content()
         cell = ImageAttachmentCell(attachment, classes="event")
@@ -2450,7 +2461,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         start_offset: int | None = None,
     ) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)
-        insert_before: object | None = transcript.children[0] if transcript.children else None
+        insert_before: MountBefore = transcript.children[0] if transcript.children else None
         if self._history_more_cell is not None:
             children = list(transcript.children)
             try:
@@ -2476,7 +2487,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self,
         events: list[dict[str, Any]],
         *,
-        before: object | None = None,
+        before: MountBefore = None,
     ) -> None:
         index = 0
         while index < len(events):
@@ -2501,7 +2512,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self,
         events: list[dict[str, Any]],
         *,
-        before: object | None = None,
+        before: MountBefore = None,
     ) -> None:
         process_cells: list[TranscriptCell] = []
         anchor_cell: TranscriptCell | None = None
@@ -2568,7 +2579,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self,
         event: dict[str, Any],
         *,
-        before: object | None = None,
+        before: MountBefore = None,
     ) -> list[TranscriptCell]:
         mounted: list[TranscriptCell] = []
         event_type = event.get("type")
@@ -2581,6 +2592,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             if reasoning_cell is not None:
                 mounted.append(reasoning_cell)
             for item in event.get("output") or []:
+                if not isinstance(item, dict):
+                    continue
                 item_type = item.get("type")
                 if item_type == "message":
                     text = self._message_item_text(item)
@@ -2639,14 +2652,14 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self,
         event: dict[str, Any],
         *,
-        before: object | None = None,
+        before: MountBefore = None,
         display_content: object | None = None,
     ) -> TranscriptCell:
         error_type = str(event.get("error_type") or "Turn error")
         message = str(event.get("message") or "The turn stopped before producing a final response.")
         retryable = self._is_retryable_error_event(event)
         hint = self._text("retry_network_error_hint") if retryable else self._text("thread_stopped_after_error")
-        content = display_content or Text.assemble((error_type, "bold red"), " ", message)
+        content = display_content if display_content is not None else Text.assemble((error_type, "bold red"), " ", message)
         cell = self._append_cell(
             join_lines([content, plain(hint, style="dim")]),
             "error",
@@ -2661,7 +2674,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self,
         event: dict[str, Any],
         *,
-        before: object | None = None,
+        before: MountBefore = None,
     ) -> TranscriptCell:
         attempt = event.get("attempt")
         max_attempts = event.get("max_attempts")
@@ -2681,14 +2694,14 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             before=before,
         )
 
-    def _append_retry_button(self, event: dict[str, Any], *, before: object | None = None) -> RetryTurnButton:
+    def _append_retry_button(self, event: dict[str, Any], *, before: MountBefore = None) -> RetryTurnButton:
         self._mark_transcript_content()
         button = RetryTurnButton(self._text("retry"), thread_id=str(event.get("thread_id") or self.thread_id or ""))
         self.query_one("#transcript", VerticalScroll).mount(button, before=before)
         self._scroll_end()
         return button
 
-    def _append_tool_call_history(self, item: dict[str, Any], *, before: object | None = None) -> ExpandableTranscriptCell:
+    def _append_tool_call_history(self, item: dict[str, Any], *, before: MountBefore = None) -> ExpandableTranscriptCell:
         return self._append_expandable_cell(
             tool_call_summary_markup({**item, "_status_label": self._text("python_called")}),
             tool_call_detail_highlight_markup(item),
@@ -2707,7 +2720,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         content: object,
         classes: str,
         *,
-        before: object | None = None,
+        before: MountBefore = None,
         copy_text: str | None = None,
     ) -> TranscriptCell:
         self._mark_transcript_content()
@@ -2722,7 +2735,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         details: object,
         classes: str,
         *,
-        before: object | None = None,
+        before: MountBefore = None,
     ) -> ExpandableTranscriptCell:
         self._mark_transcript_content()
         cell = ExpandableTranscriptCell(summary, details, classes=classes)
@@ -2735,7 +2748,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         summary: object,
         details: object,
         *,
-        before: object | None = None,
+        before: MountBefore = None,
     ) -> ExpandableTranscriptCell:
         self._mark_transcript_content()
         cell = ExpandableTranscriptCell(
@@ -3033,9 +3046,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
 
         events = self._events_after_history(run_state.live_events)
         for live_event in events:
+            item = live_event.get("item")
             self._apply_thread_event_to_active(
                 str(live_event.get("event_type") or ""),
-                live_event.get("item") if isinstance(live_event.get("item"), dict) else {},
+                item if isinstance(item, dict) else {},
             )
         if was_collapsed and self._process_cells and self._process_fold_cell is None:
             self._collapse_process_cells()
@@ -3116,7 +3130,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             start_offset=segment.start_offset,
         )
 
-    def _append_user_from_history(self, item: dict[str, Any], *, before: object | None = None) -> TranscriptCell | None:
+    def _append_user_from_history(self, item: dict[str, Any], *, before: MountBefore = None) -> TranscriptCell | None:
         self._reasoning_cell = None
         self._reasoning_buffer = ""
         parts = []
@@ -3264,7 +3278,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _expanded_composer_height(self) -> int:
         return min(COMPOSER_EXPANDED_HEIGHT, self._maximum_composer_height())
 
-    def _flash(self, message: str, *, severity: str = "information") -> None:
+    def _flash(self, message: str, *, severity: NotificationSeverity = "information") -> None:
         self.notify(message, severity=severity, timeout=2.0)
         self._last_status = message
         self._refresh_status()

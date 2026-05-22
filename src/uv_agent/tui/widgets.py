@@ -105,8 +105,8 @@ class TranscriptScroll(VerticalScroll):
         if callable(refresh):
             refresh()
 
-    def watch_scroll_y(self, old: float, new: float) -> None:
-        super().watch_scroll_y(old, new)
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
         self._recompute_near_bottom(restore_follow=True)
 
     def watch_virtual_size(self, old: Any, new: Any) -> None:

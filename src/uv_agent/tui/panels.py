@@ -490,7 +490,7 @@ class ToolDetailsPanel(FullscreenPanel):
         try:
             self.query_one("#panel-header", Static).update(self.panel_title)
             self.query_one("#panel-subtitle", Static).update(self.subtitle)
-            self.query_one("#panel-body-content", Static).update(self.body)
+            _update_static_if_changed(self.query_one("#panel-body-content", Static), self.body)
             self.query_one("#panel-body", VerticalScroll).scroll_to(y=0, animate=False)
         except NoMatches:
             pass
@@ -747,7 +747,8 @@ class PendingSendQueuePanel(FullscreenPanel):
         text = getattr(self.app, "_text", lambda key: key)
         self.panel_title = text("pending_turns_panel")
         self.subtitle = text("pending_turns_hint")
-        self.queue_items = list(self._app_call("_queued_turns_for_thread", self.thread_id) or [])
+        queue_items = self._app_call("_queued_turns_for_thread", self.thread_id)
+        self.queue_items = [item for item in queue_items if isinstance(item, QueuedTurn)] if isinstance(queue_items, list) else []
         if preferred_id and any(item.queue_id == preferred_id for item in self.queue_items):
             self._selected_queue_id = preferred_id
         elif self._selected_queue_id not in {item.queue_id for item in self.queue_items}:
