@@ -100,4 +100,4 @@
 - [x] 2. codesearch 上限改为流式提前终止
 - [x] 3. patch dry-run 改为 in-memory 验证
 - [x] 4. codequery 缓存刷新去除错误 prune
-- [ ] 5. 运行相关测试并提交最终状态
+- [x] 5. 运行相关测试并提交最终状态
