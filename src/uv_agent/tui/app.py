@@ -43,7 +43,6 @@ from uv_agent.tui.formatting import (
     format_elapsed,
     format_tokens,
     join_lines,
-    markup,
     parse_tool_payload,
     plain,
     renderable_plain,
