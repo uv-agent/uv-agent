@@ -55,7 +55,8 @@ selection, and copy behavior.
 - [x] Replace error markup helpers with renderable helpers.
 - [x] Update tests for renderable/plain-text assertions and add bracket
       regression coverage.
-- [ ] Run focused TUI tests, then the full test suite.
+- [x] Run focused TUI tests, then the full test suite.
       - Focused TUI suite: `uv run pytest tests/test_tui.py -q` passes after renderable migration.
-- [ ] Commit the refactor in focused steps with clear English messages.
+      - Full suite: `uv run pytest -q` passes.
+- [x] Commit the refactor in focused steps with clear English messages.
 
