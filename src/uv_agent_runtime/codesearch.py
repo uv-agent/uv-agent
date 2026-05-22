@@ -95,6 +95,14 @@ def _build_args(
 
 
 def _run(args: list[str], cwd: Path) -> tuple[int, str, str]:
+    """Run ripgrep to completion and return decoded output.
+
+    The simple capture path is still best when callers do not request a global
+    limit: ripgrep can stream internally without Python sitting in the middle.
+    Bounded calls use ``_run_limited`` below so ``max_total`` can stop the child
+    process before it scans and emits the rest of a very large repository.
+    """
+
     completed = subprocess.run(
         args,
         cwd=str(cwd),
@@ -106,6 +114,106 @@ def _run(args: list[str], cwd: Path) -> tuple[int, str, str]:
     )
     return completed.returncode, completed.stdout, completed.stderr
 
+
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    """Stop a bounded ripgrep process without leaving it behind.
+
+    ``terminate`` is usually enough, but on busy Windows file scans the process
+    may need a final ``kill``.  The helper centralizes that defensive cleanup so
+    the streaming readers stay small and deterministic.
+    """
+
+    process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2)
+
+
+def _run_limited(args: list[str], cwd: Path, *, line_limit: int) -> tuple[int, list[str], str, bool]:
+    """Run ripgrep and stop after collecting ``line_limit`` stdout lines.
+
+    ``rg`` has ``--max-count``, but that limit is per file, not global.  The
+    runtime helpers expose ``max_total`` as a global cap, so we enforce it by
+    streaming stdout and terminating ripgrep once enough relevant lines are in
+    hand.  A non-zero return code caused by our own termination is reported via
+    ``terminated`` instead of treated as a ripgrep failure.
+    """
+
+    if line_limit <= 0:
+        return 0, [], "", False
+    process = subprocess.Popen(
+        args,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    lines: list[str] = []
+    terminated = False
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            lines.append(line.rstrip("\r\n"))
+            if len(lines) >= line_limit:
+                terminated = True
+                process.terminate()
+                break
+        _remaining_stdout, stderr = process.communicate(timeout=2 if terminated else None)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        _remaining_stdout, stderr = process.communicate()
+        terminated = True
+    return process.returncode or 0, lines, stderr, terminated
+
+
+def _run_until_matches(args: list[str], cwd: Path, *, match_limit: int) -> tuple[int, list[str], str, bool]:
+    """Run ripgrep JSON output until ``match_limit`` match events are collected."""
+
+    if match_limit <= 0:
+        return 0, [], "", False
+    process = subprocess.Popen(
+        args,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    lines: list[str] = []
+    matches = 0
+    terminated = False
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            stripped = line.rstrip("\r\n")
+            lines.append(stripped)
+            if _is_match_event_line(stripped):
+                matches += 1
+                if matches >= match_limit:
+                    terminated = True
+                    _terminate_process(process)
+                    break
+        _remaining_stdout, stderr = process.communicate(timeout=2 if terminated else None)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        _remaining_stdout, stderr = process.communicate()
+        terminated = True
+    return process.returncode or 0, lines, stderr, terminated
+
+
+def _is_match_event_line(line: str) -> bool:
+    """Fast-path detection for rg JSON match records.
+
+    The line is parsed later by ``_parse_search_matches``; here we only need a
+    cheap counter to know when to stop the child process.
+    """
+
+    return '"type":"match"' in line or '"type": "match"' in line
 
 def search_text(
     pattern: str,
@@ -154,12 +262,26 @@ def search_text(
         extra=extra_args,
     )
     args.extend(target_paths)
-    code, stdout, stderr = _run(args, cwd_path)
-    # rg exits 1 when no matches; 2+ for real errors.
-    if code >= 2:
+    if max_total is not None and max_total <= 0:
+        return []
+    if max_total is None:
+        code, stdout, stderr = _run(args, cwd_path)
+        # rg exits 1 when no matches; 2+ for real errors.
+        if code >= 2:
+            raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
+        return _parse_search_matches(stdout.splitlines(), max_total=None)
+
+    code, lines, stderr, terminated = _run_until_matches(args, cwd_path, match_limit=max_total)
+    if code >= 2 and not terminated:
         raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
+    return _parse_search_matches(lines, max_total=max_total)
+
+
+def _parse_search_matches(lines: Sequence[str], *, max_total: int | None) -> list[Match]:
+    """Parse ripgrep JSON lines into Match objects without rerunning rg."""
+
     matches: list[Match] = []
-    for line in stdout.splitlines():
+    for line in lines:
         if not line:
             continue
         try:
@@ -233,13 +355,17 @@ def find_files(
         extra=extra_args,
     )
     args.extend(target_paths)
-    code, stdout, stderr = _run(args, cwd_path)
-    if code >= 2:
+    if max_total is not None and max_total <= 0:
+        return []
+    if max_total is None:
+        code, stdout, stderr = _run(args, cwd_path)
+        if code >= 2:
+            raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
+        return [line for line in stdout.splitlines() if line]
+    code, lines, stderr, terminated = _run_limited(args, cwd_path, line_limit=max_total)
+    if code >= 2 and not terminated:
         raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
-    files = [line for line in stdout.splitlines() if line]
-    if max_total is not None:
-        return files[:max_total]
-    return files
+    return [line for line in lines if line][:max_total]
 
 
 def _split_root(resolved: Path) -> tuple[Path, list[str]]:
