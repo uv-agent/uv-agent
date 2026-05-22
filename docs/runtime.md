@@ -77,16 +77,49 @@ Available helper groups:
 
 | Helper | Purpose |
 | --- | --- |
-| `read_text`, `write_text`, `read_json`, `write_json`, `list_files`, `resolve_workspace_path` | Workspace-relative file helpers. |
-| `run_process_text` | Argv-list subprocess helper with explicit text decoding, env/env_patch support, timeouts, and optional `check=True`. |
-| `add_dependency`, `add_dependencies`, `run_python_env_dir` | Manage or inspect the uv project environment backing `run_python`. |
-| `apply_patch` | Codex-style `*** Begin Patch` file edit helper. |
+| **File I/O** | |
+| `read_text`, `write_text` | Read or write workspace-relative text files. |
+| `read_text_lossless`, `write_text_lossless` | Read/write text while preserving encoding, BOM, newline style, and final newline. |
+| `read_json`, `write_json` | Read or write workspace-relative JSON files. |
+| `list_files`, `resolve_workspace_path` | Enumerate workspace files or resolve relative paths. |
+| `path_info` | Inspect a resolved path (existence, kind, size, relative-to-base check). |
+| **Text editing** | |
+| `replace_text` | Perform small targeted text replacements in an existing file. |
+| `apply_patch` | Apply edits via the `*** Begin Patch` envelope format. |
+| `apply_patch_any` | Apply edits by auto-detecting patch format (envelope or unified diff). |
+| `convert_patch` | Convert between the envelope format and unified diff format. |
+| `make_unified_diff` | Generate a unified diff from before/after text. |
+| **File snapshots & transactions** | |
+| `snapshot_files`, `restore_snapshot` | Capture file state and restore it later (manual savepoints). |
+| `workspace_transaction` | Multi-file edit transaction with automatic rollback on error. |
+| **Search & discovery** | |
+| `search_text` | Grep-like content search via ripgrep across the workspace. |
+| `find_files` | Enumerate workspace files via ripgrep (faster than manual walking). |
+| `find_symbols` | Locate function/class/method/etc. definitions via tree-sitter. |
+| `query_code` | Run a custom tree-sitter S-expression query over the workspace. |
+| `supported_symbol_languages` | List languages with built-in tree-sitter symbol support. |
+| `clear_codequery_cache` | Drop the tree-sitter capture cache (scoped to a root path). |
+| **Text utilities** | |
+| `compare_text`, `normalize_text` | Compare two texts or normalize line endings/whitespace. |
+| **Managed environment** | |
+| `add_dependency`, `add_dependencies` | Add third-party packages to the shared `run_python` uv project. |
+| `run_python_env_dir` | Return the shared script venv directory path. |
 | `enter_dir` | Change the active working directory and trigger directory rule loading. |
-| `emit_event`, `emit_progress`, `emit_result` | Structured events rendered by the host; each returns the emitted event dict. |
-| `look_at` | Attach image context to the conversation and return the emitted event dict. |
-| `thread_digest`, `list_thread_digests` | Read compact thread summaries from project state. |
+| **Subprocess** | |
+| `run_process_text` | Run external commands with explicit text decoding, env support, timeouts, and optional `check=True`. |
+| **Structured events** | |
+| `emit_event`, `emit_progress`, `emit_result` | Emit structured JSON events rendered by the host. |
+| `look_at` | Attach image context to the conversation. |
+| **Thread introspection** | |
+| `thread_digest`, `list_thread_digests` | Read compact conversation summaries from project state. |
+| **Nested agents** | |
 | `ask` | Launch a nested `uv-agent ask` subagent. |
-| `connect_stdio`, `connect_url`, `connect_declared`, `connect_named`, `list_declared_servers` | MCP helpers backed by the official SDK. |
+| **MCP** | |
+| `connect_named` | Connect to an MCP server declared in user/project `.agents/mcp.json`. |
+| `connect_declared` | Connect to a server declared in a specific `.agents/mcp.json` file. |
+| `connect_url` | Connect to an MCP server via HTTP/SSE URL. |
+| `connect_stdio` | Connect to an MCP server via a local stdio command. |
+| `list_declared_servers` | List MCP servers from user and project declarations. |
 
 ## Structured Events
 

@@ -20,25 +20,27 @@ The composer is multi-line.
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Insert a newline. |
+| `Enter` | Insert a newline when composer is focused, or focus the composer. |
 | `Ctrl+Enter` or `Ctrl+J` | Send the current composer text. |
 | `Esc` | Clear the composer or close the active panel. |
 | `Tab` | Toggle composer height. |
-| `/` from an empty composer | Open the command picker. |
+| `/` from an empty composer | Open the command palette. |
 | `@` | Open file mention search. |
 | `@@` | Open thread mention search. |
+| `@mcp:` followed by text | Insert an MCP server mention from configured declarations. |
+| `@skill:` followed by text | Insert a skill mention from discovered skills. |
 
-Editing text that already starts with `/` does not reopen the command picker.
-Use `Ctrl+P` when you want to open the command picker explicitly.
+Editing text that already starts with `/` does not reopen the command palette.
+Use `Ctrl+O` when you want to open the command palette explicitly.
 
 ## Global Shortcuts
 
 | Key | Action |
 | --- | --- |
 | `F1` | Open help. |
-| `Ctrl+P` | Open command picker. |
-| `Ctrl+O` | Open recent threads. |
+| `Ctrl+O` | Open command palette. |
 | `Ctrl+S` | Open runtime status. |
+| `Ctrl+G` | Collapse or expand the most recent process fold. |
 | `Ctrl+D` | Toggle Python/tool detail display. |
 | `F2` | Attach an image from the clipboard. |
 | `F3` | Preview pending images. |

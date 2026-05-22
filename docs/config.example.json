@@ -97,6 +97,13 @@
     "title_generation": {
       "enabled": true,
       "model_level": "small"
+    },
+    "stream_retry": {
+      "max_retries": 5,
+      "base": 1.0,
+      "factor": 2.0,
+      "max": 30.0,
+      "jitter": 0.2
     }
   },
   "ui": {

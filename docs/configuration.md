@@ -179,12 +179,20 @@ million tokens:
       "main": {
         "input": 2.0,
         "output": 8.0,
-        "cached_input": 0.5
+        "cached_input": 0.5,
+        "unit": null
       }
     }
   }
 }
 ```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `input` | number | `0.0` | Price per unit for input tokens. |
+| `output` | number | `0.0` | Price per unit for output tokens. |
+| `cached_input` | number | `0.0` | Price per unit for cached input tokens. |
+| `unit` | string or null | `null` | Optional per-model unit override. Falls back to the top-level `unit`. |
 
 The model key normally matches the local model name under `models`. The remote
 provider model id and level name are also accepted as fallbacks. Supported
@@ -232,6 +240,7 @@ level names rather than concrete model names.
 | `max_agent_rounds` | integer | `100` | Maximum model/tool loop rounds for one turn. |
 | `compression` | object | see below | Context compression settings. |
 | `title_generation` | object | see below | Thread title generation settings. |
+| `stream_retry` | object | see below | Streaming retry configuration. |
 
 Compression options:
 
@@ -248,6 +257,17 @@ Title generation options:
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Generate a short title for new threads. |
 | `model_level` | string or null | `null` | Optional level used for title generation. |
+
+Stream retry options control how the client retries failed streaming
+requests with exponential backoff:
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `max_retries` | integer | `5` | Maximum number of retries for a failed stream request. |
+| `base` | number | `1.0` | Base delay in seconds before the first retry. |
+| `factor` | number | `2.0` | Exponential backoff multiplier. |
+| `max` | number | `30.0` | Maximum delay in seconds between retries. |
+| `jitter` | number | `0.2` | Random jitter factor applied to each retry delay. |
 
 ## UI Options
 
