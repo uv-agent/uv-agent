@@ -249,8 +249,18 @@ def replace_text(
         if found < count:
             continue
         after_text = before.text.replace(candidate_old, candidate_new, count)
-        write_text_lossless(path, after_text, like=before)
-        after = read_text_lossless(path)
+        written = write_text_lossless(path, after_text, like=before)
+        # Avoid a second full-file read after writing.  ``write_text_lossless``
+        # derives bytes from this exact normalized text and metadata, so the
+        # resulting TextFile can be reconstructed without touching disk again.
+        after = TextFile(
+            path=str(written),
+            text=after_text,
+            encoding=before.encoding,
+            newline=_detect_newline_style(after_text),
+            final_newline=after_text.endswith(("\n", "\r")),
+            bom=before.bom,
+        )
         return ReplacementResult(path=after.path, replacements=count, before=before, after=after)
     context = _replacement_missing_context(before, old, found=best_found, count=count, newlines=newlines)
     raise ValueError(f"expected at least {count} occurrence(s), found {best_found}.{context}")
