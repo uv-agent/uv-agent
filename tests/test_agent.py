@@ -2331,6 +2331,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "run_process_text" in turn_context
     assert "add_dependency" in turn_context
     assert "run_python_env_dir" in turn_context
+    assert "search_text and find_files both pass extra_args to rg" in turn_context
+    assert '["--max-depth", "3"]' in turn_context
+    assert '["--no-ignore-vcs"]' in turn_context
+    assert "max_total=None" in turn_context
+    assert 'find_files("src", globs=["*.py", "!**/migrations/**"], max_total=30)' in turn_context
     assert "<helper_selection>" in turn_context
     assert "Prefer the smallest helper that directly matches the task" in turn_context
     assert "replace_text for small replacements" in turn_context

@@ -206,6 +206,7 @@ def find_files(
     *,
     globs: Sequence[str] | None = None,
     file_types: Sequence[str] | None = None,
+    max_total: int | None = None,
     hidden: bool = False,
     no_ignore: bool = False,
     extra_args: Sequence[str] | None = None,
@@ -235,7 +236,10 @@ def find_files(
     code, stdout, stderr = _run(args, cwd_path)
     if code >= 2:
         raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
-    return [line for line in stdout.splitlines() if line]
+    files = [line for line in stdout.splitlines() if line]
+    if max_total is not None:
+        return files[:max_total]
+    return files
 
 
 def _split_root(resolved: Path) -> tuple[Path, list[str]]:

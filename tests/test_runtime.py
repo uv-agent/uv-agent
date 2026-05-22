@@ -787,6 +787,9 @@ def test_codesearch_find_files_and_search_text(tmp_path: Path) -> None:
     files = find_files(tmp_path, globs=["*.py"])
     assert sorted(p.replace("\\", "/") for p in files) == ["src/a.py", "src/b.py"]
 
+    limited_files = find_files(tmp_path, globs=["*.py"], max_total=1)
+    assert len(limited_files) == 1
+
     hits = search_text("hello", root=tmp_path, file_types=["py"])
     paths = [h.path.replace("\\", "/") for h in hits]
     lines = sorted((p, h.line) for p, h in zip(paths, hits))

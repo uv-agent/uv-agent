@@ -389,18 +389,22 @@ from uv_agent_runtime import search_text
 #     case_sensitive=None, fixed_string=False, literal=None, multiline=False, word=False,
 #     max_count_per_file=None, max_total=None, hidden=False, no_ignore=False,
 #     extra_args=None) -> list[Match]
+# search_text and find_files both pass extra_args to rg for options that are
+# not modeled as explicit parameters. Common examples include:
+# ["--follow"], ["--max-depth", "3"], ["--one-file-system"], ["--sort", "path"],
+# ["--type-not", "py"], ["--ignore-file", ".ignore.extra"], ["--no-ignore-vcs"].
 for hit in search_text(r"def\\s+handle_\\w+", root="src", file_types=["py"], max_total=20):
     print(hit.path, hit.line, hit.text)
 ]]></example>
 </helper>
 <helper name="find_files">
-<description>Use to enumerate workspace files honoring .gitignore via `rg --files` instead of manual directory walking. It is much faster than Path.rglob on large repositories and accepts the same `globs`, `file_types`, `hidden`, and `no_ignore` controls as search_text. `root` may be a directory or a single file (returns just that file).</description>
+<description>Use to enumerate workspace files honoring .gitignore via `rg --files` instead of manual directory walking. It is much faster than Path.rglob on large repositories. `root` may be a directory or a single file (returns just that file).</description>
 <example><![CDATA[
 from uv_agent_runtime import find_files
 
-# find_files(root=".", *, globs=None, file_types=None, hidden=False,
-#     no_ignore=False, extra_args=None) -> list[str]
-for path in find_files("src", globs=["*.py", "!**/migrations/**"]):
+# find_files(root=".", *, globs=None, file_types=None, max_total=None,
+#     hidden=False, no_ignore=False, extra_args=None) -> list[str]
+for path in find_files("src", globs=["*.py", "!**/migrations/**"], max_total=30):
     print(path)
 ]]></example>
 </helper>
