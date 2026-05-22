@@ -1825,7 +1825,7 @@ class AgentEngine:
             truncated=context.truncated,
             omitted_files=context.omitted_files,
         )
-        return filtered.render(root=self.project_root)
+        return filtered.render(root=self.project_root, context_path=".")
 
     def _active_cwd_notice(self, thread_id: str) -> str:
         state = self._rule_state(thread_id)
@@ -1872,7 +1872,11 @@ class AgentEngine:
             truncated=context.truncated,
             omitted_files=context.omitted_files,
         )
-        text = filtered.render(root=self.project_root)
+        text = filtered.render(
+            root=self.project_root,
+            base_path=directory,
+            context_path=self._relative_to_project(directory),
+        )
         event = {
             "kind": "rules_loaded",
             "cwd": self._relative_to_project(directory),

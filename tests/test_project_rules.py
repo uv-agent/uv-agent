@@ -46,8 +46,10 @@ def test_load_project_rules_caps_total_context(tmp_path: Path) -> None:
 
     assert context.truncated
     assert len(context.rules) == 2
-    rendered = context.render()
-    assert "<workspace_rules>" in rendered
+    rendered = context.render(context_path=".")
+    assert '<workspace_rules path="." truncated="true">' in rendered
+    assert '<rule file="' in rendered
+    assert 'truncated="true"' in rendered
     assert "...[truncated]" in rendered
 
 
@@ -95,5 +97,6 @@ def test_load_directory_rules_only_loads_current_directory(tmp_path: Path) -> No
 
     rendered = context.render(root=project)
     assert "<workspace_rules>" in rendered
+    assert '<rule file="AGENTS.md">' in rendered
     assert "root" in rendered
     assert "child" not in rendered

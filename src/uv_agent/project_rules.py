@@ -49,26 +49,40 @@ class ProjectRuleContext:
     def paths(self) -> list[Path]:
         return [rule.path for rule in self.rules]
 
-    def render(self, *, root: Path | None = None, heading: str = "workspace_rules") -> str:
+    def render(
+        self,
+        *,
+        root: Path | None = None,
+        base_path: Path | None = None,
+        context_path: str | None = None,
+        heading: str = "workspace_rules",
+    ) -> str:
         """Render loaded rules as a compact context block for model input."""
         if not self.rules:
             return ""
+        attrs = []
+        if context_path is not None:
+            attrs.append(f'path="{xml_attr(context_path)}"')
+        if self.truncated:
+            attrs.append('truncated="true"')
+        if self.omitted_files:
+            attrs.append(f'omitted_files="{self.omitted_files}"')
+        open_tag = f"<{heading}{(' ' + ' '.join(attrs)) if attrs else ''}>"
         lines = [
-            f"<{heading}>",
+            open_tag,
             "The following directory instruction files were loaded automatically. Follow them when relevant; newer user messages still define the immediate task.",
         ]
         for rule in self.rules:
-            rel = display_path(rule.path, root=root)
-            suffix = " (truncated)" if rule.truncated else ""
+            rel = display_path(rule.path, root=base_path or root)
+            rule_attrs = [f'file="{xml_attr(rel)}"']
+            if rule.truncated:
+                rule_attrs.append('truncated="true"')
             lines.extend(
                 [
-                    f"\n## {rule.scope}: {rel}{suffix}",
+                    f"\n<rule {' '.join(rule_attrs)}>",
                     rule.text.strip(),
+                    "</rule>",
                 ]
-            )
-        if self.truncated:
-            lines.append(
-                f"\nNote: rule context was capped; {self.omitted_files} file(s) were omitted."
             )
         lines.append(f"</{heading}>")
         return "\n".join(lines)
@@ -90,7 +104,7 @@ class WorkspaceRuleIndex:
             return ""
         lines = [
             "<workspace_rule_index>",
-            f"Rule files were found under the active {label}. Use enter_dir for a matching directory to load unseen rule contents through the tool result.",
+            f"Rule files were found under the active {label}. Files whose contents are already inlined in any <workspace_rules> block above are considered loaded; do not re-read them. Use enter_dir only for entries whose contents are not present above.",
         ]
         for path in self.paths:
             lines.append(f"- {display_path(path, root=self.root)}")
@@ -323,3 +337,12 @@ def display_path(path: Path, *, root: Path | None = None) -> str:
         else:
             return "." if not relative.parts else relative.as_posix()
     return str(resolved)
+
+
+def xml_attr(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )

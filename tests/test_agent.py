@@ -2667,7 +2667,8 @@ async def test_agent_sends_project_rule_index_without_rule_contents(tmp_path: Pa
     events = [event async for event in engine.run_turn(user_text="hello")]
 
     request_text = str(client.requests[0]["input"])
-    assert "<workspace_rules>" in request_text
+    assert '<workspace_rules path=".">' in request_text
+    assert '<rule file="AGENTS.md">' in request_text
     assert "Use the local rule." in request_text
     assert "<workspace_rule_index>" in request_text
     assert "AGENTS.md" in request_text
@@ -2741,7 +2742,7 @@ async def test_compaction_request_reuses_main_prefix(tmp_path: Path) -> None:
     events = [event async for event in engine.run_turn(user_text="hello")]
 
     assert events[-1]["type"] == "turn.completed"
-    assert "<workspace_rules>" in str(client.requests[0]["input"])
+    assert '<workspace_rules path=".">' in str(client.requests[0]["input"])
     assert "Never persist this rule." in str(client.requests[0]["input"])
     assert "<workspace_rule_index>" in str(client.requests[0]["input"])
     assert "AGENTS.md" in str(client.requests[0]["input"])
@@ -2836,7 +2837,7 @@ async def test_project_rules_are_deduped_and_not_reloaded_on_file_change(tmp_pat
     [event async for event in engine.run_turn(user_text="two", thread_id=first)]
     requests_text = [str(request["input"]) for request in client.requests[:2]]
 
-    assert "<workspace_rules>" in requests_text[0]
+    assert '<workspace_rules path=".">' in requests_text[0]
     assert "AGENTS.md" in requests_text[0]
     assert "Rule v1." in requests_text[0]
     assert client.requests[1]["previous_response_id"] == "resp_1"
@@ -2889,7 +2890,7 @@ async def test_project_rules_reappear_after_compaction_epoch(tmp_path: Path) -> 
 
     assert first
     assert second
-    assert "<workspace_rules>" in str(second)
+    assert '<workspace_rules path=".">' in str(second)
     assert "After compaction rule." in str(second)
     assert "<workspace_rule_index>" in str(second)
     assert "AGENTS.md" in str(second)
@@ -2923,6 +2924,9 @@ async def test_compaction_epoch_reloads_project_rules_and_active_cwd_rules(tmp_p
     text = str(items)
 
     assert "<workspace_rule_index>" in text
+    assert '<workspace_rules path=".">' in text
+    assert '<workspace_rules path="src">' in text
+    assert '<rule file="AGENTS.md">' in text
     assert "AGENTS.md" in text
     assert "src/AGENTS.md" in text
     assert "pkg/AGENTS.md" in text
