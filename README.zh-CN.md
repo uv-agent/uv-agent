@@ -207,6 +207,22 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 - thread 状态、run 日志、共享脚本环境和附件位于
   `~/.uv-agent/projects/<project-id>/`。
 
+## 上下文管理
+
+虽然只有一个工具 (`run_python`)，agent 仍然需要感知运行时环境、可用 helper、
+workspace rules、skills 和 MCP 服务器。这些信息通过基于指纹的增量更新机制渐进披露：
+
+- **指纹增量。** 每个上下文块（runtime env、model levels、helpers、skills、MCP）
+  都计算 SHA-256 指纹。只有内容变化的部分才会在下一轮重新发送，没变的保持静默。
+- **Epoch 生命周期。** 上下文压缩（compaction）后 epoch 重置，所有块重新全量发送，
+  因为模型已丢失了之前的上下文。
+- **自描述信封。** 更新以 `<context_update status="current|removed">` 块的形式
+  发送。skills 或 MCP 服务器被移除时会有显式的移除通知。
+- **稳定的 system prompt。** system prompt 始终保持不变，所有动态上下文通过
+  user message 追加，指令遵循质量不随轮次漂移。
+- **规则渐进加载。** workspace rules（AGENTS.md 文件）先以索引形式披露，
+  仅在 agent 进入对应目录时才内联具体文件内容。
+
 ## 开发
 
 ```powershell
