@@ -6,12 +6,14 @@ import shutil
 import subprocess
 import threading
 import tomllib
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
 
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _READY_LOCK = threading.Lock()
 _READY_DIRS: set[Path] = set()
+_HOST_PACKAGE = "uv-agent"
 
 # Default Python version for the shared scriptenv. uv will download a matching
 # interpreter if none is available on the host.
@@ -32,6 +34,7 @@ def ensure_venv(scriptenv_dir: Path) -> Path:
             return python
         ensure_project(resolved)
         _ensure_runtime_package(resolved, python)
+        _ensure_runtime_version(resolved, python)
         _READY_DIRS.add(resolved)
         return python
 
@@ -90,7 +93,7 @@ def _ensure_runtime_package(scriptenv_dir: Path, python: Path) -> None:
     _add_runtime_package(scriptenv_dir)
 
 
-def _add_runtime_package(scriptenv_dir: Path) -> None:
+def _add_runtime_package(scriptenv_dir: Path, spec: str = "uv-agent") -> None:
     subprocess.run(
         [
             uv_binary(),
@@ -98,11 +101,53 @@ def _add_runtime_package(scriptenv_dir: Path) -> None:
             "--project",
             str(scriptenv_dir),
             "-q",
-            "uv-agent",
+            spec,
         ],
         env=_uv_env(),
         check=True,
     )
+
+
+def _ensure_runtime_version(scriptenv_dir: Path, python: Path) -> None:
+    target = _host_runtime_version()
+    if not target:
+        return
+    installed = _installed_runtime_version(python)
+    if not installed or installed == target:
+        return
+    _add_runtime_package(scriptenv_dir, f"{_HOST_PACKAGE}=={target}")
+
+
+def _host_runtime_version() -> str | None:
+    try:
+        return _pkg_version(_HOST_PACKAGE)
+    except PackageNotFoundError:
+        return None
+
+
+def _installed_runtime_version(python: Path) -> str | None:
+    code = (
+        "from importlib.metadata import PackageNotFoundError, version\n"
+        "try:\n"
+        f"    print(version({_HOST_PACKAGE!r}))\n"
+        "except PackageNotFoundError:\n"
+        "    pass\n"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-c", code],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    stdout = result.stdout or ""
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", "replace")
+    return stdout.strip() or None
 
 
 def _declares_dependency(pyproject: Path, name: str) -> bool:
