@@ -172,6 +172,7 @@ from uv_agent_runtime import (
 <example><![CDATA[
 from uv_agent_runtime import enter_dir
 
+# enter_dir(path: str | Path) -> Path
 enter_dir("src")
 ]]></example>
 </helper>
@@ -180,6 +181,8 @@ enter_dir("src")
 <example><![CDATA[
 from uv_agent_runtime import ask
 
+# ask(prompt: str, *, level=None, model_level=None, cwd=None, env=None, executable=None,
+#     timeout_s=300, check=False, retain=True) -> SubagentResult
 result = ask("Inspect parser tests and summarize likely failures", check=True, timeout_s=300)
 print(result.text[:2000])
 ]]></example>
@@ -189,6 +192,8 @@ print(result.text[:2000])
 <example><![CDATA[
 from uv_agent_runtime import add_dependency
 
+# add_dependency(*packages: str, editable=False, optional=None, dev=False, group=None,
+#     timeout_s=None, check=True) -> CommandTextResult
 add_dependency("requests", check=True)
 import requests
 ]]></example>
@@ -198,6 +203,7 @@ import requests
 <example><![CDATA[
 from uv_agent_runtime import look_at
 
+# look_at(path: str | Path, *, note="") -> dict[str, Any]
 look_at("screenshots/failure.png", note="inspect failing UI state")
 ]]></example>
 </helper>
@@ -206,6 +212,7 @@ look_at("screenshots/failure.png", note="inspect failing UI state")
 <example><![CDATA[
 from uv_agent_runtime import apply_patch, workspace_transaction
 
+# workspace_transaction(paths: Sequence[str | Path] | None = None, *, root=".") -> Iterator[Snapshot]
 with workspace_transaction(["src", "tests"]):
     apply_patch('''*** Begin Patch
 *** Update File: src/app.py
@@ -221,6 +228,7 @@ with workspace_transaction(["src", "tests"]):
 <example><![CDATA[
 from uv_agent_runtime import snapshot_files
 
+# snapshot_files(paths: Sequence[str | Path], *, root=".") -> Snapshot
 snapshot = snapshot_files(["src/app.py", "tests/test_app.py"])
 print(snapshot.files.keys())
 ]]></example>
@@ -230,6 +238,8 @@ print(snapshot.files.keys())
 <example><![CDATA[
 from uv_agent_runtime import restore_snapshot, snapshot_files
 
+# snapshot_files(paths: Sequence[str | Path], *, root=".") -> Snapshot
+# restore_snapshot(snapshot: Snapshot) -> list[str]
 snapshot = snapshot_files(["src/app.py"])
 # ... try an experiment ...
 print(restore_snapshot(snapshot))
@@ -240,6 +250,7 @@ print(restore_snapshot(snapshot))
 <example><![CDATA[
 from uv_agent_runtime import read_text_lossless
 
+# read_text_lossless(path: str | Path, *, encoding="utf-8") -> TextFile
 file = read_text_lossless("src/app.py")
 print(file.newline, file.final_newline, file.bom)
 ]]></example>
@@ -249,6 +260,9 @@ print(file.newline, file.final_newline, file.bom)
 <example><![CDATA[
 from uv_agent_runtime import read_text_lossless, write_text_lossless
 
+# read_text_lossless(path: str | Path, *, encoding="utf-8") -> TextFile
+# write_text_lossless(path, text, *, like=None, encoding=None, newline=None,
+#     final_newline=None, bom=None, atomic=True) -> Path
 before = read_text_lossless("src/app.py")
 write_text_lossless("src/app.py", before.text.replace("old", "new"), like=before)
 ]]></example>
@@ -258,6 +272,8 @@ write_text_lossless("src/app.py", before.text.replace("old", "new"), like=before
 <example><![CDATA[
 from uv_agent_runtime import compare_text
 
+# compare_text(left: str | TextFile, right: str | TextFile, *,
+#     ignore_eol=False, ignore_final_newline=False) -> TextComparison
 comparison = compare_text("a\r\nb\r\n", "a\nb\n", ignore_eol=True)
 print(comparison.kind)
 ]]></example>
@@ -267,6 +283,8 @@ print(comparison.kind)
 <example><![CDATA[
 from uv_agent_runtime import normalize_text
 
+# normalize_text(text: str, *, eol: "lf" | "crlf" | "cr" | None = None,
+#     final_newline=None) -> str
 text = normalize_text("a\r\nb", eol="lf", final_newline=True)
 ]]></example>
 </helper>
@@ -275,6 +293,7 @@ text = normalize_text("a\r\nb", eol="lf", final_newline=True)
 <example><![CDATA[
 from uv_agent_runtime import replace_exact
 
+# replace_exact(path: str | Path, old: str, new: str, *, count=1) -> ReplacementResult
 replace_exact("src/app.py", "old_call()", "new_call()")
 ]]></example>
 </helper>
@@ -283,6 +302,7 @@ replace_exact("src/app.py", "old_call()", "new_call()")
 <example><![CDATA[
 from uv_agent_runtime import path_info
 
+# path_info(path: str | Path, *, base=None) -> PathInfo
 info = path_info("../maybe-outside.txt", base=".")
 print(info.kind, info.is_relative_to_base)
 ]]></example>
@@ -292,6 +312,7 @@ print(info.kind, info.is_relative_to_base)
 <example><![CDATA[
 from uv_agent_runtime import apply_patch
 
+# apply_patch(patch: str, *, cwd=None, check=True) -> PatchResult
 apply_patch('''*** Begin Patch
 *** Update File: src/app.py
 @@
@@ -307,6 +328,9 @@ apply_patch('''*** Begin Patch
 <example><![CDATA[
 from uv_agent_runtime import apply_patch_any, run_process_text
 
+# run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace",
+#     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult
+# apply_patch_any(patch: str, *, cwd=None, format="auto", dry_run=False, check=True) -> PatchResult
 diff = run_process_text(["git", "diff", "--", "src/app.py"]).stdout
 apply_patch_any(diff, format="unified", dry_run=True)
 ]]></example>
@@ -316,6 +340,9 @@ apply_patch_any(diff, format="unified", dry_run=True)
 <example><![CDATA[
 from uv_agent_runtime import convert_patch, make_unified_diff
 
+# make_unified_diff(before: str, after: str, *, path=None, context=3) -> str
+# convert_patch(patch: str, *, from_format: "apply_patch" | "unified",
+#     to_format: "apply_patch" | "unified") -> str
 diff = make_unified_diff("old\n", "new\n", path="src/app.py")
 print(convert_patch(diff, from_format="unified", to_format="apply_patch"))
 ]]></example>
@@ -325,6 +352,7 @@ print(convert_patch(diff, from_format="unified", to_format="apply_patch"))
 <example><![CDATA[
 from uv_agent_runtime import make_unified_diff
 
+# make_unified_diff(before: str, after: str, *, path=None, context=3) -> str
 print(make_unified_diff("old\n", "new\n", path="src/app.py"))
 ]]></example>
 </helper>
@@ -333,6 +361,8 @@ print(make_unified_diff("old\n", "new\n", path="src/app.py"))
 <example><![CDATA[
 from uv_agent_runtime import run_process_text
 
+# run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace",
+#     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult
 result = run_process_text(["git", "status", "--short"], encoding="utf-8", check=True)
 print(result.stdout)
 ]]></example>
@@ -342,6 +372,10 @@ print(result.stdout)
 <example><![CDATA[
 from uv_agent_runtime import list_thread_digests, thread_digest
 
+# list_thread_digests(*, state_dir=None, limit=10, kind="thread", parent_thread_id=None,
+#     since_last_compaction=True, include_tools=False) -> list[dict[str, Any]]
+# thread_digest(thread_id: str, *, state_dir=None, kind=None,
+#     since_last_compaction=True, include_tools=False) -> dict[str, Any]
 threads = list_thread_digests(limit=5)
 if threads:
     print(thread_digest(threads[0]["thread_id"]))
@@ -352,6 +386,9 @@ if threads:
 <example><![CDATA[
 from uv_agent_runtime import connect_named, connect_url, list_declared_servers
 
+# list_declared_servers(*, config_paths=None, cwd=None) -> list[dict[str, Any]]
+# connect_named(name: str, *, config_paths=None, cwd=None, timeout_s=30) -> McpClient
+# connect_url(url: str, *, transport="streamable_http", timeout_s=30) -> McpClient
 print(list_declared_servers())
 with connect_named("server-name") as client:
     init = client.initialize()
@@ -370,6 +407,10 @@ with connect_url("http://localhost:3001/mcp") as client:
 <example><![CDATA[
 from uv_agent_runtime import search_text
 
+# search_text(pattern: str, *, root=".", globs=None, file_types=None, ignore_case=False,
+#     case_sensitive=None, fixed_string=False, literal=None, multiline=False, word=False,
+#     max_count_per_file=None, max_total=None, hidden=False, no_ignore=False,
+#     extra_args=None) -> list[Match]
 for hit in search_text(r"def\\s+handle_\\w+", root="src", file_types=["py"], max_total=20):
     print(hit.path, hit.line, hit.text)
 ]]></example>
@@ -379,6 +420,8 @@ for hit in search_text(r"def\\s+handle_\\w+", root="src", file_types=["py"], max
 <example><![CDATA[
 from uv_agent_runtime import find_files
 
+# find_files(root=".", *, globs=None, file_types=None, hidden=False,
+#     no_ignore=False, extra_args=None) -> list[str]
 for path in find_files("src", globs=["*.py", "!**/migrations/**"]):
     print(path)
 ]]></example>
@@ -388,6 +431,10 @@ for path in find_files("src", globs=["*.py", "!**/migrations/**"]):
 <example><![CDATA[
 from uv_agent_runtime import find_symbols, supported_symbol_languages
 
+# supported_symbol_languages() -> list[str]
+# find_symbols(root=".", *, languages=None, language=None, kinds=None, kind=None,
+#     name_pattern=None, name=None, contains=None, max_count=None, hidden=False,
+#     no_ignore=False, globs=None) -> list[Symbol]
 print(supported_symbol_languages())
 for sym in find_symbols("src", kind="class", contains="Engine"):
     print(sym.path, sym.start_row, sym.name)
@@ -398,6 +445,8 @@ for sym in find_symbols("src", kind="class", contains="Engine"):
 <example><![CDATA[
 from uv_agent_runtime import query_code
 
+# query_code(query_text: str, *, language: str, root=".", globs=None, file_types=None,
+#     hidden=False, no_ignore=False, max_count=None) -> list[Capture]
 for cap in query_code(
     "(call function: (attribute attribute: (identifier) @method))",
     language="python",
