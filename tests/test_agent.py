@@ -291,6 +291,28 @@ class SimpleRunner:
             events=[],
         )
 
+
+class LargeOutputRunner(SimpleRunner):
+    def __init__(self, stdout: str) -> None:
+        super().__init__()
+        self.stdout = stdout
+
+    async def run(self, request: PythonRunRequest) -> PythonRunResult:
+        self.requests.append(request)
+        return PythonRunResult(
+            run_id="run_large",
+            returncode=0,
+            stdout=self.stdout,
+            stderr="",
+            timed_out=False,
+            interrupted=False,
+            truncated=False,
+            run_log_path=request.cwd / "run.jsonl",
+            script_path=request.cwd / "script.py",
+            events=[],
+        )
+
+
 class StreamingRunner(SimpleRunner):
     async def stream_run(self, request: PythonRunRequest):
         self.requests.append(request)
@@ -589,6 +611,155 @@ def test_compaction_replacement_keeps_recent_user_messages_with_budget(tmp_path:
     assert "assistant output" not in text
     assert "[truncated during context compaction]" in text
     assert "The messages above may include several earlier user messages" in text
+
+
+@pytest.mark.asyncio
+async def test_agent_compacts_after_tool_outputs_before_next_model_request(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        context_window_tokens=20,
+        compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.1, min_tokens=1),
+    )
+    client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_tool",
+                "output_text": "",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_mid_compact",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "print('hello')"}),
+                    }
+                ],
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "summary includes tool result",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "summary includes tool result"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_final",
+                "output_text": "done after compaction",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done after compaction"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=SimpleRunner(),  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="run a tool")]
+    stored = engine.thread_store.read(events[-1]["thread_id"])
+
+    assert [event["type"] for event in events].count("compaction.completed") == 1
+    assert events[-1]["type"] == "turn.completed"
+    assert events[-1]["final_text"] == "done after compaction"
+    assert len(client.requests) == 3
+    assert "context_compaction_request" in str(client.requests[1]["input"][-1])
+    assert "Context is being compacted before the assistant continues" in str(client.requests[1]["input"])
+    assert client.requests[2]["previous_response_id"] is None
+    assert "conversation_summary" in str(client.requests[2]["input"])
+    assert "summary includes tool result" in str(client.requests[2]["input"])
+    assert any(event["type"] == "item.assistant" for event in stored)
+    assert any(event["type"] == "item.compaction" for event in stored)
+    assert [event["type"] for event in stored].index("item.assistant") < [
+        event["type"] for event in stored
+    ].index("item.compaction")
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_truncates_last_tool_output_for_compaction_request(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        context_window_tokens=20_000,
+        compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.1, min_tokens=1),
+    )
+    client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_tool",
+                "output_text": "",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_large",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "print('large')"}),
+                    }
+                ],
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "summary of truncated result",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "summary of truncated result"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_final",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    huge_stdout = "START" + ("x" * 80_000) + "END"
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=LargeOutputRunner(huge_stdout),  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="run a large tool")]
+    compact_request = client.requests[1]["input"]
+    compact_tool_output = next(item for item in compact_request if item.get("type") == "function_call_output")
+    compact_payload = json.loads(compact_tool_output["output"])
+    stored_tool_output = next(
+        event["item"]
+        for event in engine.thread_store.read(events[-1]["thread_id"])
+        if event["type"] == "item.tool_output"
+    )
+
+    assert compact_payload["truncated_for_context_compaction"] is True
+    assert "truncated for context compaction" in compact_payload["stdout"]
+    assert len(compact_payload["stdout"]) < len(huge_stdout)
+    assert "START" in compact_payload["stdout"]
+    assert "END" in compact_payload["stdout"]
+    assert json.loads(stored_tool_output["output"])["stdout"] == huge_stdout
+    assert events[-1]["final_text"] == "done"
 
 
 @pytest.mark.asyncio

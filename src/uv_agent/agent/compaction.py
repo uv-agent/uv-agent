@@ -64,9 +64,11 @@ def retained_user_messages_after_compaction(input_items: list[dict[str, Any]]) -
 
 
 def retain_item_after_compaction(item: dict[str, Any]) -> bool:
-    if item.get("type") != "message" or item.get("role") not in {"user"}:
+    if item.get("type") != "message" or item.get("role") not in {"user", "assistant"}:
         return False
     text = message_item_text(item)
+    if item.get("role") == "assistant":
+        return "Context is being compacted before the assistant continues" in text
     return not (
         "<runtime_environment>" in text
         or "<model_levels>" in text

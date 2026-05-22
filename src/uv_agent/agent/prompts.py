@@ -59,6 +59,11 @@ TOOL_ATTACHMENT_CONTEXT_BRIDGE = (
     "Tool execution completed. Additional visual context produced by the tool "
     "is provided in the next user message."
 )
+POST_TOOL_COMPACTION_BRIDGE = (
+    "Tool results have been received. Context is being compacted before the "
+    "assistant continues. Continue from the compacted summary and preserve the "
+    "tool results accurately."
+)
 INTERRUPTED_TOOL_CONTEXT_BRIDGE = (
     "A tool call did not produce a complete tool result. Continue from the available context."
 )

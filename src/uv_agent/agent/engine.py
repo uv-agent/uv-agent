@@ -42,6 +42,7 @@ from uv_agent.agent.prompts import (
     COMPACTED_CONTEXT_CONTINUATION,
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
     INTERRUPTED_TOOL_CONTEXT_BRIDGE,
+    POST_TOOL_COMPACTION_BRIDGE,
     PYTHON_TOOL,
     SYSTEM_INSTRUCTIONS_TEMPLATE,
     TITLE_GENERATION_PROMPT,
@@ -238,6 +239,21 @@ class ToolCallTurnResult:
 
 
 @dataclass(frozen=True)
+class CompactionResult:
+    """State produced by one context compaction pass.
+
+    The engine may compact both after a completed turn and mid-turn after a
+    batch of tool outputs. Mid-turn callers need the freshly prepared input to
+    continue without relying on a provider-side previous_response_id that still
+    points at the uncompressed history.
+    """
+
+    replacement_input: list[dict[str, Any]]
+    text: str
+    truncated_last_tool_output: bool = False
+
+
+@dataclass(frozen=True)
 class RunTurnPrelude:
     thread_id: str
     turn_id: str
@@ -333,6 +349,7 @@ class AgentEngine:
                 yield event
 
             final_text = ""
+            compacted_this_turn = False
             stream_state = StreamResponseState()
             try:
                 for round_index in range(self.config.runtime.max_agent_rounds):
@@ -403,6 +420,26 @@ class AgentEngine:
                         turn_input.pending_items.extend(copy.deepcopy(attachment_items))
                         turn_input.use_previous_response_id = False
                         request_input_items = turn_input.request_input_items()
+                    mid_turn_compaction = await self._maybe_compact_after_tool_results(
+                        thread_id,
+                        turn_id,
+                        input_items,
+                        level=level,
+                        instructions=system_instructions,
+                    )
+                    if mid_turn_compaction is not None:
+                        compacted_this_turn = True
+                        yield {
+                            "type": "compaction.completed",
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                        }
+                        input_items = copy.deepcopy(mid_turn_compaction.replacement_input)
+                        turn_input.input_items = input_items
+                        turn_input.previous_response_id = None
+                        turn_input.use_previous_response_id = False
+                        turn_input.pending_items.clear()
+                        request_input_items = turn_input.request_input_items()
                 else:
                     raise RuntimeError("Agent exceeded max_agent_rounds")
             except (asyncio.CancelledError, TurnInterrupted):
@@ -469,13 +506,15 @@ class AgentEngine:
                 turn_id=turn_id,
                 final_text=final_text,
             )
-            compacted = await self._maybe_compact(
-                thread_id,
-                turn_id,
-                input_items,
-                level=level,
-                instructions=system_instructions,
-            )
+            compacted = False
+            if not compacted_this_turn:
+                compacted = await self._maybe_compact(
+                    thread_id,
+                    turn_id,
+                    input_items,
+                    level=level,
+                    instructions=system_instructions,
+                )
             if compacted:
                 yield {
                     "type": "compaction.completed",
@@ -658,6 +697,24 @@ class AgentEngine:
                                 attachment=attachment,
                             )
                         retry_state.input_items.extend(tool_attachment_context_items(round_attachments))
+                    mid_turn_compaction = await self._maybe_compact_after_tool_results(
+                        thread_id,
+                        turn_id,
+                        retry_state.input_items,
+                        level=level,
+                        instructions=system_instructions,
+                    )
+                    if mid_turn_compaction is not None:
+                        yield {
+                            "type": "compaction.completed",
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                        }
+                        retry_state.input_items = copy.deepcopy(mid_turn_compaction.replacement_input)
+                        retry_state.previous_response_id = None
+                        retry_state.use_previous_response_id = False
+                        retry_state.pending_items.clear()
+                        retry_state.pending_tool_calls.clear()
 
                 for _ in range(self.config.runtime.max_agent_rounds):
                     self._raise_if_cancelled(cancel_event)
@@ -720,6 +777,24 @@ class AgentEngine:
                         retry_state.input_items.extend(tool_attachment_context_items(round_attachments))
                         retry_state.pending_items.extend(tool_attachment_context_items(round_attachments))
                         retry_state.use_previous_response_id = False
+                    mid_turn_compaction = await self._maybe_compact_after_tool_results(
+                        thread_id,
+                        turn_id,
+                        retry_state.input_items,
+                        level=level,
+                        instructions=system_instructions,
+                    )
+                    if mid_turn_compaction is not None:
+                        yield {
+                            "type": "compaction.completed",
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                        }
+                        retry_state.input_items = copy.deepcopy(mid_turn_compaction.replacement_input)
+                        retry_state.previous_response_id = None
+                        retry_state.use_previous_response_id = False
+                        retry_state.pending_items.clear()
+                        retry_state.pending_tool_calls.clear()
                 else:
                     raise RuntimeError("Agent exceeded max_agent_rounds")
             except (asyncio.CancelledError, TurnInterrupted):
@@ -863,21 +938,80 @@ class AgentEngine:
         level: str | None,
         instructions: str,
     ) -> bool:
+        return await self._compact_if_needed(
+            thread_id,
+            turn_id,
+            input_items,
+            level=level,
+            instructions=instructions,
+        ) is not None
+
+    async def _maybe_compact_after_tool_results(
+        self,
+        thread_id: str,
+        turn_id: str,
+        input_items: list[dict[str, Any]],
+        *,
+        level: str | None,
+        instructions: str,
+    ) -> CompactionResult | None:
+        if not self._has_tool_output(input_items):
+            return None
+        bridged_input = copy.deepcopy(input_items)
+        bridge_item = assistant_output_item(POST_TOOL_COMPACTION_BRIDGE)
+        bridged_input.append(bridge_item)
+        result = await self._compact_if_needed(
+            thread_id,
+            turn_id,
+            bridged_input,
+            level=level,
+            instructions=instructions,
+            allow_last_tool_output_truncation=True,
+            pre_compaction_event={
+                "type": "item.assistant",
+                "turn_id": turn_id,
+                "text": POST_TOOL_COMPACTION_BRIDGE,
+            },
+        )
+        if result is None:
+            return None
+        # Keep the in-memory turn state aligned with the event persisted just
+        # before the compaction checkpoint.
+        input_items.append(bridge_item)
+        return result
+
+    async def _compact_if_needed(
+        self,
+        thread_id: str,
+        turn_id: str,
+        input_items: list[dict[str, Any]],
+        *,
+        level: str | None,
+        instructions: str,
+        allow_last_tool_output_truncation: bool = False,
+        pre_compaction_event: dict[str, Any] | None = None,
+    ) -> CompactionResult | None:
         if not self.config.runtime.compression.enabled:
-            return False
+            return None
         compact_level = self.config.runtime.compression.model_level or level
         model = self.config.model_for_level(compact_level)
         approx_tokens = estimate_tokens(input_items)
         if approx_tokens < self.config.runtime.compression.min_tokens:
-            return False
+            return None
         trigger_tokens = int(
             model.context_window_tokens
             * self.config.runtime.compression.trigger_ratio
         )
         if approx_tokens < trigger_tokens:
-            return False
+            return None
         compact_input = copy.deepcopy(input_items)
         compact_input.append(self._compaction_trigger_item())
+        truncated_last_tool_output = False
+        if allow_last_tool_output_truncation:
+            compact_input, truncated_last_tool_output = self._fit_compaction_input_by_truncating_last_tool_output(
+                compact_input,
+                context_window_tokens=model.context_window_tokens,
+            )
         response = await self.model_client.create_response(
             input_items=compact_input,
             level=compact_level,
@@ -886,6 +1020,10 @@ class AgentEngine:
         )
         replacement_input = self._compaction_replacement_input(input_items, response)
         context_state = self._latest_context_state(thread_id)
+        if pre_compaction_event is not None:
+            event_type = str(pre_compaction_event.get("type") or "")
+            payload = {key: value for key, value in pre_compaction_event.items() if key != "type"}
+            self.thread_store.append(thread_id, event_type, **payload)
         self.thread_store.append(
             thread_id,
             "item.compaction",
@@ -904,7 +1042,71 @@ class AgentEngine:
             source="compaction",
         )
         self._reset_rule_epoch(thread_id)
-        return True
+        return CompactionResult(
+            replacement_input=replacement_input,
+            text=response.output_text,
+            truncated_last_tool_output=truncated_last_tool_output,
+        )
+
+    @staticmethod
+    def _has_tool_output(input_items: list[dict[str, Any]]) -> bool:
+        return any(item.get("type") == "function_call_output" for item in input_items)
+
+    def _fit_compaction_input_by_truncating_last_tool_output(
+        self,
+        input_items: list[dict[str, Any]],
+        *,
+        context_window_tokens: int,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Shrink only the last tool output when a compaction request is too large.
+
+        Tool output is the common mid-turn source of sudden context growth. The
+        first emergency mechanism intentionally stays conservative: keep the
+        full historical record on disk, but shorten the model-facing copy used
+        for summarization. If old conversation alone is too large, this function
+        leaves that harder case visible for a later, broader compaction policy.
+        """
+
+        budget = max(1, context_window_tokens - 5_000)
+        current_tokens = estimate_tokens(input_items)
+        if current_tokens <= budget:
+            return input_items, False
+
+        tool_index = self._last_tool_output_index(input_items)
+        if tool_index is None:
+            return input_items, False
+
+        tool_item = input_items[tool_index]
+        raw_output = tool_item.get("output")
+        if not isinstance(raw_output, str) or not raw_output:
+            return input_items, False
+
+        # Token estimation is currently character based. Convert the excess into
+        # a conservative character reduction and retry a few times because JSON
+        # escaping and marker metadata make the final size non-linear.
+        output_budget_chars = max(0, len(raw_output) - ((current_tokens - budget) * 4))
+        truncated_output = raw_output
+        for _ in range(6):
+            truncated_output = truncate_tool_output_for_compaction(raw_output, output_budget_chars)
+            candidate = copy.deepcopy(input_items)
+            candidate[tool_index] = {**copy.deepcopy(tool_item), "output": truncated_output}
+            if estimate_tokens(candidate) <= budget:
+                return candidate, truncated_output != raw_output
+            output_budget_chars = max(0, int(output_budget_chars * 0.75) - 1_024)
+
+        candidate = copy.deepcopy(input_items)
+        candidate[tool_index] = {
+            **copy.deepcopy(tool_item),
+            "output": truncate_tool_output_for_compaction(raw_output, 0),
+        }
+        return candidate, candidate[tool_index].get("output") != raw_output
+
+    @staticmethod
+    def _last_tool_output_index(input_items: list[dict[str, Any]]) -> int | None:
+        for index in range(len(input_items) - 1, -1, -1):
+            if input_items[index].get("type") == "function_call_output":
+                return index
+        return None
 
     @staticmethod
     def _tool_result_from_event(
@@ -1748,6 +1950,11 @@ class AgentEngine:
                 input_items.extend(pending_pre_user)
                 pending_pre_user.clear()
                 input_items.append(copy.deepcopy(event["item"]))
+            elif event.get("type") == "item.assistant":
+                flush_tool_attachments()
+                text = str(event.get("text") or "")
+                if text:
+                    input_items.append(assistant_output_item(text))
             elif event.get("type") == "item.model_response":
                 flush_tool_attachments()
                 output = event.get("output") or []
@@ -1830,6 +2037,11 @@ class AgentEngine:
                 input_items.extend(pending_pre_user)
                 pending_pre_user.clear()
                 input_items.append(event["item"])
+            elif event.get("type") == "item.assistant":
+                flush_tool_attachments()
+                text = str(event.get("text") or "")
+                if text:
+                    input_items.append(assistant_output_item(text))
             elif event.get("type") == "item.model_response":
                 flush_tool_attachments()
                 output = event.get("output") or []
@@ -2490,6 +2702,95 @@ def tool_attachment_context_items(attachments: list[dict[str, Any]]) -> list[dic
     items = [assistant_output_item(TOOL_ATTACHMENT_CONTEXT_BRIDGE)]
     items.extend(image_message_item(attachment) for attachment in attachments)
     return items
+
+
+def truncate_tool_output_for_compaction(raw_output: str, max_chars: int) -> str:
+    """Return a context-sized tool output while preserving JSON when possible.
+
+    `function_call_output.output` is usually a JSON string produced by
+    `function_output()`. Keeping that string parseable gives the compaction
+    model useful metadata (return code, run id, truncation flag) instead of a
+    broken fragment. Non-JSON outputs are rare but still get a head/tail clip.
+    """
+
+    max_chars = max(0, max_chars)
+    try:
+        payload = json.loads(raw_output)
+    except json.JSONDecodeError:
+        return _head_tail_truncate_text(raw_output, max_chars, marker="[tool output truncated for context compaction]")
+    if not isinstance(payload, dict):
+        return _head_tail_truncate_text(raw_output, max_chars, marker="[tool output truncated for context compaction]")
+    if max_chars <= 0:
+        return json.dumps(
+            {
+                "truncated_for_context_compaction": True,
+                "truncation_note": (
+                    "Tool output was omitted to fit the context compaction request."
+                ),
+                "original_json_length": len(raw_output),
+            },
+            ensure_ascii=False,
+        )
+
+    truncated = copy.deepcopy(payload)
+    truncated["truncated_for_context_compaction"] = True
+    truncated["truncation_note"] = (
+        "Tool output was shortened to fit the context compaction request. "
+        "Only a head/tail excerpt of large text fields may be present."
+    )
+    original_lengths = {
+        key: len(value)
+        for key, value in payload.items()
+        if key in {"stdout", "stderr", "output"} and isinstance(value, str)
+    }
+    if original_lengths:
+        truncated["original_text_lengths"] = original_lengths
+
+    large_keys = [key for key in ("stdout", "stderr", "output") if isinstance(truncated.get(key), str)]
+    if not large_keys:
+        return _head_tail_truncate_text(raw_output, max_chars, marker="[tool output truncated for context compaction]")
+
+    for key in large_keys:
+        truncated[key] = str(truncated.get(key) or "")
+
+    for _ in range(8):
+        candidate = json.dumps(truncated, ensure_ascii=False)
+        if len(candidate) <= max_chars:
+            return candidate
+        oversized = max(1, len(candidate) - max_chars)
+        current_lengths = {key: len(str(truncated.get(key) or "")) for key in large_keys}
+        total_text = sum(current_lengths.values())
+        if total_text <= 0:
+            break
+        for key in large_keys:
+            current = str(truncated.get(key) or "")
+            if not current:
+                continue
+            reduction = max(1, int(oversized * (len(current) / total_text)) + 256)
+            target = max(0, len(current) - reduction)
+            truncated[key] = _head_tail_truncate_text(
+                current,
+                target,
+                marker="[truncated for context compaction]",
+            )
+    return json.dumps(truncated, ensure_ascii=False)
+
+
+def _head_tail_truncate_text(text: str, max_chars: int, *, marker: str) -> str:
+    """Keep both ends of text because diagnostics often finish with the error."""
+
+    max_chars = max(0, max_chars)
+    if len(text) <= max_chars:
+        return text
+    if max_chars == 0:
+        return ""
+    marker_text = f"\n...{marker}...\n"
+    if max_chars <= len(marker_text):
+        return marker_text[:max_chars]
+    keep = max_chars - len(marker_text)
+    head = keep // 2
+    tail = keep - head
+    return text[:head].rstrip() + marker_text + text[len(text) - tail :].lstrip()
 
 
 def is_default_thread_title(title: str) -> bool:
