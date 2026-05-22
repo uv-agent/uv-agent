@@ -58,3 +58,4 @@ This repository builds `uv-agent`, an experimental coding agent with a Textual T
 - Run `uv run pytest` before committing meaningful behavior changes.
 - For TUI interaction changes, add or update Textual `run_test` coverage. Manual screenshots can be exported with `App.export_screenshot()` into `.uv-agent/screenshots/`.
 - Before committing, check `git status --short` and ensure no secrets or ignored local artifacts are staged.
+- Once `uv run pytest` passes for a meaningful change, proactively create a focused git commit with a clear message describing the change; do not wait to be asked. Do not push unless the user explicitly requests it.
