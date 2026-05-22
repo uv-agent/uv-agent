@@ -2268,6 +2268,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             else:
                 pending_cell.update(markup)
                 self._mark_tool_cell_completed(pending_cell)
+        partial_lookup_item = {**item, "call": call} if call is not None else item
+        partial_cell = self._partial_tool_result_cell(partial_lookup_item) if payload is not None else None
         if payload is None:
             markup = plain(f"{self._text('python')} {self._text('python_completed')}", style="dim")
             cell = self._append_cell(markup, "event")
@@ -2281,6 +2283,14 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._last_tool_payload = payload
         markup = tool_timeline_markup(payload)
         details = tool_detail_markup(payload)
+        if partial_cell is not None:
+            # A partial result is only a live preview. Reuse that transcript cell
+            # for the completed payload so the timeline never shows a stale
+            # "still running" entry next to the final result.
+            partial_cell.set_details(markup, details)
+            partial_cell.tool_payload = payload
+            self._refresh_status(self._text("working"))
+            return
         cell = self._append_expandable_cell(markup, details, "event")
         cell.tool_payload = payload
         self._track_process_cell(cell)

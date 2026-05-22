@@ -1873,9 +1873,15 @@ async def test_tui_live_tool_partial_updates_existing_result_cell(
         await pilot.pause()
 
         cells = app.query(ExpandableTranscriptCell).nodes
-        assert len(cells) == 3
-        assert "run_live" in plain_renderable(cells[-1].details)
-        assert "second" in plain_renderable(cells[-1].details)
+        assert len(cells) == 2
+        final_summary = plain_renderable(cells[-1].summary)
+        assert "exit 0" in final_summary
+        assert "still running; output is partial" not in final_summary
+        final_details = plain_renderable(cells[-1].details)
+        assert "run_live" in final_details
+        assert "second" in final_details
+        assert "updated" not in final_details
+        assert "still running; output is partial" not in final_details
         assert cells[-1].tool_payload is not None
         assert "partial" not in cells[-1].tool_payload
 
