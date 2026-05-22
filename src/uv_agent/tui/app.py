@@ -1625,8 +1625,18 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             if not isinstance(child, FoldedProcessCell):
                 continue
             region = child.virtual_region
+            # Fold bar itself is in the viewport.
             if region.y < viewport_bottom and region.y + region.height > viewport_top:
                 folds.append(child)
+            # Fold bar is scrolled off but the expanded cells it wraps may
+            # still be visible; treat the fold as reachable when any of its
+            # cells overlaps the viewport.
+            elif not child.collapsed:
+                for cell in child.cells:
+                    cr = cell.virtual_region
+                    if cr.y < viewport_bottom and cr.y + cr.height > viewport_top:
+                        folds.append(child)
+                        break
         return folds
 
     def _latest_expandable_cell(self) -> ExpandableTranscriptCell | None:
