@@ -47,6 +47,7 @@ from uv_agent.tui.app import (
     ImagePreviewPanel,
     PendingImage,
     PendingImagePreviewPanel,
+    PendingSendQueuePanel,
     RetryTurnButton,
     TranscriptCell,
     TranscriptScroll,
@@ -83,7 +84,15 @@ class BlockingEngine(AgentEngine):
         self.__dict__.update(engine.__dict__)
         self.started = asyncio.Event()
 
-    async def run_turn(self, *, user_text: str, thread_id: str | None = None, level: str | None = None, cancel_event: asyncio.Event | None = None):
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        image_paths: list[Path] | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
         thread_id = thread_id or self.thread_store.create_thread("New thread")
         turn_id = "turn_blocking"
         self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
@@ -106,8 +115,18 @@ class ReleasableEngine(AgentEngine):
         self.__dict__.update(engine.__dict__)
         self.started: dict[str, asyncio.Event] = {}
         self.release: dict[str, asyncio.Event] = {}
+        self.calls: list[dict[str, object]] = []
 
-    async def run_turn(self, *, user_text: str, thread_id: str | None = None, level: str | None = None, cancel_event: asyncio.Event | None = None):
+    async def run_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        image_paths: list[Path] | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        self.calls.append({"user_text": user_text, "level": level, "image_paths": list(image_paths or [])})
         thread_id = thread_id or self.thread_store.create_thread("New thread")
         turn_id = f"turn_{user_text.replace(' ', '_')}"
         self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
@@ -4490,6 +4509,167 @@ async def test_tui_tool_result_details_support_keyboard_navigation(
 
 
 @pytest.mark.asyncio
+async def test_tui_pending_send_queue_panel_edits_deletes_and_reorders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = ReleasableEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(110, 28)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("running")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        thread_id = app.thread_id
+        assert thread_id is not None
+        await engine.started[thread_id].wait()
+
+        composer.insert("second")
+        await pilot.press("ctrl+enter")
+        composer.insert("third")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+
+        pending_button = app.query_one("#pending-turns-btn", Static)
+        assert "Queued 2" in str(pending_button.render())
+        assert not pending_button.has_class("hidden")
+        assert "q2" not in str(app.query_one("#composer-footer", Static).render())
+
+        await pilot.click("#pending-turns-btn")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, PendingSendQueuePanel)
+        assert [item.prompt for item in app._thread_runs[thread_id].queue] == ["second", "third"]
+        assert panel._selected_queue_id == app._thread_runs[thread_id].queue[0].queue_id
+        editor = panel.query_one("#pending-turn-editor", TextArea)
+        assert editor.text == "second"
+
+        panel.query_one("#pending-turn-down", Button).press()
+        await pilot.pause()
+        assert [item.prompt for item in app._thread_runs[thread_id].queue] == ["third", "second"]
+
+        editor = panel.query_one("#pending-turn-editor", TextArea)
+        editor.load_text("second edited")
+        panel.query_one("#pending-turn-save", Button).press()
+        await pilot.pause()
+        assert [item.prompt for item in app._thread_runs[thread_id].queue] == ["third", "second edited"]
+
+        panel.query_one("#pending-turn-delete", Button).press()
+        await pilot.pause()
+        assert [item.prompt for item in app._thread_runs[thread_id].queue] == ["third"]
+        assert "Queued 1" in str(pending_button.render())
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is app.default_screen
+
+        engine.release[thread_id].set()
+        await pilot.pause(0.2)
+        engine.release[thread_id].clear()
+        await engine.started[thread_id].wait()
+        assert engine.calls[-1]["user_text"] == "third"
+
+
+@pytest.mark.asyncio
+async def test_tui_pending_send_save_reports_when_item_already_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = ReleasableEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(110, 28)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("running")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        thread_id = app.thread_id
+        assert thread_id is not None
+        await engine.started[thread_id].wait()
+
+        composer.insert("queued")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        await pilot.click("#pending-turns-btn")
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, PendingSendQueuePanel)
+        queued_id = panel._selected_queue_id
+        assert queued_id is not None
+
+        engine.release[thread_id].set()
+        await pilot.pause(0.2)
+        assert app._queued_turn_location(thread_id, queued_id) is None
+
+        panel.query_one("#pending-turn-editor", TextArea).load_text("too late")
+        panel.query_one("#pending-turn-save", Button).press()
+        await pilot.pause()
+
+        assert engine.calls[-1]["user_text"] == "queued"
+        assert panel._selected_queue_id is None
+        assert panel.query_one("#pending-turn-editor", TextArea).disabled
+
+
+@pytest.mark.asyncio
+async def test_tui_pending_images_are_scoped_to_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    image = tmp_path / "clip.png"
+    write_png(image)
+    engine = ReleasableEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    monkeypatch.setattr(
+        "uv_agent.tui.app.save_clipboard_image",
+        lambda target_dir: ClipboardImage(path=image, width=20, height=10),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(100, 26)) as pilot:
+        await pilot.press("f2")
+        await pilot.pause()
+        assert app._pending_images_by_thread[None] == [PendingImage(path=image, width=20, height=10)]
+        image_button = app.query_one("#pending-images-btn", Static)
+        assert "1 image" in str(image_button.render())
+
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("thread one")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        first_thread = app.thread_id
+        assert first_thread is not None
+        await engine.started[first_thread].wait()
+        assert engine.calls[-1]["image_paths"] == [image]
+        assert app._pending_images == []
+
+        app._handle_command("/clear")
+        await pilot.pause()
+        await pilot.press("f2")
+        await pilot.pause()
+        assert app._pending_images_by_thread[None] == [PendingImage(path=image, width=20, height=10)]
+
+        app._resume_thread(first_thread)
+        await pilot.pause()
+        assert app._pending_images == []
+        assert image_button.has_class("hidden")
+
+        app._handle_command("/clear")
+        await pilot.pause()
+        assert app._pending_images_by_thread[None] == [PendingImage(path=image, width=20, height=10)]
+        assert not image_button.has_class("hidden")
+
+
+@pytest.mark.asyncio
 async def test_tui_pending_images_overlay_counts_and_opens_preview(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4517,7 +4697,7 @@ async def test_tui_pending_images_overlay_counts_and_opens_preview(
         await pilot.pause()
 
         pending_button = app.query_one("#pending-images-btn", Static)
-        assert "pending 2 images" in str(pending_button.render())
+        assert "2 images" in str(pending_button.render())
         assert not pending_button.has_class("hidden")
 
         await pilot.click("#pending-images-btn")
@@ -4537,7 +4717,7 @@ async def test_tui_pending_images_overlay_counts_and_opens_preview(
         assert panel.pending_images == [PendingImage(path=image_a, width=20, height=10)]
         assert panel.index == 0
         assert "pending-a.png" in str(panel.query_one("#image-preview-meta", Static).render())
-        assert "pending 1 image" in str(pending_button.render())
+        assert "1 image" in str(pending_button.render())
 
         await pilot.press("delete")
         await pilot.pause()
@@ -4570,7 +4750,7 @@ async def test_tui_f2_attaches_clipboard_image_and_sends_with_turn(
 
         assert len(app._pending_images) == 1
         pending_button = app.query_one("#pending-images-btn", Static)
-        assert "pending 1 image" in str(pending_button.render())
+        assert "1 image" in str(pending_button.render())
         assert not pending_button.has_class("hidden")
 
         composer = app.query_one("#composer", TextArea)

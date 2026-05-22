@@ -12,11 +12,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, OptionList, Static
+from textual.widgets import Button, Input, OptionList, Static, TextArea
 from textual.widgets._option_list import Option
 
 from uv_agent.tui.formatting import format_tokens, join_lines, plain, renderable_plain, tool_detail_markup
-from uv_agent.tui.state import PanelPage, PendingImage, PickerItem
+from uv_agent.tui.state import PanelPage, PendingImage, PickerItem, QueuedTurn
 from uv_agent.tui.styles import FULLSCREEN_PANEL_CSS
 from uv_agent.tui.widgets import ExpandableTranscriptCell
 
@@ -577,6 +577,289 @@ def _stable_terminal_image_class() -> type[Any]:
     _STABLE_TERMINAL_IMAGE_CLASS = StableTerminalImage
     return StableTerminalImage
 
+
+
+
+class PendingSendQueuePanel(FullscreenPanel):
+    """Edit the active thread's queued sends before they start running."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_panel", "Close", priority=True, show=False),
+        Binding("ctrl+enter", "save_current", "Save", priority=True, show=False),
+        Binding("ctrl+j", "save_current", "Save", priority=True, show=False),
+    ]
+
+    def __init__(self, thread_id: str | None) -> None:
+        self.thread_id = thread_id
+        self.queue_items: list[QueuedTurn] = []
+        self._option_ids: dict[str, str] = {}
+        self._selected_queue_id: str | None = None
+        super().__init__(title="", body="", subtitle="")
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="panel-shell"):
+            with Horizontal(id="panel-titlebar"):
+                yield Static(self.panel_title, id="panel-header")
+                yield Static(self.subtitle, id="panel-subtitle")
+            with Horizontal(id="pending-turn-actions"):
+                yield Button("", id="pending-turn-save", variant="primary", compact=True)
+                yield Button("", id="pending-turn-delete", variant="error", compact=True)
+                yield Button("", id="pending-turn-up", compact=True)
+                yield Button("", id="pending-turn-down", compact=True)
+            with Horizontal(id="pending-turn-layout"):
+                yield OptionList(id="pending-turn-list", compact=False)
+                yield TextArea(
+                    "",
+                    id="pending-turn-editor",
+                    compact=True,
+                    soft_wrap=True,
+                    show_line_numbers=False,
+                )
+            yield Static("", id="pending-turn-meta")
+            yield Static("", id="panel-footer")
+
+    def _render_page(self, *, filter_value: str = "", highlighted: int | None = None) -> None:
+        # ``FullscreenPanel.on_mount`` calls ``_render_page`` for every
+        # subclass. This panel has its own layout instead of the generic picker
+        # widgets, so rendering must refresh our custom list/editor controls.
+        self._refresh_all()
+
+    def on_mount(self) -> None:
+        self._refresh_all()
+        try:
+            self.query_one("#pending-turn-list", OptionList).focus()
+        except NoMatches:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        actions = {
+            "pending-turn-save": self.action_save_current,
+            "pending-turn-delete": self.action_delete_current,
+            "pending-turn-up": self.action_move_current_up,
+            "pending-turn-down": self.action_move_current_down,
+        }
+        action = actions.get(event.button.id or "")
+        if action is None:
+            return
+        event.stop()
+        action()
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list.id != "pending-turn-list":
+            return
+        self._select_option(event.option_id)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "pending-turn-list":
+            return
+        event.stop()
+        self._select_option(event.option_id)
+        try:
+            self.query_one("#pending-turn-editor", TextArea).focus()
+        except NoMatches:
+            pass
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.action_dismiss_panel()
+            return
+        if event.key in {"ctrl+enter", "ctrl+j"}:
+            event.stop()
+            self.action_save_current()
+            return
+        # Let the editor keep normal composer-like editing behavior: Enter
+        # inserts a newline and Delete removes a character. Queue-level delete
+        # and reordering remain available from the buttons beside the list.
+        if isinstance(self.focused, TextArea):
+            if event.key in {"enter", "delete", "ctrl+up", "ctrl+down", "ctrl+left", "ctrl+right"}:
+                return
+        if event.key == "delete":
+            event.stop()
+            self.action_delete_current()
+            return
+        if event.key in {"ctrl+up", "ctrl+left"}:
+            event.stop()
+            self.action_move_current_up()
+            return
+        if event.key in {"ctrl+down", "ctrl+right"}:
+            event.stop()
+            self.action_move_current_down()
+            return
+        if event.key == "enter":
+            event.stop()
+            try:
+                self.query_one("#pending-turn-editor", TextArea).focus()
+            except NoMatches:
+                pass
+            return
+        if event.key in {"up", "down", "pageup", "page_up", "pagedown", "page_down"}:
+            event.stop()
+            option_list = self.query_one("#pending-turn-list", OptionList)
+            if event.key == "up":
+                option_list.action_cursor_up()
+            elif event.key == "down":
+                option_list.action_cursor_down()
+            elif event.key in {"pageup", "page_up"}:
+                option_list.action_page_up()
+            else:
+                option_list.action_page_down()
+            return
+
+    def action_save_current(self) -> None:
+        queue_id = self._selected_queue_id
+        if queue_id is None:
+            self._flash("pending_turn_missing")
+            return
+        prompt = self.query_one("#pending-turn-editor", TextArea).text
+        result = self._app_call("_update_queued_turn_prompt", self.thread_id, queue_id, prompt)
+        if result == "updated":
+            self._flash("pending_turn_saved")
+        self._refresh_all(preferred_id=queue_id)
+
+    def action_delete_current(self) -> None:
+        queue_id = self._selected_queue_id
+        if queue_id is None:
+            self._flash("pending_turn_missing")
+            return
+        result = self._app_call("_delete_queued_turn", self.thread_id, queue_id)
+        if result == "deleted":
+            self._flash("pending_turn_deleted")
+        self._refresh_all()
+
+    def action_move_current_up(self) -> None:
+        self._move_current(-1)
+
+    def action_move_current_down(self) -> None:
+        self._move_current(1)
+
+    def _move_current(self, step: int) -> None:
+        queue_id = self._selected_queue_id
+        if queue_id is None:
+            self._flash("pending_turn_missing")
+            return
+        result = self._app_call("_move_queued_turn", self.thread_id, queue_id, step)
+        if result == "moved":
+            self._flash("pending_turn_moved")
+        self._refresh_all(preferred_id=queue_id)
+
+    def _refresh_all(self, preferred_id: str | None = None) -> None:
+        text = getattr(self.app, "_text", lambda key: key)
+        self.panel_title = text("pending_turns_panel")
+        self.subtitle = text("pending_turns_hint")
+        self.queue_items = list(self._app_call("_queued_turns_for_thread", self.thread_id) or [])
+        if preferred_id and any(item.queue_id == preferred_id for item in self.queue_items):
+            self._selected_queue_id = preferred_id
+        elif self._selected_queue_id not in {item.queue_id for item in self.queue_items}:
+            self._selected_queue_id = self.queue_items[0].queue_id if self.queue_items else None
+        try:
+            with self.app.batch_update():
+                _update_static_if_changed(self.query_one("#panel-header", Static), self.panel_title)
+                _update_static_if_changed(self.query_one("#panel-subtitle", Static), self.subtitle)
+                _update_static_if_changed(self.query_one("#panel-footer", Static), text("pending_turns_footer"))
+                self._refresh_buttons()
+                self._refresh_options()
+                self._refresh_editor()
+        except NoMatches:
+            pass
+
+    def _refresh_buttons(self) -> None:
+        text = getattr(self.app, "_text", lambda key: key)
+        labels = {
+            "#pending-turn-save": text("save"),
+            "#pending-turn-delete": text("delete"),
+            "#pending-turn-up": text("move_up"),
+            "#pending-turn-down": text("move_down"),
+        }
+        has_selection = self._selected_queue_id is not None
+        for selector, label in labels.items():
+            button = self.query_one(selector, Button)
+            if str(button.label) != label:
+                button.label = label
+            button.disabled = not has_selection
+
+    def _refresh_options(self) -> None:
+        text = getattr(self.app, "_text", lambda key: key)
+        option_list = self.query_one("#pending-turn-list", OptionList)
+        self._option_ids = {}
+        options: list[Option] = []
+        for index, item in enumerate(self.queue_items):
+            option_id = f"queued_{index}"
+            self._option_ids[option_id] = item.queue_id
+            options.append(Option(self._option_markup(index, item), id=option_id))
+        if not options:
+            options.append(Option(plain(text("no_pending_turns"), style="dim"), id="", disabled=True))
+        option_list.set_options(options)
+        selected_index = self._selected_index()
+        if selected_index is not None and option_list.option_count:
+            option_list.highlighted = selected_index
+
+    def _refresh_editor(self) -> None:
+        text = getattr(self.app, "_text", lambda key: key)
+        editor = self.query_one("#pending-turn-editor", TextArea)
+        meta = self.query_one("#pending-turn-meta", Static)
+        item = self._selected_item()
+        if item is None:
+            editor.load_text("")
+            editor.disabled = True
+            _update_static_if_changed(meta, plain(text("no_pending_turns"), style="dim"))
+            return
+        if editor.text != item.prompt:
+            editor.load_text(item.prompt)
+            editor.cursor_location = editor.document.end
+        editor.disabled = False
+        _update_static_if_changed(meta, self._item_meta(item))
+
+    def _select_option(self, option_id: str | None) -> None:
+        queue_id = self._option_ids.get(option_id or "")
+        if queue_id is None:
+            return
+        self._selected_queue_id = queue_id
+        self._refresh_editor()
+        self._refresh_buttons()
+
+    def _selected_index(self) -> int | None:
+        for index, item in enumerate(self.queue_items):
+            if item.queue_id == self._selected_queue_id:
+                return index
+        return None
+
+    def _selected_item(self) -> QueuedTurn | None:
+        index = self._selected_index()
+        return self.queue_items[index] if index is not None else None
+
+    def _option_markup(self, index: int, item: QueuedTurn) -> Text:
+        text = getattr(self.app, "_text", lambda key: key)
+        preview = " ".join(item.prompt.split()) or text("empty")
+        if len(preview) > 80:
+            preview = preview[:77].rstrip() + "..."
+        title = Text.assemble((f"{index + 1}. ", "bold cyan"), preview)
+        meta_parts = [f"{len(item.image_paths)} {text('images')}" if item.image_paths else f"0 {text('images')}"]
+        if item.level:
+            meta_parts.append(f"{text('level')}: {item.level}")
+        meta = plain(" · ".join(meta_parts), style="dim")
+        return join_lines([title, meta])  # type: ignore[return-value]
+
+    def _item_meta(self, item: QueuedTurn) -> Text:
+        text = getattr(self.app, "_text", lambda key: key)
+        index = self._selected_index()
+        prefix = f"{index + 1}/{len(self.queue_items)}" if index is not None else "-"
+        parts = [prefix, f"{len(item.image_paths)} {text('images')}"]
+        if item.level:
+            parts.append(f"{text('level')}: {item.level}")
+        return plain(" · ".join(parts), style="dim")
+
+    def _app_call(self, name: str, *args: object) -> object:
+        handler = getattr(self.app, name, None)
+        if callable(handler):
+            return handler(*args)
+        return None
+
+    def _flash(self, key: str) -> None:
+        flash = getattr(self.app, "_flash", None)
+        text = getattr(self.app, "_text", lambda value: value)
+        if callable(flash):
+            flash(text(key))
 
 class ImagePreviewPanel(FullscreenPanel):
     """Full-screen image attachment panel with j/k navigation."""
