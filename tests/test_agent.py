@@ -2678,7 +2678,7 @@ async def test_agent_sends_project_rule_index_without_rule_contents(tmp_path: Pa
     assert "<workspace_rule_index>" in request_text
     assert "AGENTS.md" in request_text
     stored = engine.thread_store.read(events[-1]["thread_id"])
-    assert not any(event["type"] == "item.rules_loaded" for event in stored)
+    assert any(event["type"] == "item.rules_loaded" and event.get("source") == "project" for event in stored)
     assert not any(event["type"] == "item.context_update" and "Use the local rule." in str(event) for event in stored)
 
 
@@ -2857,6 +2857,71 @@ async def test_project_rules_are_deduped_and_not_reloaded_on_file_change(tmp_pat
     [event async for event in engine.run_turn(user_text="four", thread_id=first)]
     assert client.requests[3]["previous_response_id"] == "resp_3"
     assert "Do not rely on older appended" not in str(client.requests[3]["input"])
+
+
+@pytest.mark.asyncio
+async def test_project_rules_persist_across_engine_restart_without_one_turn_reload(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    rules = project_root / "AGENTS.md"
+    rules.write_text("Persistent rule v1.", encoding="utf-8")
+    config = make_test_config(project_root, api="chat_completions")
+    store = ThreadStore(tmp_path / "state")
+    first_client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "one",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "one"}],
+                    }
+                ],
+            }
+        ]
+    )
+    first_engine = AgentEngine(
+        config=config,
+        model_client=first_client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=store,
+        project_root=project_root,
+    )
+
+    thread_id = [event async for event in first_engine.run_turn(user_text="one")][-1]["thread_id"]
+    rules.write_text("Persistent rule v2.", encoding="utf-8")
+    second_client = FakeModelClient(
+        [
+            {
+                "id": "resp_2",
+                "output_text": "two",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "two"}],
+                    }
+                ],
+            }
+        ]
+    )
+    second_engine = AgentEngine(
+        config=config,
+        model_client=second_client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=store,
+        project_root=project_root,
+    )
+
+    [event async for event in second_engine.run_turn(user_text="two", thread_id=thread_id)]
+
+    request_text = str(second_client.requests[0]["input"])
+    assert second_client.requests[0]["previous_response_id"] is None
+    assert "Persistent rule v1." in request_text
+    assert request_text.count("Persistent rule v1.") == 1
+    assert "Persistent rule v2." not in request_text
 
 
 @pytest.mark.asyncio

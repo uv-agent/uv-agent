@@ -1698,6 +1698,11 @@ class AgentEngine:
         event_type = event.get("type")
         if event_type == "item.context_update":
             text = str(event.get("text") or "")
+        elif event_type == "item.rules_loaded" and event.get("source") in {
+            "project",
+            "active_cwd",
+        }:
+            text = str(event.get("text") or "")
         elif event_type == "item.rule_index":
             text = str(event.get("text") or "")
         elif event_type == "item.cwd_notice":
@@ -1779,7 +1784,7 @@ class AgentEngine:
         state = self._rule_state(thread_id)
         texts: list[str] = []
         if not state.index_emitted:
-            project_rules = self._project_rule_reload_text(state)
+            project_rules = self._project_rule_reload_text(thread_id, state)
             if project_rules:
                 texts.append(project_rules)
             index_root = self.project_root
@@ -1813,7 +1818,7 @@ class AgentEngine:
             texts.append(cwd_notice)
         return texts
 
-    def _project_rule_reload_text(self, state: RuleRuntimeState) -> str:
+    def _project_rule_reload_text(self, thread_id: str, state: RuleRuntimeState) -> str:
         context = load_project_rules(self.project_root)
         new_rules = [rule for rule in context.rules if rule.path not in state.loaded_rule_paths]
         if not new_rules:
@@ -1825,7 +1830,18 @@ class AgentEngine:
             truncated=context.truncated,
             omitted_files=context.omitted_files,
         )
-        return filtered.render(root=self.project_root, context_path=".")
+        text = filtered.render(root=self.project_root, context_path=".")
+        # Persist root-level rules just like enter_dir-loaded rules so a resumed
+        # engine can rebuild the epoch state instead of re-reading changed files.
+        self.thread_store.append(
+            thread_id,
+            "item.rules_loaded",
+            cwd=str(self.project_root.resolve()),
+            paths=[str(rule.path) for rule in new_rules],
+            text=text,
+            source="project",
+        )
+        return text
 
     def _active_cwd_notice(self, thread_id: str) -> str:
         state = self._rule_state(thread_id)
