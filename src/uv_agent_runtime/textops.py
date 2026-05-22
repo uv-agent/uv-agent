@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -9,7 +10,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from unidiff import PatchSet
 from unidiff.patch import PatchedFile
@@ -70,6 +71,7 @@ class CommandTextResult:
     returncode: int
     stdout: str
     stderr: str
+    timed_out: bool = False
 
     @property
     def ok(self) -> bool:
@@ -77,6 +79,12 @@ class CommandTextResult:
 
     def raise_for_error(self) -> "CommandTextResult":
         """Raise RuntimeError if the command exited non-zero."""
+        if self.timed_out:
+            detail = self.stderr or self.stdout
+            raise RuntimeError(
+                f"command timed out: {self.args!r}"
+                + (f"\n{detail}" if detail else "")
+            )
         if self.returncode != 0:
             detail = self.stderr or self.stdout
             raise RuntimeError(
@@ -396,23 +404,123 @@ def run_process_text(
             process_env.pop(key, None)
         else:
             process_env[key] = value
-    completed = subprocess.run(
+    process = subprocess.Popen(
         list(args),
         cwd=None if cwd is None else str(resolve_workspace_path(cwd)),
         env=process_env,
-        timeout=timeout_s,
-        capture_output=True,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **_subprocess_tree_kwargs(),
     )
+    timed_out = False
+    stdout_bytes: bytes | str | None = b""
+    stderr_bytes: bytes | str | None = b""
+    try:
+        stdout_bytes, stderr_bytes = process.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        stdout_bytes = _coerce_subprocess_output(exc.output)
+        stderr_bytes = _coerce_subprocess_output(exc.stderr)
+        # ``subprocess.run(..., timeout=...)`` only kills the direct child.  On
+        # Windows in particular that can leave grandchildren (for example
+        # ``uv run pytest``'s Python process) alive with stdout/stderr pipe
+        # handles open, causing the retry ``communicate()`` to block until the
+        # outer run_python timeout.  Kill the whole tree before collecting the
+        # buffered output so helper-level timeouts are actually bounded.
+        _kill_process_tree(process)
+        try:
+            stdout_bytes, stderr_bytes = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # If the platform failed to tear down every descendant, still
+            # return the output captured by the timeout exception instead of
+            # letting the managed run hang indefinitely. Close any pipes we own
+            # so the interpreter does not wait on them during cleanup.
+            _kill_direct_process(process)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            stdout_bytes = _coerce_subprocess_output(exc.output)
+            stderr_bytes = _coerce_subprocess_output(exc.stderr)
     result = CommandTextResult(
         args=list(args),
-        returncode=completed.returncode,
-        stdout=completed.stdout.decode(encoding, errors=errors),
-        stderr=completed.stderr.decode(encoding, errors=errors),
+        returncode=process.returncode if process.returncode is not None else -9,
+        stdout=_decode_subprocess_output(stdout_bytes, encoding=encoding, errors=errors),
+        stderr=_decode_subprocess_output(stderr_bytes, encoding=encoding, errors=errors),
+        timed_out=timed_out,
     )
     if check:
         result.raise_for_error()
     return result
+
+
+def _subprocess_tree_kwargs() -> dict[str, Any]:
+    """Start commands in their own process group when the platform supports it."""
+
+    if os.name == "posix":
+        return {"start_new_session": True}
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {}
+
+
+def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort synchronous process-tree termination for run_process_text."""
+
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError:
+            _kill_direct_process(process)
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            _kill_direct_process(process)
+        return
+    _kill_direct_process(process)
+
+
+def _kill_direct_process(process: subprocess.Popen[bytes]) -> None:
+    """Kill only the direct child, ignoring races with normal process exit."""
+
+    if process.poll() is not None:
+        return
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
+def _coerce_subprocess_output(value: bytes | str | None) -> bytes:
+    """Normalize TimeoutExpired partial output to bytes for shared decoding."""
+
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    return value.encode()
+
+
+def _decode_subprocess_output(value: bytes | str | None, *, encoding: str, errors: str) -> str:
+    """Decode captured subprocess output without assuming its exact type."""
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return value.decode(encoding, errors=errors)
 
 
 def _coerce_text_file(value: TextFile | str | Path) -> TextFile:

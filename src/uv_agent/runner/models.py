@@ -37,3 +37,24 @@ class PythonRunResult:
     run_log_path: Path
     script_path: Path
     events: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the JSON-serializable payload exposed as a tool result.
+
+        The runner is used by both the engine's normal blocking path and the
+        streaming path that can surface partial output while a process is still
+        running. Keeping the shape in one place avoids subtle differences in
+        what the model, TUI, and persisted history see for completed runs.
+        """
+
+        return {
+            "run_id": self.run_id,
+            "returncode": self.returncode,
+            "timed_out": self.timed_out,
+            "interrupted": self.interrupted,
+            "truncated": self.truncated,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "events": self.events,
+            "run_log_path": str(self.run_log_path),
+        }

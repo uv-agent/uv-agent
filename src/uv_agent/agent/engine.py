@@ -53,7 +53,7 @@ from uv_agent.project_rules import (
     load_directory_rules,
     load_project_rules,
 )
-from uv_agent.runner import PythonRunRequest, PythonRunner
+from uv_agent.runner import PythonRunRequest, PythonRunner, RunnerEvent
 from uv_agent.runner.scriptenv import direct_dependencies
 from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.skills import SkillSummary, discover_skills, render_skill_entry
@@ -67,6 +67,22 @@ async def _sleep_stream_retry(delay_s: float) -> None:
 class TurnInterrupted(Exception):
     """Raised internally when the active turn is interrupted by the user."""
 
+
+
+async def _ensure_async_runner_events(events: Any) -> AsyncIterator[RunnerEvent]:
+    """Iterate over either an async runner stream or a small synchronous list.
+
+    Tests and third-party integrations sometimes provide a minimal runner with
+    only ``run()``. The production runner exposes ``stream_run()`` so partial
+    output can be rendered while a process is still running.
+    """
+
+    if hasattr(events, "__aiter__"):
+        async for event in events:
+            yield event
+        return
+    for event in events:
+        yield event
 
 def _context_item_id(key: tuple[str, str, str]) -> str:
     scope, name, path = key
@@ -350,26 +366,29 @@ class AgentEngine:
 
                     round_attachments: list[dict[str, Any]] = []
                     for call_index, call in enumerate(tool_calls):
-                        result = await self._execute_tool_call_for_turn(
+                        async for tool_event in self._stream_tool_call_for_turn(
                             call=call,
                             call_index=call_index,
                             thread_id=thread_id,
                             turn_id=turn_id,
                             turn_started_at=turn_started_event.get("created_at"),
                             cancel_event=cancel_event,
-                        )
-                        yield result.started_event
-                        self.thread_store.append(
-                            thread_id,
-                            "item.tool_output",
-                            turn_id=turn_id,
-                            item=result.tool_output,
-                        )
-                        input_items.append(result.tool_output)
-                        request_input_items.append(result.tool_output)
-                        turn_input.pending_items.append(result.tool_output)
-                        round_attachments.extend(result.attachments)
-                        yield result.output_event
+                        ):
+                            public_event = {key: value for key, value in tool_event.items() if key != "_result"}
+                            yield public_event
+                            if tool_event.get("type") != "tool.output":
+                                continue
+                            result = self._tool_result_from_event(tool_event, public_event)
+                            self.thread_store.append(
+                                thread_id,
+                                "item.tool_output",
+                                turn_id=turn_id,
+                                item=result.tool_output,
+                            )
+                            input_items.append(result.tool_output)
+                            request_input_items.append(result.tool_output)
+                            turn_input.pending_items.append(result.tool_output)
+                            round_attachments.extend(result.attachments)
                     if round_attachments:
                         for attachment in round_attachments:
                             self.thread_store.append(
@@ -607,25 +626,28 @@ class AgentEngine:
                 if retry_state.pending_tool_calls:
                     round_attachments: list[dict[str, Any]] = []
                     for call_index, call in enumerate(retry_state.pending_tool_calls):
-                        result = await self._execute_tool_call_for_turn(
+                        async for tool_event in self._stream_tool_call_for_turn(
                             call=call,
                             call_index=call_index,
                             thread_id=thread_id,
                             turn_id=turn_id,
                             turn_started_at=turn_started_event.get("created_at"),
                             cancel_event=cancel_event,
-                        )
-                        yield result.started_event
-                        self.thread_store.append(
-                            thread_id,
-                            "item.tool_output",
-                            turn_id=turn_id,
-                            item=result.tool_output,
-                        )
-                        retry_state.input_items.append(result.tool_output)
-                        retry_state.pending_items.append(result.tool_output)
-                        round_attachments.extend(result.attachments)
-                        yield result.output_event
+                        ):
+                            public_event = {key: value for key, value in tool_event.items() if key != "_result"}
+                            yield public_event
+                            if tool_event.get("type") != "tool.output":
+                                continue
+                            result = self._tool_result_from_event(tool_event, public_event)
+                            self.thread_store.append(
+                                thread_id,
+                                "item.tool_output",
+                                turn_id=turn_id,
+                                item=result.tool_output,
+                            )
+                            retry_state.input_items.append(result.tool_output)
+                            retry_state.pending_items.append(result.tool_output)
+                            round_attachments.extend(result.attachments)
                     if round_attachments:
                         for attachment in round_attachments:
                             self.thread_store.append(
@@ -664,25 +686,28 @@ class AgentEngine:
                     retry_state.pending_tool_calls = tool_calls
                     round_attachments = []
                     for call_index, call in enumerate(tool_calls):
-                        result = await self._execute_tool_call_for_turn(
+                        async for tool_event in self._stream_tool_call_for_turn(
                             call=call,
                             call_index=call_index,
                             thread_id=thread_id,
                             turn_id=turn_id,
                             turn_started_at=turn_started_event.get("created_at"),
                             cancel_event=cancel_event,
-                        )
-                        yield result.started_event
-                        self.thread_store.append(
-                            thread_id,
-                            "item.tool_output",
-                            turn_id=turn_id,
-                            item=result.tool_output,
-                        )
-                        retry_state.input_items.append(result.tool_output)
-                        retry_state.pending_items.append(result.tool_output)
-                        round_attachments.extend(result.attachments)
-                        yield result.output_event
+                        ):
+                            public_event = {key: value for key, value in tool_event.items() if key != "_result"}
+                            yield public_event
+                            if tool_event.get("type") != "tool.output":
+                                continue
+                            result = self._tool_result_from_event(tool_event, public_event)
+                            self.thread_store.append(
+                                thread_id,
+                                "item.tool_output",
+                                turn_id=turn_id,
+                                item=result.tool_output,
+                            )
+                            retry_state.input_items.append(result.tool_output)
+                            retry_state.pending_items.append(result.tool_output)
+                            round_attachments.extend(result.attachments)
                     if round_attachments:
                         for attachment in round_attachments:
                             self.thread_store.append(
@@ -881,6 +906,23 @@ class AgentEngine:
         self._reset_rule_epoch(thread_id)
         return True
 
+    @staticmethod
+    def _tool_result_from_event(
+        event: dict[str, Any],
+        public_event: dict[str, Any],
+    ) -> ToolCallTurnResult:
+        """Return the internal tool result attached to a streamed tool.output."""
+
+        result = event.get("_result")
+        if isinstance(result, ToolCallTurnResult):
+            return result
+        return ToolCallTurnResult(
+            tool_output=event["output"],
+            attachments=[],
+            started_event=public_event,
+            output_event=public_event,
+        )
+
     def _compaction_trigger_item(self) -> dict[str, Any]:
         return compaction_trigger_item()
 
@@ -906,71 +948,166 @@ class AgentEngine:
         *,
         cancel_event: asyncio.Event | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+        """Execute a tool call and return the final model/display payloads."""
+
+        final: ToolCallTurnResult | None = None
+        async for event in self._stream_tool_call(
+            call,
+            thread_id,
+            turn_id,
+            turn_started_at=None,
+            tool_call_index=0,
+            cancel_event=cancel_event,
+        ):
+            if event.get("type") == "tool.output":
+                final = event["_result"]
+        if final is None:
+            raise RuntimeError("Tool call did not produce a final output")
+        return final.tool_output, final.attachments, final.output_event["output"]
+
+    async def _stream_tool_call(
+        self,
+        call: dict[str, Any],
+        thread_id: str,
+        turn_id: str,
+        *,
+        turn_started_at: object,
+        tool_call_index: int,
+        cancel_event: asyncio.Event | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Run a tool call and yield partial/final UI events as they become available."""
+
+        def output_event(tool_output: dict[str, Any], result: ToolCallTurnResult) -> dict[str, Any]:
+            """Build a public tool.output event with the private result attached."""
+
+            return {
+                "type": "tool.output",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "turn_started_at": turn_started_at,
+                "call": call,
+                "tool_call_index": tool_call_index,
+                "output": tool_output,
+                "_result": result,
+            }
+
         if call.get("name") != "run_python":
             output = {"error": f"Unsupported tool: {call.get('name')}"}
             tool_output = function_output(call, output)
-            return tool_output, [], tool_output
+            result = ToolCallTurnResult(
+                tool_output=tool_output,
+                attachments=[],
+                started_event={},
+                output_event={"output": tool_output},
+            )
+            yield output_event(tool_output, result)
+            return
         try:
             args = json.loads(call.get("arguments") or "{}")
         except json.JSONDecodeError as exc:
             output = {"error": f"Invalid tool arguments JSON: {exc}"}
             tool_output = function_output(call, output)
-            return tool_output, [], tool_output
+            result = ToolCallTurnResult(
+                tool_output=tool_output,
+                attachments=[],
+                started_event={},
+                output_event={"output": tool_output},
+            )
+            yield output_event(tool_output, result)
+            return
 
         thread_kind = str(self.thread_store.snapshot(thread_id).metadata.get("kind") or "thread")
         code = args.get("code")
         if not isinstance(code, str) or not code.strip():
             output = {"error": "run_python requires code"}
             tool_output = function_output(call, output)
-            return tool_output, [], tool_output
-        result = await self.runner.run(
-            PythonRunRequest(
-                code=code,
-                script_args=list(args.get("script_args") or []),
-                timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
-                cwd=self._active_cwd(thread_id),
-                thread_id=thread_id,
-                thread_kind=thread_kind,
-                turn_id=turn_id,
-                cancel_event=cancel_event,
+            result = ToolCallTurnResult(
+                tool_output=tool_output,
+                attachments=[],
+                started_event={},
+                output_event={"output": tool_output},
             )
-        )
-        if result.interrupted:
-            raise TurnInterrupted()
-        rule_events, visible_events = self._process_runner_events(
-            result.events,
-            thread_id=thread_id,
-            turn_id=turn_id,
-        )
-        payload = {
-            "run_id": result.run_id,
-            "returncode": result.returncode,
-            "timed_out": result.timed_out,
-            "interrupted": result.interrupted,
-            "truncated": result.truncated,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "events": visible_events,
-            "run_log_path": str(result.run_log_path),
-        }
-        if rule_events:
-            payload["rules_loaded"] = rule_events
-        attachments = self._register_look_at_events(
-            visible_events,
-            thread_id=thread_id,
-            turn_id=turn_id,
+            yield output_event(tool_output, result)
+            return
+
+        request = PythonRunRequest(
+            code=code,
+            script_args=list(args.get("script_args") or []),
+            timeout_s=float(args.get("timeout_s") or self.config.runner.default_timeout_s),
             cwd=self._active_cwd(thread_id),
-        )
-        if attachments:
-            payload["attachments"] = attachments
-        self.thread_store.append(
-            thread_id,
-            "item.runner_result",
+            thread_id=thread_id,
+            thread_kind=thread_kind,
             turn_id=turn_id,
-            call_id=call.get("call_id"),
-            result=payload,
+            cancel_event=cancel_event,
         )
-        return function_output(call, model_tool_payload(payload)), attachments, function_output(call, payload)
+        stream_run = getattr(self.runner, "stream_run", None)
+        if stream_run is None:
+            result = await self.runner.run(request)
+            runner_events = [RunnerEvent("run.completed", {"result": result, "returncode": result.returncode})]
+        else:
+            runner_events = stream_run(request)
+        async for runner_event in _ensure_async_runner_events(runner_events):
+            if runner_event.type == "run.partial":
+                partial_payload = runner_event.data["result"].to_payload()
+                partial_payload["partial"] = True
+                partial_payload["partial_reason"] = runner_event.data.get("reason")
+                partial_payload["call_id"] = call.get("call_id")
+                visible_partial_events = [
+                    event
+                    for event in partial_payload.get("events", [])
+                    if isinstance(event, dict) and event.get("kind") != "enter_dir"
+                ]
+                partial_payload["events"] = visible_partial_events
+                yield {
+                    "type": "tool.partial",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "turn_started_at": turn_started_at,
+                    "call": call,
+                    "tool_call_index": tool_call_index,
+                    "output": function_output(call, partial_payload),
+                }
+                continue
+            if runner_event.type != "run.completed":
+                continue
+            result = runner_event.data["result"]
+            if result.interrupted:
+                raise TurnInterrupted()
+            rule_events, visible_events = self._process_runner_events(
+                result.events,
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+            payload = result.to_payload()
+            payload["events"] = visible_events
+            if rule_events:
+                payload["rules_loaded"] = rule_events
+            attachments = self._register_look_at_events(
+                visible_events,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                cwd=self._active_cwd(thread_id),
+            )
+            if attachments:
+                payload["attachments"] = attachments
+            self.thread_store.append(
+                thread_id,
+                "item.runner_result",
+                turn_id=turn_id,
+                call_id=call.get("call_id"),
+                result=payload,
+            )
+            tool_output = function_output(call, model_tool_payload(payload))
+            display_output = function_output(call, payload)
+            result_payload = ToolCallTurnResult(
+                tool_output=tool_output,
+                attachments=attachments,
+                started_event={},
+                output_event={"output": display_output},
+            )
+            yield output_event(display_output, result_payload)
+            return
+        raise RuntimeError("Runner did not emit run.completed")
 
     async def _execute_tool_call_for_turn(
         self,
@@ -982,6 +1119,35 @@ class AgentEngine:
         turn_started_at: object,
         cancel_event: asyncio.Event | None,
     ) -> ToolCallTurnResult:
+        """Backward-compatible helper that waits for the final tool result."""
+
+        final: ToolCallTurnResult | None = None
+        async for event in self._stream_tool_call_for_turn(
+            call=call,
+            call_index=call_index,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            turn_started_at=turn_started_at,
+            cancel_event=cancel_event,
+        ):
+            if event.get("type") == "tool.output":
+                final = event["_result"]
+        if final is None:
+            raise RuntimeError("Tool call did not produce a final output")
+        return final
+
+    async def _stream_tool_call_for_turn(
+        self,
+        *,
+        call: dict[str, Any],
+        call_index: int,
+        thread_id: str,
+        turn_id: str,
+        turn_started_at: object,
+        cancel_event: asyncio.Event | None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield tool.started, zero or more tool.partial events, then tool.output."""
+
         self._raise_if_cancelled(cancel_event)
         started_event = {
             "type": "tool.started",
@@ -991,27 +1157,32 @@ class AgentEngine:
             "call": call,
             "tool_call_index": call_index,
         }
-        tool_output, attachments, display_output = await self._handle_tool_call(
+        yield started_event
+        async for event in self._stream_tool_call(
             call,
             thread_id,
             turn_id,
+            turn_started_at=turn_started_at,
+            tool_call_index=call_index,
             cancel_event=cancel_event,
-        )
-        output_event = {
-            "type": "tool.output",
-            "thread_id": thread_id,
-            "turn_id": turn_id,
-            "turn_started_at": turn_started_at,
-            "call": call,
-            "tool_call_index": call_index,
-            "output": display_output,
-        }
-        return ToolCallTurnResult(
-            tool_output=tool_output,
-            attachments=attachments,
-            started_event=started_event,
-            output_event=output_event,
-        )
+        ):
+            if event.get("type") == "tool.output":
+                result_value = event.get("_result")
+                if not isinstance(result_value, ToolCallTurnResult):
+                    result_value = ToolCallTurnResult(
+                        tool_output=event["output"],
+                        attachments=[],
+                        started_event=started_event,
+                        output_event={key: value for key, value in event.items() if key != "_result"},
+                    )
+                result = ToolCallTurnResult(
+                    tool_output=result_value.tool_output,
+                    attachments=result_value.attachments,
+                    started_event=started_event,
+                    output_event={key: value for key, value in event.items() if key != "_result"},
+                )
+                event["_result"] = result
+            yield event
 
     @staticmethod
     def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:

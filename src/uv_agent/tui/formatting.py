@@ -376,8 +376,11 @@ def format_elapsed(seconds: float | int | None) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
-def _tool_status_glyph(returncode: Any, timed_out: bool) -> tuple[str, str]:
-    """Return (glyph, color) for a finished tool call."""
+def _tool_status_glyph(returncode: Any, timed_out: bool, *, partial: bool = False) -> tuple[str, str]:
+    """Return (glyph, color) for a tool call status."""
+
+    if partial:
+        return GLYPH_RUNNING, "#7dd3fc"
     if timed_out:
         return GLYPH_ERR, "yellow"
     if returncode == 0:
@@ -409,8 +412,9 @@ def tool_result_markup(payload: dict[str, Any]) -> Text:
     timed_out = bool(payload.get("timed_out"))
     truncated = bool(payload.get("truncated"))
     run_id = str(payload.get("run_id") or "-")
-    glyph, color = _tool_status_glyph(returncode, timed_out)
-    status = "timeout" if timed_out else f"exit {returncode}"
+    partial = bool(payload.get("partial"))
+    glyph, color = _tool_status_glyph(returncode, timed_out, partial=partial)
+    status = "running" if partial else "timeout" if timed_out else f"exit {returncode}"
     elapsed = _payload_elapsed(payload)
 
     header = line(
@@ -432,6 +436,8 @@ def tool_result_markup(payload: dict[str, Any]) -> Text:
     if stderr:
         label = markup("[dim]stderr[/dim]") if returncode == 0 and not timed_out else markup("[red]stderr[/red]")
         lines.append(join_lines([label, plain(stderr)]))  # type: ignore[arg-type]
+    if partial:
+        lines.append(markup("[dim]still running; output is partial[/dim]"))
     if truncated:
         lines.append(markup("[dim]output truncated[/dim]"))
     return join_lines(lines)  # type: ignore[return-value]
@@ -441,8 +447,9 @@ def tool_timeline_markup(payload: dict[str, Any]) -> Text:
     """Render a one-cell tool timeline item with structured events."""
     returncode = payload.get("returncode")
     timed_out = bool(payload.get("timed_out"))
-    glyph, color = _tool_status_glyph(returncode, timed_out)
-    status = "timeout" if timed_out else f"exit {returncode}"
+    partial = bool(payload.get("partial"))
+    glyph, color = _tool_status_glyph(returncode, timed_out, partial=partial)
+    status = "running" if partial else "timeout" if timed_out else f"exit {returncode}"
     run_id = str(payload.get("run_id") or "-")
     elapsed = _payload_elapsed(payload)
     header = line(
@@ -473,6 +480,8 @@ def tool_timeline_markup(payload: dict[str, Any]) -> Text:
         lines.append(join_lines([markup(f"  [dim]{GLYPH_NESTED} stderr[/dim]"), plain(indent_text(stderr, "  "))]))  # type: ignore[arg-type]
     if stdout:
         lines.append(join_lines([markup(f"  [dim]{GLYPH_NESTED} stdout[/dim]"), plain(indent_text(stdout, "  "))]))  # type: ignore[arg-type]
+    if payload.get("partial"):
+        lines.append(markup("  [dim]still running; output is partial[/dim]"))
     if payload.get("truncated"):
         lines.append(markup("  [dim]output truncated[/dim]"))
     return join_lines(lines)  # type: ignore[return-value]

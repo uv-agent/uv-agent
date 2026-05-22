@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
+import json
 import re
 import threading
 from datetime import UTC, datetime, timedelta
@@ -474,7 +475,7 @@ class StableRoundEngine(AgentEngine):
             "turn_id": turn_id,
             "call": output[1],
             "tool_call_index": 0,
-            "output": {"type": "function_call_output", "call_id": "call_1", "output": __import__("json").dumps(payload)},
+            "output": {"type": "function_call_output", "call_id": "call_1", "output": json.dumps(payload)},
         }
         yield {"type": "assistant.delta", "thread_id": thread_id, "turn_id": turn_id, "text": "Done."}
         final_response = ModelResponse(
@@ -619,7 +620,7 @@ class InterruptedRoundEngine(AgentEngine):
             "turn_id": turn_id,
             "call": output[0],
             "tool_call_index": 0,
-            "output": {"type": "function_call_output", "call_id": "call_int", "output": __import__("json").dumps(payload)},
+            "output": {"type": "function_call_output", "call_id": "call_int", "output": json.dumps(payload)},
         }
         self.started.set()
         while cancel_event is not None and not cancel_event.is_set():
@@ -737,7 +738,7 @@ class SteppedRoundEngine(AgentEngine):
             "turn_id": turn_id,
             "call": output[1],
             "tool_call_index": 0,
-            "output": {"type": "function_call_output", "call_id": "call_stepped", "output": __import__("json").dumps(payload)},
+            "output": {"type": "function_call_output", "call_id": "call_stepped", "output": json.dumps(payload)},
         }
         await self._wait_for_step("tool_output")
 
@@ -1799,6 +1800,87 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
 
 
 @pytest.mark.asyncio
+async def test_tui_live_tool_partial_updates_existing_result_cell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+    call = {
+        "call_id": "call_live",
+        "name": "run_python",
+        "arguments": '{"code":"print(42)"}',
+    }
+    partial_payload = {
+        "run_id": "run_live",
+        "returncode": None,
+        "timed_out": False,
+        "interrupted": False,
+        "truncated": False,
+        "partial": True,
+        "call_id": "call_live",
+        "stdout": "first\n",
+        "stderr": "",
+        "events": [],
+        "run_log_path": "",
+    }
+    final_payload = {
+        "run_id": "run_live",
+        "returncode": 0,
+        "timed_out": False,
+        "interrupted": False,
+        "truncated": False,
+        "stdout": "first\nsecond\n",
+        "stderr": "",
+        "events": [],
+        "run_log_path": "",
+    }
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app._append_tool_started({"call": call, "tool_call_index": 0})
+        app._append_tool_partial(
+            {
+                "call": call,
+                "tool_call_index": 0,
+                "output": {"output": json.dumps(partial_payload)},
+            }
+        )
+        app._append_tool_partial(
+            {
+                "call": call,
+                "tool_call_index": 0,
+                "output": {"output": json.dumps({**partial_payload, "stdout": "first\nupdated\n"})},
+            }
+        )
+        await pilot.pause()
+
+        cells = app.query(ExpandableTranscriptCell).nodes
+        assert len(cells) == 2
+        assert "updated" in plain_renderable(cells[1].details)
+
+        app._append_tool_output(
+            {
+                "call": call,
+                "tool_call_index": 0,
+                "output": {"output": json.dumps(final_payload)},
+            }
+        )
+        await pilot.pause()
+
+        cells = app.query(ExpandableTranscriptCell).nodes
+        assert len(cells) == 3
+        assert "run_live" in plain_renderable(cells[-1].details)
+        assert "second" in plain_renderable(cells[-1].details)
+        assert cells[-1].tool_payload is not None
+        assert "partial" not in cells[-1].tool_payload
+
+
+@pytest.mark.asyncio
 async def test_tui_live_tool_call_and_result_are_separate_cells(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1840,7 +1922,7 @@ async def test_tui_live_tool_call_and_result_are_separate_cells(
                     "name": "run_python",
                     "arguments": '{"code":"print(42)\\nprint(43)"}',
                 },
-                "output": {"output": __import__("json").dumps(payload)},
+                "output": {"output": json.dumps(payload)},
             }
         )
         await pilot.pause()
@@ -1890,7 +1972,7 @@ async def test_tui_live_multiple_tool_calls_keep_call_result_boundaries(
                 {
                     "call": call,
                     "tool_call_index": index,
-                    "output": {"output": __import__("json").dumps(payload)},
+                    "output": {"output": json.dumps(payload)},
                 }
             )
         await pilot.pause()
@@ -2913,7 +2995,7 @@ async def test_tui_mcp_and_skill_mentions_are_disabled(
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
     (agents_dir / "mcp.json").write_text(
-        __import__("json").dumps(
+        json.dumps(
             {
                 "servers": {
                     "files": {
@@ -3257,7 +3339,7 @@ async def test_tui_models_panel_is_read_only(
     config_path = project_root / ".uv-agent" / "config.json"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        __import__("json").dumps(
+        json.dumps(
             {
                 "providers": {"p": {"base_url": "https://example.com"}},
                 "models": {"default": {"provider": "p", "model": "fake"}},
@@ -4335,7 +4417,7 @@ async def test_tui_tool_result_details_expand_on_click(
         app._append_tool_output(
             {
                 "call": {"call_id": "call_1"},
-                "output": {"output": __import__("json").dumps(payload)},
+                "output": {"output": json.dumps(payload)},
             }
         )
         await pilot.pause()
@@ -4390,7 +4472,7 @@ async def test_tui_tool_result_details_escape_literal_brackets(
         app._append_tool_output(
             {
                 "call": {"call_id": "call_1"},
-                "output": {"output": __import__("json").dumps(payload)},
+                "output": {"output": json.dumps(payload)},
             }
         )
         await pilot.pause()
@@ -4422,7 +4504,7 @@ async def test_tui_tool_call_details_highlight_python_source(
     call = {
         "call_id": "call_1",
         "name": "run_python",
-        "arguments": __import__("json").dumps({"code": code}),
+        "arguments": json.dumps({"code": code}),
     }
 
     async with app.run_test(size=(90, 24)) as pilot:
@@ -4466,7 +4548,7 @@ async def test_tui_tool_result_details_support_keyboard_navigation(
                 {
                     "call": {"call_id": f"call_{index}"},
                     "output": {
-                        "output": __import__("json").dumps(
+                        "output": json.dumps(
                             {
                                 "run_id": f"run_{index}",
                                 "returncode": 0,
@@ -4930,7 +5012,7 @@ async def test_tui_final_response_is_not_folded_into_process(
             {
                 "call": {"call_id": "call_1"},
                 "output": {
-                    "output": __import__("json").dumps(
+                    "output": json.dumps(
                         {
                             "run_id": "run_1",
                             "returncode": 0,
@@ -4974,7 +5056,7 @@ def test_tool_detail_markup_strips_runtime_event_lines_from_stdout() -> None:
     payload = {
         "run_id": "run_1",
         "returncode": 0,
-        "stdout": "visible line 1\n" + __import__("json").dumps(event) + "\nvisible line 2\n",
+        "stdout": "visible line 1\n" + json.dumps(event) + "\nvisible line 2\n",
         "stderr": "",
         "events": [event],
     }
@@ -5044,7 +5126,7 @@ async def test_tui_tool_details_panel_toggles_events_with_e_key(
         app._append_tool_output(
             {
                 "call": {"call_id": "call_1"},
-                "output": {"output": __import__("json").dumps(payload)},
+                "output": {"output": json.dumps(payload)},
             }
         )
         await pilot.pause()

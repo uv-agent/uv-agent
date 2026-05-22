@@ -339,6 +339,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._assistant_buffer = ""
         self._assistant_cell: TranscriptCell | None = None
         self._tool_cells: dict[str, TranscriptCell] = {}
+        self._tool_started_calls: dict[str, dict[str, Any]] = {}
+        self._tool_partial_payloads: dict[str, dict[str, Any]] = {}
         self._tool_delta_cells: dict[int, TranscriptCell] = {}
         self._last_status = tr(self.language, "idle")
         self._spinner_index = 0
@@ -829,6 +831,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             "tool.delta",
             "tool.started",
             "tool.output",
+            "tool.partial",
             "model.stream_retry",
             "compaction.completed",
         }:
@@ -1253,6 +1256,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._reasoning_cell = None
         self._reasoning_buffer = ""
         self._tool_cells.clear()
+        self._tool_started_calls.clear()
+        self._tool_partial_payloads.clear()
         self._tool_delta_cells.clear()
         self._tool_delta_calls.clear()
         self._process_cells = []
@@ -1328,6 +1333,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         run_state.reasoning_buffer = self._reasoning_buffer
         run_state.reasoning_cell = self._reasoning_cell
         run_state.tool_cells = dict(self._tool_cells)
+        run_state.tool_started_calls = dict(self._tool_started_calls)
+        run_state.tool_partial_payloads = dict(self._tool_partial_payloads)
         run_state.tool_delta_cells = dict(self._tool_delta_cells)
         run_state.tool_delta_calls = dict(self._tool_delta_calls)
         run_state.process_cells = list(self._process_cells)
@@ -1343,6 +1350,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._reasoning_buffer = run_state.reasoning_buffer
         self._reasoning_cell = run_state.reasoning_cell
         self._tool_cells = dict(run_state.tool_cells)
+        self._tool_started_calls = dict(run_state.tool_started_calls)
+        self._tool_partial_payloads = dict(run_state.tool_partial_payloads)
         self._tool_delta_cells = dict(run_state.tool_delta_cells)
         self._tool_delta_calls = dict(run_state.tool_delta_calls)
         self._process_cells = list(run_state.process_cells)
@@ -1447,6 +1456,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._append_tool_started(item)
         elif event_type == "tool.output":
             self._append_tool_output(item)
+        elif event_type == "tool.partial":
+            self._append_tool_partial(item)
         elif event_type == "turn.stream_retry":
             self._append_stream_retry(item)
         elif event_type == "model.stream_retry":
@@ -1569,17 +1580,36 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 run_state.status = self._text("writing_script")
             elif event_type == "tool.started":
                 delta_index = item.get("tool_call_index")
+                call = item.get("call") if isinstance(item.get("call"), dict) else {}
                 if isinstance(delta_index, int):
-                    call = item.get("call") if isinstance(item.get("call"), dict) else {}
                     run_state.tool_delta_calls[delta_index] = dict(call)
+                call_id = str(call.get("call_id") or "")
+                if call_id:
+                    run_state.tool_started_calls[call_id] = dict(call)
                 run_state.reasoning_buffer = ""
                 run_state.reasoning_cell = None
                 run_state.status = self._text("running_python")
             elif event_type == "tool.output":
                 delta_index = item.get("tool_call_index")
-                if isinstance(delta_index, int):
-                    run_state.tool_delta_calls.pop(delta_index, None)
+                call = item.get("call") if isinstance(item.get("call"), dict) else {}
+                call_id = str(call.get("call_id") or "")
+                if call_id:
+                    run_state.tool_started_calls.pop(call_id, None)
+                    run_state.tool_partial_payloads.pop(call_id, None)
+                removed_call = run_state.tool_delta_calls.pop(delta_index, None) if isinstance(delta_index, int) else None
+                if not call_id and isinstance(removed_call, dict):
+                    fallback_call_id = str(removed_call.get("call_id") or "")
+                    if fallback_call_id:
+                        run_state.tool_started_calls.pop(fallback_call_id, None)
+                        run_state.tool_partial_payloads.pop(fallback_call_id, None)
                 run_state.status = self._text("working")
+            elif event_type == "tool.partial":
+                payload = parse_tool_payload(item.get("output", {}))
+                call = item.get("call") if isinstance(item.get("call"), dict) else {}
+                call_id = str(call.get("call_id") or (payload or {}).get("call_id") or "")
+                if call_id and payload is not None:
+                    run_state.tool_partial_payloads[call_id] = payload
+                run_state.status = self._text("running_python")
             elif event_type == "assistant.final_response_started" and run_state.process_cells:
                 run_state.process_collapsed = True
             elif event_type == "compaction.completed":
@@ -2158,6 +2188,53 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return None
         return children[index + 1] if index + 1 < len(children) else None
 
+    def _append_tool_partial(self, item: dict[str, Any]) -> None:
+        """Refresh the latest run_python result cell while the process is running."""
+
+        payload = parse_tool_payload(item.get("output", {}))
+        if payload is None:
+            return
+        payload = dict(payload)
+        call = item.get("call") if isinstance(item.get("call"), dict) else None
+        call_id = str((call or {}).get("call_id") or payload.get("call_id") or "")
+        if call_id:
+            self._tool_partial_payloads[call_id] = payload
+        self._last_tool_payload = payload
+        markup = tool_timeline_markup(payload)
+        details = tool_detail_markup(payload)
+        pending_cell = self._tool_cells.get(call_id) if call_id else None
+        if pending_cell is not None:
+            self._track_process_cell(pending_cell)
+        cell = self._partial_tool_result_cell(item)
+        if cell is None:
+            cell = self._append_expandable_cell(markup, details, "event")
+            self._track_process_cell(cell)
+        else:
+            cell.set_details(markup, details)
+        cell.tool_payload = payload
+        self._refresh_status(self._text("running_python"))
+
+    def _partial_tool_result_cell(self, item: dict[str, Any]) -> ExpandableTranscriptCell | None:
+        """Return an existing partial-result cell for this tool call, if any."""
+
+        call = item.get("call") if isinstance(item.get("call"), dict) else {}
+        call_id = str(call.get("call_id") or "")
+        if call_id:
+            for cell in reversed(self._process_cells):
+                if isinstance(cell, ExpandableTranscriptCell):
+                    payload = cell.tool_payload if isinstance(cell.tool_payload, dict) else {}
+                    if payload.get("partial") and payload.get("call_id") == call_id:
+                        return cell
+        payload = parse_tool_payload(item.get("output", {})) or {}
+        run_id = str(payload.get("run_id") or "")
+        if run_id:
+            for cell in reversed(self._process_cells):
+                if isinstance(cell, ExpandableTranscriptCell):
+                    existing = cell.tool_payload if isinstance(cell.tool_payload, dict) else {}
+                    if existing.get("partial") and existing.get("run_id") == run_id:
+                        return cell
+        return None
+
     def _append_tool_output(self, item: dict[str, Any]) -> None:
         payload = parse_tool_payload(item.get("output", {}))
         call = item.get("call") if isinstance(item.get("call"), dict) else None
@@ -2165,6 +2242,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if (call is None or not tool_call_preview_line(call)) and isinstance(delta_index, int):
             call = self._tool_delta_calls.pop(delta_index, None) or call
         call_id = str((call or {}).get("call_id") or item.get("call", {}).get("call_id") or "")
+        if call_id:
+            self._tool_started_calls.pop(call_id, None)
+            self._tool_partial_payloads.pop(call_id, None)
         pending_cell = self._tool_cells.pop(call_id, None) if call_id else None
         if pending_cell is None and isinstance(delta_index, int):
             pending_cell = self._tool_delta_cells.pop(delta_index, None)
@@ -2194,6 +2274,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._track_process_cell(cell)
             return
 
+        payload = dict(payload)
+        payload.pop("partial", None)
+        payload.pop("partial_reason", None)
+        payload.pop("call_id", None)
         self._last_tool_payload = payload
         markup = tool_timeline_markup(payload)
         details = tool_detail_markup(payload)
@@ -2220,6 +2304,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if isinstance(delta_index, int):
             self._tool_delta_calls[delta_index] = dict(call)
         call_id = str(call.get("call_id") or "")
+        if call_id:
+            self._tool_started_calls[call_id] = dict(call)
         name = str(call.get("name") or "python")
         detail = self._tool_call_preview(call)
         markup = self._tool_pending_markup(name, detail, call=call)
@@ -2951,9 +3037,21 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._append_reasoning_delta(run_state.reasoning_buffer)
         if run_state.assistant_buffer:
             self._append_assistant_text(run_state.assistant_buffer)
+        replayed_call_ids = set()
         for index, call in sorted(run_state.tool_delta_calls.items()):
             self._tool_delta_calls[index] = dict(call)
+            replayed_call_ids.add(str(call.get("call_id") or ""))
             self._append_tool_pending_call(index, call)
+        for call_id, call in sorted(run_state.tool_started_calls.items()):
+            if call_id not in replayed_call_ids:
+                self._append_tool_started({"call": call})
+        for call_id, payload in sorted(run_state.tool_partial_payloads.items()):
+            self._append_tool_partial(
+                {
+                    "call": {"call_id": call_id, "name": "run_python"},
+                    "output": {"output": json.dumps(payload, ensure_ascii=False)},
+                }
+            )
         if was_collapsed and self._process_cells and self._process_fold_cell is None:
             self._collapse_process_cells()
 

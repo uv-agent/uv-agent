@@ -162,6 +162,7 @@ from uv_agent_runtime import (
 <rule>For text edits, prefer replace_text for small replacements, apply_patch for multi-line or structured edits, and read_text_lossless/write_text_lossless only when raw text metadata or manual format control matters.</rule>
 <rule>For discovery, prefer find_files/search_text/find_symbols over manual directory walking, broad file reads, or ad hoc parsing.</rule>
 <rule>For process execution, prefer run_process_text over raw subprocess unless advanced subprocess control is needed.</rule>
+<rule>Set command timeouts shorter than the outer run_python timeout when diagnosing hangs; timed-out run_process_text calls return buffered output with timed_out=True.</rule>
 <rule>Use workspace_transaction or snapshot_files for risky or multi-file edits, not for every small change.</rule>
 <rule>Use ask for bounded independent work; handle the immediate critical path locally.</rule>
 </helper_selection>
@@ -307,7 +308,7 @@ apply_patch('''*** Begin Patch
 from uv_agent_runtime import apply_patch_any, run_process_text
 
 # run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace",
-#     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult
+#     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult  # includes .timed_out
 # apply_patch_any(patch: str, *, cwd=None, format="auto", dry_run=False, check=True) -> PatchResult  # .returncode, .stdout, .stderr, .changed_files (list[str])
 diff = run_process_text(["git", "diff", "--", "src/app.py"]).stdout
 apply_patch_any(diff, format="unified", dry_run=True)
@@ -335,12 +336,12 @@ print(make_unified_diff("old\n", "new\n", path="src/app.py"))
 ]]></example>
 </helper>
 <helper name="run_process_text">
-<description>Use to run external commands with explicit stdout/stderr decoding, env/env_patch support, timeout control, and optional check=True failure raising. Prefer it over raw subprocess for ordinary command execution. The result has args, returncode, stdout, stderr, ok, and raise_for_error().</description>
+<description>Use to run external commands with explicit stdout/stderr decoding, env/env_patch support, timeout control, and optional check=True failure raising. Prefer it over raw subprocess for ordinary command execution. On timeout it best-effort kills the process tree and returns buffered output with timed_out=True. The result has args, returncode, stdout, stderr, timed_out, ok, and raise_for_error().</description>
 <example><![CDATA[
 from uv_agent_runtime import run_process_text
 
 # run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace",
-#     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult  # .args, .returncode, .stdout, .stderr, .ok, .raise_for_error()
+#     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult  # .args, .returncode, .stdout, .stderr, .timed_out, .ok, .raise_for_error()
 result = run_process_text(["git", "status", "--short"], encoding="utf-8", check=True)
 print(result.stdout)
 ]]></example>

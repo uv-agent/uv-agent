@@ -199,6 +199,32 @@ async def test_runner_parses_threaded_runtime_events_without_line_interleaving(
 
 
 @pytest.mark.asyncio
+async def test_runner_streams_partial_output_before_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = Path.cwd()
+    runner = make_runner(tmp_path, monkeypatch, config=RunnerConfig(default_timeout_s=1))
+
+    events = [
+        event
+        async for event in runner.stream_run(
+            PythonRunRequest(
+                code="import time\nprint('before hang', flush=True)\ntime.sleep(30)\n",
+                cwd=project_root,
+                timeout_s=0.2,
+            )
+        )
+    ]
+
+    partial = next(event for event in events if event.type == "run.partial")
+    completed = next(event for event in events if event.type == "run.completed")
+    assert partial.data["result"].stdout.replace("\r\n", "\n") == "before hang\n"
+    assert completed.data["result"].timed_out is True
+    assert "before hang" in completed.data["result"].stdout
+
+
+@pytest.mark.asyncio
 async def test_runner_interrupts_script_when_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

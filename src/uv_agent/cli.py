@@ -108,6 +108,19 @@ async def _ask(
                 file=sys.stderr,
                 flush=True,
             )
+        elif event_type == "tool.partial" and stream:
+            payload = parse_tool_payload(event.get("output") or {}) or {}
+            stdout = str(payload.get("stdout") or "").strip()
+            stderr = str(payload.get("stderr") or "").strip()
+            summary = stdout.splitlines()[-1] if stdout else stderr.splitlines()[-1] if stderr else ""
+            if len(summary) > 140:
+                summary = summary[:137].rstrip() + "..."
+            status = payload.get("partial_reason") or "running"
+            print(
+                f"[python] {status} run={payload.get('run_id')} {summary}",
+                file=sys.stderr,
+                flush=True,
+            )
         elif event_type == "tool.output" and stream:
             payload = parse_tool_payload(event.get("output") or {}) or {}
             stdout = str(payload.get("stdout") or "").strip()

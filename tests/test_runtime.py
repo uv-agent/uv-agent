@@ -225,6 +225,23 @@ def test_runtime_run_process_text_check_and_result_helpers() -> None:
         run_process_text([sys.executable, "-c", "raise SystemExit(3)"], check=True)
 
 
+def test_runtime_run_process_text_timeout_returns_partial_output() -> None:
+    result = run_process_text(
+        [
+            sys.executable,
+            "-c",
+            "import sys, time; print('started', flush=True); time.sleep(30)",
+        ],
+        timeout_s=0.2,
+    )
+
+    assert result.timed_out is True
+    assert result.returncode != 0
+    assert "started" in result.stdout
+    with pytest.raises(RuntimeError, match="command timed out"):
+        result.raise_for_error()
+
+
 def test_runtime_run_process_text_accepts_env_and_env_patch() -> None:
     code = "import os; print(os.environ.get('UV_AGENT_TEST_VALUE', 'missing'))"
 

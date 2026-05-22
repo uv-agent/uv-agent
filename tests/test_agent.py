@@ -291,6 +291,37 @@ class SimpleRunner:
             events=[],
         )
 
+class StreamingRunner(SimpleRunner):
+    async def stream_run(self, request: PythonRunRequest):
+        self.requests.append(request)
+        partial = PythonRunResult(
+            run_id="run_stream",
+            returncode=None,
+            stdout="partial output\n",
+            stderr="",
+            timed_out=False,
+            interrupted=False,
+            truncated=False,
+            run_log_path=request.cwd / "run.jsonl",
+            script_path=request.cwd / "script.py",
+            events=[],
+        )
+        yield SimpleNamespace(type="run.partial", data={"result": partial, "reason": "interval"})
+        final = PythonRunResult(
+            run_id="run_stream",
+            returncode=0,
+            stdout="partial output\nfinal output\n",
+            stderr="",
+            timed_out=False,
+            interrupted=False,
+            truncated=False,
+            run_log_path=request.cwd / "run.jsonl",
+            script_path=request.cwd / "script.py",
+            events=[],
+        )
+        yield SimpleNamespace(type="run.completed", data={"result": final})
+
+
 
 def make_test_config(
     project_root: Path,
@@ -1154,6 +1185,60 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     assert not any(event["type"] == "item.tool_call" for event in stored_events)
     assert not any(event["type"] == "item.assistant_delta" for event in stored_events)
     assert not any(event["type"] == "item.reasoning_delta" for event in stored_events)
+
+
+@pytest.mark.asyncio
+async def test_agent_yields_partial_tool_output_before_final_result(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    runner = StreamingRunner()
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "print('x')"}),
+                    }
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="run it")]
+    event_types = [event["type"] for event in events]
+    partial_payload = json.loads(next(event for event in events if event["type"] == "tool.partial")["output"]["output"])
+    final_payload = json.loads(next(event for event in events if event["type"] == "tool.output")["output"]["output"])
+
+    assert event_types.index("tool.started") < event_types.index("tool.partial") < event_types.index("tool.output")
+    assert partial_payload["partial"] is True
+    assert partial_payload["stdout"] == "partial output\n"
+    assert final_payload["stdout"] == "partial output\nfinal output\n"
+    model_tool_output = json.loads(client.requests[1]["input"][-1]["output"])
+    assert "partial" not in model_tool_output
+    assert "partial_reason" not in model_tool_output
 
 
 @pytest.mark.asyncio

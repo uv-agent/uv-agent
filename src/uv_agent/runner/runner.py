@@ -4,6 +4,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from time import monotonic
 
 from uv_agent.config import RunnerConfig
 from uv_agent.ids import new_id
@@ -15,6 +16,12 @@ from uv_agent.runner.process import kill_process_tree, subprocess_group_kwargs
 from uv_agent.runner.run_log import RunLogStore
 from uv_agent.runner.scriptenv import ensure_venv, uv_binary
 from uv_agent.time import utc_now_iso
+
+
+def _deadline_expired(started_monotonic: float, timeout_s: float | None) -> bool:
+    """Return True once a run-level timeout has elapsed."""
+
+    return timeout_s is not None and monotonic() - started_monotonic >= timeout_s
 
 
 class PythonRunner:
@@ -46,13 +53,10 @@ class PythonRunner:
             self.run_logs.prune()
 
     async def run(self, request: PythonRunRequest) -> PythonRunResult:
-        events: list[RunnerEvent] = []
+        completed: RunnerEvent | None = None
         async for event in self.stream_run(request):
-            events.append(event)
-        completed = next(
-            (event for event in reversed(events) if event.type == "run.completed"),
-            None,
-        )
+            if event.type == "run.completed":
+                completed = event
         if completed is None:
             raise RuntimeError("Runner did not emit run.completed")
         return completed.data["result"]
@@ -134,6 +138,7 @@ class PythonRunner:
                     capture=capture,
                 )
             )
+            started_monotonic = monotonic()
             wait_task = asyncio.create_task(process.wait())
             cancel_task = (
                 asyncio.create_task(request.cancel_event.wait())
@@ -143,21 +148,93 @@ class PythonRunner:
             tasks = {wait_task}
             if cancel_task is not None:
                 tasks.add(cancel_task)
-            done, _ = await asyncio.wait(
-                tasks,
-                timeout=timeout_s,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if wait_task in done:
-                returncode = wait_task.result()
-            elif cancel_task is not None and cancel_task in done:
-                interrupted = True
-                await kill_process_tree(process)
-                returncode = await wait_task
-            else:
-                timed_out = True
-                await kill_process_tree(process)
-                returncode = await wait_task
+            last_partial_signature: tuple[int, int, int, int, bool] | None = None
+
+            def partial_signature() -> tuple[int, int, int, int, bool]:
+                """Compactly detect whether captured output changed."""
+
+                return (
+                    len(capture.stdout_parts),
+                    len(capture.stderr_parts),
+                    capture.byte_count,
+                    len(capture.structured_events),
+                    capture.truncated,
+                )
+
+            async def current_result() -> PythonRunResult:
+                """Snapshot the output captured so far without stopping the run."""
+
+                return PythonRunResult(
+                    run_id=run_id,
+                    returncode=returncode,
+                    stdout="".join(capture.stdout_parts),
+                    stderr="".join(capture.stderr_parts),
+                    timed_out=timed_out,
+                    interrupted=interrupted,
+                    truncated=capture.truncated,
+                    run_log_path=run_log_path,
+                    script_path=script_path,
+                    events=list(capture.structured_events),
+                )
+
+            async def emit_partial(*, reason: str, force: bool = False) -> RunnerEvent | None:
+                """Create a bounded progress event for consumers while running.
+
+                The output pumps append complete decoded chunks to ``capture`` as
+                the child process writes. Yielding a fresh snapshot lets the TUI
+                and CLI expose that buffered output before the process exits,
+                while the final ``run.completed`` payload remains the source of
+                truth for the model. Interval events are suppressed when nothing
+                changed so long blocked commands do not accumulate duplicate
+                megabyte-sized snapshots in memory.
+                """
+
+                nonlocal last_partial_signature
+                signature = partial_signature()
+                if not force and signature == last_partial_signature:
+                    return None
+                last_partial_signature = signature
+                data = {
+                    "type": "run.partial",
+                    "created_at": utc_now_iso(),
+                    "run_id": run_id,
+                    "reason": reason,
+                    "result": await current_result(),
+                }
+                return RunnerEvent("run.partial", data)
+
+            while True:
+                interval = min(1.0, timeout_s) if timeout_s is not None else 1.0
+                if timeout_s is not None:
+                    remaining = timeout_s - (monotonic() - started_monotonic)
+                    interval = max(0.0, min(interval, remaining))
+                done, _ = await asyncio.wait(
+                    tasks,
+                    timeout=interval,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if wait_task in done:
+                    returncode = wait_task.result()
+                    break
+                if cancel_task is not None and cancel_task in done:
+                    interrupted = True
+                    partial_event = await emit_partial(reason="interrupted", force=True)
+                    if partial_event is not None:
+                        yield partial_event
+                    await kill_process_tree(process)
+                    returncode = await wait_task
+                    break
+                timed_out = _deadline_expired(started_monotonic, timeout_s)
+                if timed_out:
+                    partial_event = await emit_partial(reason="timeout", force=True)
+                    if partial_event is not None:
+                        yield partial_event
+                    await kill_process_tree(process)
+                    returncode = await wait_task
+                    break
+                partial_event = await emit_partial(reason="interval")
+                if partial_event is not None:
+                    yield partial_event
             for task in tasks:
                 if task is not wait_task and not task.done():
                     task.cancel()

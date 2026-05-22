@@ -106,6 +106,8 @@ class ThreadRunState:
     reasoning_buffer: str = ""
     reasoning_cell: TranscriptCell | None = None
     tool_cells: dict[str, TranscriptCell] = field(default_factory=dict)
+    tool_started_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tool_partial_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
     tool_delta_cells: dict[int, TranscriptCell] = field(default_factory=dict)
     tool_delta_calls: dict[int, dict[str, Any]] = field(default_factory=dict)
     process_cells: list[TranscriptCell] = field(default_factory=list)
@@ -117,6 +119,8 @@ class ThreadRunState:
         self.assistant_cell = None
         self.reasoning_cell = None
         self.tool_cells.clear()
+        self.tool_started_calls.clear()
+        self.tool_partial_payloads.clear()
         self.tool_delta_cells.clear()
         self.process_cells = []
         self.process_fold_cell = None
