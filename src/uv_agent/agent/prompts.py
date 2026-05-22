@@ -136,9 +136,7 @@ from uv_agent_runtime import (
     restore_snapshot,
     read_text_lossless,
     write_text_lossless,
-    compare_text,
-    normalize_text,
-    replace_exact,
+    replace_text,
     apply_patch,
     apply_patch_any,
     convert_patch,
@@ -161,7 +159,7 @@ from uv_agent_runtime import (
 </imports>
 <helper_selection>
 <rule>Prefer the smallest helper that directly matches the task. When two helpers both work, choose the one requiring less generated code, less parsing, and a smaller read/write surface.</rule>
-<rule>For focused text edits, prefer replace_exact for small exact replacements and apply_patch for localized multi-line edits. Use read_text_lossless/write_text_lossless when rewriting generated content, preserving text metadata matters, or the edit spans a large structured section.</rule>
+<rule>For text edits, prefer replace_text for small replacements, apply_patch for multi-line or structured edits, and read_text_lossless/write_text_lossless only when raw text metadata or manual format control matters.</rule>
 <rule>For discovery, prefer find_files/search_text/find_symbols over manual directory walking, broad file reads, or ad hoc parsing.</rule>
 <rule>For process execution, prefer run_process_text over raw subprocess unless advanced subprocess control is needed.</rule>
 <rule>Use workspace_transaction or snapshot_files for risky or multi-file edits, not for every small change.</rule>
@@ -267,34 +265,14 @@ before = read_text_lossless("src/app.py")
 write_text_lossless("src/app.py", before.text.replace("old", "new"), like=before)
 ]]></example>
 </helper>
-<helper name="compare_text">
-<description>Use when a change may be only EOL or final-newline noise. It classifies differences as equal, content, eol, or final_newline.</description>
+<helper name="replace_text">
+<description>Use for small text replacements in existing files. By default old and new use logical \n newlines while the helper matches and writes with the file's original newline style; pass newlines="raw" only when raw exact matching is intended.</description>
 <example><![CDATA[
-from uv_agent_runtime import compare_text
+from uv_agent_runtime import replace_text
 
-# compare_text(left: str | TextFile, right: str | TextFile, *,
-#     ignore_eol=False, ignore_final_newline=False) -> TextComparison
-comparison = compare_text("a\r\nb\r\n", "a\nb\n", ignore_eol=True)
-print(comparison.kind)
-]]></example>
-</helper>
-<helper name="normalize_text">
-<description>Use when generated text needs a specific EOL or final-newline policy before writing or diffing.</description>
-<example><![CDATA[
-from uv_agent_runtime import normalize_text
-
-# normalize_text(text: str, *, eol: "lf" | "crlf" | "cr" | None = None,
-#     final_newline=None) -> str
-text = normalize_text("a\r\nb", eol="lf", final_newline=True)
-]]></example>
-</helper>
-<helper name="replace_exact">
-<description>Use for small exact text replacements. It preserves file text metadata, rejects empty old text, and raises with context when the target text is missing.</description>
-<example><![CDATA[
-from uv_agent_runtime import replace_exact
-
-# replace_exact(path: str | Path, old: str, new: str, *, count=1) -> ReplacementResult
-replace_exact("src/app.py", "old_call()", "new_call()")
+# replace_text(path: str | Path, old: str, new: str, *, count=1,
+#     newlines="logical") -> ReplacementResult
+replace_text("README.md", "old paragraph\n\nnext", "new paragraph\n\nnext")
 ]]></example>
 </helper>
 <helper name="path_info">

@@ -225,22 +225,35 @@ def normalize_text(
     return normalized
 
 
-def replace_exact(path: str | Path, old: str, new: str, *, count: int = 1) -> ReplacementResult:
-    """Replace exact text in a file, preserving its original text metadata."""
+def replace_text(
+    path: str | Path,
+    old: str,
+    new: str,
+    *,
+    count: int = 1,
+    newlines: Literal["logical", "raw"] = "logical",
+) -> ReplacementResult:
+    """Replace text in a file while preserving its original text metadata."""
 
     if not old:
         raise ValueError("old text must not be empty")
     if count < 1:
         raise ValueError("count must be >= 1")
+    if newlines not in {"logical", "raw"}:
+        raise ValueError("newlines must be 'logical' or 'raw'")
     before = read_text_lossless(path)
-    found = before.text.count(old)
-    if found < count:
-        context = _missing_context(before.text, old)
-        raise ValueError(f"expected at least {count} occurrence(s), found {found}.{context}")
-    after_text = before.text.replace(old, new, count)
-    write_text_lossless(path, after_text, like=before)
-    after = read_text_lossless(path)
-    return ReplacementResult(path=after.path, replacements=count, before=before, after=after)
+    best_found = 0
+    for candidate_old, candidate_new in _replacement_candidates(before, old, new, newlines):
+        found = before.text.count(candidate_old)
+        best_found = max(best_found, found)
+        if found < count:
+            continue
+        after_text = before.text.replace(candidate_old, candidate_new, count)
+        write_text_lossless(path, after_text, like=before)
+        after = read_text_lossless(path)
+        return ReplacementResult(path=after.path, replacements=count, before=before, after=after)
+    context = _replacement_missing_context(before, old, found=best_found, count=count, newlines=newlines)
+    raise ValueError(f"expected at least {count} occurrence(s), found {best_found}.{context}")
 
 
 def make_unified_diff(
@@ -466,6 +479,77 @@ def _first_line_difference(left: str, right: str) -> tuple[int | None, str | Non
         right_line = right_lines[index - 1] if index <= len(right_lines) else None
         return index, left_line, right_line
     return None, None, None
+
+
+def _replacement_candidates(
+    before: TextFile,
+    old: str,
+    new: str,
+    newlines: Literal["logical", "raw"],
+) -> list[tuple[str, str]]:
+    if newlines == "raw":
+        return [(old, new)]
+
+    styles: list[Literal["lf", "crlf", "cr"]] = []
+    if before.newline in {"lf", "crlf", "cr"}:
+        styles.append(before.newline)
+    if before.newline == "mixed":
+        styles.extend(_newline_styles_in_text(before.text))
+    styles.append("lf")
+
+    candidates: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for style in styles:
+        candidate = (normalize_text(old, eol=style), normalize_text(new, eol=style))
+        if candidate not in seen:
+            candidates.append(candidate)
+            seen.add(candidate)
+    raw_candidate = (old, new)
+    if raw_candidate not in seen:
+        candidates.append(raw_candidate)
+    return candidates
+
+
+def _newline_styles_in_text(text: str) -> list[Literal["lf", "crlf", "cr"]]:
+    styles: list[Literal["lf", "crlf", "cr"]] = []
+    if "\r\n" in text:
+        styles.append("crlf")
+    without_crlf = text.replace("\r\n", "")
+    if "\n" in without_crlf:
+        styles.append("lf")
+    if "\r" in without_crlf:
+        styles.append("cr")
+    return styles
+
+
+def _replacement_missing_context(
+    before: TextFile,
+    needle: str,
+    *,
+    found: int,
+    count: int,
+    newlines: Literal["logical", "raw"],
+) -> str:
+    parts = [
+        f" File newline={before.newline!r}, final_newline={before.final_newline!r}.",
+        f" Search text repr={_short_repr(needle)}.",
+    ]
+    if newlines == "raw" and "\n" in needle and before.newline == "crlf":
+        parts.append(" Raw matching is newline-sensitive; this may be a CRLF/LF mismatch.")
+    elif newlines == "logical" and found == 0 and "\n" in needle and before.newline == "mixed":
+        parts.append(" The file has mixed newlines; inspect the target snippet when matching across lines.")
+    if found < count:
+        context = _missing_context(before.text, needle)
+        if context:
+            parts.append(context)
+    return "".join(parts)
+
+
+def _short_repr(text: str, *, limit: int = 160) -> str:
+    value = repr(text)
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
 
 
 def _missing_context(text: str, needle: str) -> str:

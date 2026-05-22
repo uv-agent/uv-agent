@@ -39,7 +39,7 @@ from uv_agent_runtime import (
     read_json,
     read_text,
     read_text_lossless,
-    replace_exact,
+    replace_text,
     restore_snapshot,
     run_python_env_dir,
     run_process_text,
@@ -296,25 +296,38 @@ def test_runtime_compare_and_normalize_text_helpers() -> None:
     assert normalize_text("a\r\nb", eol="crlf", final_newline=True) == "a\r\nb\r\n"
 
 
-def test_runtime_replace_exact_reports_context_and_preserves_style(tmp_path: Path) -> None:
+def test_runtime_replace_text_uses_logical_newlines_and_preserves_style(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text("first\r\nold\r\n\r\nlast\r\n", encoding="utf-8", newline="")
+
+    result = replace_text(path, "old\n\nlast", "new\n\nlast")
+
+    assert result.replacements == 1
+    assert path.read_bytes() == b"first\r\nnew\r\n\r\nlast\r\n"
+    with pytest.raises(ValueError, match="File newline='crlf'"):
+        replace_text(path, "missing", "nope")
+    with pytest.raises(ValueError, match="old text must not be empty"):
+        replace_text(path, "", "nope")
+
+
+def test_runtime_replace_text_raw_mode_is_newline_sensitive(tmp_path: Path) -> None:
     path = tmp_path / "sample.txt"
     path.write_text("first\r\nold\r\nlast\r\n", encoding="utf-8", newline="")
 
-    result = replace_exact(path, "old", "new")
+    with pytest.raises(ValueError, match="CRLF/LF mismatch"):
+        replace_text(path, "old\nlast", "new\nlast", newlines="raw")
+
+    result = replace_text(path, "old\r\nlast", "new\r\nlast", newlines="raw")
 
     assert result.replacements == 1
     assert path.read_bytes() == b"first\r\nnew\r\nlast\r\n"
-    with pytest.raises(ValueError, match="found 0"):
-        replace_exact(path, "missing", "nope")
-    with pytest.raises(ValueError, match="old text must not be empty"):
-        replace_exact(path, "", "nope")
 
 
-def test_runtime_replace_exact_preserves_mixed_newlines(tmp_path: Path) -> None:
+def test_runtime_replace_text_preserves_mixed_newlines(tmp_path: Path) -> None:
     path = tmp_path / "sample.txt"
     path.write_bytes(b"first\r\nold\nlast\r")
 
-    result = replace_exact(path, "old", "new")
+    result = replace_text(path, "old", "new")
 
     assert result.before.newline == "mixed"
     assert path.read_bytes() == b"first\r\nnew\nlast\r"
