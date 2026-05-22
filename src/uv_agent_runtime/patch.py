@@ -196,8 +196,7 @@ def _apply_ops(workdir: Path, ops: list[_FileOp], *, write: bool) -> None:
                 if not source.exists():
                     raise FileNotFoundError(f"update file does not exist: {op.path}")
                 text = source.read_text(encoding="utf-8", newline="")
-            for hunk in op.hunks:
-                text = _apply_hunk(text, hunk, op.path)
+            text = _apply_hunks(text, op.hunks, op.path)
             if op.move_to is None:
                 pending[source] = text
             else:
@@ -245,18 +244,37 @@ def _join_lines(lines: list[str]) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def _apply_hunk(text: str, hunk: list[str], path: str) -> str:
+def _apply_hunks(text: str, hunks: list[list[str]], path: str) -> str:
+    """Apply all hunks for one file after splitting it only once.
+
+    Patch hunks are ordered, so each search can resume near the previous match
+    instead of rebuilding line arrays and scanning from the beginning for every
+    hunk.  This keeps the simple patch format while avoiding avoidable O(hunks ×
+    file_size) work on large files.
+    """
+
     original = text.splitlines(keepends=True)
-    expected = [line[1:] for line in hunk if line[0] in " -"]
-    start = _find_subsequence(original, expected)
-    if start is None:
-        raise ValueError(f"hunk context was not found in {path}")
-    replacement = _replacement_lines(original[start : start + len(expected)], hunk, original)
-    return "".join(original[:start] + replacement + original[start + len(expected) :])
-
-
-def _replacement_lines(matched: list[str], hunk: list[str], original: list[str]) -> list[str]:
+    bodies = [_line_body(line) for line in original]
     newline = _detect_newline(original)
+    search_start = 0
+    for hunk in hunks:
+        expected = [line[1:] for line in hunk if line[0] in " -"]
+        start = _find_subsequence(bodies, expected, start=search_start)
+        if start is None and search_start:
+            # Preserve historical behavior for out-of-order or ambiguous hunks:
+            # a fallback full search may still find a valid unique context.
+            start = _find_subsequence(bodies, expected, start=0)
+        if start is None:
+            raise ValueError(f"hunk context was not found in {path}")
+        replacement = _replacement_lines(original[start : start + len(expected)], hunk, newline)
+        original[start : start + len(expected)] = replacement
+        replacement_bodies = [_line_body(line) for line in replacement]
+        bodies[start : start + len(expected)] = replacement_bodies
+        search_start = start + len(replacement_bodies)
+    return "".join(original)
+
+
+def _replacement_lines(matched: list[str], hunk: list[str], newline: str) -> list[str]:
     replacement: list[str] = []
     matched_index = 0
     for line in hunk:
@@ -281,12 +299,12 @@ def _detect_newline(lines: list[str]) -> str:
     return "\n"
 
 
-def _find_subsequence(lines: list[str], target: list[str]) -> int | None:
+def _find_subsequence(lines: list[str], target: list[str], *, start: int = 0) -> int | None:
     if not target:
-        return 0
+        return start
     last_start = len(lines) - len(target)
-    for index in range(last_start + 1):
-        if [_line_body(line) for line in lines[index : index + len(target)]] == target:
+    for index in range(max(0, start), last_start + 1):
+        if lines[index : index + len(target)] == target:
             return index
     return None
 
