@@ -582,7 +582,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             worker=None,
             cancel_event=cancel_event,
             queue=list(queue or []),
-            status=self._text("thinking_status"),
+            status=self._text("sending"),
             started_at=started_at,
         )
         self._thread_runs[thread_id] = run_state
@@ -604,7 +604,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 "event",
             )
             self._sync_run_state_from_active(run_state)
-            self._refresh_status(self._text("thinking_status"))
+            self._refresh_status(self._text("sending"))
         worker = self.run_worker(
             self._run_turn(prompt, thread_id, level=level, image_paths=list(image_paths or [])),
             exclusive=False,
@@ -624,7 +624,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             worker=None,
             cancel_event=cancel_event,
             queue=[],
-            status=self._text("thinking_status"),
+            status=self._text("sending"),
             started_at=started_at,
         )
         self._thread_runs[thread_id] = run_state
@@ -639,7 +639,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 "event",
             )
             self._sync_run_state_from_active(run_state)
-            self._refresh_status(self._text("thinking_status"))
+            self._refresh_status(self._text("sending"))
         worker = self.run_worker(
             self._run_turn(
                 "",

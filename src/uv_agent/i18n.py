@@ -7,6 +7,7 @@ TEXT = {
     "en": {
         "idle": "Idle",
         "working": "Working",
+        "sending": "Sending",
         "thinking_status": "Thinking",
         "writing_script": "Writing script",
         "writing_answer": "Writing answer",
@@ -177,6 +178,7 @@ TEXT = {
     "zh": {
         "idle": "空闲",
         "working": "工作中",
+        "sending": "发送中",
         "thinking_status": "思考中",
         "writing_script": "编写脚本中",
         "writing_answer": "回复中",
