@@ -139,6 +139,7 @@ API keys in environment variables or ignored local config.
   },
   "runtime": {
     "default_level": "deepseek-flash",
+    "ask_default_level": "deepseek-flash",
     "store_provider_response": false,
     "max_agent_rounds": 1000,
     "compression": {

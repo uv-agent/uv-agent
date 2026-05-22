@@ -136,6 +136,7 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
   },
   "runtime": {
     "default_level": "deepseek-flash",
+    "ask_default_level": "deepseek-flash",
     "store_provider_response": false,
     "max_agent_rounds": 1000,
     "compression": {

@@ -227,6 +227,7 @@ level names rather than concrete model names.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `default_level` | string | `"medium"` | Level used when no explicit level is selected. |
+| `ask_default_level` | string or null | `null` | Optional level used for `ask` CLI command. Falls back to `default_level` when null. |
 | `store_provider_response` | boolean | `false` | Store raw provider responses in thread state. |
 | `max_agent_rounds` | integer | `100` | Maximum model/tool loop rounds for one turn. |
 | `compression` | object | see below | Context compression settings. |
