@@ -12,7 +12,10 @@ Each project has one shared script venv:
 ```text
 ~/.uv-agent/projects/<project-id>/
   runner/
-    scriptenv/.venv/
+    scriptenv/
+      pyproject.toml
+      uv.lock
+      .venv/
     runs/
       <run_id>.py
       <run_id>.jsonl
@@ -24,37 +27,35 @@ Each project has one shared script venv:
     <thread_id>.json
 ```
 
-The runner creates the venv lazily, installs the `uv-agent` runtime package into
-it, writes each `run_python` call to `runner/runs/<run_id>.py`, and executes that
-file with the venv Python. Run JSONL records include the generated `run_id`, cwd,
-timeout, script args, stdout/stderr stream events, structured runtime events,
-exit status, truncation state, and script path.
+The runner creates the `scriptenv` uv project lazily with `uv init`, adds
+`uv-agent` with `uv add`, writes each `run_python` call to
+`runner/runs/<run_id>.py`, and executes it with
+`uv run --project <scriptenv> --directory <active-cwd> python <run_id>.py`. Run
+JSONL records include the generated `run_id`, cwd, timeout, script args,
+stdout/stderr stream events, structured runtime events, exit status, truncation
+state, and script path.
 
 The number of retained run log pairs is controlled by `runner.max_run_logs`,
 defaulting to 200. The runner prunes `<run_id>.py` and `<run_id>.jsonl` together.
 
 ## Dependencies
 
-To install a third-party package, run `uv pip install` against the current
-interpreter:
+To add a third-party package to the shared run environment, use
+`add_dependency`:
 
 ```python
-import sys
+from uv_agent_runtime import add_dependency
 
-from uv_agent_runtime import run_process_text
-
-run_process_text(
-    ["uv", "pip", "install", "--python", sys.executable, "-q", "requests"],
-    check=True,
-)
+add_dependency("requests", check=True)
 
 import requests
 ```
 
-For dependency installation, leave the active directory unchanged and call
-`run_process_text` without `cwd`. The target environment is chosen by
-`--python sys.executable`; the current directory is not part of the install
-semantics. Installed packages persist in the project script venv for later runs.
+The runtime context shows the `run_python` environment directory and its
+`pyproject.toml`. That directory is the uv project used by `run_python`, not the
+workspace or active cwd. Direct dependencies from that `pyproject.toml` are shown
+in runtime context; transitive dependencies from `uv.lock` are not. Installed
+packages persist in the project script environment for later runs.
 
 ## Runtime Helpers
 
@@ -74,6 +75,7 @@ Available helper groups:
 | --- | --- |
 | `read_text`, `write_text`, `read_json`, `write_json`, `list_files`, `resolve_workspace_path` | Workspace-relative file helpers. |
 | `run_process_text` | Argv-list subprocess helper with explicit text decoding, env/env_patch support, timeouts, and optional `check=True`. |
+| `add_dependency`, `add_dependencies`, `run_python_env_dir` | Manage or inspect the uv project environment backing `run_python`. |
 | `apply_patch` | Codex-style `*** Begin Patch` file edit helper. |
 | `enter_dir` | Change the active working directory and trigger directory rule loading. |
 | `emit_event`, `emit_progress`, `emit_result` | Structured events rendered by the host; each returns the emitted event dict. |

@@ -12,7 +12,7 @@ from uv_agent.config import RunnerConfig
 from uv_agent.jsonl import read_jsonl
 from uv_agent.runner import PythonRunRequest, PythonRunner
 from uv_agent.runner.runner import parse_structured_event
-from uv_agent.runner.scriptenv import ensure_venv
+from uv_agent.runner.scriptenv import direct_dependencies, ensure_venv
 
 
 def make_runner(
@@ -50,7 +50,14 @@ async def test_runner_executes_script_and_records_jsonl(
     events = read_jsonl(result.run_log_path)
     assert events[0]["type"] == "run.started"
     assert events[-1]["type"] == "run.completed"
-    assert events[0]["argv"][0].endswith(("python.exe", "python"))
+    assert events[0]["argv"][1:5] == [
+        "run",
+        "--project",
+        str(runner.scriptenv_dir),
+        "--directory",
+    ]
+    assert events[0]["argv"][5] == str(project_root)
+    assert events[0]["argv"][6] == "python"
     assert events[0]["script_path"] == str(result.script_path)
 
 
@@ -267,5 +274,7 @@ def test_ensure_venv_installs_runtime_package(tmp_path: Path) -> None:
     python = ensure_venv(tmp_path / "scriptenv")
 
     assert python.exists()
+    assert (tmp_path / "scriptenv" / "pyproject.toml").exists()
+    assert any(dependency.startswith("uv-agent") for dependency in direct_dependencies(tmp_path / "scriptenv"))
     result = subprocess.run([str(python), "-c", "import uv_agent_runtime"], check=False)
     assert result.returncode == 0

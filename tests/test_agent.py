@@ -2223,6 +2223,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
         config=RunnerConfig(
         ),
     )
+    runner.scriptenv_dir.mkdir(parents=True)
+    (runner.scriptenv_dir / "pyproject.toml").write_text(
+        "[project]\nname = \"uv-agent-scriptenv\"\ndependencies = [\"uv-agent\", \"requests>=2\"]\n",
+        encoding="utf-8",
+    )
     engine = AgentEngine(
         config=config,
         model_client=FakeModelClient([]),
@@ -2243,12 +2248,13 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "reply concisely and with a friendly, approachable tone" in prompt
     assert "Keep answers restrained in length by default" in prompt
     assert "explicitly asks for a detailed explanation of specific content" in prompt
-    assert "project-shared Python venv" in prompt
-    assert 'run_process_text(["uv", "pip", "install", "--python", sys.executable' in prompt
-    assert "For dependency installation, leave the active directory unchanged" in prompt
+    assert "project-shared uv environment" in prompt
+    assert 'add_dependency("package-name")' in prompt
+    assert "run_python environment pyproject.toml" in prompt
     assert "run_python accepts code, script_args, and timeout_s" in prompt
     assert "thread's active cwd" in prompt
     assert "PEP 723" not in prompt
+    assert "uv pip" not in prompt
     assert "For mature domain problems" in prompt
     assert "unidiff for parsing diffs" in prompt
     assert "libcst for Python source transforms" in prompt
@@ -2275,8 +2281,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "capability explanations layered" not in prompt
     assert "<context_updates>" in prompt
     assert "model-visible user messages wrapped in <context_update" in prompt
-    assert "Treat each context_update as authoritative for the runtime sections" in prompt
-    assert "Earlier sections remain in force" in prompt
+    assert "stable within the current epoch" in prompt
+    assert "sent again after compaction starts a new epoch" in prompt
+    assert "Skills and MCP server declarations may be appended" in prompt
     assert "A removed context section means older content" in prompt
     assert "item.context_update is an internal persistence event" not in prompt
     assert "After compaction, current context updates are re-sent" not in prompt
@@ -2295,6 +2302,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<host>" in turn_context
     assert "<user_language>" in turn_context
     assert str(project_root) in turn_context
+    assert "<run_python_environment>" in turn_context
+    assert str(runner.scriptenv_dir) in turn_context
+    assert str(runner.scriptenv_dir / "pyproject.toml") in turn_context
+    assert "<dependency>uv-agent</dependency>" in turn_context
+    assert "<dependency>requests&gt;=2</dependency>" in turn_context
     assert "<model_levels>" in turn_context
     assert "<default>medium</default>" in turn_context
     assert "<level>small</level>" in turn_context
@@ -2314,6 +2326,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "snapshot_files" in turn_context
     assert "restore_snapshot" in turn_context
     assert "run_process_text" in turn_context
+    assert "add_dependency" in turn_context
+    assert "run_python_env_dir" in turn_context
     assert "<helper_selection>" in turn_context
     assert "Prefer the smallest helper that directly matches the task" in turn_context
     assert "replace_exact for small exact replacements" in turn_context
@@ -3023,7 +3037,7 @@ async def test_system_instructions_refresh_after_compaction(tmp_path: Path) -> N
     assert sum(1 for event in stored if event["type"] == "item.system_instructions") == 2
 
 
-def test_runtime_context_reappears_after_compaction_epoch(tmp_path: Path) -> None:
+def test_dynamic_runtime_context_reappears_after_compaction_epoch(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     skill_dir = project_root / ".agents" / "skills" / "demo"
     skill_dir.mkdir(parents=True)

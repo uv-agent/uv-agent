@@ -14,7 +14,7 @@ This repository builds `uv-agent`, an experimental coding agent with a Textual T
 - The agent has exactly one external action surface: `run_python`.
 - `run_python` executes Python through the managed runner. Do not add direct shell, filesystem, browser, network, or MCP model tools.
 - Python scripts may call `subprocess`; that capability must stay inside the Python runner boundary.
-- Managed scripts install third-party dependencies into the shared script venv from inside Python, typically with `run_process_text(["uv", "pip", "install", "--python", sys.executable, ...])`. Do not add a separate dependency argument to the tool API.
+- Managed scripts add third-party dependencies to the shared run_python uv environment from inside Python, typically with `add_dependency("package-name")`. Do not add a separate dependency argument to the tool API.
 - `uv_agent_runtime` must work as a package dependency for managed scripts; scripts must not rely on the repository checkout, current `.venv`, or implicit import paths.
 - MCP and skills are progressively disclosed context. MCP calls happen through Python runtime helpers, not direct model tool calls.
 

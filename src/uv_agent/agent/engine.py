@@ -53,6 +53,7 @@ from uv_agent.project_rules import (
     load_project_rules,
 )
 from uv_agent.runner import PythonRunRequest, PythonRunner
+from uv_agent.runner.scriptenv import direct_dependencies
 from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.skills import SkillSummary, discover_skills, render_skill_entry
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
@@ -1903,17 +1904,9 @@ class AgentEngine:
             for part in parts
         }
         previous_fingerprint = previous.get("fingerprint") if previous else None
-        if previous_fingerprint == fingerprint:
-            return None
         initial = previous_fingerprint is None
         if initial:
             removed = [key for key in previous_parts if key not in state_parts]
-            changed = [
-                part.id
-                for part in parts
-                if previous_parts.get(part.id, {}).get("fingerprint")
-                != state_parts[part.id]["fingerprint"]
-            ]
             rendered_parts = parts
         else:
             current_kinds = {part.kind for part in parts}
@@ -1969,7 +1962,7 @@ class AgentEngine:
             removed_text = ""
         prefix = (
             "<context_update id=\"runtime_context\" status=\"current\">\n"
-            "The following runtime context is current. It updates only the listed content; prior runtime context remains current unless explicitly removed.\n"
+            "The following runtime context is current. It updates only the listed content; prior runtime context remains current within this epoch unless explicitly removed.\n"
             + "</context_update>"
         )
         text = prefix + removed_text + ("\n\n" + rendered if rendered else "")
@@ -2187,10 +2180,13 @@ class AgentEngine:
         return SYSTEM_INSTRUCTIONS_TEMPLATE
 
     def _runtime_environment_context(self) -> str:
+        scriptenv_dir = getattr(self.runner, "scriptenv_dir", self.thread_store.data_dir / "runner" / "scriptenv")
         return runtime_environment_context(
             project_root=self.project_root,
             user_state=uv_agent_home(),
             project_state=self.thread_store.data_dir,
+            scriptenv_dir=scriptenv_dir,
+            scriptenv_dependencies=direct_dependencies(scriptenv_dir),
             host_environment=self._host_environment,
             user_language=detect_user_language(self.config.ui.language),
         )

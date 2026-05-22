@@ -60,11 +60,21 @@ class PythonRunner:
     async def stream_run(self, request: PythonRunRequest) -> AsyncIterator[RunnerEvent]:
         run_id = new_id("run")
         timeout_s = request.timeout_s or self.config.default_timeout_s
-        python = await asyncio.to_thread(ensure_venv, self.scriptenv_dir)
+        await asyncio.to_thread(ensure_venv, self.scriptenv_dir)
         script_path, run_log_path = self.run_logs.create_run_files(run_id, request.code)
         writer = JsonlWriter(run_log_path)
         run_cwd = (request.cwd or self.project_root).resolve()
-        argv = [str(python), str(script_path), *request.script_args]
+        argv = [
+            uv_binary(),
+            "run",
+            "--project",
+            str(self.scriptenv_dir),
+            "--directory",
+            str(run_cwd),
+            "python",
+            str(script_path),
+            *request.script_args,
+        ]
         env = self._run_env(
             run_id=run_id,
             thread_id=request.thread_id,
@@ -204,6 +214,7 @@ class PythonRunner:
         turn_id: str | None,
     ) -> dict[str, str]:
         env = dict(os.environ)
+        env.pop("VIRTUAL_ENV", None)
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
         env["UV_AGENT_RUNTIME_PROJECT_ROOT"] = str(self.project_root)
@@ -218,4 +229,5 @@ class PythonRunner:
         if turn_id:
             env["UV_AGENT_RUNTIME_TURN_ID"] = turn_id
         env["UV_AGENT_RUNTIME_RUN_ID"] = run_id
+        env["UV_AGENT_SCRIPTVENV_DIR"] = str(self.scriptenv_dir)
         return env
