@@ -968,11 +968,40 @@ def test_codequery_cache_is_incremental(
     assert after[rel_b] != before[rel_b]
     assert after[rel_a] == before[rel_a]
 
-    # Deleting a file prunes the row on the next call.
+    # Scoped cache refreshes intentionally do not prune unrelated rows; explicit
+    # clear_cache remains the cleanup mechanism.  The query result still reflects
+    # the current filesystem because missing candidate files are not returned.
     target.unlink()
+    symbols_after_delete = find_symbols(tmp_path)
+    assert all(not (s.path.endswith("b.py") and s.name == "extra") for s in symbols_after_delete)
+    assert rel_b in read_stats()
+
+
+@requires_rg
+def test_codequery_scoped_queries_do_not_prune_other_cached_files(
+    tmp_path: Path,
+    codequery_home: Path,
+) -> None:
+    import sqlite3
+
+    _make_python_workspace(tmp_path)
     find_symbols(tmp_path)
-    pruned = read_stats()
-    assert all(not p.endswith("b.py") for p in pruned)
+    db = codequery_home / "cache" / "codequery" / "index.sqlite"
+
+    target = tmp_path / "src" / "a.py"
+    find_symbols(target)
+
+    conn = sqlite3.connect(db)
+    try:
+        cached_paths = {
+            rel.replace("\\", "/")
+            for (rel,) in conn.execute("SELECT rel_path FROM files")
+        }
+    finally:
+        conn.close()
+
+    assert "a.py" in cached_paths or "src/a.py" in cached_paths
+    assert any(path.endswith("b.py") for path in cached_paths)
 
 
 @requires_rg

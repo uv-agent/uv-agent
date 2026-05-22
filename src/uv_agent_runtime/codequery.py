@@ -294,7 +294,6 @@ def _refresh_cache(
         )
     }
 
-    candidate_set = {rel for rel, _ in candidates}
     results: dict[tuple[str, str], list[dict]] = {}
 
     conn.execute("BEGIN")
@@ -346,17 +345,10 @@ def _refresh_cache(
             )
             results[(rel, lang)] = captures
 
-        # Prune entries for files that disappeared from the candidate listing.
-        stale_files = set(existing_files) - candidate_set
-        for rel in stale_files:
-            conn.execute(
-                "DELETE FROM files WHERE root = ? AND rel_path = ?",
-                (root_key, rel),
-            )
-            conn.execute(
-                "DELETE FROM captures WHERE root = ? AND rel_path = ?",
-                (root_key, rel),
-            )
+        # Do not prune entries outside the current candidate set here.  Callers
+        # may query a single file, one language group, or a narrow glob; deleting
+        # everything else would make those scoped queries thrash the shared root
+        # cache.  Explicit cleanup remains available through ``clear_cache``.
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
