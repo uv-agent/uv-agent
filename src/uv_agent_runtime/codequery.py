@@ -127,6 +127,22 @@ _SYMBOL_QUERIES: dict[str, str] = {
     """,
 }
 
+# Use ripgrep's native type filters when possible so large mixed-language
+# repositories do not enumerate every ignored/non-code file before Python filters
+# by tree-sitter language.  Keep this deliberately small and limited to rg's
+# built-in aliases to avoid surprising path semantics.
+_LANGUAGE_FILE_TYPES: dict[str, tuple[str, ...]] = {
+    "python": ("py",),
+    "javascript": ("js",),
+    "typescript": ("ts",),
+    "rust": ("rust",),
+    "go": ("go",),
+    "java": ("java",),
+    "c": ("c",),
+    "cpp": ("cpp",),
+    "ruby": ("ruby",),
+}
+
 
 _db_lock = threading.Lock()
 _SCHEMA_VERSION = 1
@@ -208,6 +224,22 @@ def _detect_language(path: str | Path) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
+def _rg_file_types_for_languages(languages: set[str] | None) -> list[str] | None:
+    """Return rg type aliases that safely cover the requested languages."""
+
+    if not languages:
+        return None
+    aliases: list[str] = []
+    for language in sorted(languages):
+        values = _LANGUAGE_FILE_TYPES.get(language)
+        if values is None:
+            # Fall back to broad enumeration if any requested language lacks a
+            # known rg alias; correctness is more important than partial speedup.
+            return None
+        aliases.extend(values)
+    return aliases
+
+
 def _captures_for_file(
     *,
     abs_path: Path,
@@ -250,10 +282,11 @@ def _candidate_files(
     no_ignore: bool,
 ) -> list[tuple[str, str]]:
     """Return ``[(rel_path, language), ...]`` for files under root."""
+    effective_file_types = file_types or _rg_file_types_for_languages(languages)
     rels = codesearch.find_files(
         root,
         globs=globs,
-        file_types=file_types,
+        file_types=effective_file_types,
         hidden=hidden,
         no_ignore=no_ignore,
     )
