@@ -43,18 +43,19 @@ selection, and copy behavior.
 ## Implementation checklist
 
 - [x] Create a feature branch for the refactor.
-- [ ] Add small formatting helpers for composing `Text` from static styled labels
+- [x] Add small formatting helpers for composing `Text` from static styled labels
       and plain external data.
-- [ ] Convert formatting helpers from `*_markup` string construction to Rich
+- [x] Convert formatting helpers from `*_markup` string construction to Rich
       renderables while preserving public names where it keeps the diff smaller.
-- [ ] Update transcript widgets to accept renderables without `markup=True` and
+- [x] Update transcript widgets to accept renderables without `markup=True` and
       keep plain copy text explicit or derivable.
-- [ ] Update app transcript append/replace paths and all TUI event builders.
-- [ ] Update full-screen panels, picker options, tool details, config panels, and
+- [x] Update app transcript append/replace paths and all TUI event builders.
+- [x] Update full-screen panels, picker options, tool details, config panels, and
       image metadata to use renderables.
-- [ ] Replace error markup helpers with renderable helpers.
-- [ ] Update tests for renderable/plain-text assertions and add bracket
+- [x] Replace error markup helpers with renderable helpers.
+- [x] Update tests for renderable/plain-text assertions and add bracket
       regression coverage.
 - [ ] Run focused TUI tests, then the full test suite.
+      - Focused TUI suite: `uv run pytest tests/test_tui.py -q` passes after renderable migration.
 - [ ] Commit the refactor in focused steps with clear English messages.
 

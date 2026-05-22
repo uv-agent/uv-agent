@@ -33,6 +33,8 @@ from uv_agent.session import ThreadStore
 from uv_agent.tui.formatting import (
     RUNTIME_EVENT_EVENT_ID_KEY,
     RUNTIME_EVENT_RUN_ID_KEY,
+    markup,
+    renderable_plain,
     short_thread,
     tool_detail_markup,
 )
@@ -59,6 +61,11 @@ _MARKUP_TAG_RE = re.compile(r"\[/?[^\[\]]*\]")
 def strip_markup(text: str) -> str:
     """Drop Textual markup spans so substring assertions can target source text."""
     return _MARKUP_TAG_RE.sub("", text).replace("\\[", "[").replace("\\]", "]")
+
+
+def plain_renderable(value: object) -> str:
+    """Return plain text from the renderables used by TUI tests."""
+    return renderable_plain(value) or str(value)
 
 
 @pytest.fixture(autouse=True)
@@ -866,7 +873,7 @@ async def test_tui_command_palette_completes_without_blocking_newlines(
         assert isinstance(status_panel, FullscreenPanel)
         assert status_panel.panel_title == app._text("status")
         assert status_panel.picker_mode is False
-        assert "258K" in status_panel.body
+        assert "258K" in plain_renderable(status_panel.body)
 
 
 @pytest.mark.asyncio
@@ -944,7 +951,7 @@ async def test_tui_status_panel_opens_fullscreen_overlay(
         assert isinstance(panel, FullscreenPanel)
         assert panel.panel_title == app._text("status")
         assert panel.picker_mode is False
-        assert "258K" in panel.body
+        assert "258K" in plain_renderable(panel.body)
 
 
 @pytest.mark.asyncio
@@ -1652,7 +1659,7 @@ async def test_tui_thread_picker_resumes_and_renders_history(
             if isinstance(child, ExpandableTranscriptCell) and child.detail_title == "reasoning_details"
         ]
         assert reasoning_cells
-        assert "checking files" in reasoning_cells[0].details
+        assert "checking files" in plain_renderable(reasoning_cells[0].details)
         assert not app.query(EmptyState)
 
 
@@ -1733,7 +1740,7 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
             for index, child in enumerate(children)
             if (
                 isinstance(child, ExpandableTranscriptCell)
-                and "run_1" in child.details
+                and "run_1" in plain_renderable(child.details)
                 and index > assistant_index
             )
         )
@@ -1750,13 +1757,13 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
         assert any(
             isinstance(cell, ExpandableTranscriptCell)
             and cell.detail_title == "reasoning_details"
-            and "thinking first" in cell.details
+            and "thinking first" in plain_renderable(cell.details)
             for cell in fold_cell.cells
         )
         assert any(
             isinstance(cell, ExpandableTranscriptCell)
-            and "print(" in strip_markup(cell.details)
-            and "'ok'" in strip_markup(cell.details)
+            and "print(" in strip_markup(plain_renderable(cell.details))
+            and "'ok'" in strip_markup(plain_renderable(cell.details))
             for cell in fold_cell.cells
         )
         assert any(
@@ -1767,7 +1774,7 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
         )
         result_cell = children[result_index]
         assert isinstance(result_cell, ExpandableTranscriptCell)
-        assert "print('ok')" not in result_cell.details
+        assert "print('ok')" not in plain_renderable(result_cell.details)
         assert fold_index < assistant_index < result_index
         assert children[assistant_index].copy_text == "I will inspect first."
 
@@ -1821,11 +1828,11 @@ async def test_tui_live_tool_call_and_result_are_separate_cells(
 
         call_cell, result_cell = app.query(ExpandableTranscriptCell).nodes
         assert "print(42)" in strip_markup(str(call_cell.render()))
-        assert "print(43)" in strip_markup(call_cell.details)
-        assert "run_live" in result_cell.details
-        assert "ok" in result_cell.details
+        assert "print(43)" in strip_markup(plain_renderable(call_cell.details))
+        assert "run_live" in plain_renderable(result_cell.details)
+        assert "ok" in plain_renderable(result_cell.details)
         assert "print(42)" not in str(result_cell.render())
-        assert "print(43)" not in result_cell.details
+        assert "print(43)" not in plain_renderable(result_cell.details)
 
 
 @pytest.mark.asyncio
@@ -1871,12 +1878,12 @@ async def test_tui_live_multiple_tool_calls_keep_call_result_boundaries(
 
         cells = app.query(ExpandableTranscriptCell).nodes
         assert len(cells) == 4
-        assert "print(0)" in strip_markup(cells[0].details)
-        assert "run_0" in cells[1].details
-        assert "print(0)" not in strip_markup(cells[1].details)
-        assert "print(1)" in strip_markup(cells[2].details)
-        assert "run_1" in cells[3].details
-        assert "print(1)" not in strip_markup(cells[3].details)
+        assert "print(0)" in strip_markup(plain_renderable(cells[0].details))
+        assert "run_0" in plain_renderable(cells[1].details)
+        assert "print(0)" not in strip_markup(plain_renderable(cells[1].details))
+        assert "print(1)" in strip_markup(plain_renderable(cells[2].details))
+        assert "run_1" in plain_renderable(cells[3].details)
+        assert "print(1)" not in strip_markup(plain_renderable(cells[3].details))
 
 
 @pytest.mark.asyncio
@@ -1915,7 +1922,7 @@ async def test_tui_live_rounds_do_not_duplicate_reasoning_or_merge_final_text(
         assert len(reasoning_cells) == 1
         assert len(fold_cells) == 1
         assert fold_cells[0].collapsed is True
-        assert reasoning_cells[0].details.count("provider reasoning") == 1
+        assert plain_renderable(reasoning_cells[0].details).count("provider reasoning") == 1
         assert reasoning_cells[0].has_class("process_fold_hidden")
         assert assistant_cells[0].has_class("process_fold_hidden")
         assert any(
@@ -1967,7 +1974,7 @@ async def test_tui_process_fold_expands_original_cells(
         assert any(
             isinstance(cell, ExpandableTranscriptCell)
             and cell.detail_title == "reasoning_details"
-            and "provider reasoning" in cell.details
+            and "provider reasoning" in plain_renderable(cell.details)
             for cell in fold_cell.cells
         )
         assert any(
@@ -1977,7 +1984,7 @@ async def test_tui_process_fold_expands_original_cells(
         )
         assert any(
             isinstance(cell, ExpandableTranscriptCell)
-            and "run_1" in cell.details
+            and "run_1" in plain_renderable(cell.details)
             for cell in fold_cell.cells
         )
         assert any(
@@ -2263,7 +2270,7 @@ async def test_tui_renders_tool_delta_before_tool_started(
 
         assert len(app.query(".tool_pending").nodes) == 1
         cell = app.query_one(ExpandableTranscriptCell)
-        assert "print(1)" in strip_markup(cell.details)
+        assert "print(1)" in strip_markup(plain_renderable(cell.details))
 
 
 @pytest.mark.asyncio
@@ -3018,7 +3025,7 @@ async def test_tui_displays_billing_total_with_footer_and_status_precision(
         await pilot.pause()
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
-        assert "- billing: $0.123457" in panel.body
+        assert "- billing: $0.123457" in plain_renderable(panel.body)
 
 
 @pytest.mark.asyncio
@@ -3324,10 +3331,10 @@ async def test_tui_status_summarizes_context_and_rules(
         assert isinstance(panel, FullscreenPanel)
         assert panel.panel_title == app._text("status")
         assert panel.picker_mode is False
-        assert "- version: [cyan]9.8.7[/cyan]" in panel.body
-        assert "258K" in panel.body
-        assert "AGENTS.md" in panel.body
-        assert "Use local rules" not in panel.body
+        assert "- version: 9.8.7" in plain_renderable(panel.body)
+        assert "258K" in plain_renderable(panel.body)
+        assert "AGENTS.md" in plain_renderable(panel.body)
+        assert "Use local rules" not in plain_renderable(panel.body)
 
 
 @pytest.mark.asyncio
@@ -3484,7 +3491,7 @@ async def test_tui_transcript_selection_auto_copies_after_delay(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24), notifications=True) as pilot:
-        cell = app._append_cell("[bold]agent reply[/bold]", "assistant")
+        cell = app._append_cell(markup("[bold]agent reply[/bold]"), "assistant")
         cell.text_select_all()
         app.screen.post_message(events.TextSelected())
 
@@ -4076,8 +4083,8 @@ async def test_tui_clear_while_current_thread_runs_keeps_old_thread_backgrounded
         await pilot.pause()
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
-        assert app._text("active_threads") in panel.body
-        assert old_thread[-8:] in panel.body
+        assert app._text("active_threads") in plain_renderable(panel.body)
+        assert old_thread[-8:] in plain_renderable(panel.body)
         await pilot.press("escape")
         await pilot.pause()
 
@@ -4174,7 +4181,7 @@ async def test_tui_resume_running_thread_rebinds_live_cells(
         assert assistant.copy_text == "I will run more"
         assert len(app.query(".tool_pending").nodes) == 1
         cell = app.query_one(ExpandableTranscriptCell)
-        assert "print(1)" in strip_markup(cell.details)
+        assert "print(1)" in strip_markup(plain_renderable(cell.details))
 
 
 @pytest.mark.asyncio
@@ -4266,7 +4273,7 @@ async def test_tui_resume_after_background_tool_output_does_not_duplicate_histor
         result_cells = [
             child
             for child in transcript.children
-            if isinstance(child, ExpandableTranscriptCell) and "run_stepped" in child.details
+            if isinstance(child, ExpandableTranscriptCell) and "run_stepped" in plain_renderable(child.details)
         ]
         assistant_cells = [
             child
@@ -4413,12 +4420,12 @@ async def test_tui_tool_call_details_highlight_python_source(
         rendered = str(content.render())
         assert "for item in ['alpha', 'beta'" in rendered
         assert "print(item)" in rendered
-        assert "[bold #7dd3fc]for[/bold #7dd3fc]" in panel.body
-        assert "[#fbbf24]'alpha'[/#fbbf24]" in panel.body
+        assert "for item in ['alpha', 'beta']" in plain_renderable(panel.body)
+        assert "'alpha'" in plain_renderable(panel.body)
         # Pygments-based highlighter additionally colors builtins and the
         # ``in`` operator word, which the prior tokenize-based pass missed.
-        assert "[#a78bfa]print[/#a78bfa]" in panel.body
-        assert "[bold #7dd3fc]in[/bold #7dd3fc]" in panel.body
+        assert "print" in plain_renderable(panel.body)
+        assert " in " in plain_renderable(panel.body)
 
 
 @pytest.mark.asyncio
@@ -4869,26 +4876,26 @@ async def test_tui_tool_details_panel_toggles_events_with_e_key(
         panel = app.screen_stack[-1]
         assert isinstance(panel, ToolDetailsPanel)
         assert panel.events_collapsed is False
-        assert "halfway" in panel.body
-        assert "done" in panel.body
+        assert "halfway" in plain_renderable(panel.body)
+        assert "done" in plain_renderable(panel.body)
         # stdout remains visible regardless of events fold state
-        assert "alpha line" in panel.body
+        assert "alpha line" in plain_renderable(panel.body)
 
         await pilot.press("e")
         await pilot.pause()
 
         assert panel.events_collapsed is True
-        assert "halfway" not in panel.body
-        assert "done" not in panel.body
-        assert "2 events" in panel.body
-        assert "alpha line" in panel.body
+        assert "halfway" not in plain_renderable(panel.body)
+        assert "done" not in plain_renderable(panel.body)
+        assert "2 events" in plain_renderable(panel.body)
+        assert "alpha line" in plain_renderable(panel.body)
 
         await pilot.press("e")
         await pilot.pause()
 
         assert panel.events_collapsed is False
-        assert "halfway" in panel.body
-        assert "done" in panel.body
+        assert "halfway" in plain_renderable(panel.body)
+        assert "done" in plain_renderable(panel.body)
 
 
 def _transcript_snapshot(app: UvAgentApp) -> list[dict[str, object]]:

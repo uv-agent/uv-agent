@@ -10,7 +10,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
-from rich.markup import escape
+from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -28,8 +28,7 @@ from uv_agent.billing import billing_total_from_metadata, format_billing_total
 from uv_agent.config import ConfigError
 from uv_agent.environment import application_version, detect_user_language, host_environment_line
 from uv_agent.errors import (
-    error_markup,
-    escape_markup as escape_error_markup,
+    error_renderable,
     format_error,
     is_retryable_provider_error,
 )
@@ -43,7 +42,11 @@ from uv_agent.tui.config_panels import ConfigPanelMixin
 from uv_agent.tui.formatting import (
     format_elapsed,
     format_tokens,
+    join_lines,
+    markup,
     parse_tool_payload,
+    plain,
+    renderable_plain,
     short_thread,
     tool_call_detail_highlight_markup,
     tool_call_preview_line,
@@ -384,7 +387,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 yield EmptyState()
             yield Static("", id="pending-images-btn", classes="hidden")
             yield Static(
-                f"↓ {tr(self.language, 'back_to_bottom')}",
+                plain(f"↓ {tr(self.language, 'back_to_bottom')}"),
                 id="scroll-to-bottom-btn",
                 classes="hidden",
             )
@@ -657,12 +660,15 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._turn_completed_at = None
             for image_path in image_paths or []:
                 self._append_cell(
-                    f"[dim]{escape(self._text('image_pending_sent'))}[/dim] "
-                    f"[cyan]{escape(Path(image_path).name)}[/cyan]",
+                    Text.assemble(
+                        (self._text("image_pending_sent"), "dim"),
+                        " ",
+                        (Path(image_path).name, "cyan"),
+                    ),
                     "event",
                 )
             self._reasoning_cell = self._append_cell(
-                f"[dim]{escape(self._text('thinking'))}...[/dim]",
+                plain(f"{self._text('thinking')}...", style="dim"),
                 "event",
             )
             self._sync_run_state_from_active(run_state)
@@ -697,7 +703,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._turn_started_at = started_at
             self._turn_completed_at = None
             self._reasoning_cell = self._append_cell(
-                f"[dim]{escape(self._text('thinking'))}...[/dim]",
+                plain(f"{self._text('thinking')}...", style="dim"),
                 "event",
             )
             self._sync_run_state_from_active(run_state)
@@ -762,7 +768,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             run_state.status = self._text("error")
             if self._is_active_thread(thread_id):
                 self._flush_pending_stream_retries(run_state)
-                self._append_turn_error(item, display_markup=error_markup(error))
+                self._append_turn_error(item, display_content=error_renderable(error))
                 self._refresh_status(self._text("error"))
         finally:
             next_turn = run_state.queue.pop(0) if run_state.queue else None
@@ -1135,11 +1141,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         message = str(event.get("message") or self._text("model_switch_warning"))
         from_level = str(event.get("from_level") or "")
         to_level = str(event.get("to_level") or "")
-        suffix = ""
+        content = Text(message, style="yellow")
         if from_level or to_level:
-            suffix = f"\n[dim]{escape(from_level or '?')} -> {escape(to_level or '?')}[/dim]"
+            content.append("\n")
+            content.append(f"{from_level or '?'} -> {to_level or '?'}", style="dim")
         return self._append_cell(
-            f"[yellow]{escape(message)}[/yellow]{suffix}",
+            content,
             "event",
             before=before,
             copy_text=message,
@@ -1357,7 +1364,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         elif event_type == "model.stream_retry":
             pass
         elif event_type == "compaction.completed":
-            self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event")
+            self._append_cell(plain(self._text("compacted"), style="dim"), "event")
         elif event_type == "thread.billing_accumulated":
             self._refresh_status()
         elif event_type == "turn.interrupted":
@@ -1765,11 +1772,14 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._last_auto_copied_selection = text
         self.notify(self._text("copied"), timeout=1.5)
 
-    def _queued_turn_markup(self, prompt: str, image_paths: list[Path]) -> str:
-        suffix = ""
+    def _queued_turn_markup(self, prompt: str, image_paths: list[Path]) -> Text:
+        content = Text(self._text("queued"), style="dim")
+        content.append("\n")
+        content.append(prompt)
         if image_paths:
-            suffix = "\n" + f"[dim]+{len(image_paths)} {escape(self._text('images'))}[/dim]"
-        return f"[dim]{escape(self._text('queued'))}[/dim]\n{escape(prompt)}{suffix}"
+            content.append("\n")
+            content.append(f"+{len(image_paths)} {self._text('images')}", style="dim")
+        return content
 
     def _handle_command(self, prompt: str) -> bool:
         command, _, rest = prompt.partition(" ")
@@ -1827,43 +1837,43 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
 
     def _open_help_panel(self) -> None:
         lines = [
-            f"[bold]{escape(self._text('keyboard_shortcuts'))}[/bold]",
-            f"- [cyan]Ctrl+Enter / Ctrl+J[/cyan] [dim]{escape(self._text('help_send'))}[/dim]",
-            f"- [cyan]Enter[/cyan] [dim]{escape(self._text('help_newline'))}[/dim]",
-            f"- [cyan]Ctrl+O / /[/cyan] [dim]{escape(self._text('help_commands'))}[/dim]",
-            f"- [cyan]F1 / ?[/cyan] [dim]{escape(self._text('help_help'))}[/dim]",
-            f"- [cyan]Ctrl+S[/cyan] [dim]{escape(self._text('help_status'))}[/dim]",
-            f"- [cyan]Ctrl+D[/cyan] [dim]{escape(self._text('help_details'))}[/dim]",
-            f"- [cyan]F2[/cyan] [dim]{escape(self._text('help_attach_image'))}[/dim]",
-            f"- [cyan]F3[/cyan] [dim]{escape(self._text('help_preview_images'))}[/dim]",
-            f"- [cyan]Tab[/cyan] [dim]{escape(self._text('help_height'))}[/dim]",
-            f"- [cyan]Ctrl+C[/cyan] [dim]{escape(self._text('help_interrupt_quit'))}[/dim]",
-            "",
-            f"[bold]{escape(self._text('mentions'))}[/bold]",
-            f"- [cyan]@[/cyan] [dim]{escape(self._text('help_mention_files'))}[/dim]",
-            f"- [cyan]@@[/cyan] [dim]{escape(self._text('help_mention_threads'))}[/dim]",
-            "",
-            f"[bold]{escape(self._text('commands'))}[/bold] [dim](Tab/Enter, Esc)[/dim]",
+            Text(self._text("keyboard_shortcuts"), style="bold"),
+            Text.assemble("- ", ("Ctrl+Enter / Ctrl+J", "cyan"), " ", (self._text("help_send"), "dim")),
+            Text.assemble("- ", ("Enter", "cyan"), " ", (self._text("help_newline"), "dim")),
+            Text.assemble("- ", ("Ctrl+O / /", "cyan"), " ", (self._text("help_commands"), "dim")),
+            Text.assemble("- ", ("F1 / ?", "cyan"), " ", (self._text("help_help"), "dim")),
+            Text.assemble("- ", ("Ctrl+S", "cyan"), " ", (self._text("help_status"), "dim")),
+            Text.assemble("- ", ("Ctrl+D", "cyan"), " ", (self._text("help_details"), "dim")),
+            Text.assemble("- ", ("F2", "cyan"), " ", (self._text("help_attach_image"), "dim")),
+            Text.assemble("- ", ("F3", "cyan"), " ", (self._text("help_preview_images"), "dim")),
+            Text.assemble("- ", ("Tab", "cyan"), " ", (self._text("help_height"), "dim")),
+            Text.assemble("- ", ("Ctrl+C", "cyan"), " ", (self._text("help_interrupt_quit"), "dim")),
+            Text(),
+            Text(self._text("mentions"), style="bold"),
+            Text.assemble("- ", ("@", "cyan"), " ", (self._text("help_mention_files"), "dim")),
+            Text.assemble("- ", ("@@", "cyan"), " ", (self._text("help_mention_threads"), "dim")),
+            Text(),
+            Text.assemble((self._text("commands"), "bold"), " ", ("(Tab/Enter, Esc)", "dim")),
         ]
         for spec in self._commands():
             lines.append(
-                f"[cyan]{escape(spec.usage):<18}[/cyan] [dim]{escape(spec.description)}[/dim]"
+                Text.assemble((f"{spec.usage:<18}", "cyan"), " ", (spec.description, "dim"))
             )
-        self._open_panel("\n".join(lines), "help", self._text("help"))
+        self._open_panel(join_lines(lines), "help", self._text("help"))
 
     def _append_help(self) -> None:
-        lines = [f"[bold]{escape(self._text('commands'))}[/bold] [dim](Ctrl+O, F1, Esc)[/dim]"]
+        lines = [Text.assemble((self._text("commands"), "bold"), " ", ("(Ctrl+O, F1, Esc)", "dim"))]
         for spec in self._commands():
             lines.append(
-                f"[cyan]{escape(spec.usage):<18}[/cyan] [dim]{escape(spec.description)}[/dim]"
+                Text.assemble((f"{spec.usage:<18}", "cyan"), " ", (spec.description, "dim"))
             )
-        self._append_cell("\n".join(lines), "event")
+        self._append_cell(join_lines(lines), "event")
 
     def _append_user(self, text: str, *, before: object | None = None) -> TranscriptCell:
         label = "你" if self.language.is_chinese else "you"
         # Codex-style "› " prefix keeps user turns easy to spot.
         return self._append_cell(
-            f"[bold #7dd3fc]› {label}[/bold #7dd3fc]\n{escape(text)}",
+            join_lines([Text(f"› {label}", style="bold #7dd3fc"), plain(text)]),
             "user",
             before=before,
         )
@@ -1894,14 +1904,15 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         first = display_text.splitlines()[0]
         if len(first) > 120:
             first = first[:117].rstrip() + "..."
-        markup = (
-            f"[dim italic]{escape(self._text('thinking'))}[/dim italic]  "
-            f"[italic #a3b1c2]{escape(first)}[/italic #a3b1c2]"
+        content = Text.assemble(
+            (self._text("thinking"), "dim italic"),
+            "  ",
+            (first, "italic #a3b1c2"),
         )
         if self._reasoning_cell is None:
-            self._reasoning_cell = self._append_cell(markup, "reasoning")
+            self._reasoning_cell = self._append_cell(content, "reasoning")
         else:
-            self._reasoning_cell.update(markup)
+            self._reasoning_cell.update(content)
             self._scroll_end()
 
     def _append_reasoning_text(self, existing: str, delta: str) -> str:
@@ -1909,16 +1920,17 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return delta.lstrip()
         return existing + delta
 
-    def _reasoning_markup(self, text: str) -> tuple[str, str]:
+    def _reasoning_markup(self, text: str) -> tuple[Text, Text]:
         stripped = text.strip()
         first = stripped.splitlines()[0]
         if len(first) > 120:
             first = first[:117].rstrip() + "..."
-        summary = (
-            f"[dim italic]{escape(self._text('thinking'))}[/dim italic]  "
-            f"[italic #a3b1c2]{escape(first)}[/italic #a3b1c2]"
+        summary = Text.assemble(
+            (self._text("thinking"), "dim italic"),
+            "  ",
+            (first, "italic #a3b1c2"),
         )
-        return summary, escape(stripped)
+        return summary, plain(stripped)
 
     def _finalize_reasoning(self, text: str) -> None:
         stripped = text.strip()
@@ -2029,7 +2041,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             collapsed=collapsed,
             elapsed_label=elapsed_label if elapsed_label is not None else self._process_elapsed_label(),
             classes="process_fold",
-            markup=True,
         )
         self.query_one("#transcript", VerticalScroll).mount(cell, before=insert_before)
         self._process_fold_cell = cell
@@ -2083,7 +2094,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 pending_cell.update(markup)
                 self._mark_tool_cell_completed(pending_cell)
         if payload is None:
-            markup = f"[dim]{escape(self._text('python'))} {escape(self._text('python_completed'))}[/dim]"
+            markup = plain(f"{self._text('python')} {self._text('python_completed')}", style="dim")
             cell = self._append_cell(markup, "event")
             self._track_process_cell(cell)
             return
@@ -2211,16 +2222,22 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         detail: str,
         *,
         call: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> Text:
         if call is not None and tool_call_preview_line(call):
             return tool_call_summary_markup(
                 {**call, "_status_label": call.get("_status_label") or self._text("python_running")}
             )
         status = str((call or {}).get("_status_label") or self._text("python_running"))
-        return (
-            f"[#7dd3fc]⠿[/#7dd3fc] [bold]{escape(name)}[/bold] "
-            f"[dim]{escape(status)}[/dim]{detail}"
+        content = Text.assemble(
+            ("⠿", "#7dd3fc"),
+            " ",
+            (name, "bold"),
+            " ",
+            (status, "dim"),
         )
+        if detail:
+            content.append(detail, style="dim")
+        return content
 
     def _append_image_attachment_cell(
         self,
@@ -2229,7 +2246,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         before: object | None = None,
     ) -> ImageAttachmentCell:
         self._mark_transcript_content()
-        cell = ImageAttachmentCell(attachment, classes="event", markup=True)
+        cell = ImageAttachmentCell(attachment, classes="event")
         self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
         return cell
@@ -2258,7 +2275,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         elif events:
             self._history_before_offset = _event_offset(events[0])
         if has_more or events:
-            marker = LoadOlderHistoryCell(has_more=has_more, classes="event", markup=True)
+            marker = LoadOlderHistoryCell(has_more=has_more, classes="event")
             transcript.mount(marker, before=insert_before)
             self._history_more_cell = marker
         self._mount_history_events(events, before=insert_before)
@@ -2406,7 +2423,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         elif event_type == "turn.stream_retry":
             mounted.append(self._append_stream_retry(event, before=before))
         elif event_type == "item.compaction":
-            mounted.append(self._append_cell(f"[dim]{escape(self._text('compacted'))}[/dim]", "event", before=before))
+            mounted.append(self._append_cell(plain(self._text("compacted"), style="dim"), "event", before=before))
         elif event_type == "thread.model_switch_warning":
             mounted.append(self._append_model_switch_warning_cell(event, before=before))
         return mounted
@@ -2432,15 +2449,15 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         event: dict[str, Any],
         *,
         before: object | None = None,
-        display_markup: str | None = None,
+        display_content: object | None = None,
     ) -> TranscriptCell:
         error_type = str(event.get("error_type") or "Turn error")
         message = str(event.get("message") or "The turn stopped before producing a final response.")
         retryable = self._is_retryable_error_event(event)
         hint = self._text("retry_network_error_hint") if retryable else self._text("thread_stopped_after_error")
-        content = display_markup or f"[bold red]{escape_error_markup(error_type)}[/bold red] {escape_error_markup(message)}"
+        content = display_content or Text.assemble((error_type, "bold red"), " ", message)
         cell = self._append_cell(
-            f"{content}\n[dim]{escape_error_markup(hint)}[/dim]",
+            join_lines([content, plain(hint, style="dim")]),
             "error",
             before=before,
             copy_text=f"{error_type}: {message}\n{hint}",
@@ -2463,12 +2480,15 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             delay_text = f"{float(delay_s):.1f}s"
         except (TypeError, ValueError):
             delay_text = "?s"
-        markup = (
-            "[dim]⟳ stream empty, retrying "
-            f"{escape(str(attempt or '?'))}/{escape(str(max_attempts or '?'))} "
-            f"in {escape(delay_text)} ({escape(error_type)})[/dim]"
+        return self._append_cell(
+            plain(
+                f"⟳ stream empty, retrying {attempt or '?'}/{max_attempts or '?'} "
+                f"in {delay_text} ({error_type})",
+                style="dim",
+            ),
+            "event",
+            before=before,
         )
-        return self._append_cell(markup, "event", before=before)
 
     def _append_retry_button(self, event: dict[str, Any], *, before: object | None = None) -> RetryTurnButton:
         self._mark_transcript_content()
@@ -2489,7 +2509,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         first = tool_call_preview_line(call, max_chars=72)
         if not first:
             return ""
-        return f"\n[dim]{escape(first)}[/dim]"
+        return f"\n{first}"
 
     def _append_cell(
         self,
@@ -2500,29 +2520,29 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         copy_text: str | None = None,
     ) -> TranscriptCell:
         self._mark_transcript_content()
-        cell = TranscriptCell(content, classes=classes, markup=True, copy_text=copy_text)
+        cell = TranscriptCell(content, classes=classes, copy_text=copy_text)
         self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
         return cell
 
     def _append_expandable_cell(
         self,
-        summary: str,
-        details: str,
+        summary: object,
+        details: object,
         classes: str,
         *,
         before: object | None = None,
     ) -> ExpandableTranscriptCell:
         self._mark_transcript_content()
-        cell = ExpandableTranscriptCell(summary, details, classes=classes, markup=True)
+        cell = ExpandableTranscriptCell(summary, details, classes=classes)
         self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
         return cell
 
     def _append_reasoning_cell(
         self,
-        summary: str,
-        details: str,
+        summary: object,
+        details: object,
         *,
         before: object | None = None,
     ) -> ExpandableTranscriptCell:
@@ -2533,7 +2553,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             detail_title="reasoning_details",
             detail_hint="reasoning_details_hint",
             classes="reasoning",
-            markup=True,
         )
         self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
@@ -2542,11 +2561,11 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _replace_with_expandable_cell(
         self,
         old_cell: TranscriptCell,
-        summary: str,
-        details: str,
+        summary: object,
+        details: object,
         classes: str,
     ) -> ExpandableTranscriptCell:
-        cell = ExpandableTranscriptCell(summary, details, classes=classes, markup=True)
+        cell = ExpandableTranscriptCell(summary, details, classes=classes)
         self.query_one("#transcript", VerticalScroll).mount(cell, before=old_cell)
         old_cell.remove()
         return cell
@@ -2554,8 +2573,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _replace_with_reasoning_cell(
         self,
         old_cell: TranscriptCell,
-        summary: str,
-        details: str,
+        summary: object,
+        details: object,
     ) -> ExpandableTranscriptCell:
         cell = ExpandableTranscriptCell(
             summary,
@@ -2563,7 +2582,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             detail_title="reasoning_details",
             detail_hint="reasoning_details_hint",
             classes="reasoning",
-            markup=True,
         )
         self.query_one("#transcript", VerticalScroll).mount(cell, before=old_cell)
         old_cell.remove()
@@ -2595,7 +2613,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if not threads:
             self._open_fullscreen_panel(
                 self._text("threads"),
-                f"[dim]{escape(self._text('no_threads'))}[/dim]",
+                plain(self._text("no_threads"), style="dim"),
             )
             return
         items = []
@@ -2630,7 +2648,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _open_status_panel(self) -> None:
         self._open_panel(self._status_panel_markup(), "status", self._text("status"))
 
-    def _status_panel_markup(self) -> str:
+    def _status_panel_markup(self) -> Text:
         self.engine.refresh_config()
         level_name = self.level or self.engine.config.runtime.default_level
         rules = self.engine.project_rule_context()
@@ -2639,12 +2657,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             model = self.engine.config.model_for_level(self.level)
             provider = self.engine.config.provider_for_model(model)
             stats = self.engine.context_stats(self.thread_id, self.level)
-            model_line = f"{escape(model.name)} -> {escape(model.model)}"
-            provider_line = f"{escape(provider.name)} / {escape(model.api)}"
+            model_line = f"{model.name} -> {model.model}"
+            provider_line = f"{provider.name} / {model.api}"
             context_line = (
                 f"{stats.percent}% "
                 f"({format_tokens(stats.used_tokens)} / {format_tokens(stats.context_window_tokens)}, "
-                f"{escape(stats.source)})"
+                f"{stats.source})"
             )
             compress_line = (
                 f"{'on' if self.engine.config.runtime.compression.enabled else 'off'} · "
@@ -2652,8 +2670,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 f"headroom {format_tokens(stats.headroom_tokens)}"
             )
         except ConfigError as exc:
-            model_line = "[red]not configured[/red]"
-            provider_line = escape(str(exc))
+            model_line = Text("not configured", style="red")
+            provider_line = str(exc)
             context_line = "-"
             compress_line = "-"
         rules_line = f"{len(rules.rules)} {self._text('status_rules_loaded')}"
@@ -2661,56 +2679,55 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             rules_line += f" · {self._text('truncated')}"
         if rules.omitted_files:
             rules_line += f" · {rules.omitted_files} {self._text('status_rules_omitted')}"
-        lines = [
-            f"- state: [cyan]{escape(self._last_status)}[/cyan]",
-            f"- version: [cyan]{escape(application_version())}[/cyan]",
-            f"- level: [cyan]{escape(level_name)}[/cyan]",
-            f"- model: {model_line}",
-            f"- provider/api: {provider_line}",
-            f"- context: {context_line}",
+        lines: list[Text] = [
+            Text.assemble("- state: ", (self._last_status, "cyan")),
+            Text.assemble("- version: ", (application_version(), "cyan")),
+            Text.assemble("- level: ", (level_name, "cyan")),
+            Text.assemble("- model: ", model_line),
+            Text.assemble("- provider/api: ", provider_line),
+            Text.assemble("- context: ", context_line),
         ]
         if billing_line:
-            lines.append(f"- billing: {billing_line}")
+            lines.append(Text.assemble("- billing: ", billing_line))
         lines.extend(
             [
-                f"- compaction: {compress_line}",
-                f"- rules: {escape(rules_line)}",
-                f"- thread: {escape(short_thread(self.thread_id))}",
-                f"- queued: {self._active_queue_length()}",
-                f"- user state: {escape(str(uv_agent_home()))}",
-                f"- project state: {escape(str(project_state_dir(self.project_root)))}",
-                f"- host: {escape(host_environment_line())}",
-                f"- language: {escape(self.language.name)}",
+                Text.assemble("- compaction: ", compress_line),
+                Text.assemble("- rules: ", rules_line),
+                Text.assemble("- thread: ", short_thread(self.thread_id)),
+                Text.assemble("- queued: ", str(self._active_queue_length())),
+                Text.assemble("- user state: ", str(uv_agent_home())),
+                Text.assemble("- project state: ", str(project_state_dir(self.project_root))),
+                Text.assemble("- host: ", host_environment_line()),
+                Text.assemble("- language: ", self.language.name),
             ]
         )
         background_runs = self._background_run_states()
         if background_runs:
             lines.append(
-                f"- background: [cyan]{len(background_runs)} {escape(self._text('active_threads'))}[/cyan]"
+                Text.assemble("- background: ", (f"{len(background_runs)} {self._text('active_threads')}", "cyan"))
             )
             for run_state in background_runs[:6]:
                 queue = f" · q{len(run_state.queue)}" if run_state.queue else ""
                 lines.append(
-                    f"  - {escape(short_thread(run_state.thread_id))}: "
-                    f"{escape(run_state.status)}{queue}"
+                    Text.assemble("  - ", short_thread(run_state.thread_id), ": ", run_state.status, queue)
                 )
             if len(background_runs) > 6:
-                lines.append(f"  - ... {len(background_runs) - 6} more")
+                lines.append(Text(f"  - ... {len(background_runs) - 6} more"))
         if rules.rules:
-            lines.append("")
-            lines.append(f"[bold]{escape(self._text('rules'))}[/bold]")
+            lines.append(Text())
+            lines.append(Text(self._text("rules"), style="bold"))
             for rule in rules.rules[:6]:
-                suffix = f" [{escape(self._text('truncated'))}]" if rule.truncated else ""
-                lines.append(f"- {escape(rule.scope)}: {escape(str(rule.path))}{suffix}")
+                suffix = f" [{self._text('truncated')}]" if rule.truncated else ""
+                lines.append(Text(f"- {rule.scope}: {rule.path}{suffix}"))
             if len(rules.rules) > 6:
-                lines.append(f"- ... {len(rules.rules) - 6} more")
-        return "\n".join(lines)
+                lines.append(Text(f"- ... {len(rules.rules) - 6} more"))
+        return join_lines(lines)  # type: ignore[return-value]
 
     def _thread_billing_status_line(self) -> str:
         if not self.engine.config.pricing.models:
             return ""
         label = self._thread_billing_label(decimals=6)
-        return escape(label) if label else "-"
+        return label if label else "-"
 
     def _open_command_palette(self, *, query: str = "") -> None:
         self._open_picker(
@@ -2788,7 +2805,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             if run_state.worker is not None:
                 self._replay_running_live_events(run_state)
                 if run_state.status != self._text("idle"):
-                    self._append_cell(f"[dim]{escape(run_state.status)}...[/dim]", "event")
+                    self._append_cell(plain(f"{run_state.status}...", style="dim"), "event")
             elif run_state.retryable_error or run_state.terminal_error:
                 self._turn_started_at = run_state.started_at
                 self._turn_completed_at = run_state.completed_at
@@ -2807,7 +2824,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._history_before_offset = segment.start_offset
         if segment.has_more:
             transcript = self.query_one("#transcript", VerticalScroll)
-            marker = LoadOlderHistoryCell(has_more=True, classes="event", markup=True)
+            marker = LoadOlderHistoryCell(has_more=True, classes="event")
             transcript.mount(marker)
             self._history_more_cell = marker
         self._mount_history_events(segment.events)
@@ -2874,7 +2891,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _cell_text(self, cell: TranscriptCell) -> str:
         parts = [str(cell.copy_text or "")]
         if isinstance(cell, ExpandableTranscriptCell):
-            parts.append(cell.details)
+            parts.append(renderable_plain(cell.details) or "")
         try:
             parts.append(str(cell.render()))
         except Exception:
@@ -2923,8 +2940,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 parts.append(str(content.get("text") or ""))
         return "".join(parts)
 
-    def _open_fullscreen_panel(self, title: str, markup: str, *, subtitle: str = "") -> None:
-        self.push_screen(FullscreenPanel(title=title, body=markup, subtitle=subtitle))
+    def _open_fullscreen_panel(self, title: str, content: object, *, subtitle: str = "") -> None:
+        self.push_screen(FullscreenPanel(title=title, body=content, subtitle=subtitle))
 
     def _active_fullscreen_panel(self) -> FullscreenPanel | None:
         if self.screen_stack and isinstance(self.screen_stack[-1], FullscreenPanel):
@@ -2994,14 +3011,14 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
 
         self.push_screen(panel, handle)
 
-    def _open_panel(self, markup: str, name: str | None = None, title: str | None = None) -> None:
+    def _open_panel(self, content: object, name: str | None = None, title: str | None = None) -> None:
         panel_title = title or (name.title() if name else self._text("panel"))
         panel = self._active_fullscreen_panel()
         if panel is not None and panel.can_navigate:
-            panel.navigate_panel(title=panel_title, body=markup, subtitle=self._text("panel_closes"))
+            panel.navigate_panel(title=panel_title, body=content, subtitle=self._text("panel_closes"))
             self._refresh_status()
             return
-        self._open_fullscreen_panel(panel_title, markup, subtitle=self._text("panel_closes"))
+        self._open_fullscreen_panel(panel_title, content, subtitle=self._text("panel_closes"))
         self._refresh_status()
 
     def _resize_composer(self) -> None:
@@ -3063,10 +3080,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         title = str(digest.get("title") or self._text("new_thread")).strip()
         if len(title) > 48:
             title = title[:45].rstrip() + "..."
-        markup = (
-            f"[dim]{escape(self._text('background_thread_completed'))}[/dim] "
-            f"[cyan]{escape(title or self._text('new_thread'))}[/cyan] "
-            f"[dim]{escape(short_thread(thread_id))}[/dim]"
+        markup = Text.assemble(
+            (self._text("background_thread_completed"), "dim"),
+            " ",
+            (title or self._text("new_thread"), "cyan"),
+            " ",
+            (short_thread(thread_id), "dim"),
         )
         self._append_cell(markup, "event")
 
@@ -3100,27 +3119,24 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 elapsed_seconds = monotonic() - self._busy_started_at
             if elapsed_seconds is not None:
                 elapsed = format_elapsed(elapsed_seconds)
-                elapsed_suffix = f" [dim]({escape(elapsed)})[/dim]"
+                elapsed_suffix = f" ({elapsed})"
 
         if self.busy:
-            footer = (
-                f"[cyan]{spinner}{escape(state_text)}[/cyan]{elapsed_suffix} "
-                f"[dim]{escape(level_name)} · {escape(compact_context)} · "
-                f"{escape(short_thread(self.thread_id))}{queued}[/dim]"
+            footer = Text.assemble(
+                (f"{spinner}{state_text}", "cyan"),
+                (elapsed_suffix, "dim"),
+                " ",
+                (f"{level_name} · {compact_context} · {short_thread(self.thread_id)}{queued}", "dim"),
             )
         else:
-            footer = (
-                f"[dim]{escape(level_name)} · {escape(compact_context)} · "
-                f"{escape(short_thread(self.thread_id))}{queued}[/dim]"
-            )
+            footer = Text(f"{level_name} · {compact_context} · {short_thread(self.thread_id)}{queued}", style="dim")
         if billing_label:
-            footer += f" [dim]·[/dim] [dim]{escape(billing_label)}[/dim]"
+            footer.append(" · ", style="dim")
+            footer.append(billing_label, style="dim")
         background_count = len(self._background_run_states())
         if background_count:
-            footer += (
-                f" [dim]·[/dim] [cyan]{background_count} "
-                f"{escape(self._text('background_active'))}[/cyan]"
-            )
+            footer.append(" · ", style="dim")
+            footer.append(f"{background_count} {self._text('background_active')}", style="cyan")
         self._refresh_window_title()
         try:
             self.query_one("#composer-footer", Static).update(footer)

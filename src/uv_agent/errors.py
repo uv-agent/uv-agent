@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from rich.text import Text
 
 from uv_agent.config import ConfigError
 
@@ -100,15 +100,20 @@ def _provider_error_kind(exc: BaseException) -> str:
     return ""
 
 
-def error_markup(error: DisplayError) -> str:
-    lines = [f"[bold red]{error.title}[/bold red] {escape_markup(error.message)}"]
+def error_renderable(error: DisplayError) -> Text:
+    """Build a styled error block without parsing external text as markup."""
+    first = Text()
+    first.append(error.title, style="bold red")
+    first.append(" ")
+    first.append(error.message)
+    lines = [first]
     if error.hint:
-        lines.append(f"[dim]{escape_markup(error.hint)}[/dim]")
+        lines.append(Text(error.hint, style="dim"))
     if error.detail:
-        lines.append(escape_markup(error.detail))
-    return "\n".join(lines)
-
-
-def escape_markup(value: Any) -> str:
-    text = str(value)
-    return text.replace("[", "\\[").replace("]", "\\]")
+        lines.append(Text(error.detail))
+    result = Text()
+    for index, line in enumerate(lines):
+        if index:
+            result.append("\n")
+        result.append_text(line)
+    return result

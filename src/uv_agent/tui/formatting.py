@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from functools import lru_cache
 from typing import Any
+
+from rich.console import Group, RenderableType
+from rich.text import Text
 
 
 # Runtime event sentinel keys. These mirror values in
@@ -24,9 +28,92 @@ GLYPH_RUNNING = "⠿"
 GLYPH_NESTED = "└─"
 
 
-def escape(value: Any) -> str:
-    """Escape text for Textual markup surfaces."""
-    return str(value).replace("[", "\\[").replace("]", "\\]")
+RenderablePart = str | Text | RenderableType
+
+
+def markup(value: str) -> Text:
+    """Create styled text from trusted, static Rich markup snippets only."""
+    return Text.from_markup(value)
+
+
+def plain(value: Any = "", *, style: str | None = None) -> Text:
+    """Create Rich text from external/plain data without markup parsing."""
+    return Text(str(value), style=style)
+
+
+def line(*parts: Any, style: str | None = None) -> Text:
+    """Compose one ``Text`` line from trusted markup snippets and plain data.
+
+    ``str`` parts are treated as literal text. Use ``markup(...)`` at the call
+    site for trusted labels/glyphs that intentionally contain Rich markup.
+    """
+    text = Text(style=style)
+    for part in parts:
+        if part is None:
+            continue
+        if isinstance(part, Text):
+            text.append_text(part)
+        else:
+            text.append(str(part))
+    return text
+
+
+def join_lines(parts: Iterable[RenderablePart]) -> Text | Group:
+    """Join renderables with newlines, returning ``Text`` when possible.
+
+    Transcript cells mostly need styled text. ``Group`` remains available for
+    future non-Text renderables while keeping plain-text extraction explicit.
+    """
+    items = list(parts)
+    if all(isinstance(item, (str, Text)) for item in items):
+        result = Text()
+        for index, item in enumerate(items):
+            if index:
+                result.append("\n")
+            if isinstance(item, Text):
+                result.append_text(item)
+            else:
+                result.append(str(item))
+        return result
+    grouped: list[RenderableType] = []
+    for index, item in enumerate(items):
+        if index:
+            grouped.append(Text("\n"))
+        grouped.append(item if not isinstance(item, str) else Text(item))
+    return Group(*grouped)
+
+
+def renderable_plain(renderable: object) -> str | None:
+    """Best-effort plain text for copy/search/test helpers.
+
+    Rich renderables do not expose a universal plain-text protocol. The TUI uses
+    ``Text`` for composed external data, so this helper deliberately handles the
+    small set of renderables we create instead of trying to render via a console.
+    """
+    if renderable is None:
+        return ""
+    if isinstance(renderable, str):
+        return renderable
+    if isinstance(renderable, Text):
+        return renderable.plain
+    if isinstance(renderable, Group):
+        rendered = getattr(renderable, "renderables", ())
+        plain_parts: list[str] = []
+        for part in rendered:
+            value = renderable_plain(part)
+            if value is None:
+                return None
+            plain_parts.append(value)
+        return "".join(plain_parts)
+    plain_attr = getattr(renderable, "plain", None)
+    if isinstance(plain_attr, str):
+        return plain_attr
+    return None
+
+
+def indent_text(text: str, prefix: str) -> str:
+    """Indent every displayed line with ``prefix`` while preserving content."""
+    return prefix + text.replace("\n", "\n" + prefix)
 
 
 def parse_tool_payload(output_item: dict[str, Any]) -> dict[str, Any] | None:
@@ -71,78 +158,75 @@ def tool_call_preview_line(call: dict[str, Any] | None, *, max_chars: int = 90) 
     return first
 
 
-def tool_call_summary_markup(call: dict[str, Any]) -> str:
+def tool_call_summary_markup(call: dict[str, Any]) -> Text:
     """Render a run_python call before a result is available."""
     name = str(call.get("name") or "python")
     running = str(call.get("_status_label") or "running")
     preview = tool_call_preview_line(call)
     lines = [
-        f"[#7dd3fc]{GLYPH_RUNNING}[/#7dd3fc] [bold]{escape(name)}[/bold] [dim]{escape(running)}[/dim]"
+        line(
+            markup(f"[#7dd3fc]{GLYPH_RUNNING}[/#7dd3fc] "),
+            plain(name, style="bold"),
+            " ",
+            plain(running, style="dim"),
+        )
     ]
     if preview:
-        lines.append(f"  [dim]{GLYPH_NESTED} script[/dim] {escape(preview)}")
-    return "\n".join(lines)
+        lines.append(line(markup(f"  [dim]{GLYPH_NESTED} script[/dim] "), preview))
+    return join_lines(lines)  # type: ignore[return-value]
 
 
-def tool_call_detail_markup(call: dict[str, Any]) -> str:
+def tool_call_detail_markup(call: dict[str, Any]) -> Text:
     """Render hidden details for a run_python call, including full source."""
     args = tool_call_args(call)
-    lines = [
-        "[dim]call[/dim]",
-        f"name: {escape(str(call.get('name') or 'python'))}",
-    ]
+    lines: list[Text] = [markup("[dim]call[/dim]"), line("name: ", str(call.get("name") or "python"))]
     call_id = str(call.get("call_id") or "")
     if call_id:
-        lines.append(f"call_id: {escape(call_id)}")
+        lines.append(line("call_id: ", call_id))
     code = str(args.get("code") or "").strip()
     if code:
-        lines.append("[dim]script[/dim]")
-        lines.append(escape(code))
+        lines.append(markup("[dim]script[/dim]"))
+        lines.append(plain(code))
     if args:
         remainder = {key: value for key, value in args.items() if key != "code"}
         if remainder:
-            lines.append("[dim]arguments[/dim]")
-            lines.append(escape(json.dumps(remainder, ensure_ascii=False, indent=2)))
+            lines.append(markup("[dim]arguments[/dim]"))
+            lines.append(json_markup(remainder))
     else:
         raw_args = str(call.get("arguments") or "").strip()
         if raw_args:
-            lines.append("[dim]arguments[/dim]")
-            lines.append(escape(raw_args))
-    return "\n".join(lines)
+            lines.append(markup("[dim]arguments[/dim]"))
+            lines.append(plain(raw_args))
+    return join_lines(lines)  # type: ignore[return-value]
 
 
-def tool_call_detail_highlight_markup(call: dict[str, Any]) -> str:
+def tool_call_detail_highlight_markup(call: dict[str, Any]) -> Text:
     """Render hidden details with Python syntax highlighting for script source."""
     args = tool_call_args(call)
-    lines = [
-        "[dim]call[/dim]",
-        f"name: {escape(str(call.get('name') or 'python'))}",
-    ]
+    lines: list[Text] = [markup("[dim]call[/dim]"), line("name: ", str(call.get("name") or "python"))]
     call_id = str(call.get("call_id") or "")
     if call_id:
-        lines.append(f"call_id: {escape(call_id)}")
+        lines.append(line("call_id: ", call_id))
     code = str(args.get("code") or "").strip()
     if code:
-        lines.append("[dim]script[/dim]")
+        lines.append(markup("[dim]script[/dim]"))
         lines.append(python_syntax_markup(code))
     if args:
         remainder = {key: value for key, value in args.items() if key != "code"}
         if remainder:
-            lines.append("[dim]arguments[/dim]")
-            lines.append(escape(json.dumps(remainder, ensure_ascii=False, indent=2)))
+            lines.append(markup("[dim]arguments[/dim]"))
+            lines.append(json_markup(remainder))
     else:
         raw_args = str(call.get("arguments") or "").strip()
         if raw_args:
-            lines.append("[dim]arguments[/dim]")
-            lines.append(escape(raw_args))
-    return "\n".join(lines)
+            lines.append(markup("[dim]arguments[/dim]"))
+            lines.append(plain(raw_args))
+    return join_lines(lines)  # type: ignore[return-value]
 
 
-# Mapping from Pygments token types to Textual markup styles. The list is
-# ordered most-specific first; ``token in parent`` walks the token hierarchy
-# so e.g. ``Token.Literal.String.Single in Token.Literal.String`` matches.
-# Colors intentionally extend the previous tokenize-based palette so existing
-# tests around keyword / string highlight continue to hold.
+# Mapping from Pygments token types to Rich styles. The list is ordered
+# most-specific first; ``token in parent`` walks the token hierarchy so e.g.
+# ``Token.Literal.String.Single in Token.Literal.String`` matches.
 @lru_cache(maxsize=1)
 def _pygments_helpers() -> tuple[Any, Any, tuple[tuple[Any, str], ...]]:
     """Return Pygments lexer/style helpers, importing Pygments on first use."""
@@ -182,18 +266,11 @@ def _pyg_style(token_type: Any) -> str:
     return ""
 
 
-def python_syntax_markup(code: str) -> str:
-    """Return Textual markup with full Python syntax highlighting.
-
-    Uses Pygments' ``PythonLexer`` so the script panel covers keywords,
-    builtins, numbers, operators, decorators, class/function names, string
-    escapes, f-string interpolation, comments and docstrings. Contiguous
-    tokens sharing the same style are coalesced into one markup span to keep
-    the output compact and stable.
-    """
+def python_syntax_markup(code: str) -> Text:
+    """Return styled Rich text with full Python syntax highlighting."""
     if not code:
-        return ""
-    pieces: list[str] = []
+        return Text()
+    result = Text()
     pending_style = ""
     pending_text = ""
 
@@ -201,11 +278,7 @@ def python_syntax_markup(code: str) -> str:
         nonlocal pending_text
         if not pending_text:
             return
-        escaped = escape(pending_text)
-        if pending_style:
-            pieces.append(f"[{pending_style}]{escaped}[/{pending_style}]")
-        else:
-            pieces.append(escaped)
+        result.append(pending_text, style=pending_style or None)
         pending_text = ""
 
     try:
@@ -220,8 +293,8 @@ def python_syntax_markup(code: str) -> str:
             pending_text += token_text
         flush()
     except Exception:
-        return escape(code)
-    return "".join(pieces)
+        return plain(code)
+    return result
 
 
 def strip_runtime_event_lines(text: str, *, run_id: str | None = None) -> str:
@@ -229,10 +302,10 @@ def strip_runtime_event_lines(text: str, *, run_id: str | None = None) -> str:
     if not text:
         return ""
     kept: list[str] = []
-    for line in text.splitlines(keepends=True):
-        if _is_runtime_event_line(line, run_id=run_id):
+    for line_value in text.splitlines(keepends=True):
+        if _is_runtime_event_line(line_value, run_id=run_id):
             continue
-        kept.append(line)
+        kept.append(line_value)
     return "".join(kept)
 
 
@@ -330,7 +403,7 @@ def _payload_elapsed(payload: dict[str, Any]) -> str:
     return ""
 
 
-def tool_result_markup(payload: dict[str, Any]) -> str:
+def tool_result_markup(payload: dict[str, Any]) -> Text:
     """Render a Python runner result as a compact transcript block."""
     returncode = payload.get("returncode")
     timed_out = bool(payload.get("timed_out"))
@@ -339,31 +412,32 @@ def tool_result_markup(payload: dict[str, Any]) -> str:
     glyph, color = _tool_status_glyph(returncode, timed_out)
     status = "timeout" if timed_out else f"exit {returncode}"
     elapsed = _payload_elapsed(payload)
-    elapsed_suffix = f" [dim]· {escape(elapsed)}[/dim]" if elapsed else ""
 
-    header = (
-        f"[{color}]{glyph}[/{color}] [bold]python[/bold] "
-        f"[dim]{escape(run_id)} ·[/dim] "
-        f"[{color}]{status}[/{color}]{elapsed_suffix}"
+    header = line(
+        markup(f"[{color}]{glyph}[/{color}] [bold]python[/bold] "),
+        plain(f"{run_id} ·", style="dim"),
+        " ",
+        plain(status, style=color),
     )
-    lines = [header]
+    if elapsed:
+        header.append(" ")
+        header.append_text(plain(f"· {elapsed}", style="dim"))
+    lines: list[Text] = [header]
     run_id_str = str(payload.get("run_id") or "")
-    raw_stdout = strip_runtime_event_lines(
-        str(payload.get("stdout") or ""), run_id=run_id_str
-    )
+    raw_stdout = strip_runtime_event_lines(str(payload.get("stdout") or ""), run_id=run_id_str)
     stdout = short_block(raw_stdout)
     stderr = short_block(str(payload.get("stderr") or ""))
     if stdout:
-        lines.append("[dim]stdout[/dim]\n" + escape(stdout))
+        lines.append(join_lines([markup("[dim]stdout[/dim]"), plain(stdout)]))  # type: ignore[arg-type]
     if stderr:
-        label = "[dim]stderr[/dim]" if returncode == 0 and not timed_out else "[red]stderr[/red]"
-        lines.append(f"{label}\n" + escape(stderr))
+        label = markup("[dim]stderr[/dim]") if returncode == 0 and not timed_out else markup("[red]stderr[/red]")
+        lines.append(join_lines([label, plain(stderr)]))  # type: ignore[arg-type]
     if truncated:
-        lines.append("[dim]output truncated[/dim]")
-    return "\n".join(lines)
+        lines.append(markup("[dim]output truncated[/dim]"))
+    return join_lines(lines)  # type: ignore[return-value]
 
 
-def tool_timeline_markup(payload: dict[str, Any]) -> str:
+def tool_timeline_markup(payload: dict[str, Any]) -> Text:
     """Render a one-cell tool timeline item with structured events."""
     returncode = payload.get("returncode")
     timed_out = bool(payload.get("timed_out"))
@@ -371,105 +445,90 @@ def tool_timeline_markup(payload: dict[str, Any]) -> str:
     status = "timeout" if timed_out else f"exit {returncode}"
     run_id = str(payload.get("run_id") or "-")
     elapsed = _payload_elapsed(payload)
-    elapsed_suffix = f" [dim]· {escape(elapsed)}[/dim]" if elapsed else ""
-    lines = [
-        f"[{color}]{glyph}[/{color}] [bold]python[/bold] "
-        f"[dim]{escape(run_id)}[/dim] "
-        f"[{color}]{status}[/{color}]{elapsed_suffix}"
-    ]
+    header = line(
+        markup(f"[{color}]{glyph}[/{color}] [bold]python[/bold] "),
+        plain(run_id, style="dim"),
+        " ",
+        plain(status, style=color),
+    )
+    if elapsed:
+        header.append(" ")
+        header.append_text(plain(f"· {elapsed}", style="dim"))
+    lines: list[Text] = [header]
     events = payload.get("events") if isinstance(payload.get("events"), list) else []
     for event in events[:5]:
         if not isinstance(event, dict):
             continue
-        lines.append("  " + structured_event_markup(event))
+        event_line = Text("  ")
+        event_line.append_text(structured_event_markup(event))
+        lines.append(event_line)
     if len(events) > 5:
-        lines.append(f"  [dim]… +{len(events) - 5} more events[/dim]")
+        lines.append(plain(f"  … +{len(events) - 5} more events", style="dim"))
     stderr = short_block(str(payload.get("stderr") or ""), max_lines=3, max_chars=600)
-    stdout_raw = strip_runtime_event_lines(
-        str(payload.get("stdout") or ""), run_id=run_id
-    )
+    stdout_raw = strip_runtime_event_lines(str(payload.get("stdout") or ""), run_id=run_id)
     stdout = short_block(stdout_raw, max_lines=3, max_chars=600)
     if stderr and returncode != 0:
-        lines.append("  [red]" + GLYPH_NESTED + " stderr[/red]\n  " + escape(stderr).replace("\n", "\n  "))
+        lines.append(join_lines([markup(f"  [red]{GLYPH_NESTED} stderr[/red]"), plain(indent_text(stderr, "  "))]))  # type: ignore[arg-type]
     elif stderr:
-        lines.append("  [dim]" + GLYPH_NESTED + " stderr[/dim]\n  " + escape(stderr).replace("\n", "\n  "))
+        lines.append(join_lines([markup(f"  [dim]{GLYPH_NESTED} stderr[/dim]"), plain(indent_text(stderr, "  "))]))  # type: ignore[arg-type]
     if stdout:
-        lines.append("  [dim]" + GLYPH_NESTED + " stdout[/dim]\n  " + escape(stdout).replace("\n", "\n  "))
+        lines.append(join_lines([markup(f"  [dim]{GLYPH_NESTED} stdout[/dim]"), plain(indent_text(stdout, "  "))]))  # type: ignore[arg-type]
     if payload.get("truncated"):
-        lines.append("  [dim]output truncated[/dim]")
-    return "\n".join(lines)
+        lines.append(markup("  [dim]output truncated[/dim]"))
+    return join_lines(lines)  # type: ignore[return-value]
 
 
-def tool_detail_markup(
-    payload: dict[str, Any], *, events_collapsed: bool = False
-) -> str:
-    """Render complete hidden details for an expandable tool cell.
-
-    Structured runtime events are stripped from the displayed stdout (they are
-    already surfaced individually in the events section). Events are rendered
-    one per line in a friendly format so backslash escape characters from
-    ``json.dumps`` are not shown. The events section can be folded via
-    ``events_collapsed=True``.
-    """
-    lines = [
-        "[dim]details[/dim]",
-        f"run_id: {escape(str(payload.get('run_id') or '-'))}",
-    ]
+def tool_detail_markup(payload: dict[str, Any], *, events_collapsed: bool = False) -> Text:
+    """Render complete hidden details for an expandable tool cell."""
+    lines: list[Text] = [markup("[dim]details[/dim]"), line("run_id: ", str(payload.get("run_id") or "-"))]
     elapsed = _payload_elapsed(payload)
     if elapsed:
-        lines.append(f"elapsed: {escape(elapsed)}")
+        lines.append(line("elapsed: ", elapsed))
     run_log_path = str(payload.get("run_log_path") or "")
     if run_log_path:
-        lines.append(f"run_log_path: {escape(run_log_path)}")
+        lines.append(line("run_log_path: ", run_log_path))
     events = payload.get("events") if isinstance(payload.get("events"), list) else []
     valid_events = [event for event in events if isinstance(event, dict)]
     if valid_events:
         if events_collapsed:
-            lines.append(
-                "[dim]events (collapsed · "
-                f"{len(valid_events)} events · press e to expand)[/dim]"
-            )
+            lines.append(plain(f"events (collapsed · {len(valid_events)} events · press e to expand)", style="dim"))
         else:
-            lines.append("[dim]events (press e to collapse)[/dim]")
-            for event in valid_events:
-                lines.append(structured_event_markup(event))
+            lines.append(markup("[dim]events (press e to collapse)[/dim]"))
+            lines.extend(structured_event_markup(event) for event in valid_events)
     run_id = str(payload.get("run_id") or "")
-    stdout = strip_runtime_event_lines(
-        str(payload.get("stdout") or ""), run_id=run_id
-    ).strip()
+    stdout = strip_runtime_event_lines(str(payload.get("stdout") or ""), run_id=run_id).strip()
     stderr = str(payload.get("stderr") or "").strip()
     if stdout:
-        lines.append("[dim]stdout[/dim]")
-        lines.append(escape(stdout))
+        lines.append(markup("[dim]stdout[/dim]"))
+        lines.append(plain(stdout))
     if stderr:
-        lines.append("[dim]stderr[/dim]")
-        lines.append(escape(stderr))
-    return "\n".join(lines)
+        lines.append(markup("[dim]stderr[/dim]"))
+        lines.append(plain(stderr))
+    return join_lines(lines)  # type: ignore[return-value]
 
 
-def structured_event_markup(event: dict[str, Any]) -> str:
+def structured_event_markup(event: dict[str, Any]) -> Text:
     """Render one uv_agent_runtime structured event for compact timelines."""
     kind = str(event.get("kind") or "event")
-    arrow = f"[dim]{GLYPH_NESTED}[/dim]"
+    prefix = markup(f"[dim]{GLYPH_NESTED}[/dim] ")
     if kind == "progress":
-        message = str(event.get("message") or "")
-        return f"{arrow} [cyan]progress[/cyan] {escape(message)}"
+        return line(prefix, markup("[cyan]progress[/cyan] "), str(event.get("message") or ""))
     if kind == "result":
-        return f"{arrow} [cyan]result[/cyan] [dim]{escape(json.dumps(event, ensure_ascii=False))}[/dim]"
+        return line(prefix, markup("[cyan]result[/cyan] "), plain(json.dumps(event, ensure_ascii=False), style="dim"))
     if kind == "look_at":
-        return f"{arrow} [cyan]look_at[/cyan] {escape(str(event.get('path') or ''))}"
+        return line(prefix, markup("[cyan]look_at[/cyan] "), str(event.get("path") or ""))
     if kind == "subagent.started":
-        return f"{arrow} [magenta]subagent[/magenta] [dim]started[/dim]"
+        return line(prefix, markup("[magenta]subagent[/magenta] [dim]started[/dim]"))
     if kind == "subagent.completed":
         thread_id = str(event.get("thread_id") or "")
         summary = str(event.get("summary") or "").splitlines()[0]
         if len(summary) > 90:
             summary = summary[:87].rstrip() + "..."
-        detail = f" {escape(short_thread(thread_id))}" if thread_id else ""
-        return f"{arrow} [magenta]subagent[/magenta] [dim]completed{detail}[/dim] {escape(summary)}"
-    return f"{arrow} [dim]{escape(kind)}[/dim] [dim]{escape(json.dumps(event, ensure_ascii=False))}[/dim]"
+        detail = f" {short_thread(thread_id)}" if thread_id else ""
+        return line(prefix, markup("[magenta]subagent[/magenta] "), plain(f"completed{detail}", style="dim"), " ", summary)
+    return line(prefix, plain(kind, style="dim"), " ", plain(json.dumps(event, ensure_ascii=False), style="dim"))
 
 
-def json_markup(value: object) -> str:
-    """Render JSON with escaped markup for transcript display."""
-    return escape(json.dumps(value, ensure_ascii=False, indent=2))
+def json_markup(value: object) -> Text:
+    """Render JSON as plain Rich text for transcript display."""
+    return plain(json.dumps(value, ensure_ascii=False, indent=2))

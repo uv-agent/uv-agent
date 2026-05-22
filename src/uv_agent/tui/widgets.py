@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Any
 
 from rich.cells import cell_len
-from rich.markup import escape, render as render_markup
 from rich.segment import Segment
 from rich.style import Style
+from rich.text import Text
 from textual import events
 from textual.containers import VerticalScroll
 from textual.reactive import reactive
@@ -15,21 +15,21 @@ from textual.strip import Strip
 from textual.widgets import Button, Static, TextArea
 
 from uv_agent.tui import theme
-from uv_agent.tui.formatting import format_tokens
+from uv_agent.tui.formatting import format_tokens, join_lines, plain, renderable_plain
 from uv_agent.tui.styles import EMPTY_STATE_CSS, TRANSCRIPT_CELL_CSS
 
 
-def image_attachment_markup(attachment: dict[str, Any], *, label: str = "image attached") -> str:
+def image_attachment_markup(attachment: dict[str, Any], *, label: str = "image attached") -> Text:
     path = Path(str(attachment.get("stored_path") or ""))
     name = path.name or str(path)
     size = int(attachment.get("size_bytes") or 0)
     size_label = f" · {format_tokens(size)}B" if size else ""
-    return (
-        f"[dim]{escape(label)}[/dim] "
-        f"[cyan]{escape(name)}[/cyan]"
-        f"[dim]{escape(size_label)}[/dim]\n"
-        "[dim][preview][/dim]"
-    )
+    first = Text()
+    first.append(str(label), style="dim")
+    first.append(" ")
+    first.append(name, style="cyan")
+    first.append(size_label, style="dim")
+    return join_lines([first, plain("[preview]", style="dim")])  # type: ignore[return-value]
 
 class TranscriptScroll(VerticalScroll):
     """VerticalScroll that auto-follows tail until the user intervenes.
@@ -188,8 +188,16 @@ class EmptyState(Static):
         self.frame += 1
         text = getattr(self.app, "_text", lambda key: key)
         self.update(
-            f"[bold #dce7f3]{escape(text('ready_title'))}[/bold #dce7f3] [dim]{escape(frame)}[/dim]\n"
-            f"[dim]{escape(text('ready_hint'))}[/dim]"
+            join_lines(
+                [
+                    Text.assemble(
+                        (text("ready_title"), "bold #dce7f3"),
+                        " ",
+                        (frame, "dim"),
+                    ),
+                    plain(text("ready_hint"), style="dim"),
+                ]
+            )
         )
 
 
@@ -232,6 +240,9 @@ class TranscriptCell(Static):
     DEFAULT_CSS = TRANSCRIPT_CELL_CSS
 
     def __init__(self, content: object = "", *, copy_text: str | None = None, **kwargs: Any) -> None:
+        # Transcript content is passed as renderables. Parsing string markup here
+        # would reintroduce the bracket-escaping bug this refactor removes.
+        kwargs.setdefault("markup", False)
         super().__init__(content, **kwargs)
         self.copy_text: str | None = copy_text if copy_text is not None else self._plain_copy_text(content)
         self._rendered_copy_lines: dict[int, str] = {}
@@ -313,12 +324,7 @@ class TranscriptCell(Static):
         return self.copy_text
 
     def _plain_copy_text(self, content: object) -> str | None:
-        if isinstance(content, str):
-            try:
-                return str(render_markup(content))
-            except Exception:
-                return content
-        return None
+        return renderable_plain(content)
 
 
 class RetryTurnButton(Button):
@@ -334,8 +340,8 @@ class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
 
     def __init__(
         self,
-        summary: str,
-        details: str,
+        summary: object,
+        details: object,
         detail_title: str = "tool_details",
         detail_hint: str = "tool_details_hint",
         **kwargs: Any,
@@ -368,7 +374,7 @@ class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
             event.stop()
             app.action_focus_composer()
 
-    def set_details(self, summary: str, details: str) -> None:
+    def set_details(self, summary: object, details: object) -> None:
         self.summary = summary
         self.details = details
         self.update(self._content())
@@ -378,10 +384,18 @@ class ExpandableTranscriptCell(TranscriptCell, can_focus=True):
         if hasattr(app, "_open_tool_details_panel"):
             app._open_tool_details_panel(self)
 
-    def _content(self) -> str:
-        lines = self.summary.splitlines() or [""]
-        lines[0] = f"{lines[0]} [dim][details][/dim]"
-        return "\n".join(lines)
+    def _content(self) -> object:
+        if isinstance(self.summary, Text):
+            lines = list(self.summary.split(allow_blank=True)) or [Text()]
+            lines[0].append(" ")
+            lines[0].append("[details]", style="dim")
+            return join_lines(lines)
+        summary_text = renderable_plain(self.summary)
+        if summary_text is not None:
+            lines = summary_text.splitlines() or [""]
+            lines[0] = f"{lines[0]} [details]"
+            return "\n".join(lines)
+        return join_lines([self.summary, plain("[details]", style="dim")])
 
 
 class FoldedProcessCell(TranscriptCell, can_focus=True):
@@ -457,10 +471,13 @@ class FoldedProcessCell(TranscriptCell, can_focus=True):
         state = text(key)
         step_label = text("process_fold_step" if count == 1 else "process_fold_steps")
         hint = text("process_fold_expand_hint" if self.collapsed else "process_fold_collapse_hint")
-        elapsed = f" · {escape(self.elapsed_label)}" if self.elapsed_label else ""
+        elapsed = f" · {self.elapsed_label}" if self.elapsed_label else ""
         self.update(
-            f"[dim]{escape(state)} · {count} {escape(step_label)}{elapsed}[/dim] "
-            f"[dim]{escape(hint)}[/dim]"
+            Text.assemble(
+                (f"{state} · {count} {step_label}{elapsed}", "dim"),
+                " ",
+                (hint, "dim"),
+            )
         )
 
 
@@ -516,7 +533,7 @@ class LoadOlderHistoryCell(TranscriptCell, can_focus=True):
     def _refresh_content(self) -> None:
         text = getattr(self.app, "_text", lambda key: key)
         label = text("load_older_history") if self.has_more else text("history_start")
-        self.update(f"[dim]{escape(label)}[/dim]")
+        self.update(plain(label, style="dim"))
 
     def on_click(self, event: events.Click) -> None:
         event.stop()

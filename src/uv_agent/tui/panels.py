@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from rich.markup import escape
 from rich.rule import Rule
+from rich.text import Text
 from textual import events
 from textual.actions import SkipAction
 from textual.app import ComposeResult
@@ -15,7 +15,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets._option_list import Option
 
-from uv_agent.tui.formatting import format_tokens, tool_detail_markup
+from uv_agent.tui.formatting import format_tokens, join_lines, plain, renderable_plain, tool_detail_markup
 from uv_agent.tui.state import PanelPage, PendingImage, PickerItem
 from uv_agent.tui.styles import FULLSCREEN_PANEL_CSS
 from uv_agent.tui.widgets import ExpandableTranscriptCell
@@ -43,7 +43,7 @@ class FullscreenPanel(ModalScreen[str | None]):
         self,
         *,
         title: str,
-        body: str = "",
+        body: object = "",
         items: list[PickerItem] | None = None,
         subtitle: str = "",
         initial_filter: str = "",
@@ -79,7 +79,7 @@ class FullscreenPanel(ModalScreen[str | None]):
                 yield Static(self.subtitle, id="panel-subtitle")
             yield Input(placeholder=getattr(self.app, "_text", lambda key: key)("filter"), id="panel-filter")
             yield PickerOptionList(id="panel-content", compact=False)
-            yield VerticalScroll(Static(self.body, markup=True, id="panel-body-content"), id="panel-body")
+            yield VerticalScroll(Static(self.body, markup=False, id="panel-body-content"), id="panel-body")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def on_mount(self) -> None:
@@ -263,7 +263,7 @@ class FullscreenPanel(ModalScreen[str | None]):
             )
         )
 
-    def navigate_panel(self, *, title: str, body: str, subtitle: str = "") -> None:
+    def navigate_panel(self, *, title: str, body: object, subtitle: str = "") -> None:
         self._page_stack.append(self._snapshot_page())
         self._load_page(PanelPage(title=title, body=body, subtitle=subtitle))
 
@@ -351,9 +351,15 @@ class FullscreenPanel(ModalScreen[str | None]):
                 continue
             options.append(
                 Option(
-                    f"[bold cyan]{escape(item.title)}[/bold cyan]"
-                    + (f"\n[dim]{escape(item.description)}[/dim]" if item.description else "")
-                    + (f"\n[dim]{escape(item.meta)}[/dim]" if item.meta else ""),
+                    join_lines(
+                        part
+                        for part in [
+                            plain(item.title, style="bold cyan"),
+                            plain(item.description, style="dim") if item.description else None,
+                            plain(item.meta, style="dim") if item.meta else None,
+                        ]
+                        if part is not None
+                    ),
                     id=option_id,
                     disabled=disabled,
                 )
@@ -370,7 +376,7 @@ class FullscreenPanel(ModalScreen[str | None]):
                 label = text("no_skills")
             else:
                 label = text("no_matches")
-            options = [Option(f"[dim]{escape(label)}[/dim]", id="")]
+            options = [Option(plain(label, style="dim"), id="")]
         option_list = self.query_one("#panel-content", OptionList)
         previous = option_list.highlighted
         option_list.set_options(options)
@@ -490,22 +496,23 @@ class ToolDetailsPanel(FullscreenPanel):
             pass
 
 
-def _update_static_if_changed(widget: Static, markup: str) -> None:
-    """Call ``Static.update`` only when the rendered markup actually changes.
+def _update_static_if_changed(widget: Static, content: object) -> None:
+    """Call ``Static.update`` only when the rendered content actually changes.
 
     ``Static.update`` always triggers a repaint, even if the new content is
     identical to the previous one. For widgets sharing the screen with a
     :class:`TerminalImage`, every redundant repaint becomes a visible image
     flicker on terminals using sixel / TGP encoding. The previous value is
-    cached as an attribute on the widget instance (``Static`` keeps its
-    internal content under a name-mangled attribute, so storing our own copy
-    is the simplest stable comparison).
+    The previous plain value is cached as an attribute on the widget instance
+    (``Static`` keeps its internal content under a name-mangled attribute, so
+    storing our own copy is the simplest stable comparison).
     """
 
-    if getattr(widget, "_uv_last_markup", None) == markup:
+    cache_key = renderable_plain(content) or repr(content)
+    if getattr(widget, "_uv_last_content", None) == cache_key:
         return
-    widget._uv_last_markup = markup  # type: ignore[attr-defined]
-    widget.update(markup)
+    widget._uv_last_content = cache_key  # type: ignore[attr-defined]
+    widget.update(content)
 
 
 _TERMINAL_IMAGE_CLASS: type[Any] | None = None
@@ -600,7 +607,7 @@ class ImagePreviewPanel(FullscreenPanel):
                 yield Static(self.panel_title, id="panel-header")
                 yield Static(self.subtitle, id="panel-subtitle")
             with VerticalScroll(id="image-preview-scroll"):
-                yield Static("", markup=True, id="image-preview-meta")
+                yield Static("", markup=False, id="image-preview-meta")
                 yield _stable_terminal_image_class()(id="image-preview")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
@@ -686,11 +693,11 @@ class ImagePreviewPanel(FullscreenPanel):
             return None
         return self.attachments[self.index]
 
-    def _attachment_markup(self) -> str:
+    def _attachment_markup(self) -> Text:
         text = getattr(self.app, "_text", lambda key: key)
         attachment = self._current_attachment()
         if attachment is None:
-            return f"[dim]{escape(text('no_images'))}[/dim]"
+            return plain(text("no_images"), style="dim")
         path = Path(str(attachment.get("stored_path") or ""))
         source = str(attachment.get("source_path") or "")
         note = str(attachment.get("note") or "").strip()
@@ -701,17 +708,18 @@ class ImagePreviewPanel(FullscreenPanel):
         display_name = Path(source).name if source else (path.name or str(path))
         mime = str(attachment.get("mime_type") or "").strip()
         parts = [
-            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold]",
-            f"[cyan]{escape(display_name)}[/cyan]",
+            Text(f"{self.index + 1}/{len(self.attachments)}", style="bold"),
+            plain(display_name, style="cyan"),
         ]
         if mime:
-            parts.append(escape(mime))
+            parts.append(plain(mime))
         if size:
-            parts.append(f"{format_tokens(size)}B")
-        parts.append(f"[dim]{escape(str(path))}[/dim]")
-        line = " · ".join(parts)
+            parts.append(plain(f"{format_tokens(size)}B"))
+        parts.append(plain(str(path), style="dim"))
+        line = Text(" · ").join(parts)
         if note:
-            line += f"  [dim]{escape(text('image_note'))}: {escape(note)}[/dim]"
+            line.append("  ")
+            line.append(f"{text('image_note')}: {note}", style="dim")
         return line
 
 
@@ -738,7 +746,7 @@ class PendingImagePreviewPanel(ImagePreviewPanel):
                 yield Static(self.subtitle, id="panel-subtitle")
             yield Button("", variant="error", id="pending-image-delete", compact=True)
             with VerticalScroll(id="image-preview-scroll"):
-                yield Static("", markup=True, id="image-preview-meta")
+                yield Static("", markup=False, id="image-preview-meta")
                 yield _stable_terminal_image_class()(id="image-preview")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
@@ -780,22 +788,22 @@ class PendingImagePreviewPanel(ImagePreviewPanel):
         self.attachments = [image.to_attachment() for image in self.pending_images]
         self._refresh_current()
 
-    def _attachment_markup(self) -> str:
+    def _attachment_markup(self) -> Text:
         attachment = self._current_attachment()
         if attachment is None:
             text = getattr(self.app, "_text", lambda key: key)
-            return f"[dim]{escape(text('no_pending_images'))}[/dim]"
+            return plain(text("no_pending_images"), style="dim")
         path = Path(str(attachment.get("stored_path") or ""))
         size = int(attachment.get("size_bytes") or 0)
         width = int(attachment.get("width") or 0)
         height = int(attachment.get("height") or 0)
         parts = [
-            f"[bold]{self.index + 1}/{len(self.attachments)}[/bold]",
-            f"[cyan]{escape(path.name or str(path))}[/cyan]",
+            Text(f"{self.index + 1}/{len(self.attachments)}", style="bold"),
+            plain(path.name or str(path), style="cyan"),
         ]
         if width and height:
-            parts.append(f"{width}×{height}")
+            parts.append(plain(f"{width}×{height}"))
         if size:
-            parts.append(f"{format_tokens(size)}B")
-        parts.append(f"[dim]{escape(str(path))}[/dim]")
-        return " · ".join(parts)
+            parts.append(plain(f"{format_tokens(size)}B"))
+        parts.append(plain(str(path), style="dim"))
+        return Text(" · ").join(parts)

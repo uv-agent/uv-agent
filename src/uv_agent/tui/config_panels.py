@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from rich.markup import escape
+from rich.text import Text
 
 from uv_agent.config import (
     ConfigError,
@@ -14,7 +14,7 @@ from uv_agent.config import (
     redact_config,
 )
 from uv_agent.environment import detect_user_language
-from uv_agent.tui.formatting import format_tokens
+from uv_agent.tui.formatting import format_tokens, join_lines, plain
 from uv_agent.tui.state import PickerItem
 
 
@@ -172,21 +172,21 @@ class ConfigPanelMixin:
 
     def _open_config_sources_panel(self) -> None:
         sources = config_sources(self.project_root)
-        lines = ["[bold]sources[/bold]"]
+        lines = [Text("sources", style="bold")]
         for source in sources:
             exists = "yes" if source["exists"] else "no"
             lines.append(
-                f"- {escape(source['scope'])}: {escape(source['path'])} [dim]exists={exists}[/dim]"
+                Text.assemble(f"- {source['scope']}: {source['path']} ", (f"exists={exists}", "dim"))
             )
-        lines.append(f"\n[bold]editable[/bold]\n{escape(str(editable_config_path(self.project_root)))}")
-        self._open_panel("\n".join(lines), "config", self._text("config_sources"))
+        lines.extend([Text(), Text("editable", style="bold"), plain(str(editable_config_path(self.project_root)))])
+        self._open_panel(join_lines(lines), "config", self._text("config_sources"))
 
     def _open_config_raw_panel(self) -> None:
         redacted = redact_config(load_raw_config(self.project_root))
         preview = json.dumps(redacted, ensure_ascii=False, indent=2)
         if len(preview) > 3200:
             preview = preview[:3200].rstrip() + "\n..."
-        self._open_panel(escape(preview), "config", self._text("config_raw"))
+        self._open_panel(plain(preview), "config", self._text("config_raw"))
 
     def _set_default_level(self, name: str) -> None:
         if name not in self.engine.config.levels:
@@ -295,26 +295,31 @@ class ConfigPanelMixin:
             self._flash(str(exc), severity="error")
             return
         lines = [
-            f"[bold cyan]{escape(name)}[/bold cyan]",
-            f"- {self._text('models_provider')}: {escape(provider.name)}",
-            f"- model: {escape(model.model)}",
-            f"- {self._text('models_api')}: {escape(model.api)}",
-            f"- {self._text('models_context_window')}: "
-            f"{format_tokens(model.context_window_tokens)}",
+            Text(name, style="bold cyan"),
+            Text(f"- {self._text('models_provider')}: {provider.name}"),
+            Text(f"- model: {model.model}"),
+            Text(f"- {self._text('models_api')}: {model.api}"),
+            Text(
+                f"- {self._text('models_context_window')}: "
+                f"{format_tokens(model.context_window_tokens)}"
+            ),
         ]
-        lines.append("")
+        lines.append(Text())
         lines.append(
-            f"[dim]{escape(self._text('models_edit_hint'))} "
-            f"{escape(str(editable_config_path(self.project_root)))}[/dim]"
+            Text(
+                f"{self._text('models_edit_hint')} "
+                f"{editable_config_path(self.project_root)}",
+                style="dim",
+            )
         )
-        self._open_panel("\n".join(lines), "models", self._text("models"))
+        self._open_panel(join_lines(lines), "models", self._text("models"))
 
     def _handle_level_command(self, name: str) -> None:
         if not name:
             self._open_models_panel()
             return
         if name not in self.engine.config.levels:
-            self._append_cell(f"[red]{escape(self._text('unknown_level'))}[/red] {escape(name)}", "error")
+            self._append_cell(Text.assemble((self._text("unknown_level"), "red"), " ", name), "error")
             return
         previous_level = self._current_level_for_thread(self.thread_id)
         if (
@@ -331,7 +336,7 @@ class ConfigPanelMixin:
         self.level = name
         if self.thread_id is not None:
             self._persist_thread_level(self.thread_id, name)
-        self._append_cell(f"[dim]{escape(self._text('level'))}[/dim] [cyan]{escape(name)}[/cyan]", "event")
+        self._append_cell(Text.assemble((self._text("level"), "dim"), " ", (name, "cyan")), "event")
         self._refresh_status()
 
     def _open_mcp_panel(self) -> None:

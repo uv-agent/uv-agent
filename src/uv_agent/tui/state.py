@@ -22,7 +22,7 @@ class PickerItem:
 @dataclass
 class PanelPage:
     title: str
-    body: str = ""
+    body: object = ""
     items: list[PickerItem] | None = None
     subtitle: str = ""
     filter_value: str = ""
