@@ -232,6 +232,12 @@ def _event_offset(event: dict[str, Any] | None) -> int | None:
 class TranscriptScreen(Screen[None]):
     """Default screen with tighter transcript selection behavior."""
 
+    def on_paste(self, event: events.Paste) -> None:
+        """Forward unhandled pastes to the app-level composer fallback."""
+        handler = getattr(self.app, "_handle_unfocused_composer_paste", None)
+        if callable(handler):
+            handler(event)
+
     def _watch__select_state(self, select_state: Any) -> None:
         super()._watch__select_state(select_state)
         self._tighten_transcript_selection()
@@ -480,6 +486,47 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._last_auto_copied_selection = ""
             return
         self._schedule_selection_copy(selected_text, source="screen")
+
+    def _handle_unfocused_composer_paste(self, event: events.Paste) -> None:
+        """Recover bracketed pastes that arrive while terminal focus is cleared.
+
+        Windows Terminal shows a native confirmation dialog for large pastes. That
+        dialog emits FocusOut, so Textual temporarily removes widget focus before
+        the bracketed paste payload is delivered. With no focused widget, Textual
+        forwards the Paste event to the screen and the composer never sees it.
+        If the composer was the widget blurred by AppBlur, treat the paste as
+        intended for the composer and insert it exactly like TextArea's paste
+        handler would.
+        """
+        if self.screen is not self.default_screen:
+            return
+        try:
+            composer = self.query_one("#composer", TextArea)
+        except NoMatches:
+            return
+
+        # Avoid duplicating normal paste handling. When the composer is still
+        # focused, Textual routes the Paste event there first; it bubbles up to
+        # the app only after TextArea has already inserted the text.
+        if self.screen.focused is composer:
+            return
+        if self.screen.focused is not None:
+            return
+        if self._last_focused_on_app_blur is not composer:
+            return
+
+        event.stop()
+
+        # A Paste event is terminal input, just like a key press, but Textual's
+        # App.on_event only treats Key/MouseDown as focus-restoring input. Mark
+        # the app focused now so bindings/styles recover even if FocusIn arrives
+        # after the paste payload.
+        if not self.app_focus:
+            self.app_focus = True
+
+        result = composer.replace(event.text, *composer.selection, maintain_selection_offset=False)
+        composer.move_cursor(result.end_location)
+        composer.focus()
 
     def _tick(self) -> None:
         if not self._transcript_has_content:

@@ -2314,6 +2314,40 @@ async def test_tui_enter_keeps_newline_when_composer_has_focus(
 
 
 @pytest.mark.asyncio
+async def test_tui_large_paste_recovers_composer_after_terminal_blur(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        assert app.screen.focused is composer
+
+        # Windows Terminal's large-paste confirmation dialog sends FocusOut
+        # before it delivers the bracketed paste payload. Textual reacts by
+        # clearing widget focus, so the paste would otherwise target the screen
+        # instead of the composer.
+        app.post_message(events.AppBlur())
+        await pilot.pause()
+        assert app.screen.focused is None
+
+        pasted_text = "x" * 6000
+        app.post_message(events.Paste(pasted_text))
+        await pilot.pause()
+
+        assert composer.text == pasted_text
+        assert app.screen.focused is composer
+        assert app.app_focus is True
+
+
+@pytest.mark.asyncio
 async def test_tui_composer_up_down_browses_recent_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
