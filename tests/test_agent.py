@@ -2245,8 +2245,10 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "explicitly asks for a detailed explanation of specific content" in prompt
     assert "project-shared Python venv" in prompt
     assert 'run_process_text(["uv", "pip", "install", "--python", sys.executable' in prompt
-    assert "Do not use PEP 723 inline metadata" in prompt
-    assert "does not support script_id, run_id, rerun, uv_args, or cwd parameters" in prompt
+    assert "For dependency installation, leave the active directory unchanged" in prompt
+    assert "run_python accepts code, script_args, and timeout_s" in prompt
+    assert "thread's active cwd" in prompt
+    assert "PEP 723" not in prompt
     assert "For mature domain problems" in prompt
     assert "unidiff for parsing diffs" in prompt
     assert "libcst for Python source transforms" in prompt

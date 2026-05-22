@@ -35,8 +35,8 @@ defaulting to 200. The runner prunes `<run_id>.py` and `<run_id>.jsonl` together
 
 ## Dependencies
 
-Managed scripts do not use PEP 723 metadata. To install a third-party package,
-run `uv pip install` against the current interpreter:
+To install a third-party package, run `uv pip install` against the current
+interpreter:
 
 ```python
 import sys
@@ -51,9 +51,9 @@ run_process_text(
 import requests
 ```
 
-Do not call `enter_dir` for dependency installation, and do not pass `cwd` to
-`run_process_text` for dependency installation. The target environment is chosen
-by `--python sys.executable`; the current directory is not part of the install
+For dependency installation, leave the active directory unchanged and call
+`run_process_text` without `cwd`. The target environment is chosen by
+`--python sys.executable`; the current directory is not part of the install
 semantics. Installed packages persist in the project script venv for later runs.
 
 ## Runtime Helpers
