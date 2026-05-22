@@ -1,13 +1,12 @@
 # uv-agent Project Rules
 
-This repository builds `uv-agent`, an experimental coding agent with a Textual TUI. The product goal is documented in `docs/design.md`; this file records the repository rules an agent should follow while editing the project.
+This repository builds `uv-agent`, an experimental coding agent with a Textual TUI. This file records the repository rules an agent should follow while editing the project.
 
 ## Project Shape
 
 - `src/uv_agent/`: host application, configuration, model clients, session store, Python runner, project rules, skills/MCP discovery, and TUI.
 - `src/uv_agent_runtime/`: helper package installed into the project shared `scriptenv` uv project so scripts can access file helpers, dependency helpers, subprocess helpers, structured events, image attachment, subagent launch helpers, and MCP clients.
 - `tests/`: pytest coverage for runner, runtime, model clients, project rules, sessions, config, and Textual UI behavior.
-- `docs/design.md`: product semantics and longer design notes. Keep it aligned when changing architecture or user-visible behavior.
 
 ## Hard Boundaries
 
