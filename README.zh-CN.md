@@ -2,10 +2,12 @@
 
 [English](README.md)
 
-`uv-agent` 是一个可移植的 coding agent，提供 Textual TUI。它对外只有一个动作面：
-`run_python`：模型把 Python 脚本提交给受管理的 `uv run` runner，再由脚本完成实际工作。
-这种单一工具面的设计让 agent 在不同平台上的行为保持一致——任何安装了 Python 和 uv
-的操作系统都能获得相同的体验。
+`uv-agent` 是一个 Windows-first 的 coding agent，提供 Textual TUI。它首先面向
+Windows 体验设计，尽量避免许多 coding agent 在 PowerShell 引号、shell 语义、
+Unix-first 假设上经常“水土不服”的问题。它对外只有一个动作面：`run_python`：
+模型把 Python 脚本提交给受管理的 `uv run` runner，再由脚本完成实际工作，而不是
+依赖脆弱的 shell 片段。这种单一工具面的设计让 agent 在 Windows 上行为更可预期，
+同时仍可移植到任何安装了 Python 和 uv 的操作系统。
 
 公开 API、配置字段和 runtime 行为可能随项目演进而继续调整。
 

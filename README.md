@@ -2,11 +2,13 @@
 
 [简体中文](README.zh-CN.md)
 
-`uv-agent` is a portable coding agent with a Textual TUI. Its only external
-action surface is `run_python`: the model submits Python scripts to a managed
-`uv run` runner, and those scripts do the actual work. This single-tool design
-keeps agent behavior consistent across platforms—any OS with Python and uv
-behaves the same way.
+`uv-agent` is a Windows-first coding agent with a Textual TUI. It is designed
+to feel at home on Windows, where many coding agents stumble over PowerShell
+quoting, shell semantics, or Unix-first assumptions. Its only external action
+surface is `run_python`: the model submits Python scripts to a managed `uv run`
+runner, and those scripts do the actual work instead of relying on fragile
+shell snippets. This single-tool design keeps behavior predictable on Windows
+and portable to any OS with Python and uv.
 
 Public APIs, config fields, and runtime behavior may still change as the
 project evolves.
