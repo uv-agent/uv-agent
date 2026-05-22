@@ -54,9 +54,9 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 > 
 > | `api` 取值 | 格式 | 状态 |
 > |---|---|---|
-> | `"chat_completions"` | OpenAI Chat Completions API | ✅ 主要支持（功能完整） |
-> | `"responses"` | OpenAI Responses API | ⚠️ 实验性——可能存在 bug |
-> | `"anthropic_messages"` | Anthropic Messages API | ⚠️ 实验性——可能存在 bug |
+> | `"chat_completions"` | OpenAI Chat Completions API | ✅ 支持 |
+> | `"responses"` | OpenAI Responses API | ✅ 支持 |
+> | `"anthropic_messages"` | Anthropic Messages API | ✅ 支持 |
 > 
 > 欢迎提交 Issue 和 PR！示例配置
 

@@ -57,9 +57,9 @@ API keys in environment variables or ignored local config.
 > 
 > | `api` value | Format | Status |
 > |---|---|---|
-> | `"chat_completions"` | OpenAI Chat Completions API | ✅ Primary (fully supported) |
-> | `"responses"` | OpenAI Responses API | ⚠️ Experimental — may have bugs |
-> | `"anthropic_messages"` | Anthropic Messages API | ⚠️ Experimental — may have bugs |
+> | `"chat_completions"` | OpenAI Chat Completions API | ✅ Supported |
+> | `"responses"` | OpenAI Responses API | ✅ Supported |
+> | `"anthropic_messages"` | Anthropic Messages API | ✅ Supported |
 > 
 > Issues and PRs are welcome for any format!Example configuration:
 
