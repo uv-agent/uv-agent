@@ -50,13 +50,20 @@ class TranscriptScroll(VerticalScroll):
     near_bottom = reactive(True)
 
     _BOTTOM_THRESHOLD = 2
+    _scroll_pending = False
 
     def programmatic_scroll_end(self) -> None:
         # Defer the actual scroll to after the next refresh so any pending
         # mount/update has had a chance to recompute virtual_size; otherwise
         # `scroll_end` reads a stale `max_scroll_y` and only crawls along
-        # one row at a time during streaming.
+        # one row at a time during streaming. Coalesce repeated calls within
+        # the same refresh cycle so streaming deltas don't pile up callbacks.
+        if self._scroll_pending:
+            return
+        self._scroll_pending = True
+
         def _do() -> None:
+            self._scroll_pending = False
             self.scroll_end(animate=False, immediate=True)
             self._recompute_near_bottom()
 
