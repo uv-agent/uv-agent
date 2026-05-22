@@ -175,12 +175,13 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 ## 核心思路
 
 - agent 对外只有一个动作面：`run_python`。
-- 受管理脚本用 PEP 723 inline metadata 声明第三方依赖。
+- 受管理脚本运行在项目共享 uv 环境中；第三方依赖通过
+  `add_dependency` 添加到这个环境。
 - 发布包同时包含 `uv_agent` 和 `uv_agent_runtime`；受管理脚本从
   `uv_agent_runtime` 导入快捷 helper。
 - workspace rules、skills 和 MCP declarations 作为上下文渐进披露。MCP 调用通过
   Python runtime helper 完成，不直接暴露成模型工具。
-- thread 状态、run 日志、保存的脚本和附件位于
+- thread 状态、run 日志、共享脚本环境和附件位于
   `~/.uv-agent/projects/<project-id>/`。
 
 ## 开发

@@ -4,25 +4,35 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 from uv_agent.config import RunnerConfig
 from uv_agent.ids import new_id
 from uv_agent.jsonl import JsonlWriter
 from uv_agent.runner.events import parse_structured_event as parse_structured_event
-from uv_agent.runner.metadata import ensure_dependency
-from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RerunRequest, RunnerEvent
+from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RunnerEvent
 from uv_agent.runner.output import OutputCapture, pump_stream
-from uv_agent.runner.process import kill_process_tree, subprocess_group_kwargs, uv_run_argv
-from uv_agent.runner.store import ScriptStore
+from uv_agent.runner.process import kill_process_tree, subprocess_group_kwargs
+from uv_agent.runner.run_log import RunLogStore
+from uv_agent.runner.scriptenv import ensure_venv, uv_binary
 from uv_agent.time import utc_now_iso
 
 
 class PythonRunner:
-    def __init__(self, *, project_root: Path, data_dir: Path, config: RunnerConfig) -> None:
+    def __init__(
+        self,
+        *,
+        project_root: Path,
+        data_dir: Path,
+        config: RunnerConfig,
+        runs_dir: Path | None = None,
+        scriptenv_dir: Path | None = None,
+    ) -> None:
         self.project_root = project_root.resolve()
+        self.data_dir = data_dir.resolve()
+        self.runs_dir = (runs_dir or self.data_dir / "runner" / "runs").resolve()
+        self.scriptenv_dir = (scriptenv_dir or self.data_dir / "runner" / "scriptenv").resolve()
         self.config = config
-        self.store = ScriptStore(data_dir, max_saved_scripts=config.max_saved_scripts)
+        self.run_logs = RunLogStore(self.runs_dir, max_run_logs=config.max_run_logs)
 
     @property
     def config(self) -> RunnerConfig:
@@ -31,9 +41,9 @@ class PythonRunner:
     @config.setter
     def config(self, value: RunnerConfig) -> None:
         self._config = value
-        if hasattr(self, "store"):
-            self.store.max_saved_scripts = max(1, value.max_saved_scripts)
-            self.store.prune_scripts()
+        if hasattr(self, "run_logs"):
+            self.run_logs.max_run_logs = max(1, value.max_run_logs)
+            self.run_logs.prune()
 
     async def run(self, request: PythonRunRequest) -> PythonRunResult:
         events: list[RunnerEvent] = []
@@ -48,145 +58,40 @@ class PythonRunner:
         return completed.data["result"]
 
     async def stream_run(self, request: PythonRunRequest) -> AsyncIterator[RunnerEvent]:
-        timeout_s = request.timeout_s or self.config.default_timeout_s
-        final_code = ensure_dependency(
-            request.code,
-            self.config.runtime_dependency,
-            self.config.runtime_package_name,
-        )
-        script_id, original_path, final_path = self.store.create_script(
-            original_code=request.code,
-            final_code=final_code,
-            thread_id=request.thread_id,
-            turn_id=request.turn_id,
-        )
-        async for event in self._execute_saved_script(
-            script_id=script_id,
-            original_path=original_path,
-            final_path=final_path,
-            uv_args=self._merged_uv_args(request.uv_args),
-            script_args=request.script_args,
-            cwd=request.cwd,
-            timeout_s=timeout_s,
-            thread_id=request.thread_id,
-            thread_kind=request.thread_kind,
-            turn_id=request.turn_id,
-            cancel_event=request.cancel_event,
-        ):
-            yield event
-
-    async def rerun(self, request: RerunRequest) -> PythonRunResult:
-        events: list[RunnerEvent] = []
-        async for event in self.stream_rerun(request):
-            events.append(event)
-        completed = next(
-            (event for event in reversed(events) if event.type == "run.completed"),
-            None,
-        )
-        if completed is None:
-            raise RuntimeError("Runner did not emit run.completed")
-        return completed.data["result"]
-
-    async def stream_rerun(self, request: RerunRequest) -> AsyncIterator[RunnerEvent]:
-        if not request.script_id and not request.run_id:
-            raise ValueError("RerunRequest requires script_id or run_id")
-
-        inherited: dict[str, Any] = {}
-        script_id = request.script_id
-        if request.run_id:
-            inherited = self.store.find_run(request.run_id)
-            script_id = script_id or inherited["script_id"]
-        if script_id is None:
-            raise ValueError("Unable to resolve script_id for rerun")
-
-        metadata = self.store.get_script(script_id)
-        final_path = Path(metadata["final_path"])
-        original_path = Path(metadata["original_path"])
-        if request.mode == "replay":
-            uv_args = request.uv_args if request.uv_args is not None else inherited.get("uv_args", [])
-            script_args = (
-                request.script_args
-                if request.script_args is not None
-                else inherited.get("script_args", [])
-            )
-            cwd = request.cwd or (Path(inherited["cwd"]) if inherited.get("cwd") else None)
-            timeout_s = request.timeout_s or inherited.get("timeout_s") or self.config.default_timeout_s
-        else:
-            uv_args = request.uv_args or []
-            script_args = request.script_args or []
-            cwd = request.cwd
-            timeout_s = request.timeout_s or self.config.default_timeout_s
-
-        async for event in self._execute_saved_script(
-            script_id=script_id,
-            original_path=original_path,
-            final_path=final_path,
-            uv_args=self._merged_uv_args(list(uv_args)),
-            script_args=list(script_args),
-            cwd=cwd,
-            timeout_s=float(timeout_s),
-            thread_id=request.thread_id,
-            thread_kind=request.thread_kind,
-            turn_id=request.turn_id,
-            cancel_event=request.cancel_event,
-            rerun_of=request.run_id,
-        ):
-            yield event
-
-    async def _execute_saved_script(
-        self,
-        *,
-        script_id: str,
-        original_path: Path,
-        final_path: Path,
-        uv_args: list[str],
-        script_args: list[str],
-        cwd: Path | None,
-        timeout_s: float,
-        thread_id: str | None,
-        thread_kind: str | None,
-        turn_id: str | None,
-        cancel_event: asyncio.Event | None,
-        rerun_of: str | None = None,
-    ) -> AsyncIterator[RunnerEvent]:
         run_id = new_id("run")
-        run_log_path = self.store.create_run_log_path(run_id)
+        timeout_s = request.timeout_s or self.config.default_timeout_s
+        await asyncio.to_thread(ensure_venv, self.scriptenv_dir)
+        script_path, run_log_path = self.run_logs.create_run_files(run_id, request.code)
         writer = JsonlWriter(run_log_path)
-        run_cwd = (cwd or self.project_root).resolve()
-        argv = uv_run_argv(uv_args, final_path, script_args)
-        env = dict(os.environ)
-        # Force UTF-8 for the child Python so non-ASCII stdout/stderr (e.g.
-        # Chinese on Windows where the default code page is cp936) round-trips
-        # cleanly through our `decode("utf-8")` pump. PYTHONUTF8 also flips the
-        # child's `open()` / locale default to UTF-8 so file I/O inside scripts
-        # stops depending on the host code page.
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        env["UV_AGENT_RUNTIME_PROJECT_ROOT"] = str(self.project_root)
-        env["UV_AGENT_RUNTIME_STATE_DIR"] = str(self.store.data_dir)
-        if thread_id:
-            env["UV_AGENT_RUNTIME_THREAD_ID"] = thread_id
-        if thread_kind:
-            env["UV_AGENT_RUNTIME_THREAD_KIND"] = thread_kind
-        if turn_id:
-            env["UV_AGENT_RUNTIME_TURN_ID"] = turn_id
-        env["UV_AGENT_RUNTIME_RUN_ID"] = run_id
-        env["UV_AGENT_RUNTIME_SCRIPT_ID"] = script_id
+        run_cwd = (request.cwd or self.project_root).resolve()
+        argv = [
+            uv_binary(),
+            "run",
+            "--project",
+            str(self.scriptenv_dir),
+            "--directory",
+            str(run_cwd),
+            "python",
+            str(script_path),
+            *request.script_args,
+        ]
+        env = self._run_env(
+            run_id=run_id,
+            thread_id=request.thread_id,
+            thread_kind=request.thread_kind,
+            turn_id=request.turn_id,
+        )
         started = {
             "type": "run.started",
             "created_at": utc_now_iso(),
             "run_id": run_id,
-            "script_id": script_id,
-            "thread_id": thread_id,
-            "turn_id": turn_id,
-            "rerun_of": rerun_of,
+            "thread_id": request.thread_id,
+            "turn_id": request.turn_id,
             "cwd": str(run_cwd),
             "timeout_s": timeout_s,
-            "uv_args": uv_args,
-            "script_args": script_args,
+            "script_args": request.script_args,
             "argv": argv,
-            "original_script_path": str(original_path),
-            "final_script_path": str(final_path),
+            "script_path": str(script_path),
         }
         writer.write(started)
         yield RunnerEvent("run.started", started)
@@ -213,7 +118,6 @@ class PythonRunner:
                     sink=capture.stdout_parts,
                     structured_events=capture.structured_events,
                     run_id=run_id,
-                    script_id=script_id,
                     max_output_bytes=self.config.max_output_bytes,
                     capture=capture,
                 )
@@ -226,57 +130,50 @@ class PythonRunner:
                     sink=capture.stderr_parts,
                     structured_events=capture.structured_events,
                     run_id=run_id,
-                    script_id=script_id,
                     max_output_bytes=self.config.max_output_bytes,
                     capture=capture,
                 )
             )
-            try:
-                wait_task = asyncio.create_task(process.wait())
-                cancel_task = (
-                    asyncio.create_task(cancel_event.wait())
-                    if cancel_event is not None
-                    else None
-                )
-                tasks = {wait_task}
-                if cancel_task is not None:
-                    tasks.add(cancel_task)
-                done, pending = await asyncio.wait(
-                    tasks,
-                    timeout=timeout_s,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if wait_task in done:
-                    returncode = wait_task.result()
-                elif cancel_task is not None and cancel_task in done:
-                    interrupted = True
-                    await kill_process_tree(process)
-                    returncode = await wait_task
-                else:
-                    timed_out = True
-                    await kill_process_tree(process)
-                    returncode = await wait_task
-                for task in tasks:
-                    if task is wait_task or task.done():
-                        continue
-                    task.cancel()
-                cancellable = [task for task in tasks if task is not wait_task and not task.done()]
-                if cancellable:
-                    await asyncio.gather(*cancellable, return_exceptions=True)
-            except TimeoutError:
+            wait_task = asyncio.create_task(process.wait())
+            cancel_task = (
+                asyncio.create_task(request.cancel_event.wait())
+                if request.cancel_event is not None
+                else None
+            )
+            tasks = {wait_task}
+            if cancel_task is not None:
+                tasks.add(cancel_task)
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=timeout_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if wait_task in done:
+                returncode = wait_task.result()
+            elif cancel_task is not None and cancel_task in done:
+                interrupted = True
+                await kill_process_tree(process)
+                returncode = await wait_task
+            else:
                 timed_out = True
                 await kill_process_tree(process)
                 returncode = await wait_task
-            except asyncio.CancelledError:
-                await kill_process_tree(process)
-                raise
+            for task in tasks:
+                if task is not wait_task and not task.done():
+                    task.cancel()
+            cancellable = [task for task in tasks if task is not wait_task and not task.done()]
+            if cancellable:
+                await asyncio.gather(*cancellable, return_exceptions=True)
             await asyncio.gather(stdout_task, stderr_task)
+        except asyncio.CancelledError:
+            if process is not None:
+                await kill_process_tree(process)
+            raise
         except Exception as exc:
             failed = {
                 "type": "run.failed",
                 "created_at": utc_now_iso(),
                 "run_id": run_id,
-                "script_id": script_id,
                 "error": repr(exc),
             }
             writer.write(failed)
@@ -284,7 +181,6 @@ class PythonRunner:
             raise
 
         result = PythonRunResult(
-            script_id=script_id,
             run_id=run_id,
             returncode=returncode,
             stdout="".join(capture.stdout_parts),
@@ -293,26 +189,44 @@ class PythonRunner:
             interrupted=interrupted,
             truncated=capture.truncated,
             run_log_path=run_log_path,
-            script_path=original_path,
-            final_script_path=final_path,
+            script_path=script_path,
             events=capture.structured_events,
         )
         completed = {
             "type": "run.completed",
             "created_at": utc_now_iso(),
             "run_id": run_id,
-            "script_id": script_id,
             "returncode": returncode,
             "timed_out": timed_out,
             "interrupted": interrupted,
             "truncated": capture.truncated,
         }
         writer.write(completed)
+        self.run_logs.prune()
         yield RunnerEvent("run.completed", {**completed, "result": result})
 
-    def _merged_uv_args(self, uv_args: list[str]) -> list[str]:
-        merged = list(self.config.default_uv_args)
-        for arg in uv_args:
-            if arg not in merged:
-                merged.append(arg)
-        return merged
+    def _run_env(
+        self,
+        *,
+        run_id: str,
+        thread_id: str | None,
+        thread_kind: str | None,
+        turn_id: str | None,
+    ) -> dict[str, str]:
+        env = dict(os.environ)
+        env.pop("VIRTUAL_ENV", None)
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        env["UV_AGENT_RUNTIME_PROJECT_ROOT"] = str(self.project_root)
+        env["UV_AGENT_RUNTIME_STATE_DIR"] = str(self.data_dir)
+        env["UV_AGENT_SCRIPTENV_DIR"] = str(self.scriptenv_dir)
+        env["UV_AGENT_SCRIPT_DIR"] = str(self.runs_dir)
+        env["UV_BIN"] = uv_binary()
+        if thread_id:
+            env["UV_AGENT_RUNTIME_THREAD_ID"] = thread_id
+        if thread_kind:
+            env["UV_AGENT_RUNTIME_THREAD_KIND"] = thread_kind
+        if turn_id:
+            env["UV_AGENT_RUNTIME_TURN_ID"] = turn_id
+        env["UV_AGENT_RUNTIME_RUN_ID"] = run_id
+        return env

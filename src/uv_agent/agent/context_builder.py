@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from html import escape as xml_escape
 from pathlib import Path
 from typing import Any
@@ -15,15 +16,32 @@ def runtime_environment_context(
     project_root: Path,
     user_state: Path,
     project_state: Path,
+    scriptenv_dir: Path,
+    scriptenv_dependencies: list[str],
     host_environment: dict[str, Any],
     user_language: UserLanguage,
 ) -> str:
+    dependencies = "\n".join(
+        f"<dependency>{xml_text(dependency)}</dependency>"
+        for dependency in scriptenv_dependencies
+        if not _is_uv_agent_dependency(dependency)
+    )
+    if not dependencies:
+        dependencies = '<dependency_list empty="true" />'
     return "\n".join(
         [
             "<runtime_environment>",
             f"<workspace>{xml_text(project_root)}</workspace>",
             f"<user_state>{xml_text(user_state)}</user_state>",
             f"<project_state>{xml_text(project_state)}</project_state>",
+            "<run_python_environment>",
+            f"<directory>{xml_text(scriptenv_dir)}</directory>",
+            f"<pyproject>{xml_text(scriptenv_dir / 'pyproject.toml')}</pyproject>",
+            "<rule>This is the uv project environment used by run_python; it is not the workspace or active cwd.</rule>",
+            "<direct_dependencies>",
+            dependencies,
+            "</direct_dependencies>",
+            "</run_python_environment>",
             f"<host>{xml_text(host_environment_line(host_environment))}</host>",
             f"<user_language>{xml_text(user_language.name)}</user_language>",
             "<persistence>Persisted scripts, runs, and threads live under the project state directory.</persistence>",
@@ -61,3 +79,11 @@ def context_fingerprint(text: str) -> str:
 
 def xml_text(value: object) -> str:
     return xml_escape(str(value), quote=False)
+
+
+def _is_uv_agent_dependency(dependency: str) -> bool:
+    match = re.match(r"^\s*([A-Za-z0-9_.-]+)", dependency)
+    if match is None:
+        return False
+    normalized = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+    return normalized == "uv-agent"

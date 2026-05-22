@@ -43,7 +43,7 @@ from uv_agent.model import (
     parse_responses_response,
 )
 from uv_agent.runner import PythonRunner
-from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RerunRequest
+from uv_agent.runner.models import PythonRunRequest, PythonRunResult
 from uv_agent.session import ThreadLockedError, ThreadStore
 
 
@@ -253,7 +253,6 @@ class LookAtRunner:
         self.image_path.parent.mkdir(parents=True, exist_ok=True)
         self.image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
         return PythonRunResult(
-            script_id="scr_look",
             run_id="run_look",
             returncode=0,
             stdout="created image\n",
@@ -263,7 +262,6 @@ class LookAtRunner:
             truncated=False,
             run_log_path=self.image_path.parent / "run.jsonl",
             script_path=self.image_path.parent / "script.py",
-            final_script_path=self.image_path.parent / "final.py",
             events=[
                 {
                     "kind": "look_at",
@@ -273,10 +271,6 @@ class LookAtRunner:
             ],
         )
 
-    async def rerun(self, request: RerunRequest) -> PythonRunResult:
-        raise AssertionError("rerun should not be called")
-
-
 class SimpleRunner:
     def __init__(self, *, interrupted: bool = False) -> None:
         self.requests: list[PythonRunRequest] = []
@@ -285,7 +279,6 @@ class SimpleRunner:
     async def run(self, request: PythonRunRequest) -> PythonRunResult:
         self.requests.append(request)
         return PythonRunResult(
-            script_id="scr_simple",
             run_id="run_simple",
             returncode=0,
             stdout="simple\n",
@@ -295,12 +288,8 @@ class SimpleRunner:
             truncated=False,
             run_log_path=request.cwd / "run.jsonl",
             script_path=request.cwd / "script.py",
-            final_script_path=request.cwd / "final.py",
             events=[],
         )
-
-    async def rerun(self, request: RerunRequest) -> PythonRunResult:
-        raise AssertionError("rerun should not be called")
 
 
 def make_test_config(
@@ -338,8 +327,6 @@ def make_test_config(
             stream_retry=stream_retry or StreamRetryConfig(),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
         pricing=pricing or PricingConfig(),
     )
@@ -348,12 +335,12 @@ def make_test_config(
 def test_agent_exposes_only_python_runner_tool() -> None:
     assert PYTHON_TOOL["name"] == "run_python"
     assert PYTHON_TOOL["type"] == "function"
-    assert "script_id" in PYTHON_TOOL["parameters"]["properties"]
+    assert set(PYTHON_TOOL["parameters"]["properties"]) == {"code", "script_args", "timeout_s"}
+    assert PYTHON_TOOL["parameters"]["required"] == ["code"]
 
 
 def test_model_tool_payload_filters_only_tagged_runtime_event_lines() -> None:
     payload = {
-        "script_id": "scr_1",
         "run_id": "run_1",
         "returncode": 0,
         "timed_out": False,
@@ -410,8 +397,6 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = FakeModelClient(
@@ -444,8 +429,6 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
         project_root=project_root,
         data_dir=tmp_path / ".uv-agent",
         config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     engine = AgentEngine(
@@ -493,8 +476,6 @@ async def test_agent_compaction_falls_back_to_current_level(tmp_path: Path) -> N
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = FakeModelClient(
@@ -597,8 +578,6 @@ async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path:
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     blocking_client = BlockingModelClient()
@@ -770,8 +749,6 @@ async def test_agent_generates_title_for_default_new_thread(tmp_path: Path) -> N
         },
         runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = RoutedModelClient(
@@ -842,8 +819,6 @@ async def test_agent_does_not_replace_manual_thread_title(tmp_path: Path) -> Non
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = FakeModelClient(
@@ -901,8 +876,6 @@ async def test_agent_uses_configured_title_generation_level(tmp_path: Path) -> N
             title_generation=TitleGenerationConfig(model_level="title"),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = RoutedModelClient(
@@ -1016,8 +989,6 @@ async def test_agent_title_generation_falls_back_to_current_level(tmp_path: Path
         },
         runtime=RuntimeConfig(default_level="fast", compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = RoutedModelClient(
@@ -1083,8 +1054,6 @@ async def test_agent_attaches_user_turn_images(tmp_path: Path) -> None:
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = FakeModelClient(
@@ -1130,8 +1099,6 @@ async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
         project_root=project_root,
         data_dir=tmp_path / ".uv-agent",
         config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
             default_timeout_s=30,
         ),
     )
@@ -1213,8 +1180,6 @@ async def test_agent_persists_model_stream_error(tmp_path: Path) -> None:
         project_root=project_root,
         data_dir=tmp_path / ".uv-agent",
         config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
             default_timeout_s=30,
         ),
     )
@@ -1901,8 +1866,6 @@ async def test_agent_displays_and_reconstructs_mixed_text_tool_response(tmp_path
         project_root=project_root,
         data_dir=tmp_path / ".uv-agent",
         config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
             default_timeout_s=30,
         ),
     )
@@ -1986,8 +1949,6 @@ async def test_responses_turn_uses_previous_response_id_for_follow_up(tmp_path: 
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
             default_timeout_s=30,
         ),
     )
@@ -2054,8 +2015,6 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
             default_timeout_s=30,
         ),
     )
@@ -2152,8 +2111,6 @@ async def test_enter_dir_loads_rules_in_tool_result_and_persists_cwd(tmp_path: P
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     runner = PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner)
@@ -2240,73 +2197,6 @@ async def test_enter_dir_loads_rules_in_tool_result_and_persists_cwd(tmp_path: P
     assert second_tool_payload["stdout"].strip() == "src"
 
 
-@pytest.mark.asyncio
-async def test_agent_can_rerun_saved_script_by_id(tmp_path: Path) -> None:
-    project_root = Path.cwd()
-    config = AppConfig(
-        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
-        models={
-            "default": ModelConfig(
-                name="default",
-                provider="p",
-                model="fake",
-                context_window_tokens=100_000,
-                params={},
-            )
-        },
-        levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(
-            compression=CompressionConfig(enabled=False),
-            title_generation=TitleGenerationConfig(enabled=False),
-        ),
-        runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {project_root.resolve().as_uri()}",
-            runtime_package_name="uv-agent",
-            default_timeout_s=30,
-        ),
-    )
-    runner = PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner)
-    first = await runner.run(PythonRunRequest(code="print('saved')\n", cwd=project_root))
-    client = FakeModelClient(
-        [
-            {
-                "id": "resp_1",
-                "output": [
-                    {
-                        "type": "function_call",
-                        "call_id": "call_1",
-                        "name": "run_python",
-                        "arguments": json.dumps({"script_id": first.script_id}),
-                    }
-                ],
-            },
-            {
-                "id": "resp_2",
-                "output_text": "done",
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "done"}],
-                    }
-                ],
-            },
-        ]
-    )
-    engine = AgentEngine(
-        config=config,
-        model_client=client,
-        runner=runner,
-        thread_store=ThreadStore(tmp_path / "state"),
-        project_root=project_root,
-    )
-
-    events = [event async for event in engine.run_turn(user_text="rerun")]
-
-    assert events[-1]["final_text"] == "done"
-    assert "saved" in client.requests[1]["input"][-1]["output"]
-
-
 def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
     project_root = tmp_path / "project"
@@ -2331,9 +2221,12 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
         project_root=project_root,
         data_dir=tmp_path / "state",
         config=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
+    )
+    runner.scriptenv_dir.mkdir(parents=True)
+    (runner.scriptenv_dir / "pyproject.toml").write_text(
+        "[project]\nname = \"uv-agent-scriptenv\"\ndependencies = [\"uv-agent>=0.6.2\", \"requests>=2\"]\n",
+        encoding="utf-8",
     )
     engine = AgentEngine(
         config=config,
@@ -2355,10 +2248,15 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "reply concisely and with a friendly, approachable tone" in prompt
     assert "Keep answers restrained in length by default" in prompt
     assert "explicitly asks for a detailed explanation of specific content" in prompt
-    assert 'requires-python = ">=3.12"' in prompt
-    assert '# dependencies = [' in prompt
-    assert "plain Python source without a metadata block" in prompt
-    assert "not a temporary-script wrapper" in prompt
+    assert "project-shared uv environment" in prompt
+    assert 'add_dependency("package-name")' in prompt
+    assert "Call add_dependency before importing the package" in prompt
+    assert "already been imported in the current Python process" in prompt
+    assert "run_python environment pyproject.toml" in prompt
+    assert "run_python accepts code, script_args, and timeout_s" in prompt
+    assert "thread's active cwd" in prompt
+    assert "PEP 723" not in prompt
+    assert "uv pip" not in prompt
     assert "For mature domain problems" in prompt
     assert "unidiff for parsing diffs" in prompt
     assert "libcst for Python source transforms" in prompt
@@ -2385,8 +2283,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "capability explanations layered" not in prompt
     assert "<context_updates>" in prompt
     assert "model-visible user messages wrapped in <context_update" in prompt
-    assert "Treat each context_update as authoritative for the runtime sections" in prompt
-    assert "Earlier sections remain in force" in prompt
+    assert "stable within the current epoch" in prompt
+    assert "sent again after compaction starts a new epoch" in prompt
+    assert "Skills and MCP server declarations may be appended" in prompt
     assert "A removed context section means older content" in prompt
     assert "item.context_update is an internal persistence event" not in prompt
     assert "After compaction, current context updates are re-sent" not in prompt
@@ -2396,7 +2295,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "</runtime_helpers>" not in prompt
     assert "custom patch envelope" not in prompt
     assert "connect_named(\"files\")" not in prompt
-    assert "saved_scripts(limit=32)" not in prompt
+    assert "saved_scripts" not in prompt
     assert "Directory rules from AGENTS files are loaded automatically" not in prompt
 
     turn_context = engine._turn_context_text()
@@ -2405,6 +2304,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<host>" in turn_context
     assert "<user_language>" in turn_context
     assert str(project_root) in turn_context
+    assert "<run_python_environment>" in turn_context
+    assert str(runner.scriptenv_dir) in turn_context
+    assert str(runner.scriptenv_dir / "pyproject.toml") in turn_context
+    assert "uv-agent&gt;=0.6.2" not in turn_context
+    assert "<dependency>requests&gt;=2</dependency>" in turn_context
     assert "<model_levels>" in turn_context
     assert "<default>medium</default>" in turn_context
     assert "<level>small</level>" in turn_context
@@ -2424,6 +2328,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "snapshot_files" in turn_context
     assert "restore_snapshot" in turn_context
     assert "run_process_text" in turn_context
+    assert "add_dependency" in turn_context
+    assert "run_python_env_dir" in turn_context
     assert "<helper_selection>" in turn_context
     assert "Prefer the smallest helper that directly matches the task" in turn_context
     assert "replace_exact for small exact replacements" in turn_context
@@ -2486,8 +2392,6 @@ def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_p
         },
         runtime=RuntimeConfig(default_level="deep", compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     engine = AgentEngine(
@@ -2685,8 +2589,6 @@ def test_context_percent_prefers_latest_usage(tmp_path: Path) -> None:
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     engine = AgentEngine(
@@ -2736,8 +2638,6 @@ async def test_agent_sends_project_rule_index_without_rule_contents(tmp_path: Pa
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = FakeModelClient(
@@ -2801,8 +2701,6 @@ async def test_compaction_request_reuses_main_prefix(tmp_path: Path) -> None:
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = FakeModelClient(
@@ -2875,8 +2773,6 @@ async def test_project_rules_are_deduped_and_not_reloaded_on_file_change(tmp_pat
             title_generation=TitleGenerationConfig(enabled=False),
         ),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     client = FakeModelClient(
@@ -2975,8 +2871,6 @@ async def test_project_rules_reappear_after_compaction_epoch(tmp_path: Path) -> 
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(default_level="medium", compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     engine = AgentEngine(
@@ -3145,7 +3039,7 @@ async def test_system_instructions_refresh_after_compaction(tmp_path: Path) -> N
     assert sum(1 for event in stored if event["type"] == "item.system_instructions") == 2
 
 
-def test_runtime_context_reappears_after_compaction_epoch(tmp_path: Path) -> None:
+def test_dynamic_runtime_context_reappears_after_compaction_epoch(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     skill_dir = project_root / ".agents" / "skills" / "demo"
     skill_dir.mkdir(parents=True)
@@ -3477,8 +3371,6 @@ def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> 
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     engine = AgentEngine(
@@ -3540,8 +3432,6 @@ def test_context_update_reconstructs_as_stable_prefix(tmp_path: Path) -> None:
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     engine = AgentEngine(
@@ -3588,8 +3478,6 @@ def test_rules_loaded_from_tool_result_is_not_reconstructed_between_tool_call_an
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     engine = AgentEngine(
@@ -3651,8 +3539,6 @@ def test_context_update_is_reanchored_before_next_user_when_reconstructing(tmp_p
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     engine = AgentEngine(
@@ -3727,8 +3613,6 @@ def test_rule_state_restore_uses_local_index_when_active_cwd_is_child(tmp_path: 
         levels={"medium": LevelConfig(name="medium", model="default", params={})},
         runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
     )
     store = ThreadStore(tmp_path / "state")

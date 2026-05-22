@@ -423,7 +423,6 @@ class StableRoundEngine(AgentEngine):
             "tool_call_index": 0,
         }
         payload = {
-            "script_id": "scr_1",
             "run_id": "run_1",
             "returncode": 0,
             "timed_out": False,
@@ -565,7 +564,6 @@ class InterruptedRoundEngine(AgentEngine):
             "tool_call_index": 0,
         }
         payload = {
-            "script_id": "scr_int",
             "run_id": "run_int",
             "returncode": 0,
             "timed_out": False,
@@ -684,7 +682,6 @@ class SteppedRoundEngine(AgentEngine):
         await self._wait_for_step("tool_started")
 
         payload = {
-            "script_id": "scr_stepped",
             "run_id": "run_stepped",
             "returncode": 0,
             "timed_out": False,
@@ -791,8 +788,6 @@ def fake_engine(project_root: Path, state_dir: Path) -> AgentEngine:
         },
         runtime=RuntimeConfig(default_level="medium", compression=CompressionConfig(enabled=False)),
         runner=RunnerConfig(
-            runtime_dependency=f"uv-agent @ {Path.cwd().resolve().as_uri()}",
-            runtime_package_name="uv-agent",
         ),
         ui=UiConfig(
             language="en",
@@ -1704,7 +1699,6 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
         turn_id="turn_1",
         call_id="call_1",
         result={
-            "script_id": "scr_1",
             "run_id": "run_1",
             "returncode": 0,
             "timed_out": False,
@@ -1791,7 +1785,6 @@ async def test_tui_live_tool_call_and_result_are_separate_cells(
     )
     app = UvAgentApp(project_root=project_root)
     payload = {
-        "script_id": "scr_live",
         "run_id": "run_live",
         "returncode": 0,
         "timed_out": False,
@@ -1856,7 +1849,6 @@ async def test_tui_live_multiple_tool_calls_keep_call_result_boundaries(
                 "arguments": f'{{"code":"print({index})"}}',
             }
             payload = {
-                "script_id": f"scr_{index}",
                 "run_id": f"run_{index}",
                 "returncode": 0,
                 "timed_out": False,
@@ -3276,7 +3268,7 @@ async def test_tui_config_panel_includes_read_only_models_entry(
 
 
 @pytest.mark.asyncio
-async def test_tui_status_summarizes_context_rules_and_scripts(
+async def test_tui_status_summarizes_context_and_rules(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3284,12 +3276,6 @@ async def test_tui_status_summarizes_context_rules_and_scripts(
     project_root.mkdir()
     (project_root / "AGENTS.md").write_text("Use local rules.", encoding="utf-8")
     engine = fake_engine(project_root, tmp_path / "state")
-    engine.runner.store.create_script(
-        original_code="print('hi')",
-        final_code="print('hi')",
-        thread_id=None,
-        turn_id=None,
-    )
     monkeypatch.setattr("uv_agent.tui.app.application_version", lambda: "9.8.7")
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
     app = UvAgentApp(project_root=project_root)
@@ -3305,7 +3291,6 @@ async def test_tui_status_summarizes_context_rules_and_scripts(
         assert "258K" in panel.body
         assert "AGENTS.md" in panel.body
         assert "Use local rules" not in panel.body
-        assert "print('hi')" in panel.body
 
 
 @pytest.mark.asyncio
@@ -4275,7 +4260,6 @@ async def test_tui_tool_result_details_expand_on_click(
     )
     app = UvAgentApp(project_root=project_root)
     payload = {
-        "script_id": "scr_1",
         "run_id": "run_1",
         "returncode": 0,
         "stdout": "visible one\nvisible two\nvisible three\nhidden tail",
@@ -4328,7 +4312,6 @@ async def test_tui_tool_result_details_escape_literal_brackets(
     )
     app = UvAgentApp(project_root=project_root)
     payload = {
-        "script_id": "scr_1",
         "run_id": "run_1",
         "returncode": 0,
         "stdout": (
@@ -4422,7 +4405,6 @@ async def test_tui_tool_result_details_support_keyboard_navigation(
                     "output": {
                         "output": __import__("json").dumps(
                             {
-                                "script_id": f"scr_{index}",
                                 "run_id": f"run_{index}",
                                 "returncode": 0,
                                 "stdout": f"preview {index}\nfull tail {index}",
@@ -4726,7 +4708,6 @@ async def test_tui_final_response_is_not_folded_into_process(
                 "output": {
                     "output": __import__("json").dumps(
                         {
-                            "script_id": "scr_1",
                             "run_id": "run_1",
                             "returncode": 0,
                             "stdout": "tool output",
@@ -4767,7 +4748,6 @@ def test_tool_detail_markup_strips_runtime_event_lines_from_stdout() -> None:
         RUNTIME_EVENT_RUN_ID_KEY: "run_1",
     }
     payload = {
-        "script_id": "scr_1",
         "run_id": "run_1",
         "returncode": 0,
         "stdout": "visible line 1\n" + __import__("json").dumps(event) + "\nvisible line 2\n",
@@ -4789,7 +4769,6 @@ def test_tool_detail_markup_strips_runtime_event_lines_from_stdout() -> None:
 
 def test_tool_detail_markup_collapses_events_when_requested() -> None:
     payload = {
-        "script_id": "scr_1",
         "run_id": "run_1",
         "returncode": 0,
         "stdout": "stdout line\n",
@@ -4826,7 +4805,6 @@ async def test_tui_tool_details_panel_toggles_events_with_e_key(
     )
     app = UvAgentApp(project_root=project_root)
     payload = {
-        "script_id": "scr_1",
         "run_id": "run_1",
         "returncode": 0,
         "stdout": "alpha line\nbravo line\ncharlie line",

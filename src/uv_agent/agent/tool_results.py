@@ -18,7 +18,6 @@ def function_output(call: dict[str, Any], output: dict[str, Any]) -> dict[str, A
 def model_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return the run payload that is safe and useful to feed back to the model."""
     visible = {
-        "script_id": payload.get("script_id"),
         "run_id": payload.get("run_id"),
         "returncode": payload.get("returncode"),
         "timed_out": payload.get("timed_out"),

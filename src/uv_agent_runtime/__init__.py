@@ -16,6 +16,7 @@ from .codesearch import (
     search_text,
 )
 from .cwd import enter_dir
+from .dependencies import add_dependencies, add_dependency, run_python_env_dir
 from .events import emit_event, emit_progress, emit_result
 from .files import list_files, read_json, read_text, resolve_workspace_path, write_json, write_text
 from .mcp import (
@@ -28,7 +29,6 @@ from .mcp import (
     list_declared_servers,
 )
 from .patch import PatchResult, apply_patch
-from .scripts import saved_scripts
 from .subagent import SubagentResult, ask
 from .textops import (
     CommandTextResult,
@@ -73,6 +73,8 @@ __all__ = [
     "apply_patch",
     "apply_patch_any",
     "ask",
+    "add_dependencies",
+    "add_dependency",
     "clear_codequery_cache",
     "compare_text",
     "connect_declared",
@@ -100,8 +102,8 @@ __all__ = [
     "replace_exact",
     "resolve_workspace_path",
     "restore_snapshot",
+    "run_python_env_dir",
     "run_process_text",
-    "saved_scripts",
     "search_text",
     "snapshot_files",
     "supported_symbol_languages",

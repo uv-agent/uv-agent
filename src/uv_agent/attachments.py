@@ -46,9 +46,8 @@ class ImageAttachment:
 class AttachmentStore:
     """Store binary context attachments outside JSONL history."""
 
-    def __init__(self, data_dir: Path) -> None:
-        self.data_dir = data_dir
-        self.attachments_dir = data_dir / "attachments"
+    def __init__(self, attachments_dir: Path) -> None:
+        self.attachments_dir = attachments_dir
         self.attachments_dir.mkdir(parents=True, exist_ok=True)
 
     def register_image(

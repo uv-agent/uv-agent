@@ -6,14 +6,17 @@ import shutil
 import sys
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from uv_agent_runtime import (
+    add_dependency,
     apply_patch,
     apply_patch_any,
     ask,
     clear_codequery_cache,
+    CommandTextResult,
     compare_text,
     connect_declared,
     connect_named,
@@ -38,8 +41,8 @@ from uv_agent_runtime import (
     read_text_lossless,
     replace_exact,
     restore_snapshot,
+    run_python_env_dir,
     run_process_text,
-    saved_scripts,
     search_text,
     snapshot_files,
     supported_symbol_languages,
@@ -233,6 +236,33 @@ def test_runtime_run_process_text_accepts_env_and_env_patch() -> None:
     )
 
     assert result.stdout.strip() == "patched"
+
+
+def test_runtime_dependency_helpers_use_run_python_env_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uv_agent_runtime.dependencies as dependencies
+
+    scriptenv = tmp_path / "scriptenv"
+    scriptenv.mkdir()
+    monkeypatch.setenv("UV_AGENT_SCRIPTENV_DIR", str(scriptenv))
+    monkeypatch.setenv("UV_BIN", "uv-test")
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def fake_run_process_text(*args: Any, **kwargs: Any) -> CommandTextResult:
+        calls.append((args, kwargs))
+        return CommandTextResult(args=list(args[0]), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dependencies, "run_process_text", fake_run_process_text)
+
+    assert run_python_env_dir() == scriptenv.resolve()
+
+    result = add_dependency("idna", check=False, timeout_s=1)
+
+    assert result.args[:4] == ["uv-test", "add", "--project", str(scriptenv.resolve())]
+    assert result.args[-1] == "idna"
+    assert calls[0][1] == {"timeout_s": 1, "check": False}
 
 
 def test_runtime_lossless_text_helpers_preserve_metadata(tmp_path: Path) -> None:
@@ -602,28 +632,6 @@ def test_runtime_subagent_events_do_not_include_prompt(capsys, monkeypatch: pyte
 
 def test_extract_subagent_thread_id_from_stderr() -> None:
     assert _extract_subagent_thread_id("noise\n[subagent-thread] thr_123\n") == "thr_123"
-
-
-def test_runtime_saved_scripts_reads_state_dir(tmp_path: Path) -> None:
-    script = tmp_path / "scripts" / "scr_1"
-    script.mkdir(parents=True)
-    final = script / "script.py"
-    final.write_text("# /// script\n# dependencies=[]\n# ///\n\nprint('hello')\n", encoding="utf-8")
-    (script / "metadata.json").write_text(
-        json.dumps(
-            {
-                "script_id": "scr_1",
-                "created_at": "2026-01-01T00:00:00Z",
-                "final_path": str(final),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    summaries = saved_scripts(state_dir=tmp_path)
-
-    assert summaries[0]["script_id"] == "scr_1"
-    assert summaries[0]["summary"] == "print('hello')"
 
 
 def test_runtime_thread_digest_reads_state_dir(tmp_path: Path) -> None:

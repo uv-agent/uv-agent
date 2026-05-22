@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from importlib.metadata import version
 from pathlib import Path
 
 from uv_agent.config import config_paths, editable_config_path, load_config, redact_config
@@ -104,31 +103,26 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert config.pricing.models["m"].input == 2.0
     assert config.pricing.models["m"].output == 8.0
     assert config.pricing.models["m"].cached_input == 0.5
-    assert config.runner.runtime_dependency == f"uv-agent=={version('uv-agent')}"
-    assert config.runner.default_uv_args == []
     assert config.runner.default_timeout_s == 7200
-    assert config.runner.max_saved_scripts == 32
+    assert config.runner.max_run_logs == 200
 
 
-def test_runtime_dependency_can_be_overridden_for_local_development(tmp_path: Path) -> None:
+def test_runner_max_run_logs_can_be_configured(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
-    project_root = tmp_path / "workspace"
-    project_root.mkdir()
     config_path.write_text(
         json.dumps(
             {
                 "runner": {
-                    "runtime_dependency": f"uv-agent @ {project_root.resolve().as_uri()}",
+                    "max_run_logs": 12,
                 },
             }
         ),
         encoding="utf-8",
     )
 
-    config = load_config(project_root, [config_path])
+    config = load_config(tmp_path, [config_path])
 
-    assert config.runner.runtime_dependency.startswith("uv-agent @ file:///")
-    assert config.runner.default_uv_args == ["--reinstall-package", "uv-agent"]
+    assert config.runner.max_run_logs == 12
 
 
 def test_legacy_reasoning_option_fields_are_ignored(tmp_path: Path) -> None:
