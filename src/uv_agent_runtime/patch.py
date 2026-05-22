@@ -31,7 +31,13 @@ class _UpdateFile:
 
 
 _FileOp = _AddFile | _DeleteFile | _UpdateFile
-_MISSING = object()
+
+
+class _MissingPending:
+    """Sentinel type for paths that have not been staged in a patch transaction."""
+
+
+_MISSING = _MissingPending()
 
 
 def apply_patch(patch: str, *, cwd: str | Path | None = None, check: bool = True) -> PatchResult:
@@ -234,7 +240,7 @@ def _resolve_patch_path(workdir: Path, path: str) -> Path:
     return resolved
 
 
-def _read_pending(path: Path, pending: dict[Path, str | None]) -> str | None | object:
+def _read_pending(path: Path, pending: dict[Path, str | None]) -> str | None | _MissingPending:
     if path in pending:
         return pending[path]
     return _MISSING

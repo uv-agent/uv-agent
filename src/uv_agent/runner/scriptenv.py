@@ -10,6 +10,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
 import tomlkit
+from tomlkit.exceptions import TOMLKitError
 
 
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
@@ -143,7 +144,7 @@ def _ensure_runtime_version(scriptenv_dir: Path, python: Path) -> None:
 def _pin_dependency(pyproject: Path, package: str, version: str) -> bool:
     try:
         document = tomlkit.parse(pyproject.read_text(encoding="utf-8"))
-    except (OSError, tomlkit.exceptions.TOMLKitError):
+    except (OSError, TOMLKitError):
         return False
     project = document.get("project")
     if project is None:

@@ -464,7 +464,7 @@ def _subprocess_tree_kwargs() -> dict[str, Any]:
     return {}
 
 
-def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+def _kill_process_tree(process: subprocess.Popen[Any]) -> None:
     """Best-effort synchronous process-tree termination for run_process_text."""
 
     if process.poll() is not None:
@@ -492,7 +492,7 @@ def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
     _kill_direct_process(process)
 
 
-def _kill_direct_process(process: subprocess.Popen[bytes]) -> None:
+def _kill_direct_process(process: subprocess.Popen[Any]) -> None:
     """Kill only the direct child, ignoring races with normal process exit."""
 
     if process.poll() is not None:
@@ -546,9 +546,17 @@ def _detect_newline_style(text: str) -> Literal["lf", "crlf", "cr", "mixed", "no
     return "lf"
 
 
-def _single_newline_style(style: str) -> Literal["lf", "crlf", "cr", "none"] | None:
-    if style in {"lf", "crlf", "cr", "none"}:
-        return style  # type: ignore[return-value]
+def _single_newline_style(
+    style: str,
+) -> Literal["lf", "crlf", "cr", "none"] | None:
+    if style == "lf":
+        return "lf"
+    if style == "crlf":
+        return "crlf"
+    if style == "cr":
+        return "cr"
+    if style == "none":
+        return "none"
     return None
 
 
@@ -609,9 +617,10 @@ def _replacement_candidates(
         return [(old, new)]
 
     styles: list[Literal["lf", "crlf", "cr"]] = []
-    if before.newline in {"lf", "crlf", "cr"}:
-        styles.append(before.newline)
-    if before.newline == "mixed":
+    single_style = _single_newline_style(before.newline)
+    if single_style in {"lf", "crlf", "cr"}:
+        styles.append(single_style)
+    elif before.newline == "mixed":
         styles.extend(_newline_styles_in_text(before.text))
     styles.append("lf")
 
