@@ -51,6 +51,10 @@ add_dependency("requests", check=True)
 import requests
 ```
 
+Call `add_dependency` before importing the package in the current script. It is
+not a way to upgrade or replace a package that has already been imported in that
+same Python process.
+
 The runtime context shows the `run_python` environment directory and its
 `pyproject.toml`. That directory is the uv project used by `run_python`, not the
 workspace or active cwd. Direct dependencies from that `pyproject.toml` are shown
@@ -178,7 +182,7 @@ The runner sets useful environment variables for managed scripts:
 | `UV_AGENT_RUNTIME_THREAD_KIND` | Current thread kind when available. |
 | `UV_AGENT_RUNTIME_TURN_ID` | Current turn id when available. |
 | `UV_AGENT_RUNTIME_RUN_ID` | Current run id. |
-| `UV_AGENT_VENV_DIR` | Project shared script venv directory. |
+| `UV_AGENT_SCRIPTENV_DIR` | Project shared `scriptenv` uv project directory. |
 | `UV_AGENT_SCRIPT_DIR` | Directory containing run scripts and logs. |
 | `UV_BIN` | Resolved `uv` executable used by the runner. |
 | `PYTHONIOENCODING` | Forced to `utf-8` for child output. |

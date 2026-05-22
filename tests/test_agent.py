@@ -2225,7 +2225,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     )
     runner.scriptenv_dir.mkdir(parents=True)
     (runner.scriptenv_dir / "pyproject.toml").write_text(
-        "[project]\nname = \"uv-agent-scriptenv\"\ndependencies = [\"uv-agent\", \"requests>=2\"]\n",
+        "[project]\nname = \"uv-agent-scriptenv\"\ndependencies = [\"uv-agent>=0.6.2\", \"requests>=2\"]\n",
         encoding="utf-8",
     )
     engine = AgentEngine(
@@ -2250,6 +2250,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "explicitly asks for a detailed explanation of specific content" in prompt
     assert "project-shared uv environment" in prompt
     assert 'add_dependency("package-name")' in prompt
+    assert "Call add_dependency before importing the package" in prompt
+    assert "already been imported in the current Python process" in prompt
     assert "run_python environment pyproject.toml" in prompt
     assert "run_python accepts code, script_args, and timeout_s" in prompt
     assert "thread's active cwd" in prompt
@@ -2305,7 +2307,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<run_python_environment>" in turn_context
     assert str(runner.scriptenv_dir) in turn_context
     assert str(runner.scriptenv_dir / "pyproject.toml") in turn_context
-    assert "<dependency>uv-agent</dependency>" in turn_context
+    assert "uv-agent&gt;=0.6.2" not in turn_context
     assert "<dependency>requests&gt;=2</dependency>" in turn_context
     assert "<model_levels>" in turn_context
     assert "<default>medium</default>" in turn_context

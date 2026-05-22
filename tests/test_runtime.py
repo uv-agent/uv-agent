@@ -246,7 +246,7 @@ def test_runtime_dependency_helpers_use_run_python_env_dir(
 
     scriptenv = tmp_path / "scriptenv"
     scriptenv.mkdir()
-    monkeypatch.setenv("UV_AGENT_SCRIPTVENV_DIR", str(scriptenv))
+    monkeypatch.setenv("UV_AGENT_SCRIPTENV_DIR", str(scriptenv))
     monkeypatch.setenv("UV_BIN", "uv-test")
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 

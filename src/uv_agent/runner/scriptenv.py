@@ -4,11 +4,14 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import tomllib
 from pathlib import Path
 
 
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
+_READY_LOCK = threading.Lock()
+_READY_DIRS: set[Path] = set()
 
 
 def uv_binary() -> str:
@@ -16,10 +19,17 @@ def uv_binary() -> str:
 
 
 def ensure_venv(scriptenv_dir: Path) -> Path:
-    ensure_project(scriptenv_dir)
-    python = _venv_python(scriptenv_dir / ".venv")
-    _ensure_runtime_package(scriptenv_dir, python)
-    return python
+    resolved = scriptenv_dir.resolve()
+    python = _venv_python(resolved / ".venv")
+    if resolved in _READY_DIRS and python.exists():
+        return python
+    with _READY_LOCK:
+        if resolved in _READY_DIRS and python.exists():
+            return python
+        ensure_project(resolved)
+        _ensure_runtime_package(resolved, python)
+        _READY_DIRS.add(resolved)
+        return python
 
 
 def direct_dependencies(scriptenv_dir: Path) -> list[str]:

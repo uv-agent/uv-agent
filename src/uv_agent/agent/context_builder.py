@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from html import escape as xml_escape
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,9 @@ def runtime_environment_context(
     user_language: UserLanguage,
 ) -> str:
     dependencies = "\n".join(
-        f"<dependency>{xml_text(dependency)}</dependency>" for dependency in scriptenv_dependencies
+        f"<dependency>{xml_text(dependency)}</dependency>"
+        for dependency in scriptenv_dependencies
+        if not _is_uv_agent_dependency(dependency)
     )
     if not dependencies:
         dependencies = '<dependency_list empty="true" />'
@@ -76,3 +79,11 @@ def context_fingerprint(text: str) -> str:
 
 def xml_text(value: object) -> str:
     return xml_escape(str(value), quote=False)
+
+
+def _is_uv_agent_dependency(dependency: str) -> bool:
+    match = re.match(r"^\s*([A-Za-z0-9_.-]+)", dependency)
+    if match is None:
+        return False
+    normalized = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+    return normalized == "uv-agent"

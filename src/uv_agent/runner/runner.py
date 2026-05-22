@@ -219,7 +219,7 @@ class PythonRunner:
         env["PYTHONUTF8"] = "1"
         env["UV_AGENT_RUNTIME_PROJECT_ROOT"] = str(self.project_root)
         env["UV_AGENT_RUNTIME_STATE_DIR"] = str(self.data_dir)
-        env["UV_AGENT_VENV_DIR"] = str(self.scriptenv_dir / ".venv")
+        env["UV_AGENT_SCRIPTENV_DIR"] = str(self.scriptenv_dir)
         env["UV_AGENT_SCRIPT_DIR"] = str(self.runs_dir)
         env["UV_BIN"] = uv_binary()
         if thread_id:
@@ -229,5 +229,4 @@ class PythonRunner:
         if turn_id:
             env["UV_AGENT_RUNTIME_TURN_ID"] = turn_id
         env["UV_AGENT_RUNTIME_RUN_ID"] = run_id
-        env["UV_AGENT_SCRIPTVENV_DIR"] = str(self.scriptenv_dir)
         return env

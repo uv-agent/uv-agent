@@ -10,13 +10,10 @@ from .textops import CommandTextResult, run_process_text
 def run_python_env_dir() -> Path:
     """Return the uv project directory backing the current run_python environment."""
 
-    raw = os.environ.get("UV_AGENT_SCRIPTVENV_DIR") or os.environ.get("UV_AGENT_VENV_DIR")
+    raw = os.environ.get("UV_AGENT_SCRIPTENV_DIR")
     if not raw:
-        raise RuntimeError("UV_AGENT_SCRIPTVENV_DIR is not set")
-    path = Path(raw).resolve()
-    if path.name == ".venv":
-        return path.parent
-    return path
+        raise RuntimeError("UV_AGENT_SCRIPTENV_DIR is not set")
+    return Path(raw).resolve()
 
 
 def add_dependency(

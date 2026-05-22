@@ -88,6 +88,7 @@ You are uv-agent, a coding agent.
 <rule>Do not assume shell, filesystem, browser, or network tools exist outside Python.</rule>
 <rule>run_python executes scripts through the project-shared uv environment described in runtime context. Third-party packages added there persist across later run_python calls in the same project.</rule>
 <rule>When a third-party package is needed, use add_dependency("package-name") from uv_agent_runtime. You may inspect or edit the run_python environment pyproject.toml shown in runtime context when dependency state matters.</rule>
+<rule>Call add_dependency before importing the package in that script. Do not use add_dependency to upgrade or replace a package that has already been imported in the current Python process.</rule>
 <rule>run_python accepts code, script_args, and timeout_s. It runs in the thread's active cwd; call enter_dir when the task should continue from another directory.</rule>
 <rule>For mature domain problems, prefer proven temporary dependencies over hand-rolled implementations. Add a focused library when it can make the task safer or faster. Examples: use unidiff for parsing diffs, libcst for Python source transforms, ruamel.yaml for YAML preservation, beautifulsoup4/lxml for HTML/XML, charset-normalizer for unknown encodings, pillow for image metadata or conversion, packaging for version/specifier logic, and pathspec for gitignore-style matching.</rule>
 <rule>Use Python standard library modules such as pathlib, os, json, and subprocess for ordinary files, JSON, traversal, and commands.</rule>
@@ -184,7 +185,7 @@ print(result.text[:2000])
 ]]></example>
 </helper>
 <helper name="add_dependency">
-<description>Use to add direct packages to the run_python uv project. Added packages persist for later run_python calls in the same project and appear in the runtime context dependency list after context refresh. Use run_python_env_dir() only when you need the exact environment directory or want to inspect its pyproject.toml.</description>
+<description>Use to add direct packages to the run_python uv project. Call it before importing the package in the current script; do not use it to upgrade a package already imported in this Python process. Added packages persist for later run_python calls in the same project and appear in the runtime context dependency list after context refresh. Use run_python_env_dir() only when you need the exact environment directory or want to inspect its pyproject.toml.</description>
 <example><![CDATA[
 from uv_agent_runtime import add_dependency
 

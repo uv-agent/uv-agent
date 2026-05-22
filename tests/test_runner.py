@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from uv_agent.config import RunnerConfig
 from uv_agent.jsonl import read_jsonl
 from uv_agent.runner import PythonRunRequest, PythonRunner
+import uv_agent.runner.scriptenv as scriptenv
 from uv_agent.runner.runner import parse_structured_event
 from uv_agent.runner.scriptenv import direct_dependencies, ensure_venv
 
@@ -278,3 +280,55 @@ def test_ensure_venv_installs_runtime_package(tmp_path: Path) -> None:
     assert any(dependency.startswith("uv-agent") for dependency in direct_dependencies(tmp_path / "scriptenv"))
     result = subprocess.run([str(python), "-c", "import uv_agent_runtime"], check=False)
     assert result.returncode == 0
+
+
+def test_ensure_venv_reuses_ready_environment_without_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scriptenv_dir = tmp_path / "scriptenv"
+    python = ensure_venv(scriptenv_dir)
+
+    def fail_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise AssertionError("ready scriptenv should not spawn subprocesses")
+
+    monkeypatch.setattr(scriptenv.subprocess, "run", fail_run)
+
+    assert ensure_venv(scriptenv_dir) == python
+
+
+def test_ensure_venv_serializes_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scriptenv_dir = tmp_path / "scriptenv"
+    monkeypatch.setattr(scriptenv, "_READY_DIRS", set())
+    monkeypatch.setattr(scriptenv, "_READY_LOCK", threading.Lock())
+    calls: list[list[str]] = []
+    python = scriptenv_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append(list(args))
+        if args[1] == "init":
+            (scriptenv_dir / "pyproject.toml").parent.mkdir(parents=True, exist_ok=True)
+            (scriptenv_dir / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+        if args[1] == "add":
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(scriptenv.subprocess, "run", fake_run)
+
+    results: list[Path] = []
+    threads = [threading.Thread(target=lambda: results.append(ensure_venv(scriptenv_dir))) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 2
+    assert set(results) == {python}
+    assert [call[1] for call in calls].count("init") == 1
+    assert [call[1] for call in calls].count("add") == 1
