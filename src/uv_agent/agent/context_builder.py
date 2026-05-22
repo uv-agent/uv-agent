@@ -54,17 +54,18 @@ def model_levels_context(config: AppConfig) -> str:
     lines = [
         "<model_levels>",
         f"<default>{xml_text(config.runtime.default_level)}</default>",
-        "<available>",
     ]
+    ask_default_level = config.runtime.ask_default_level
+    if ask_default_level:
+        lines.append(f"<ask_default>{xml_text(ask_default_level)}</ask_default>")
+    lines.append("<available>")
     for name in config.levels:
         lines.append(f"<level>{xml_text(name)}</level>")
-    lines.extend(
-        [
-            "</available>",
-            "<rule>level and model_level values are configuration-defined; use only an available name, or omit them to use the default.</rule>",
-            "</model_levels>",
-        ]
+    lines.append("</available>")
+    lines.append(
+        "<rule>level and model_level values are configuration-defined; use only an available name, or omit them to use the default.</rule>"
     )
+    lines.append("</model_levels>")
     return "\n".join(lines)
 
 

@@ -77,6 +77,10 @@ async def _ask(
     from uv_agent.app_factory import create_engine
 
     engine = create_engine(Path.cwd(), data_dir=project_state_dir)
+    if level is None:
+        ask_default = engine.config.runtime.ask_default_level
+        if ask_default:
+            level = ask_default
     if thread_id is None and thread_kind == "subagent":
         title = prompt.splitlines()[0].strip()
         if len(title) > 80:

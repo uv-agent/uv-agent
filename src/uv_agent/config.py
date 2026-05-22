@@ -137,6 +137,7 @@ class StreamRetryConfig:
 @dataclass(frozen=True)
 class RuntimeConfig:
     default_level: str = "medium"
+    ask_default_level: str | None = None
     store_provider_response: bool = False
     max_agent_rounds: int = 100
     compression: CompressionConfig = field(default_factory=CompressionConfig)
@@ -372,8 +373,15 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
     default_level = runtime_raw.get("default_level", "medium")
     if default_level not in levels and levels:
         default_level = next(iter(levels))
+    ask_default_level_raw = runtime_raw.get("ask_default_level")
+    ask_default_level: str | None
+    if isinstance(ask_default_level_raw, str) and ask_default_level_raw:
+        ask_default_level = ask_default_level_raw if ask_default_level_raw in levels else None
+    else:
+        ask_default_level = None
     runtime = RuntimeConfig(
         default_level=default_level,
+        ask_default_level=ask_default_level,
         store_provider_response=runtime_raw.get("store_provider_response", False),
         max_agent_rounds=runtime_raw.get("max_agent_rounds", 100),
         compression=compression,

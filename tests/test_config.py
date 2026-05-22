@@ -201,6 +201,48 @@ def test_configured_levels_replace_default_level_template(tmp_path: Path) -> Non
     assert list(config.levels) == ["small", "medium"]
 
 
+def test_runtime_ask_default_level_is_parsed(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {"p": {"base_url": "https://example.com"}},
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {
+                    "fast": {"model": "m"},
+                    "deep": {"model": "m"},
+                },
+                "runtime": {"default_level": "fast", "ask_default_level": "deep"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert config.runtime.default_level == "fast"
+    assert config.runtime.ask_default_level == "deep"
+
+
+def test_runtime_ask_default_level_ignored_when_unknown(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {"p": {"base_url": "https://example.com"}},
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {"fast": {"model": "m"}},
+                "runtime": {"ask_default_level": "missing"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert config.runtime.ask_default_level is None
+
+
 def test_default_title_and_compression_levels_do_not_assume_small(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
