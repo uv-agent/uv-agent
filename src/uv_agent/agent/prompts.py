@@ -180,7 +180,7 @@ enter_dir("src")
 from uv_agent_runtime import ask
 
 # ask(prompt: str, *, level=None, model_level=None, cwd=None, env=None, executable=None,
-#     timeout_s=300, check=False, retain=True) -> SubagentResult
+#     timeout_s=300, check=False, retain=True) -> SubagentResult  # .text, .stdout, .stderr, .thread_id, .returncode, .raise_for_error()
 result = ask("Inspect parser tests and summarize likely failures", check=True, timeout_s=300)
 print(result.text[:2000])
 ]]></example>
@@ -191,7 +191,7 @@ print(result.text[:2000])
 from uv_agent_runtime import add_dependency
 
 # add_dependency(*packages: str, editable=False, optional=None, dev=False, group=None,
-#     timeout_s=None, check=True) -> CommandTextResult
+#     timeout_s=None, check=True) -> CommandTextResult  # .args, .returncode, .stdout, .stderr, .ok, .raise_for_error()
 add_dependency("requests", check=True)
 import requests
 ]]></example>
@@ -201,7 +201,7 @@ import requests
 <example><![CDATA[
 from uv_agent_runtime import look_at
 
-# look_at(path: str | Path, *, note="") -> dict[str, Any]
+# look_at(path: str | Path, *, note="") -> dict[str, Any]  # {path, note}
 look_at("screenshots/failure.png", note="inspect failing UI state")
 ]]></example>
 </helper>
@@ -210,7 +210,7 @@ look_at("screenshots/failure.png", note="inspect failing UI state")
 <example><![CDATA[
 from uv_agent_runtime import apply_patch, workspace_transaction
 
-# workspace_transaction(paths: Sequence[str | Path] | None = None, *, root=".") -> Iterator[Snapshot]
+# workspace_transaction(paths: Sequence[str | Path] | None = None, *, root=".") -> Iterator[Snapshot]  # Snapshot: .root, .files (dict[str, bytes|None])
 with workspace_transaction(["src", "tests"]):
     apply_patch('''*** Begin Patch
 *** Update File: src/app.py
@@ -226,7 +226,7 @@ with workspace_transaction(["src", "tests"]):
 <example><![CDATA[
 from uv_agent_runtime import snapshot_files
 
-# snapshot_files(paths: Sequence[str | Path], *, root=".") -> Snapshot
+# snapshot_files(paths: Sequence[str | Path], *, root=".") -> Snapshot  # .root, .files (dict[str, bytes|None])
 snapshot = snapshot_files(["src/app.py", "tests/test_app.py"])
 print(snapshot.files.keys())
 ]]></example>
@@ -248,7 +248,7 @@ print(restore_snapshot(snapshot))
 <example><![CDATA[
 from uv_agent_runtime import read_text_lossless
 
-# read_text_lossless(path: str | Path, *, encoding="utf-8") -> TextFile
+# read_text_lossless(path: str | Path, *, encoding="utf-8") -> TextFile  # .path, .text, .encoding, .newline, .final_newline, .bom
 file = read_text_lossless("src/app.py")
 print(file.newline, file.final_newline, file.bom)
 ]]></example>
@@ -260,7 +260,7 @@ from uv_agent_runtime import read_text_lossless, write_text_lossless
 
 # read_text_lossless(path: str | Path, *, encoding="utf-8") -> TextFile
 # write_text_lossless(path, text, *, like=None, encoding=None, newline=None,
-#     final_newline=None, bom=None, atomic=True) -> Path
+#     final_newline=None, bom=None, atomic=True) -> Path  # written path
 before = read_text_lossless("src/app.py")
 write_text_lossless("src/app.py", before.text.replace("old", "new"), like=before)
 ]]></example>
@@ -271,7 +271,7 @@ write_text_lossless("src/app.py", before.text.replace("old", "new"), like=before
 from uv_agent_runtime import replace_text
 
 # replace_text(path: str | Path, old: str, new: str, *, count=1,
-#     newlines="logical") -> ReplacementResult
+#     newlines="logical") -> ReplacementResult  # .path, .replacements, .before (TextFile), .after (TextFile)
 replace_text("README.md", "old paragraph\n\nnext", "new paragraph\n\nnext")
 ]]></example>
 </helper>
@@ -280,7 +280,7 @@ replace_text("README.md", "old paragraph\n\nnext", "new paragraph\n\nnext")
 <example><![CDATA[
 from uv_agent_runtime import path_info
 
-# path_info(path: str | Path, *, base=None) -> PathInfo
+# path_info(path: str | Path, *, base=None) -> PathInfo  # .path, .exists, .kind, .size, .cwd, .base, .is_absolute, .is_relative_to_base
 info = path_info("../maybe-outside.txt", base=".")
 print(info.kind, info.is_relative_to_base)
 ]]></example>
@@ -290,7 +290,7 @@ print(info.kind, info.is_relative_to_base)
 <example><![CDATA[
 from uv_agent_runtime import apply_patch
 
-# apply_patch(patch: str, *, cwd=None, check=True) -> PatchResult
+# apply_patch(patch: str, *, cwd=None, check=True) -> PatchResult  # .returncode, .stdout, .stderr, .changed_files (list[str])
 apply_patch('''*** Begin Patch
 *** Update File: src/app.py
 @@
@@ -308,7 +308,7 @@ from uv_agent_runtime import apply_patch_any, run_process_text
 
 # run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace",
 #     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult
-# apply_patch_any(patch: str, *, cwd=None, format="auto", dry_run=False, check=True) -> PatchResult
+# apply_patch_any(patch: str, *, cwd=None, format="auto", dry_run=False, check=True) -> PatchResult  # .returncode, .stdout, .stderr, .changed_files (list[str])
 diff = run_process_text(["git", "diff", "--", "src/app.py"]).stdout
 apply_patch_any(diff, format="unified", dry_run=True)
 ]]></example>
@@ -340,7 +340,7 @@ print(make_unified_diff("old\n", "new\n", path="src/app.py"))
 from uv_agent_runtime import run_process_text
 
 # run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace",
-#     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult
+#     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult  # .args, .returncode, .stdout, .stderr, .ok, .raise_for_error()
 result = run_process_text(["git", "status", "--short"], encoding="utf-8", check=True)
 print(result.stdout)
 ]]></example>
@@ -351,9 +351,9 @@ print(result.stdout)
 from uv_agent_runtime import list_thread_digests, thread_digest
 
 # list_thread_digests(*, state_dir=None, limit=10, kind="thread", parent_thread_id=None,
-#     since_last_compaction=True, include_tools=False) -> list[dict[str, Any]]
+#     since_last_compaction=True, include_tools=False) -> list[dict[str, Any]]  # each: thread_id, title, created_at, updated_at, last_text, turn_count, items
 # thread_digest(thread_id: str, *, state_dir=None, kind=None,
-#     since_last_compaction=True, include_tools=False) -> dict[str, Any]
+#     since_last_compaction=True, include_tools=False) -> dict[str, Any]  # keys: thread_id, title, created_at, updated_at, last_text, turn_count, items
 threads = list_thread_digests(limit=5)
 if threads:
     print(thread_digest(threads[0]["thread_id"]))
@@ -364,9 +364,9 @@ if threads:
 <example><![CDATA[
 from uv_agent_runtime import connect_named, connect_url, list_declared_servers
 
-# list_declared_servers(*, config_paths=None, cwd=None) -> list[dict[str, Any]]
-# connect_named(name: str, *, config_paths=None, cwd=None, timeout_s=30) -> McpClient
-# connect_url(url: str, *, transport="streamable_http", timeout_s=30) -> McpClient
+# list_declared_servers(*, config_paths=None, cwd=None) -> list[dict[str, Any]]  # each: name, scope, path, description, transport, command, url
+# connect_named(name: str, *, config_paths=None, cwd=None, timeout_s=30) -> McpClient  # .initialize()->McpResult(.value,.raw), .list_tools(), .call_tool(name,args)
+# connect_url(url: str, *, transport="streamable_http", timeout_s=30) -> McpClient  # .initialize()->McpResult(.value,.raw), .list_tools(), .call_tool(name,args)
 print(list_declared_servers())
 with connect_named("server-name") as client:
     init = client.initialize()
@@ -388,7 +388,7 @@ from uv_agent_runtime import search_text
 # search_text(pattern: str, *, root=".", globs=None, file_types=None, ignore_case=False,
 #     case_sensitive=None, fixed_string=False, literal=None, multiline=False, word=False,
 #     max_count_per_file=None, max_total=None, hidden=False, no_ignore=False,
-#     extra_args=None) -> list[Match]
+#     extra_args=None) -> list[Match]  # Match: .path, .line, .column, .text, .submatches (Submatch: .start, .end, .text)
 # search_text and find_files both pass extra_args to rg for options that are
 # not modeled as explicit parameters. Common examples include:
 # ["--follow"], ["--max-depth", "3"], ["--one-file-system"], ["--sort", "path"],
@@ -416,7 +416,7 @@ from uv_agent_runtime import find_symbols, supported_symbol_languages
 # supported_symbol_languages() -> list[str]
 # find_symbols(root=".", *, languages=None, language=None, kinds=None, kind=None,
 #     name_pattern=None, name=None, contains=None, max_count=None, hidden=False,
-#     no_ignore=False, globs=None) -> list[Symbol]
+#     no_ignore=False, globs=None) -> list[Symbol]  # Symbol: .kind, .name, .path, .language, .start_row, .end_row
 print(supported_symbol_languages())
 for sym in find_symbols("src", kind="class", contains="Engine"):
     print(sym.path, sym.start_row, sym.name)
@@ -428,7 +428,7 @@ for sym in find_symbols("src", kind="class", contains="Engine"):
 from uv_agent_runtime import query_code
 
 # query_code(query_text: str, *, language: str, root=".", globs=None, file_types=None,
-#     hidden=False, no_ignore=False, max_count=None) -> list[Capture]
+#     hidden=False, no_ignore=False, max_count=None) -> list[Capture]  # Capture: .name, .path, .language, .start_row, .start_col, .end_row, .end_col, .text
 for cap in query_code(
     "(call function: (attribute attribute: (identifier) @method))",
     language="python",
