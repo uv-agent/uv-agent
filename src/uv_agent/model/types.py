@@ -44,7 +44,7 @@ class ModelClient(Protocol):
     ) -> ModelResponse:
         ...
 
-    async def stream_response(
+    def stream_response(
         self,
         *,
         input_items: list[dict[str, Any]],
@@ -53,4 +53,12 @@ class ModelClient(Protocol):
         instructions: str | None = None,
         previous_response_id: str | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        """Return an async iterator immediately; callers must not await it first.
+
+        Concrete clients implement this as async-generator methods. An ``async
+        def`` protocol member would describe a coroutine that resolves to an
+        iterator, which is a different call contract and caused cascading type
+        errors in clients and tests.
+        """
+
         ...
