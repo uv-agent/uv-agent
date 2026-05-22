@@ -783,6 +783,47 @@ def test_codesearch_find_files_and_search_text(tmp_path: Path) -> None:
 
 
 @requires_rg
+def test_codesearch_accepts_file_root(tmp_path: Path) -> None:
+    _make_python_workspace(tmp_path)
+    target = tmp_path / "src" / "a.py"
+
+    files = find_files(target)
+    assert [p.replace("\\", "/") for p in files] == ["a.py"]
+
+    hits = search_text("hello", root=target)
+    assert hits
+    assert {h.path.replace("\\", "/") for h in hits} == {"a.py"}
+
+    # Searching a file should not pick up unrelated matches in sibling files.
+    world_hits = search_text("world", root=target)
+    assert world_hits == []
+
+
+@requires_rg
+def test_codequery_accepts_file_root(
+    tmp_path: Path,
+    codequery_home: Path,
+) -> None:
+    _make_python_workspace(tmp_path)
+    target = tmp_path / "src" / "a.py"
+
+    symbols = find_symbols(target)
+    names = {(s.kind, s.name, s.path.replace("\\", "/")) for s in symbols}
+    assert ("function", "hello", "a.py") in names
+    assert ("class", "Foo", "a.py") in names
+    # b.py's `world` must not appear when scoping to a.py.
+    assert all(s.name != "world" for s in symbols)
+
+    captures = query_code(
+        "(call function: (identifier) @call)",
+        language="python",
+        root=target,
+    )
+    assert [c.text for c in captures] == ["hello"]
+    assert {c.path.replace("\\", "/") for c in captures} == {"a.py"}
+
+
+@requires_rg
 def test_codesearch_search_text_fixed_string_and_max_total(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
     hits = search_text("def ", root=tmp_path, fixed_string=True, max_total=2)

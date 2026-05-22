@@ -382,10 +382,13 @@ def query_code(
     """
     if not query_text.strip():
         raise ValueError("query_text must be non-empty")
-    root_path = resolve_workspace_path(root)
+    resolved = resolve_workspace_path(root)
+    # ``find_files`` accepts a file as root by scoping to that single file; mirror
+    # that here so cache keys and abs_path joins use the enclosing directory.
+    root_path = resolved.parent if resolved.is_file() else resolved
     root_key = str(root_path)
     candidates = _candidate_files(
-        root=root_path,
+        root=resolved,
         languages={language},
         globs=globs,
         file_types=file_types,
@@ -448,7 +451,8 @@ def find_symbols(
     """
     import re
 
-    root_path = resolve_workspace_path(root)
+    resolved = resolve_workspace_path(root)
+    root_path = resolved.parent if resolved.is_file() else resolved
     root_key = str(root_path)
     lang_set = set(languages or [])
     if language:
@@ -459,7 +463,7 @@ def find_symbols(
     if not available:
         return []
     candidates = _candidate_files(
-        root=root_path,
+        root=resolved,
         languages=available,
         globs=globs,
         file_types=None,

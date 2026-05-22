@@ -366,7 +366,7 @@ with connect_url("http://localhost:3001/mcp") as client:
 ]]></example>
 </helper>
 <helper name="search_text">
-<description>Use for grep-like content search across the workspace instead of broad file reads or manual scanning. It wraps the system `rg` (ripgrep), honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `literal=True` or `fixed_string=True` to disable regex, `case_sensitive=False` for case-insensitive search, and `max_count_per_file`/`max_total` to bound output.</description>
+<description>Use for grep-like content search across the workspace instead of broad file reads or manual scanning. It wraps the system `rg` (ripgrep), honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). `root` may be a directory or a single file (scopes the search to that file). Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `literal=True` or `fixed_string=True` to disable regex, `case_sensitive=False` for case-insensitive search, and `max_count_per_file`/`max_total` to bound output.</description>
 <example><![CDATA[
 from uv_agent_runtime import search_text
 
@@ -375,7 +375,7 @@ for hit in search_text(r"def\\s+handle_\\w+", root="src", file_types=["py"], max
 ]]></example>
 </helper>
 <helper name="find_files">
-<description>Use to enumerate workspace files honoring .gitignore via `rg --files` instead of manual directory walking. It is much faster than Path.rglob on large repositories and accepts the same `globs`, `file_types`, `hidden`, and `no_ignore` controls as search_text.</description>
+<description>Use to enumerate workspace files honoring .gitignore via `rg --files` instead of manual directory walking. It is much faster than Path.rglob on large repositories and accepts the same `globs`, `file_types`, `hidden`, and `no_ignore` controls as search_text. `root` may be a directory or a single file (returns just that file).</description>
 <example><![CDATA[
 from uv_agent_runtime import find_files
 
@@ -384,7 +384,7 @@ for path in find_files("src", globs=["*.py", "!**/migrations/**"]):
 ]]></example>
 </helper>
 <helper name="find_symbols">
-<description>Use to locate function/class/method/struct/interface/... definitions across the workspace via tree-sitter. Results are cached per file in ~/.uv-agent/cache/codequery so repeat calls only re-parse files whose (mtime, size) changed. Filter with `language="python"` or `languages=[...]`, `kind="class"` or `kinds=[...]`, exact `name="Engine"`, substring `contains="Engine"`, or regex `name_pattern=r"^test_"`. Built-in language support: see supported_symbol_languages().</description>
+<description>Use to locate function/class/method/struct/interface/... definitions across the workspace via tree-sitter. Results are cached per file in ~/.uv-agent/cache/codequery so repeat calls only re-parse files whose (mtime, size) changed. `root` may be a directory or a single file. Filter with `language="python"` or `languages=[...]`, `kind="class"` or `kinds=[...]`, exact `name="Engine"`, substring `contains="Engine"`, or regex `name_pattern=r"^test_"`. Built-in language support: see supported_symbol_languages().</description>
 <example><![CDATA[
 from uv_agent_runtime import find_symbols, supported_symbol_languages
 

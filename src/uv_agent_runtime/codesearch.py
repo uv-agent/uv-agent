@@ -136,6 +136,7 @@ def search_text(
     if not pattern:
         raise ValueError("pattern must be non-empty")
     resolved = resolve_workspace_path(root)
+    cwd_path, target_paths = _split_root(resolved)
     effective_ignore_case = ignore_case if case_sensitive is None else not case_sensitive
     effective_fixed_string = fixed_string if literal is None else literal
     args = _build_args(
@@ -152,7 +153,8 @@ def search_text(
         no_ignore=no_ignore,
         extra=extra_args,
     )
-    code, stdout, stderr = _run(args, resolved)
+    args.extend(target_paths)
+    code, stdout, stderr = _run(args, cwd_path)
     # rg exits 1 when no matches; 2+ for real errors.
     if code >= 2:
         raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
@@ -214,6 +216,7 @@ def find_files(
     typically far faster than `Path.rglob` on large repositories.
     """
     resolved = resolve_workspace_path(root)
+    cwd_path, target_paths = _split_root(resolved)
     args = _build_args(
         pattern=None,
         files_only=True,
@@ -228,10 +231,23 @@ def find_files(
         no_ignore=no_ignore,
         extra=extra_args,
     )
-    code, stdout, stderr = _run(args, resolved)
+    args.extend(target_paths)
+    code, stdout, stderr = _run(args, cwd_path)
     if code >= 2:
         raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
     return [line for line in stdout.splitlines() if line]
+
+
+def _split_root(resolved: Path) -> tuple[Path, list[str]]:
+    """Return ``(cwd, positional_paths)`` for ripgrep based on the resolved root.
+
+    Ripgrep requires ``cwd`` to be a directory. When the agent passes a file as
+    the search root, scope the search to that single file by using its parent
+    as ``cwd`` and appending the file name as a positional path argument.
+    """
+    if resolved.is_file():
+        return resolved.parent, [resolved.name]
+    return resolved, []
 
 
 def _decode_bytes_field(field_obj: dict) -> str | None:
