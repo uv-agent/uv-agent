@@ -13,6 +13,7 @@ def test_runtime_rpc_server_handles_notification_and_call(tmp_path: Path) -> Non
     events: list[dict] = []
     writer = JsonlWriter(tmp_path / "run.jsonl")
     server.register_method("echo", lambda text: {"text": text})
+    server.register_method("run_id", lambda context: context.run_id)
     try:
         handle = server.open_session(
             run_id="run_rpc",
@@ -56,6 +57,14 @@ def test_runtime_rpc_server_handles_notification_and_call(tmp_path: Path) -> Non
             )
             assert status == 200
             assert json.loads(body) == {"jsonrpc": "2.0", "id": "1", "result": {"text": "hi"}}
+
+            status, body = _post(
+                server.url,
+                handle.token,
+                {"jsonrpc": "2.0", "id": "2", "method": "call.run_id", "params": {}},
+            )
+            assert status == 200
+            assert json.loads(body) == {"jsonrpc": "2.0", "id": "2", "result": "run_rpc"}
         finally:
             handle.close()
     finally:

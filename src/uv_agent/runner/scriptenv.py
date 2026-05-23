@@ -75,7 +75,10 @@ def ensure_project(scriptenv_dir: Path) -> None:
             env=_uv_env(),
             check=True,
         )
-    if not venv_dir.exists() or not _declares_dependency(pyproject, "uv-agent"):
+    checkout = _editable_checkout_root()
+    needs_runtime = not venv_dir.exists() or not _declares_dependency(pyproject, "uv-agent")
+    needs_checkout_source = checkout is not None and not _declares_editable_checkout(pyproject, checkout)
+    if needs_runtime or needs_checkout_source:
         _add_runtime_package(scriptenv_dir)
 
 
@@ -216,9 +219,28 @@ def _declares_dependency(pyproject: Path, name: str) -> bool:
     return False
 
 
+def _declares_editable_checkout(pyproject: Path, checkout: Path) -> bool:
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+    if not isinstance(sources, dict):
+        return False
+    source = sources.get(_HOST_PACKAGE)
+    if not isinstance(source, dict) or source.get("editable") is not True:
+        return False
+    source_path = source.get("path")
+    if not isinstance(source_path, str) or not source_path:
+        return False
+    try:
+        return (pyproject.parent / source_path).resolve() == checkout.resolve()
+    except OSError:
+        return False
+
+
 def _normalize_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
-
 
 
 def _editable_checkout_root() -> Path | None:

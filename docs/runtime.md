@@ -28,7 +28,8 @@ Each project has one shared script venv:
 ```
 
 The runner creates the `scriptenv` uv project lazily with `uv init`, adds
-`uv-agent` with `uv add`, writes each `run_python` call to
+`uv-agent` with `uv add` (editable from the current checkout during source-tree
+development), writes each `run_python` call to
 `runner/runs/<run_id>.py`, and executes it with
 `uv run --project <scriptenv> --directory <active-cwd> python <run_id>.py`. Run
 JSONL records include the generated `run_id`, cwd, timeout, script args,

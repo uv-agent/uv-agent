@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -37,17 +38,21 @@ class MethodRegistry:
         method = self.get(name)
         if method is None:
             raise KeyError(name)
-        try:
-            return method(**params)
-        except TypeError as exc:
-            # If a host method explicitly asks for context, provide the current
-            # immutable run context without making it mandatory for simple helpers.
-            if "context" not in params:
-                try:
-                    return method(context=context, **params)
-                except TypeError:
-                    pass
-            raise exc
+        call_params = dict(params)
+        if "context" not in call_params and _accepts_context(method):
+            call_params["context"] = context
+        return method(**call_params)
+
+
+def _accepts_context(method: HostMethod) -> bool:
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+    return "context" in signature.parameters
 
 
 def _normalize_name(name: str) -> str:
