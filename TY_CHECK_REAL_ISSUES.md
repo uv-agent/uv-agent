@@ -54,3 +54,14 @@
 - `uv run pytest tests/test_config.py tests/test_model_client.py tests/test_notifications.py tests/test_mcp_probe.py -q`：59 passed（后续配置补丁后相关子集 54 passed）
 - `uv run pytest tests/test_tui.py -q`：109 passed
 - `uv run pytest`：343 passed
+
+
+## Pyright 复查记录
+
+新增 `pyrightconfig.json` 后继续排查 Pyright 的剩余诊断：
+
+- 已修复 runtime 中 `Path.read_text(newline=...)` 的 Python 3.12 兼容性问题，改为 `Path.open(..., newline="")`。
+- 已修复 async iterator `__anext__()` awaitable 包装、SDK client `None` 收窄、TUI renderable/事件字典/延迟值收窄。
+- 保留配置中对 mixin 文件的 `ignore`：这些文件依赖最终 `UvAgentApp` 组合注入属性，Pyright 单独分析 mixin 时会产生大量非真实 `attribute unknown` 噪声。
+- 当前 `uv run --with pyright pyright`：0 errors, 0 warnings。
+- 当前 `uv run pytest`：343 passed。
