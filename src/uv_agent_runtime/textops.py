@@ -618,8 +618,12 @@ def _replacement_candidates(
 
     styles: list[Literal["lf", "crlf", "cr"]] = []
     single_style = _single_newline_style(before.newline)
-    if single_style in {"lf", "crlf", "cr"}:
-        styles.append(single_style)
+    if single_style == "lf":
+        styles.append("lf")
+    elif single_style == "crlf":
+        styles.append("crlf")
+    elif single_style == "cr":
+        styles.append("cr")
     elif before.newline == "mixed":
         styles.extend(_newline_styles_in_text(before.text))
     styles.append("lf")

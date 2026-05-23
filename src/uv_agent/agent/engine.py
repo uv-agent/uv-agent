@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import importlib
 import json
 import random
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from html import escape as xml_escape
 from pathlib import Path
@@ -60,6 +61,19 @@ from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.skills import SkillSummary, discover_skills, render_skill_entry
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.agent.tool_results import function_output, model_tool_payload
+
+
+async def _await_next_stream_event(awaitable: Awaitable[Any]) -> Any:
+    """Bridge async-iterator ``__anext__`` awaitables into coroutine tasks.
+
+    ``asyncio.create_task`` accepts coroutine objects at runtime, but async
+    generators return an ``async_generator_asend`` awaitable from ``__anext__``.
+    Wrapping the awaitable keeps cancellation behavior explicit and gives static
+    checkers the concrete coroutine shape they expect.
+    """
+
+    return await awaitable
+
 
 async def _sleep_stream_retry(delay_s: float) -> None:
     await asyncio.sleep(delay_s)
@@ -1645,7 +1659,7 @@ class AgentEngine:
             cancel_task = asyncio.create_task(cancel_event.wait())
         try:
             while True:
-                next_task = asyncio.create_task(iterator.__anext__())
+                next_task = asyncio.create_task(_await_next_stream_event(iterator.__anext__()))
                 tasks: set[asyncio.Task[Any]] = {next_task}
                 if cancel_task is not None:
                     tasks.add(cancel_task)
@@ -1669,7 +1683,9 @@ class AgentEngine:
                 await asyncio.gather(cancel_task, return_exceptions=True)
             aclose = getattr(iterator, "aclose", None)
             if callable(aclose):
-                await aclose()
+                close_result = aclose()
+                if inspect.isawaitable(close_result):
+                    await _await_next_stream_event(close_result)
 
     def _register_look_at_events(
         self,

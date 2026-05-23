@@ -109,6 +109,7 @@ class McpClient:
 
     async def _worker(self) -> None:
         import anyio
+        from anyio import to_thread
 
         async with AsyncExitStack() as stack:
             if self.config.transport == "stdio":
@@ -137,7 +138,7 @@ class McpClient:
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
             self._ready.put(None)
             while True:
-                op, payload, response = await anyio.to_thread.run_sync(self._requests.get)
+                op, payload, response = await to_thread.run_sync(self._requests.get)
                 try:
                     if op == "close":
                         response.put(None)

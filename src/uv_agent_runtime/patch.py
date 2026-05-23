@@ -198,10 +198,10 @@ def _apply_ops(workdir: Path, ops: list[_FileOp], *, write: bool) -> None:
             text = _read_pending(source, pending)
             if text is None:
                 raise FileNotFoundError(f"update file does not exist: {op.path}")
-            if text is _MISSING:
+            if isinstance(text, _MissingPending):
                 if not source.exists():
                     raise FileNotFoundError(f"update file does not exist: {op.path}")
-                text = source.read_text(encoding="utf-8", newline="")
+                text = _read_text_preserve_newlines(source)
             text = _apply_hunks(text, op.hunks, op.path)
             if op.move_to is None:
                 pending[source] = text
@@ -225,7 +225,7 @@ def _apply_ops(workdir: Path, ops: list[_FileOp], *, write: bool) -> None:
                 _remove_empty_parents(path.parent, workdir)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8", newline="")
+            _write_text_preserve_newlines(path, text)
 
 
 def _resolve_patch_path(workdir: Path, path: str) -> Path:
@@ -244,6 +244,25 @@ def _read_pending(path: Path, pending: dict[Path, str | None]) -> str | None | _
     if path in pending:
         return pending[path]
     return _MISSING
+
+
+def _read_text_preserve_newlines(path: Path) -> str:
+    """Read UTF-8 text without universal newline translation.
+
+    ``Path.read_text(newline=...)`` is only available on newer Python versions,
+    while this runtime package supports Python 3.12. Going through ``open`` keeps
+    patch application compatible and still preserves existing line endings.
+    """
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def _write_text_preserve_newlines(path: Path, text: str) -> None:
+    """Write UTF-8 text exactly as composed by the patch engine."""
+
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
 
 
 def _join_lines(lines: list[str]) -> str:
