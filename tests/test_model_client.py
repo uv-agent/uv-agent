@@ -654,6 +654,33 @@ def test_anthropic_messages_convert_tool_items() -> None:
     assert messages[2]["content"][0]["type"] == "tool_result"
 
 
+def test_anthropic_messages_group_parallel_tool_results_after_tool_uses() -> None:
+    messages = anthropic_messages(
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {
+                "type": "function_call",
+                "call_id": "toolu_1",
+                "name": "run_python",
+                "arguments": "{\"code\":\"print(1)\"}",
+            },
+            {
+                "type": "function_call",
+                "call_id": "toolu_2",
+                "name": "run_python",
+                "arguments": "{\"code\":\"print(2)\"}",
+            },
+            {"type": "function_call_output", "call_id": "toolu_1", "output": "{\"one\":true}"},
+            {"type": "function_call_output", "call_id": "toolu_2", "output": "{\"two\":true}"},
+        ]
+    )
+
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+    assert [block["type"] for block in messages[1]["content"]] == ["tool_use", "tool_use"]
+    assert [block["type"] for block in messages[2]["content"]] == ["tool_result", "tool_result"]
+    assert [block["tool_use_id"] for block in messages[2]["content"]] == ["toolu_1", "toolu_2"]
+
+
 def test_parse_anthropic_response_maps_tool_use() -> None:
     response = parse_anthropic_response(
         {

@@ -81,44 +81,74 @@ def parse_anthropic_response(data: dict[str, Any]) -> ModelResponse:
 
 def anthropic_messages(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
+    pending_assistant: dict[str, Any] | None = None
+    pending_tool_results: list[dict[str, Any]] = []
+
+    def flush_pending_assistant() -> None:
+        nonlocal pending_assistant
+        if pending_assistant is not None:
+            messages.append(pending_assistant)
+            pending_assistant = None
+
+    def flush_tool_results() -> None:
+        nonlocal pending_tool_results
+        if pending_tool_results:
+            # Anthropic requires all tool_result blocks for one assistant
+            # tool_use batch to be in the immediately following user message.
+            # Emitting one user message per result makes the second result no
+            # longer directly follow the assistant tool_use message.
+            messages.append({"role": "user", "content": pending_tool_results})
+            pending_tool_results = []
+
+    def pending_assistant_content() -> list[dict[str, Any]]:
+        nonlocal pending_assistant
+        if pending_assistant is None:
+            pending_assistant = {"role": "assistant", "content": []}
+        content = pending_assistant.get("content")
+        if isinstance(content, list):
+            return content
+        blocks = [{"type": "text", "text": str(content)}] if content else []
+        pending_assistant["content"] = blocks
+        return blocks
+
     for item in input_items:
         item_type = item.get("type")
         if item_type == "message":
+            flush_pending_assistant()
+            flush_tool_results()
             role = item.get("role", "user")
-            content = anthropic_message_content(item)
-            messages.append(
-                {
-                    "role": "assistant" if role == "assistant" else "user",
-                    "content": content,
-                }
-            )
+            message = {
+                "role": "assistant" if role == "assistant" else "user",
+                "content": anthropic_message_content(item),
+            }
+            if role == "assistant":
+                # Keep plain assistant text as a string unless a following
+                # function_call needs to append tool_use blocks to the same
+                # assistant message.
+                pending_assistant = message
+            else:
+                messages.append(message)
         elif item_type == "function_call":
-            messages.append(
+            flush_tool_results()
+            pending_assistant_content().append(
                 {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": item.get("call_id"),
-                            "name": item.get("name"),
-                            "input": json.loads(item.get("arguments") or "{}"),
-                        }
-                    ],
+                    "type": "tool_use",
+                    "id": item.get("call_id"),
+                    "name": item.get("name"),
+                    "input": json.loads(item.get("arguments") or "{}"),
                 }
             )
         elif item_type == "function_call_output":
-            messages.append(
+            flush_pending_assistant()
+            pending_tool_results.append(
                 {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": item.get("call_id"),
-                            "content": item.get("output", ""),
-                        }
-                    ],
+                    "type": "tool_result",
+                    "tool_use_id": item.get("call_id"),
+                    "content": item.get("output", ""),
                 }
             )
+    flush_pending_assistant()
+    flush_tool_results()
     return messages
 
 
