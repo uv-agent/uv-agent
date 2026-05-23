@@ -2511,7 +2511,7 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
     assert display_payload["events"][0]["message"] == "internal progress"
     assert display_payload["events"][0]["_uv_agent_run_id"] == display_payload["run_id"]
     assert display_payload["events"][0]["_uv_agent_event_id"].startswith("evt_")
-    assert '"kind": "progress"' in display_payload["stdout"]
+    assert '"kind": "progress"' not in display_payload["stdout"]
 
     stored = engine.thread_store.read(events[-1]["thread_id"])
     runner_result = next(event["result"] for event in stored if event["type"] == "item.runner_result")
