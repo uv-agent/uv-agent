@@ -676,7 +676,7 @@ async def test_compaction_warns_when_trigger_uses_estimate(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_compaction_warns_when_latest_provider_usage_is_stale(tmp_path: Path) -> None:
+async def test_compaction_uses_provider_usage_even_when_tool_output_followed(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(
@@ -734,8 +734,8 @@ async def test_compaction_warns_when_latest_provider_usage_is_stale(tmp_path: Pa
     events = [event async for event in engine.run_turn(user_text="run a tool")]
     stored = engine.thread_store.read(events[-1]["thread_id"])
 
-    assert any(event["type"] == "thread.token_estimation_warning" for event in events)
-    assert any(event["type"] == "thread.token_estimation_warning" for event in stored)
+    assert not any(event["type"] == "thread.token_estimation_warning" for event in events)
+    assert not any(event["type"] == "thread.token_estimation_warning" for event in stored)
     assert any(event["type"] == "item.compaction" for event in stored)
 
 
@@ -2852,9 +2852,30 @@ def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_p
 
 
 def test_usage_token_count_supports_provider_shapes() -> None:
-    assert usage_token_count({"total_tokens": 42}) == 42
+    # OpenAI Responses API: input/output/total all present, total is authoritative.
+    assert usage_token_count({"total_tokens": 42, "input_tokens": 30, "output_tokens": 12}) == 42
+    # OpenAI Chat Completions: prompt/completion/total all present.
+    assert (
+        usage_token_count({"total_tokens": 100, "prompt_tokens": 70, "completion_tokens": 30}) == 100
+    )
+    # Anthropic: no total_tokens; sum non-cache input + output + cache_creation + cache_read.
+    assert (
+        usage_token_count(
+            {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 30,
+            }
+        )
+        == 200
+    )
+    # Anthropic without cache fields.
     assert usage_token_count({"input_tokens": 10, "output_tokens": 3}) == 13
-    assert usage_token_count({"prompt_tokens": 9, "completion_tokens": 2}) == 11
+    # Some providers expose total_token_count instead of total_tokens.
+    assert usage_token_count({"total_token_count": 7}) == 7
+    # Null/missing direct keys fall through to summing pairs.
+    assert usage_token_count({"total_tokens": None, "prompt_tokens": 9, "completion_tokens": 2}) == 11
     assert usage_token_count({}) is None
 
 

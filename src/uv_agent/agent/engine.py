@@ -1209,11 +1209,14 @@ class AgentEngine:
     ) -> TokenCountResult:
         """Return the authoritative token count used for compaction triggers.
 
-        Provider usage is the only accurate count because it reflects the exact
-        server-side tokenizer and hidden request framing. The local estimate is a
-        last-resort fallback so old threads or providers that omit usage can still
-        compact, but callers surface a warning whenever that fallback drives the
-        trigger decision.
+        Provider usage is the source of truth because it reflects the exact
+        server-side tokenizer and hidden request framing. We always trust the
+        most recent provider-reported usage when any exists in the open epoch,
+        even if extra events (tool outputs, user turns, context updates) were
+        appended afterwards: the very next model call will refresh the count.
+        The local estimate is only used when no provider usage exists at all
+        (e.g. first turn before any model call, or providers that omit usage),
+        and that case is the only one that surfaces the estimation warning.
         """
 
         provider_tokens = self._latest_compaction_provider_tokens(thread_id)
@@ -1226,51 +1229,22 @@ class AgentEngine:
         )
 
     def _latest_compaction_provider_tokens(self, thread_id: str) -> int | None:
-        """Return provider usage only when it covers the current compaction input.
-
-        The latest model-response usage is authoritative for the request that
-        produced it, but a large tool result appended afterwards has never been
-        tokenized by the provider. In that case we must fall back to estimation
-        and warn instead of treating stale provider usage as a current count.
-        """
+        """Return the latest provider-reported usage tokens for the open epoch."""
 
         snap = self.thread_store.snapshot(thread_id)
-        events = snap.events_after_compaction
-        for index in range(len(events) - 1, -1, -1):
-            event = events[index]
+        for event in reversed(snap.events_after_compaction):
             if event.get("type") not in {"item.model_response", "item.compaction"}:
                 continue
             used = usage_token_count(event.get("usage") or {})
-            if used is None:
-                continue
-            if any(self._event_adds_unmeasured_input_after_usage(item) for item in events[index + 1 :]):
-                return None
-            return used
+            if used is not None:
+                return used
 
         compaction = snap.latest_compaction
         if compaction is not None:
             used = usage_token_count(compaction.get("usage") or {})
-            if used is not None and not any(
-                self._event_adds_unmeasured_input_after_usage(event)
-                for event in events
-            ):
+            if used is not None:
                 return used
         return None
-
-    @staticmethod
-    def _event_adds_unmeasured_input_after_usage(event: dict[str, Any]) -> bool:
-        """Whether an event after provider usage changes the next model input."""
-
-        return event.get("type") in {
-            "item.user",
-            "item.assistant",
-            "item.assistant_partial",
-            "item.tool_output",
-            "item.image_attachment",
-            "item.context_update",
-            "item.rule_index",
-            "item.cwd_notice",
-        }
 
     def _estimate_compaction_tokens(
         self,
