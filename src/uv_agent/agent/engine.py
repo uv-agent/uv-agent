@@ -450,6 +450,13 @@ class AgentEngine:
                         turn_input.pending_items.extend(copy.deepcopy(attachment_items))
                         turn_input.use_previous_response_id = False
                         request_input_items = turn_input.request_input_items()
+                    if self._will_compact_after_tool_results(
+                        thread_id,
+                        input_items,
+                        level=level,
+                        instructions=system_instructions,
+                    ):
+                        yield self._compaction_started_event(thread_id, turn_id)
                     mid_turn_compaction = await self._maybe_compact_after_tool_results(
                         thread_id,
                         turn_id,
@@ -461,11 +468,11 @@ class AgentEngine:
                         yield self._public_event(mid_turn_compaction.token_warning_event)
                     if mid_turn_compaction.result is not None:
                         compacted_this_turn = True
-                        yield {
-                            "type": "compaction.completed",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                        }
+                        yield self._compaction_completed_event(
+                            thread_id,
+                            turn_id,
+                            mid_turn_compaction.result,
+                        )
                         input_items = copy.deepcopy(mid_turn_compaction.result.replacement_input)
                         turn_input.input_items = input_items
                         turn_input.previous_response_id = None
@@ -540,6 +547,8 @@ class AgentEngine:
             )
             compacted = CompactionDecision()
             if not compacted_this_turn:
+                if self._will_compact(thread_id, input_items, level=level, instructions=system_instructions):
+                    yield self._compaction_started_event(thread_id, turn_id)
                 compacted = await self._maybe_compact(
                     thread_id,
                     turn_id,
@@ -550,11 +559,7 @@ class AgentEngine:
             if compacted.token_warning_event is not None:
                 yield self._public_event(compacted.token_warning_event)
             if compacted.result is not None:
-                yield {
-                    "type": "compaction.completed",
-                    "thread_id": thread_id,
-                    "turn_id": turn_id,
-                }
+                yield self._compaction_completed_event(thread_id, turn_id, compacted.result)
             generated_title = await self._finish_title_generation(title_task)
             if generated_title:
                 yield {
@@ -731,6 +736,13 @@ class AgentEngine:
                                 attachment=attachment,
                             )
                         retry_state.input_items.extend(tool_attachment_context_items(round_attachments))
+                    if self._will_compact_after_tool_results(
+                        thread_id,
+                        retry_state.input_items,
+                        level=level,
+                        instructions=system_instructions,
+                    ):
+                        yield self._compaction_started_event(thread_id, turn_id)
                     mid_turn_compaction = await self._maybe_compact_after_tool_results(
                         thread_id,
                         turn_id,
@@ -741,11 +753,11 @@ class AgentEngine:
                     if mid_turn_compaction.token_warning_event is not None:
                         yield self._public_event(mid_turn_compaction.token_warning_event)
                     if mid_turn_compaction.result is not None:
-                        yield {
-                            "type": "compaction.completed",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                        }
+                        yield self._compaction_completed_event(
+                            thread_id,
+                            turn_id,
+                            mid_turn_compaction.result,
+                        )
                         retry_state.input_items = copy.deepcopy(mid_turn_compaction.result.replacement_input)
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
@@ -813,6 +825,13 @@ class AgentEngine:
                         retry_state.input_items.extend(tool_attachment_context_items(round_attachments))
                         retry_state.pending_items.extend(tool_attachment_context_items(round_attachments))
                         retry_state.use_previous_response_id = False
+                    if self._will_compact_after_tool_results(
+                        thread_id,
+                        retry_state.input_items,
+                        level=level,
+                        instructions=system_instructions,
+                    ):
+                        yield self._compaction_started_event(thread_id, turn_id)
                     mid_turn_compaction = await self._maybe_compact_after_tool_results(
                         thread_id,
                         turn_id,
@@ -823,11 +842,11 @@ class AgentEngine:
                     if mid_turn_compaction.token_warning_event is not None:
                         yield self._public_event(mid_turn_compaction.token_warning_event)
                     if mid_turn_compaction.result is not None:
-                        yield {
-                            "type": "compaction.completed",
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                        }
+                        yield self._compaction_completed_event(
+                            thread_id,
+                            turn_id,
+                            mid_turn_compaction.result,
+                        )
                         retry_state.input_items = copy.deepcopy(mid_turn_compaction.result.replacement_input)
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
@@ -1018,6 +1037,65 @@ class AgentEngine:
         input_items.append(bridge_item)
         return result
 
+    def _will_compact(
+        self,
+        thread_id: str,
+        input_items: list[dict[str, Any]],
+        *,
+        level: str | None,
+        instructions: str,
+    ) -> bool:
+        """Cheaply predict whether the next compaction check will call a model."""
+
+        return self._compaction_should_run(
+            thread_id,
+            input_items,
+            level=level,
+            instructions=instructions,
+        )
+
+    def _will_compact_after_tool_results(
+        self,
+        thread_id: str,
+        input_items: list[dict[str, Any]],
+        *,
+        level: str | None,
+        instructions: str,
+    ) -> bool:
+        """Predict mid-turn compaction without mutating the turn input list."""
+
+        if not self._has_tool_output(input_items):
+            return False
+        bridged_input = copy.deepcopy(input_items)
+        bridged_input.append(assistant_output_item(POST_TOOL_COMPACTION_BRIDGE))
+        return self._compaction_should_run(
+            thread_id,
+            bridged_input,
+            level=level,
+            instructions=instructions,
+        )
+
+    def _compaction_should_run(
+        self,
+        thread_id: str,
+        input_items: list[dict[str, Any]],
+        *,
+        level: str | None,
+        instructions: str,
+    ) -> bool:
+        """Return whether compaction thresholds currently require a checkpoint."""
+
+        if not self.config.runtime.compression.enabled:
+            return False
+        compact_level = self.config.runtime.compression.model_level or level
+        model = self.config.model_for_level(compact_level)
+        token_count = self._compaction_token_count(thread_id, input_items, instructions=instructions)
+        trigger_tokens = int(model.context_window_tokens * self.config.runtime.compression.trigger_ratio)
+        return (
+            token_count.tokens >= self.config.runtime.compression.min_tokens
+            and token_count.tokens >= trigger_tokens
+        )
+
     async def _compact_if_needed(
         self,
         thread_id: str,
@@ -1053,6 +1131,10 @@ class AgentEngine:
             return CompactionDecision(token_warning_event=token_warning_event)
         if token_count.tokens < trigger_tokens:
             return CompactionDecision(token_warning_event=token_warning_event)
+        if pre_compaction_event is not None:
+            event_type = str(pre_compaction_event.get("type") or "")
+            payload = {key: value for key, value in pre_compaction_event.items() if key != "type"}
+            self.thread_store.append(thread_id, event_type, **payload)
         compact_input = copy.deepcopy(input_items)
         compact_input.append(self._compaction_trigger_item())
         truncated_last_tool_output = False
@@ -1069,10 +1151,6 @@ class AgentEngine:
         )
         replacement_input = self._compaction_replacement_input(input_items, response)
         context_state = self._latest_context_state(thread_id)
-        if pre_compaction_event is not None:
-            event_type = str(pre_compaction_event.get("type") or "")
-            payload = {key: value for key, value in pre_compaction_event.items() if key != "type"}
-            self.thread_store.append(thread_id, event_type, **payload)
         self.thread_store.append(
             thread_id,
             "item.compaction",
@@ -1099,6 +1177,28 @@ class AgentEngine:
             ),
             token_warning_event=token_warning_event,
         )
+
+    @staticmethod
+    def _compaction_started_event(thread_id: str, turn_id: str) -> dict[str, Any]:
+        """Public stream item emitted before a potentially slow compaction call."""
+
+        return {"type": "compaction.started", "thread_id": thread_id, "turn_id": turn_id}
+
+    @staticmethod
+    def _compaction_completed_event(
+        thread_id: str,
+        turn_id: str,
+        result: CompactionResult,
+    ) -> dict[str, Any]:
+        """Public stream item emitted after compaction persists a checkpoint."""
+
+        return {
+            "type": "compaction.completed",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "text": result.text,
+            "truncated_last_tool_output": result.truncated_last_tool_output,
+        }
 
     def _compaction_token_count(
         self,

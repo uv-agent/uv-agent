@@ -2136,6 +2136,67 @@ async def test_tui_reasoning_deltas_stream_without_inserted_spaces(
 
 
 @pytest.mark.asyncio
+async def test_tui_compaction_completion_folds_prior_process_and_shows_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        run_state = app._run_state_for_thread("thread_compact")
+        app.thread_id = "thread_compact"
+        app._process_anchor_cell = app._append_user("inspect")
+        app._sync_run_state_from_active(run_state)
+        app._append_reasoning_delta("thinking before compaction")
+        await app._handle_thread_event(
+            "thread_compact",
+            "tool.started",
+            {
+                "type": "tool.started",
+                "turn_id": "turn_1",
+                "call": {"call_id": "call_1", "name": "run_python", "arguments": '{"code":"print(1)"}'},
+            },
+            run_state,
+        )
+        await app._handle_thread_event(
+            "thread_compact",
+            "compaction.started",
+            {"type": "compaction.started", "turn_id": "turn_1"},
+            run_state,
+        )
+        assert app._last_status == app._text("compacting")
+
+        await app._handle_thread_event(
+            "thread_compact",
+            "compaction.completed",
+            {"type": "compaction.completed", "turn_id": "turn_1", "text": "summary after tools"},
+            run_state,
+        )
+        await pilot.pause()
+
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        children = list(transcript.children)
+        fold = next(child for child in children if isinstance(child, FoldedProcessCell))
+        compaction_cell = next(
+            child
+            for child in children
+            if isinstance(child, ExpandableTranscriptCell)
+            and child.detail_title == "compaction_summary"
+        )
+        assert fold.collapsed is True
+        assert all(cell.has_class("process_fold_hidden") for cell in fold.cells)
+        assert "summary after tools" in plain_renderable(compaction_cell.details)
+        assert not compaction_cell.has_class("process_fold_hidden")
+        assert children.index(fold) < children.index(compaction_cell)
+        assert app._process_anchor_cell is compaction_cell
+        assert app._process_cells == []
+
+
+@pytest.mark.asyncio
 async def test_tui_process_fold_shows_persisted_turn_elapsed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2299,6 +2360,14 @@ async def test_tui_thread_resume_pages_older_history(
         assert "old segment" not in transcript_text
         assert "middle segment" not in transcript_text
         assert "new segment" in transcript_text
+        compaction_cells = [
+            child
+            for child in app.query_one("#transcript", TranscriptScroll).children
+            if isinstance(child, ExpandableTranscriptCell)
+            and child.detail_title == "compaction_summary"
+        ]
+        assert len(compaction_cells) == 1
+        assert "summary two" in plain_renderable(compaction_cells[0].details)
         assert app._history_has_more is True
 
         app._load_older_thread_history()

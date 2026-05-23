@@ -840,7 +840,13 @@ async def test_agent_compacts_after_tool_outputs_before_next_model_request(tmp_p
     events = [event async for event in engine.run_turn(user_text="run a tool")]
     stored = engine.thread_store.read(events[-1]["thread_id"])
 
+    assert [event["type"] for event in events].count("compaction.started") == 1
     assert [event["type"] for event in events].count("compaction.completed") == 1
+    assert [event["type"] for event in events].index("compaction.started") < [
+        event["type"] for event in events
+    ].index("compaction.completed")
+    compaction_event = next(event for event in events if event["type"] == "compaction.completed")
+    assert compaction_event["text"] == "summary includes tool result"
     assert events[-1]["type"] == "turn.completed"
     assert events[-1]["final_text"] == "done after compaction"
     assert len(client.requests) == 3

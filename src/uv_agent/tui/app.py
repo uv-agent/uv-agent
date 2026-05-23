@@ -846,6 +846,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             "tool.partial",
             "model.stream_retry",
             "thread.token_estimation_warning",
+            "compaction.started",
             "compaction.completed",
         }:
             await self._handle_thread_event(item_thread_id, event_type, item, run_state)
@@ -1496,8 +1497,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             pass
         elif event_type == "thread.token_estimation_warning":
             self._append_token_estimation_warning(item)
+        elif event_type == "compaction.started":
+            self._refresh_status(self._text("compacting"))
         elif event_type == "compaction.completed":
-            self._append_cell(plain(self._text("compacted"), style="dim"), "event")
+            self._append_compaction_completed(item)
         elif event_type == "thread.billing_accumulated":
             self._refresh_status()
         elif event_type == "turn.interrupted":
@@ -1649,6 +1652,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 run_state.status = self._text("running_python")
             elif event_type == "thread.token_estimation_warning":
                 run_state.status = self._text("working")
+            elif event_type == "compaction.started":
+                run_state.status = self._text("compacting")
             elif event_type == "assistant.final_response_started" and run_state.process_cells:
                 run_state.process_collapsed = True
             elif event_type == "compaction.completed":
@@ -2167,6 +2172,46 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._process_collapsed = True
         self._refresh_process_fold_elapsed()
 
+    def _append_compaction_completed(self, item: dict[str, Any]) -> None:
+        """Render a completed compaction as a hard visual boundary.
+
+        A compaction checkpoint replaces the previous model context. Mirroring
+        that in the transcript keeps old tool/reasoning cells folded before the
+        checkpoint while allowing subsequent tool output to start a fresh process
+        group below the summary cell.
+        """
+
+        self._finalize_turn_render()
+        cell = self._append_compaction_cell(item)
+        self._process_cells = []
+        self._process_fold_cell = None
+        self._process_collapsed = False
+        self._process_anchor_cell = cell
+
+    def _append_compaction_cell(
+        self,
+        event: dict[str, Any],
+        *,
+        before: MountBefore = None,
+    ) -> ExpandableTranscriptCell:
+        """Append an expandable checkpoint cell containing the compaction text."""
+
+        summary_text = str(event.get("text") or "").strip()
+        summary = Text.assemble(
+            (self._text("compacted"), "dim"),
+            " · ",
+            (self._text("compacted_summary_hint"), "cyan dim"),
+        )
+        details = plain(summary_text or self._text("compacted"))
+        return self._append_expandable_cell(
+            summary,
+            details,
+            "event",
+            before=before,
+            detail_title="compaction_summary",
+            detail_hint="compaction_summary_hint",
+        )
+
     def _finalize_turn_render(self) -> None:
         """Bring the live transcript to the same end-of-turn state as re-entry.
 
@@ -2657,7 +2702,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         elif event_type == "turn.stream_retry":
             mounted.append(self._append_stream_retry(event, before=before))
         elif event_type == "item.compaction":
-            mounted.append(self._append_cell(plain(self._text("compacted"), style="dim"), "event", before=before))
+            mounted.append(self._append_compaction_cell(event, before=before))
         elif event_type == "thread.token_estimation_warning":
             mounted.append(self._append_token_estimation_warning(event, before=before, flash=False))
         elif event_type == "thread.model_switch_warning":
@@ -2770,9 +2815,17 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         classes: str,
         *,
         before: MountBefore = None,
+        detail_title: str = "tool_details",
+        detail_hint: str = "tool_details_hint",
     ) -> ExpandableTranscriptCell:
         self._mark_transcript_content()
-        cell = ExpandableTranscriptCell(summary, details, classes=classes)
+        cell = ExpandableTranscriptCell(
+            summary,
+            details,
+            detail_title=detail_title,
+            detail_hint=detail_hint,
+            classes=classes,
+        )
         self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
         self._scroll_end()
         return cell
