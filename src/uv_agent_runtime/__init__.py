@@ -36,6 +36,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "connect_stdio": (".mcp", "connect_stdio"),
     "connect_url": (".mcp", "connect_url"),
     "call_host": (".transport", "call_host"),
+    "resolve_host_helper": (".transport", "resolve_host_helper"),
     "convert_patch": (".textops", "convert_patch"),
     "emit_event": (".events", "emit_event"),
     "emit_progress": (".events", "emit_progress"),
@@ -101,11 +102,32 @@ def __getattr__(name: str) -> Any:
     try:
         module_name, attribute = _EXPORTS[name]
     except KeyError as exc:
+        dynamic = _dynamic_host_helper(name)
+        if dynamic is not None:
+            globals()[name] = dynamic
+            return dynamic
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
     module = import_module(module_name, __name__)
     value = getattr(module, attribute)
     globals()[name] = value
     return value
+
+
+def _dynamic_host_helper(name: str) -> Any:
+    if not name.isidentifier() or name.startswith("_"):
+        return None
+    transport = import_module(".transport", __name__)
+    resolved = transport.resolve_host_helper(name)
+    if not resolved.get("found"):
+        return None
+
+    def helper(*args: Any, **kwargs: Any) -> Any:
+        return transport.call_host(name, *args, **kwargs)
+
+    helper.__name__ = name
+    helper.__qualname__ = name
+    helper.__doc__ = str(resolved.get("doc") or f"Host-provided runtime helper {name}.")
+    return helper
 
 
 def __dir__() -> list[str]:

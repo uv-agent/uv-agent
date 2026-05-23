@@ -38,10 +38,19 @@ class MethodRegistry:
         method = self.get(name)
         if method is None:
             raise KeyError(name)
-        call_params = dict(params)
-        if "context" not in call_params and _accepts_context(method):
-            call_params["context"] = context
-        return method(**call_params)
+        if _is_args_kwargs_envelope(params):
+            args = list(params.get("args") or [])
+            kwargs = dict(params.get("kwargs") or {})
+        else:
+            args = []
+            kwargs = dict(params)
+        if "context" not in kwargs and _accepts_context(method):
+            kwargs["context"] = context
+        return method(*args, **kwargs)
+
+
+def _is_args_kwargs_envelope(params: dict[str, Any]) -> bool:
+    return set(params).issubset({"args", "kwargs"}) and ("args" in params or "kwargs" in params)
 
 
 def _accepts_context(method: HostMethod) -> bool:

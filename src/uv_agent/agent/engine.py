@@ -41,6 +41,8 @@ from uv_agent.mcp_config import McpInstructionsPreview, McpServerSummary, discov
 from uv_agent.mcp_probe import McpInstructionsProbe
 from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
+from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn
+from uv_agent.plugins.helpers import RuntimeHelperRegistry
 from uv_agent.agent.prompts import (
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
     INTERRUPTED_TOOL_CONTEXT_BRIDGE,
@@ -331,6 +333,19 @@ class AgentEngine:
         self._rule_states: dict[str, RuleRuntimeState] = {}
         self._mcp_instructions_probe = mcp_instructions_probe or McpInstructionsProbe(self.project_root)
         self._mcp_instructions_probe.start()
+        self.events = EventBus()
+        self.runtime_helpers = RuntimeHelperRegistry()
+        self.plugins = PluginManager(
+            config=self.config.plugins,
+            project_root=self.project_root,
+            events=self.events,
+            helper_registry=self.runtime_helpers,
+            submitter=self._plugin_submit_turn,
+        )
+        rpc_server = getattr(self.runner, "rpc_server", None)
+        if rpc_server is not None:
+            rpc_server.register_method("helper.resolve", self.plugins.resolve_helper)
+        self._plugins_started = False
 
     def close(self) -> None:
         """Release long-lived host resources owned by the engine."""
@@ -340,11 +355,53 @@ class AgentEngine:
             close()
 
     async def aclose(self) -> None:
+        await self.plugins.stop()
         close = getattr(self.runner, "aclose", None)
         if callable(close):
             await close()
             return
         await asyncio.to_thread(self.close)
+
+    def start_plugins_background(self) -> asyncio.Task[None]:
+        self._plugins_started = True
+        return self.plugins.start_background()
+
+    def _ensure_plugins_started(self) -> None:
+        if not self._plugins_started:
+            self.start_plugins_background()
+
+    async def _plugin_submit_turn(
+        self,
+        *,
+        text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        image_paths: list[Path] | None = None,
+    ) -> SubmittedTurn:
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        started: asyncio.Future[tuple[str, str]] = asyncio.get_running_loop().create_future()
+
+        async def run() -> None:
+            try:
+                async for event in self.run_turn(
+                    user_text=text,
+                    thread_id=thread_id,
+                    level=level,
+                    image_paths=image_paths,
+                ):
+                    if event.get("type") == "turn.started" and not started.done():
+                        started.set_result((str(event.get("thread_id")), str(event.get("turn_id"))))
+                    await queue.put(event)
+            except Exception as exc:
+                if not started.done():
+                    started.set_exception(exc)
+                await queue.put({"type": "turn.error", "message": str(exc) or repr(exc), "error_type": exc.__class__.__name__})
+            finally:
+                await queue.put(None)
+
+        asyncio.create_task(run(), name="uv-agent-plugin-submit-turn")
+        submitted_thread_id, submitted_turn_id = await started
+        return SubmittedTurn(thread_id=submitted_thread_id, turn_id=submitted_turn_id, _queue=queue)
 
     def refresh_config(self, *, force: bool = False) -> None:
         """Reload user/project config for long-running sessions."""
@@ -368,6 +425,7 @@ class AgentEngine:
         image_paths: list[str | Path] | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        self._ensure_plugins_started()
         thread_id = thread_id or await asyncio.to_thread(self.thread_store.create_thread, "New thread")
         with self.thread_store.lock_thread(thread_id):
             prelude = await asyncio.to_thread(
@@ -390,8 +448,14 @@ class AgentEngine:
                 should_generate=prelude.should_generate_title,
                 level=level,
             )
+            yield self._publish_event({
+                "type": "turn.started",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "turn_started_at": turn_started_event.get("created_at"),
+            })
             for event in prelude.image_events:
-                yield event
+                yield self._publish_event(event)
 
             final_text = ""
             compacted_this_turn = False
@@ -410,7 +474,7 @@ class AgentEngine:
                         stream_state=stream_state,
                         cancel_event=cancel_event,
                     ):
-                        yield event
+                        yield self._publish_event(event)
                     response = stream_state.require_response()
                     input_items.extend(response.output)
                     turn_input.previous_response_id = response.id
@@ -437,7 +501,7 @@ class AgentEngine:
                             cancel_event=cancel_event,
                         ):
                             public_event = {key: value for key, value in tool_event.items() if key != "_result"}
-                            yield public_event
+                            yield self._publish_event(public_event)
                             if tool_event.get("type") != "tool.output":
                                 continue
                             result = self._tool_result_from_event(tool_event, public_event)
@@ -471,7 +535,7 @@ class AgentEngine:
                         level=level,
                         instructions=system_instructions,
                     ):
-                        yield self._compaction_started_event(thread_id, turn_id)
+                        yield self._publish_event(self._compaction_started_event(thread_id, turn_id))
                     mid_turn_compaction = await self._maybe_compact_after_tool_results(
                         thread_id,
                         turn_id,
@@ -480,14 +544,14 @@ class AgentEngine:
                         instructions=system_instructions,
                     )
                     if mid_turn_compaction.token_warning_event is not None:
-                        yield self._public_event(mid_turn_compaction.token_warning_event)
+                        yield self._publish_event(self._public_event(mid_turn_compaction.token_warning_event))
                     if mid_turn_compaction.result is not None:
                         compacted_this_turn = True
-                        yield self._compaction_completed_event(
+                        yield self._publish_event(self._compaction_completed_event(
                             thread_id,
                             turn_id,
                             mid_turn_compaction.result,
-                        )
+                        ))
                         input_items = self._input_after_compaction(thread_id, mid_turn_compaction.result)
                         turn_input.input_items = input_items
                         turn_input.previous_response_id = None
@@ -520,13 +584,13 @@ class AgentEngine:
                     reason="user_interrupt",
                     partial_stream=stream_state.saw_stream_output,
                 )
-                yield {
+                yield self._publish_event({
                     "type": "turn.interrupted",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "reason": "user_interrupt",
                     "partial_stream": stream_state.saw_stream_output,
-                }
+                })
                 if title_task is not None:
                     title_task.cancel()
                 return
@@ -541,7 +605,7 @@ class AgentEngine:
                 )
                 if title_task is not None:
                     title_task.cancel()
-                yield {
+                yield self._publish_event({
                     "type": "turn.error",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
@@ -551,7 +615,7 @@ class AgentEngine:
                     "error_type": exc.__class__.__name__,
                     "message": str(exc) or repr(exc),
                     "retryable": is_retryable_provider_error(exc),
-                }
+                })
                 return
 
             turn_completed_event = self.thread_store.append(
@@ -563,7 +627,7 @@ class AgentEngine:
             compacted = CompactionDecision()
             if not compacted_this_turn:
                 if self._will_compact(thread_id, input_items, level=level, instructions=system_instructions):
-                    yield self._compaction_started_event(thread_id, turn_id)
+                    yield self._publish_event(self._compaction_started_event(thread_id, turn_id))
                 compacted = await self._maybe_compact(
                     thread_id,
                     turn_id,
@@ -572,18 +636,18 @@ class AgentEngine:
                     instructions=system_instructions,
                 )
             if compacted.token_warning_event is not None:
-                yield self._public_event(compacted.token_warning_event)
+                yield self._publish_event(self._public_event(compacted.token_warning_event))
             if compacted.result is not None:
-                yield self._compaction_completed_event(thread_id, turn_id, compacted.result)
+                yield self._publish_event(self._compaction_completed_event(thread_id, turn_id, compacted.result))
             generated_title = await self._finish_title_generation(title_task)
             if generated_title:
-                yield {
+                yield self._publish_event({
                     "type": "thread.title",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "title": generated_title,
-                }
-            yield {
+                })
+            yield self._publish_event({
                 "type": "turn.completed",
                 "thread_id": thread_id,
                 "turn_id": turn_id,
@@ -591,7 +655,7 @@ class AgentEngine:
                 "created_at": turn_completed_event.get("created_at"),
                 "completed_at": turn_completed_event.get("created_at"),
                 "final_text": final_text,
-            }
+            })
 
     def _prepare_run_turn_prelude(
         self,
@@ -717,6 +781,7 @@ class AgentEngine:
         level: str | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        self._ensure_plugins_started()
         self.refresh_config(force=True)
         with self.thread_store.lock_thread(thread_id):
             retry_state = self._prepare_retry_input(thread_id, level=level)
@@ -724,6 +789,13 @@ class AgentEngine:
             turn_id = new_id("turn")
             turn_started_event = self.thread_store.append(thread_id, "turn.started", turn_id=turn_id, retry=True)
             self.thread_store.append(thread_id, "turn.retry", turn_id=turn_id)
+            yield self._publish_event({
+                "type": "turn.started",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "turn_started_at": turn_started_event.get("created_at"),
+                "retry": True,
+            })
             final_text = ""
             stream_state = StreamResponseState()
             try:
@@ -739,7 +811,7 @@ class AgentEngine:
                             cancel_event=cancel_event,
                         ):
                             public_event = {key: value for key, value in tool_event.items() if key != "_result"}
-                            yield public_event
+                            yield self._publish_event(public_event)
                             if tool_event.get("type") != "tool.output":
                                 continue
                             result = self._tool_result_from_event(tool_event, public_event)
@@ -768,7 +840,7 @@ class AgentEngine:
                         level=level,
                         instructions=system_instructions,
                     ):
-                        yield self._compaction_started_event(thread_id, turn_id)
+                        yield self._publish_event(self._compaction_started_event(thread_id, turn_id))
                     mid_turn_compaction = await self._maybe_compact_after_tool_results(
                         thread_id,
                         turn_id,
@@ -777,13 +849,13 @@ class AgentEngine:
                         instructions=system_instructions,
                     )
                     if mid_turn_compaction.token_warning_event is not None:
-                        yield self._public_event(mid_turn_compaction.token_warning_event)
+                        yield self._publish_event(self._public_event(mid_turn_compaction.token_warning_event))
                     if mid_turn_compaction.result is not None:
-                        yield self._compaction_completed_event(
+                        yield self._publish_event(self._compaction_completed_event(
                             thread_id,
                             turn_id,
                             mid_turn_compaction.result,
-                        )
+                        ))
                         retry_state.input_items = self._input_after_compaction(thread_id, mid_turn_compaction.result)
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
@@ -803,7 +875,7 @@ class AgentEngine:
                         stream_state=stream_state,
                         cancel_event=cancel_event,
                     ):
-                        yield event
+                        yield self._publish_event(event)
                     response = stream_state.require_response()
                     retry_state.input_items.extend(response.output)
                     retry_state.previous_response_id = response.id
@@ -826,7 +898,7 @@ class AgentEngine:
                             cancel_event=cancel_event,
                         ):
                             public_event = {key: value for key, value in tool_event.items() if key != "_result"}
-                            yield public_event
+                            yield self._publish_event(public_event)
                             if tool_event.get("type") != "tool.output":
                                 continue
                             result = self._tool_result_from_event(tool_event, public_event)
@@ -857,7 +929,7 @@ class AgentEngine:
                         level=level,
                         instructions=system_instructions,
                     ):
-                        yield self._compaction_started_event(thread_id, turn_id)
+                        yield self._publish_event(self._compaction_started_event(thread_id, turn_id))
                     mid_turn_compaction = await self._maybe_compact_after_tool_results(
                         thread_id,
                         turn_id,
@@ -866,13 +938,13 @@ class AgentEngine:
                         instructions=system_instructions,
                     )
                     if mid_turn_compaction.token_warning_event is not None:
-                        yield self._public_event(mid_turn_compaction.token_warning_event)
+                        yield self._publish_event(self._public_event(mid_turn_compaction.token_warning_event))
                     if mid_turn_compaction.result is not None:
-                        yield self._compaction_completed_event(
+                        yield self._publish_event(self._compaction_completed_event(
                             thread_id,
                             turn_id,
                             mid_turn_compaction.result,
-                        )
+                        ))
                         retry_state.input_items = self._input_after_compaction(thread_id, mid_turn_compaction.result)
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
@@ -894,13 +966,13 @@ class AgentEngine:
                     reason="user_interrupt",
                     partial_stream=stream_state.saw_stream_output,
                 )
-                yield {
+                yield self._publish_event({
                     "type": "turn.interrupted",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "reason": "user_interrupt",
                     "partial_stream": stream_state.saw_stream_output,
-                }
+                })
                 return
             except Exception as exc:
                 error_event = self.thread_store.append(
@@ -911,7 +983,7 @@ class AgentEngine:
                     message=str(exc) or repr(exc),
                     retryable=is_retryable_provider_error(exc),
                 )
-                yield {
+                yield self._publish_event({
                     "type": "turn.error",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
@@ -921,11 +993,11 @@ class AgentEngine:
                     "error_type": exc.__class__.__name__,
                     "message": str(exc) or repr(exc),
                     "retryable": is_retryable_provider_error(exc),
-                }
+                })
                 return
 
             completed_event = self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text=final_text)
-            yield {
+            yield self._publish_event({
                 "type": "turn.completed",
                 "thread_id": thread_id,
                 "turn_id": turn_id,
@@ -933,7 +1005,7 @@ class AgentEngine:
                 "created_at": completed_event.get("created_at"),
                 "completed_at": completed_event.get("created_at"),
                 "final_text": final_text,
-            }
+            })
             return
 
     def _should_generate_title(self, thread_id: str) -> bool:
@@ -1580,7 +1652,7 @@ class AgentEngine:
                     if isinstance(event, dict) and event.get("kind") != "enter_dir"
                 ]
                 partial_payload["events"] = visible_partial_events
-                yield {
+                yield self._publish_event({
                     "type": "tool.partial",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
@@ -1588,7 +1660,7 @@ class AgentEngine:
                     "call": call,
                     "tool_call_index": tool_call_index,
                     "output": function_output(call, partial_payload),
-                }
+                })
                 continue
             if runner_event.type != "run.completed":
                 continue
@@ -1679,7 +1751,7 @@ class AgentEngine:
             "call": call,
             "tool_call_index": call_index,
         }
-        yield started_event
+        yield self._publish_event(started_event)
         async for event in self._stream_tool_call(
             call,
             thread_id,
@@ -1704,7 +1776,11 @@ class AgentEngine:
                     output_event={key: value for key, value in event.items() if key != "_result"},
                 )
                 event["_result"] = result
-            yield event
+            yield self._publish_event(event)
+
+    def _publish_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        self.events.publish(event)
+        return event
 
     @staticmethod
     def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:
@@ -1736,32 +1812,32 @@ class AgentEngine:
             if stream_event.type == "text_delta" and stream_event.text:
                 stream_state.saw_stream_output = True
                 stream_state.assistant_parts.append(stream_event.text)
-                yield {
+                yield self._publish_event({
                     "type": "assistant.delta",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "turn_started_at": turn_started_at,
                     "text": stream_event.text,
-                }
+                })
             elif stream_event.type == "reasoning_delta" and stream_event.text:
                 stream_state.saw_stream_output = True
                 stream_state.reasoning_parts.append(stream_event.text)
-                yield {
+                yield self._publish_event({
                     "type": "assistant.reasoning_delta",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "turn_started_at": turn_started_at,
                     "text": stream_event.text,
-                }
+                })
             elif stream_event.type == "tool_call_delta" and stream_event.tool_call:
                 stream_state.saw_stream_output = True
-                yield {
+                yield self._publish_event({
                     "type": "tool.delta",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "turn_started_at": turn_started_at,
                     "tool_call": stream_event.tool_call,
-                }
+                })
             elif stream_event.type == "completed":
                 stream_state.response = stream_event.response
         self._raise_if_cancelled(cancel_event)
@@ -1772,13 +1848,13 @@ class AgentEngine:
         )
         if completed_text_delta:
             stream_state.assistant_parts.append(completed_text_delta)
-            yield {
+            yield self._publish_event({
                 "type": "assistant.delta",
                 "thread_id": thread_id,
                 "turn_id": turn_id,
                 "turn_started_at": turn_started_at,
                 "text": completed_text_delta,
-            }
+            })
         reasoning_text = response.reasoning_text or stream_state.partial_reasoning_text
         self.thread_store.append(
             thread_id,
@@ -1797,7 +1873,7 @@ class AgentEngine:
             level=level,
             source="model_response",
         )
-        yield {
+        yield self._publish_event({
             "type": "model.response",
             "thread_id": thread_id,
             "turn_id": turn_id,
@@ -1805,7 +1881,7 @@ class AgentEngine:
             "response": response,
             "reasoning_text": reasoning_text,
             "billing_charge": billing_charge,
-        }
+        })
 
     def _record_billing_charge(
         self,
@@ -1886,7 +1962,7 @@ class AgentEngine:
                     error_type=exc.__class__.__name__,
                     message=str(exc) or repr(exc),
                 )
-                yield {
+                yield self._publish_event({
                     "type": "model.stream_retry",
                     "thread_id": thread_id,
                     "turn_id": turn_id,
@@ -1897,7 +1973,7 @@ class AgentEngine:
                     "delay_s": delay_s,
                     "error_type": exc.__class__.__name__,
                     "message": str(exc) or repr(exc),
-                }
+                })
                 await self._sleep_stream_retry(delay_s, cancel_event=cancel_event)
 
     @staticmethod
@@ -2824,6 +2900,9 @@ class AgentEngine:
             ContextPart("model_levels", "model_levels", self._model_levels_context()),
             ContextPart("runtime_helpers", "runtime_helpers", self._runtime_helpers_context()),
         ]
+        plugin_part = self._plugin_runtime_helpers_context()
+        if plugin_part:
+            parts.append(ContextPart("plugin_runtime_helpers", "plugin_runtime_helpers", plugin_part, dynamic=True))
         skills = discover_skills(self.project_root)
         if skills:
             parts.extend(self._skill_context_parts(skills))
@@ -3020,6 +3099,20 @@ class AgentEngine:
 
     def _runtime_helpers_context(self) -> str:
         return runtime_helpers_context()
+
+    def _plugin_runtime_helpers_context(self) -> str:
+        helpers = self.plugins.helper_specs()
+        if not helpers:
+            return ""
+        lines = [
+            "<plugin_runtime_helpers>",
+            "These helpers are provided by installed uv-agent plugins and can be imported from uv_agent_runtime in run_python.",
+        ]
+        for helper in helpers:
+            doc = xml_text(helper.doc or "")
+            lines.append(f'<helper name="{xml_text(helper.name)}" plugin="{xml_text(helper.plugin)}">{doc}</helper>')
+        lines.append("</plugin_runtime_helpers>")
+        return "\n".join(lines)
 
 def tool_attachment_context_items(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return a neutral assistant bridge followed by tool-produced image context."""

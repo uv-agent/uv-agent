@@ -10,6 +10,7 @@ dependencies = [
     "mcp>=1.27.1",
     "openai>=2.36.0",
     "pillow>=12.0.0",
+    "pluggy>=1.6.0",
     "pygments>=2.20.0",
     "textual>=6.5.0",
     "textual-image[textual]>=0.12.0",

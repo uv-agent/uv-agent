@@ -168,6 +168,12 @@ class RunnerConfig:
 
 
 @dataclass(frozen=True)
+class PluginsConfig:
+    disabled: list[str] = field(default_factory=list)
+    config: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class AppConfig:
     providers: dict[str, ProviderConfig]
     models: dict[str, ModelConfig]
@@ -175,6 +181,7 @@ class AppConfig:
     runtime: RuntimeConfig
     runner: RunnerConfig
     ui: UiConfig = field(default_factory=UiConfig)
+    plugins: PluginsConfig = field(default_factory=PluginsConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
 
     def level(self, name: str | None = None) -> LevelConfig:
@@ -251,6 +258,10 @@ def default_config(project_root: Path) -> dict[str, Any]:
             "default_timeout_s": 7200,
             "max_output_bytes": 1_000_000,
             "max_run_logs": 200,
+        },
+        "plugins": {
+            "disabled": [],
+            "config": {},
         },
         "pricing": {
             "currency": "USD",
@@ -407,6 +418,15 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         max_run_logs=int(runner_raw.get("max_run_logs", 200)),
     )
     ui_raw = _object_dict(raw.get("ui", {}))
+    plugins_raw = _object_dict(raw.get("plugins", {}))
+    disabled_raw = plugins_raw.get("disabled", [])
+    disabled = [str(item) for item in disabled_raw if isinstance(item, str)] if isinstance(disabled_raw, list) else []
+    plugin_config = {
+        str(name): dict(value)
+        for name, value in _object_dict(plugins_raw.get("config", {})).items()
+        if isinstance(value, dict)
+    }
+    plugins = PluginsConfig(disabled=disabled, config=plugin_config)
     pricing = parse_pricing(raw.get("pricing", {}))
     return AppConfig(
         providers=providers,
@@ -420,6 +440,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
                 ui_raw.get("completion_notification", {})
             ),
         ),
+        plugins=plugins,
         pricing=pricing,
     )
 

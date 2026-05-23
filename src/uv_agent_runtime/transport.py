@@ -34,7 +34,30 @@ def emit_event_rpc(event: dict[str, Any]) -> None:
         return
 
 
-def call_host(name: str, **kwargs: Any) -> Any:
+def resolve_host_helper(name: str) -> dict[str, Any]:
+    """Ask the host whether a dynamic runtime helper is registered."""
+
+    if not _rpc_configured():
+        return {"found": False, "name": name}
+    try:
+        request_id = _next_request_id()
+        response = _post_jsonrpc(
+            {
+                "jsonrpc": JSONRPC_VERSION,
+                "id": request_id,
+                "method": "helper.resolve",
+                "params": {"name": name},
+            },
+            expect_response=True,
+        )
+    except Exception:
+        return {"found": False, "name": name}
+    if not isinstance(response, dict) or not isinstance(response.get("result"), dict):
+        return {"found": False, "name": name}
+    return response["result"]
+
+
+def call_host(name: str, *args: Any, **kwargs: Any) -> Any:
     """Call a host-registered helper from inside a managed runtime script."""
 
     if not _rpc_configured():
@@ -45,7 +68,7 @@ def call_host(name: str, **kwargs: Any) -> Any:
             "jsonrpc": JSONRPC_VERSION,
             "id": request_id,
             "method": f"call.{name}",
-            "params": kwargs,
+            "params": {"args": list(args), "kwargs": kwargs},
         },
         expect_response=True,
     )

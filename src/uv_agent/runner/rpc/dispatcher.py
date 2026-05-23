@@ -97,6 +97,8 @@ class JsonRpcDispatcher:
 
         if method == "event.emit":
             return self._emit_event(params, session=session)
+        if method == "helper.resolve":
+            return self._resolve_helper(params)
         if method.startswith("call."):
             return self._call_host(method.removeprefix("call."), params, session=session)
         raise JsonRpcError(METHOD_NOT_FOUND, "Method not found", data={"method": method})
@@ -117,6 +119,19 @@ class JsonRpcDispatcher:
         except RuntimeError as exc:
             raise JsonRpcError(SESSION_CLOSED, str(exc)) from exc
         return {"ok": True}
+
+    def _resolve_helper(self, params: dict[str, Any]) -> dict[str, Any]:
+        name = params.get("name")
+        if not isinstance(name, str) or not name:
+            raise JsonRpcError(INVALID_PARAMS, "helper.resolve requires a helper name")
+        resolver = self._methods.get("helper.resolve")
+        if resolver is None:
+            return {"found": False, "name": name}
+        try:
+            result = resolver(name=name)
+        except Exception as exc:
+            raise JsonRpcError(BUSINESS_ERROR, f"{exc.__class__.__name__}: {exc}") from exc
+        return result if isinstance(result, dict) else {"found": False, "name": name}
 
     def _call_host(self, name: str, params: dict[str, Any], *, session: RunSession) -> Any:
         try:
