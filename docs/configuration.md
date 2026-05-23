@@ -247,8 +247,8 @@ Compression options:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Automatically compress thread context near the trigger threshold. |
-| `model_level` | string or null | `null` | Optional level used for compression. `null` uses the active/default level. |
-| `trigger_ratio` | number | `0.7` | Compress when estimated context usage reaches this ratio. |
+| `model_level` | string or null | `null` | Optional level used to **perform** the compression summary. `null` uses the active/default level. The trigger threshold is always computed against the **active turn's** model context window, not this level's. |
+| `trigger_ratio` | number | `0.7` | Compress when estimated context usage reaches this ratio of the active turn's model context window. |
 | `min_tokens` | integer | `5000` | Do not compress below this estimated token count. |
 
 Title generation options:

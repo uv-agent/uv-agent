@@ -573,6 +573,69 @@ async def test_agent_compaction_falls_back_to_current_level(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_compaction_trigger_uses_active_level_context_window(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = AppConfig(
+        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
+        models={
+            "small-model": ModelConfig(
+                name="small-model",
+                provider="p",
+                model="small-remote",
+                context_window_tokens=100,
+                params={},
+            ),
+            "deep-model": ModelConfig(
+                name="deep-model",
+                provider="p",
+                model="deep-remote",
+                context_window_tokens=1_000,
+                params={},
+            ),
+        },
+        levels={
+            "small": LevelConfig(name="small", model="small-model", params={}),
+            "deep": LevelConfig(name="deep", model="deep-model", params={}),
+        },
+        runtime=RuntimeConfig(
+            default_level="deep",
+            compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.5, min_tokens=1),
+            title_generation=TitleGenerationConfig(enabled=False),
+        ),
+        runner=RunnerConfig(),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "ok",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {"total_tokens": 200},
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="hello", level="deep")]
+
+    assert [event["type"] for event in events].count("compaction.started") == 0
+    assert len(client.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_compaction_trigger_prefers_provider_usage(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()

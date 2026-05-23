@@ -1185,10 +1185,9 @@ class AgentEngine:
 
         if not self.config.runtime.compression.enabled:
             return False
-        compact_level = self.config.runtime.compression.model_level or level
-        model = self.config.model_for_level(compact_level)
+        active_model = self.config.model_for_level(level)
         token_count = self._compaction_token_count(thread_id, input_items, instructions=instructions)
-        trigger_tokens = int(model.context_window_tokens * self.config.runtime.compression.trigger_ratio)
+        trigger_tokens = int(active_model.context_window_tokens * self.config.runtime.compression.trigger_ratio)
         return (
             token_count.tokens >= self.config.runtime.compression.min_tokens
             and token_count.tokens >= trigger_tokens
@@ -1207,10 +1206,11 @@ class AgentEngine:
     ) -> CompactionDecision:
         if not self.config.runtime.compression.enabled:
             return CompactionDecision()
+        active_model = self.config.model_for_level(level)
         compact_level = self.config.runtime.compression.model_level or level
-        model = self.config.model_for_level(compact_level)
+        compact_model = self.config.model_for_level(compact_level)
         token_count = self._compaction_token_count(thread_id, input_items, instructions=instructions)
-        trigger_tokens = int(model.context_window_tokens * self.config.runtime.compression.trigger_ratio)
+        trigger_tokens = int(active_model.context_window_tokens * self.config.runtime.compression.trigger_ratio)
         token_warning_event = None
         if token_count.source == "estimate" and token_count.tokens >= self.config.runtime.compression.min_tokens:
             token_warning_event = self.thread_store.append(
@@ -1223,7 +1223,7 @@ class AgentEngine:
                 ),
                 used_tokens=token_count.tokens,
                 threshold_tokens=trigger_tokens,
-                context_window_tokens=model.context_window_tokens,
+                context_window_tokens=active_model.context_window_tokens,
             )
         if token_count.tokens < self.config.runtime.compression.min_tokens:
             return CompactionDecision(token_warning_event=token_warning_event)
@@ -1239,7 +1239,7 @@ class AgentEngine:
         if allow_last_tool_output_truncation:
             compact_input, truncated_last_tool_output = self._fit_compaction_input_by_truncating_last_tool_output(
                 compact_input,
-                context_window_tokens=model.context_window_tokens,
+                context_window_tokens=compact_model.context_window_tokens,
             )
         response = await self.model_client.create_response(
             input_items=compact_input,
