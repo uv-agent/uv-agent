@@ -210,8 +210,8 @@ async def create_anthropic_response(
     instructions: str | None,
     client: Any | None = None,
 ) -> ModelResponse:
-    client = client or anthropic_client(provider)
-    response = await client.messages.create(
+    sdk_client: Any = anthropic_client(provider) if client is None else client
+    response = await sdk_client.messages.create(
         **anthropic_create_kwargs(
             provider=provider,
             model=model,
@@ -232,13 +232,13 @@ async def stream_anthropic_response(
     instructions: str | None,
     client: Any | None = None,
 ) -> AsyncIterator[ModelStreamEvent]:
-    client = client or anthropic_client(provider)
+    sdk_client: Any = anthropic_client(provider) if client is None else client
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_acc: dict[int, dict[str, Any]] = {}
     response_id: str | None = None
     usage: dict[str, Any] = {}
-    stream = await client.messages.create(
+    stream = await sdk_client.messages.create(
         stream=True,
         **anthropic_create_kwargs(
             provider=provider,

@@ -116,8 +116,8 @@ async def create_chat_response(
 ) -> ModelResponse:
     from uv_agent.model.openai_sdk import openai_client
 
-    client = client or openai_client(provider, model.api, CHAT_COMPLETIONS_PATH)
-    response = await client.chat.completions.create(
+    sdk_client: Any = openai_client(provider, model.api, CHAT_COMPLETIONS_PATH) if client is None else client
+    response = await sdk_client.chat.completions.create(
         **chat_create_kwargs(
             provider=provider,
             model=model,
@@ -140,14 +140,14 @@ async def stream_chat_response(
 ) -> AsyncIterator[ModelStreamEvent]:
     from uv_agent.model.openai_sdk import openai_client
 
-    client = client or openai_client(provider, model.api, CHAT_COMPLETIONS_PATH)
+    sdk_client: Any = openai_client(provider, model.api, CHAT_COMPLETIONS_PATH) if client is None else client
     payload = chat_payload(provider, model, input_items, tools, instructions, stream=True)
     payload_kwargs = sdk_kwargs(
         payload,
         model_param_sources(provider, model, "chat_completions"),
         chat_completions_sdk_param_keys(),
     )
-    stream = await client.chat.completions.create(**payload_kwargs)
+    stream = await sdk_client.chat.completions.create(**payload_kwargs)
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     passthrough_acc: dict[str, str] = {}

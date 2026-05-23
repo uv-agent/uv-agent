@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
+from rich.console import RenderableType
 from rich.rule import Rule
 from rich.text import Text
 from textual import events
@@ -79,7 +80,7 @@ class FullscreenPanel(ModalScreen[str | None]):
                 yield Static(self.subtitle, id="panel-subtitle")
             yield Input(placeholder=getattr(self.app, "_text", lambda key: key)("filter"), id="panel-filter")
             yield PickerOptionList(id="panel-content", compact=False)
-            yield VerticalScroll(Static(self.body, markup=False, id="panel-body-content"), id="panel-body")
+            yield VerticalScroll(Static(_renderable(self.body), markup=False, id="panel-body-content"), id="panel-body")
             yield Static(getattr(self.app, "_text", lambda key: key)("panel_footer"), id="panel-footer")
 
     def on_mount(self) -> None:
@@ -335,7 +336,7 @@ class FullscreenPanel(ModalScreen[str | None]):
                 option_list.highlighted = min(highlighted, option_list.option_count - 1)
             option_list.focus()
             return
-        body_content.update(self.body)
+        body_content.update(_renderable(self.body))
         body.focus()
 
     def _refresh_options(self) -> None:
@@ -472,10 +473,13 @@ class ToolDetailsPanel(FullscreenPanel):
         self._refresh_current()
 
     def _move(self, step: int) -> None:
-        app = self.app
-        if not hasattr(app, "_relative_expandable_cell"):
+        relative_cell = getattr(self.app, "_relative_expandable_cell", None)
+        if not callable(relative_cell):
             return
-        self.current_cell = app._relative_expandable_cell(self.current_cell, step)
+        next_cell = relative_cell(self.current_cell, step)
+        if not isinstance(next_cell, ExpandableTranscriptCell):
+            return
+        self.current_cell = next_cell
         self._refresh_current()
 
     def _refresh_current(self) -> None:
@@ -512,7 +516,18 @@ def _update_static_if_changed(widget: Static, content: object) -> None:
     if getattr(widget, "_uv_last_content", None) == cache_key:
         return
     widget._uv_last_content = cache_key  # type: ignore[attr-defined]
-    widget.update(content)
+    widget.update(_renderable(content))
+
+
+def _renderable(content: object) -> RenderableType:
+    """Treat panel bodies as Rich renderables at Static update boundaries.
+
+    Panel bodies are assembled from controlled Rich/Textual renderables in the
+    app. Keeping the public attributes as ``object`` avoids a large generic type
+    surface, while this cast localizes the VisualType requirement of Static.
+    """
+
+    return cast(RenderableType, content)
 
 
 _TERMINAL_IMAGE_CLASS: type[Any] | None = None

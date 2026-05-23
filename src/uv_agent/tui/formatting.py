@@ -38,7 +38,7 @@ def markup(value: str) -> Text:
 
 def plain(value: Any = "", *, style: str | None = None) -> Text:
     """Create Rich text from external/plain data without markup parsing."""
-    return Text(str(value), style=style)
+    return Text(str(value), style=style or "")
 
 
 def line(*parts: Any, style: str | None = None) -> Text:
@@ -47,7 +47,7 @@ def line(*parts: Any, style: str | None = None) -> Text:
     ``str`` parts are treated as literal text. Use ``markup(...)`` at the call
     site for trusted labels/glyphs that intentionally contain Rich markup.
     """
-    text = Text(style=style)
+    text = Text(style=style or "")
     for part in parts:
         if part is None:
             continue
@@ -462,7 +462,9 @@ def tool_timeline_markup(payload: dict[str, Any]) -> Text:
         header.append(" ")
         header.append_text(plain(f"· {elapsed}", style="dim"))
     lines: list[Text] = [header]
-    events = payload.get("events") if isinstance(payload.get("events"), list) else []
+    events = payload.get("events")
+    if not isinstance(events, list):
+        events = []
     for event in events[:5]:
         if not isinstance(event, dict):
             continue
@@ -496,7 +498,9 @@ def tool_detail_markup(payload: dict[str, Any], *, events_collapsed: bool = Fals
     run_log_path = str(payload.get("run_log_path") or "")
     if run_log_path:
         lines.append(line("run_log_path: ", run_log_path))
-    events = payload.get("events") if isinstance(payload.get("events"), list) else []
+    events = payload.get("events")
+    if not isinstance(events, list):
+        events = []
     valid_events = [event for event in events if isinstance(event, dict)]
     if valid_events:
         if events_collapsed:

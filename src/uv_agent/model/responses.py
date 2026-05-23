@@ -105,8 +105,8 @@ async def create_responses_response(
 ) -> ModelResponse:
     from uv_agent.model.openai_sdk import openai_client
 
-    client = client or openai_client(provider, model.api, RESPONSES_PATH)
-    response = await client.responses.create(
+    sdk_client: Any = openai_client(provider, model.api, RESPONSES_PATH) if client is None else client
+    response = await sdk_client.responses.create(
         **responses_create_kwargs(
             provider=provider,
             model=model,
@@ -131,8 +131,8 @@ async def stream_responses_response(
 ) -> AsyncIterator[ModelStreamEvent]:
     from uv_agent.model.openai_sdk import openai_client
 
-    client = client or openai_client(provider, model.api, RESPONSES_PATH)
-    stream = await client.responses.create(
+    sdk_client: Any = openai_client(provider, model.api, RESPONSES_PATH) if client is None else client
+    stream = await sdk_client.responses.create(
         stream=True,
         **responses_create_kwargs(
             provider=provider,

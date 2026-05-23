@@ -8,7 +8,7 @@ from dataclasses import asdict, is_dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable, Literal, TypeAlias
+from typing import Any, Callable, Literal, TypeAlias, cast
 
 from rich.text import Text
 from textual import events
@@ -46,6 +46,7 @@ from uv_agent.tui.formatting import (
     join_lines,
     parse_tool_payload,
     plain,
+    RenderablePart,
     renderable_plain,
     short_thread,
     tool_call_detail_highlight_markup,
@@ -464,7 +465,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         except NoMatches:
             reserved = 1
         else:
-            reserved = transcript.styles.min_height.value or 0
+            min_height = transcript.styles.min_height
+            reserved = min_height.value if min_height is not None and min_height.value is not None else 0
         return max(COMPOSER_COLLAPSED_HEIGHT, self.size.height - int(reserved) - 1)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
@@ -1428,8 +1430,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _live_event_item(self, item: dict[str, Any]) -> dict[str, Any]:
         copy = dict(item)
         tool_call = copy.get("tool_call")
-        if tool_call is not None:
-            copy["tool_call"] = asdict(tool_call) if is_dataclass(tool_call) else dict(tool_call)
+        if is_dataclass(tool_call) and not isinstance(tool_call, type):
+            copy["tool_call"] = asdict(tool_call)
+        elif isinstance(tool_call, dict):
+            copy["tool_call"] = dict(tool_call)
+        elif tool_call is not None:
+            copy.pop("tool_call", None)
         response = copy.get("response")
         if response is not None:
             copy.pop("response", None)
@@ -1590,7 +1596,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 run_state.status = self._text("writing_script")
             elif event_type == "tool.started":
                 delta_index = item.get("tool_call_index")
-                call = item.get("call") if isinstance(item.get("call"), dict) else {}
+                call_raw = item.get("call")
+                call = cast(dict[str, Any], call_raw) if isinstance(call_raw, dict) else {}
                 if isinstance(delta_index, int):
                     run_state.tool_delta_calls[delta_index] = dict(call)
                 call_id = str(call.get("call_id") or "")
@@ -1601,7 +1608,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 run_state.status = self._text("running_python")
             elif event_type == "tool.output":
                 delta_index = item.get("tool_call_index")
-                call = item.get("call") if isinstance(item.get("call"), dict) else {}
+                call_raw = item.get("call")
+                call = cast(dict[str, Any], call_raw) if isinstance(call_raw, dict) else {}
                 call_id = str(call.get("call_id") or "")
                 if call_id:
                     run_state.tool_started_calls.pop(call_id, None)
@@ -1615,7 +1623,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 run_state.status = self._text("working")
             elif event_type == "tool.partial":
                 payload = parse_tool_payload(item.get("output", {}))
-                call = item.get("call") if isinstance(item.get("call"), dict) else {}
+                call_raw = item.get("call")
+                call = cast(dict[str, Any], call_raw) if isinstance(call_raw, dict) else {}
                 call_id = str(call.get("call_id") or (payload or {}).get("call_id") or "")
                 if call_id and payload is not None:
                     run_state.tool_partial_payloads[call_id] = payload
@@ -2228,7 +2237,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _partial_tool_result_cell(self, item: dict[str, Any]) -> ExpandableTranscriptCell | None:
         """Return an existing partial-result cell for this tool call, if any."""
 
-        call = item.get("call") if isinstance(item.get("call"), dict) else {}
+        call_raw = item.get("call")
+        call = cast(dict[str, Any], call_raw) if isinstance(call_raw, dict) else {}
         call_id = str(call.get("call_id") or "")
         if call_id:
             for cell in reversed(self._process_cells):
@@ -2659,7 +2669,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         message = str(event.get("message") or "The turn stopped before producing a final response.")
         retryable = self._is_retryable_error_event(event)
         hint = self._text("retry_network_error_hint") if retryable else self._text("thread_stopped_after_error")
-        content = display_content if display_content is not None else Text.assemble((error_type, "bold red"), " ", message)
+        content = cast(RenderablePart, display_content) if display_content is not None else Text.assemble((error_type, "bold red"), " ", message)
         cell = self._append_cell(
             join_lines([content, plain(hint, style="dim")]),
             "error",
@@ -2681,6 +2691,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         delay_s = event.get("delay_s")
         error_type = str(event.get("error_type") or "stream")
         try:
+            if delay_s is None:
+                raise TypeError("delay_s is missing")
             delay_text = f"{float(delay_s):.1f}s"
         except (TypeError, ValueError):
             delay_text = "?s"
@@ -3089,7 +3101,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         start = 0
         for index, live_event in enumerate(live_events):
             event_type = str(live_event.get("event_type") or "")
-            item = live_event.get("item") if isinstance(live_event.get("item"), dict) else {}
+            item_raw = live_event.get("item")
+            item = cast(dict[str, Any], item_raw) if isinstance(item_raw, dict) else {}
             if event_type == "tool.output":
                 output = item.get("output") if isinstance(item, dict) else {}
                 payload = parse_tool_payload(output if isinstance(output, dict) else {})
@@ -3371,7 +3384,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             for event in reversed(run_state.live_events):
                 if event.get("event_type") != "thread.billing_accumulated":
                     continue
-                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                item_raw = event.get("item")
+                item = cast(dict[str, Any], item_raw) if isinstance(item_raw, dict) else {}
                 amount = item.get("total")
                 currency = item.get("total_currency") or item.get("currency")
                 if amount is not None and currency:
