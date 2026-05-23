@@ -19,4 +19,4 @@ Planning reference: `docs/pending-runtime-http-transport.md` (intentionally igno
 - [x] Remove stdout structured-event parsing from runner output handling.
 - [x] Update runtime, runner, and RPC tests for the new transport behavior.
 - [x] Update tracked docs describing runtime structured events and environment variables.
-- [ ] Run full test suite and commit the finished implementation.
+- [x] Run full test suite and commit the finished implementation.
