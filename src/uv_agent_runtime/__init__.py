@@ -35,6 +35,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "connect_named": (".mcp", "connect_named"),
     "connect_stdio": (".mcp", "connect_stdio"),
     "connect_url": (".mcp", "connect_url"),
+    "call_host": (".transport", "call_host"),
     "convert_patch": (".textops", "convert_patch"),
     "emit_event": (".events", "emit_event"),
     "emit_progress": (".events", "emit_progress"),
@@ -83,6 +84,7 @@ _SUBMODULES = {
     "subagent",
     "textops",
     "threads",
+    "transport",
     "vision",
 }
 

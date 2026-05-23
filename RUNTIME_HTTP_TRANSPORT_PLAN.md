@@ -13,10 +13,10 @@ Planning reference: `docs/pending-runtime-http-transport.md` (intentionally igno
 
 ## Checklist
 
-- [ ] Add host-side RPC server, dispatcher, method registry, auth, and per-run session registry.
-- [ ] Add runtime stdlib HTTP transport and expose `call_host`.
-- [ ] Wire `PythonRunner` to the long-lived server and per-run sessions/tokens.
-- [ ] Remove stdout structured-event parsing from runner output handling.
-- [ ] Update runtime, runner, and RPC tests for the new transport behavior.
-- [ ] Update tracked docs describing runtime structured events and environment variables.
+- [x] Add host-side RPC server, dispatcher, method registry, auth, and per-run session registry.
+- [x] Add runtime stdlib HTTP transport and expose `call_host`.
+- [x] Wire `PythonRunner` to the long-lived server and per-run sessions/tokens.
+- [x] Remove stdout structured-event parsing from runner output handling.
+- [x] Update runtime, runner, and RPC tests for the new transport behavior.
+- [x] Update tracked docs describing runtime structured events and environment variables.
 - [ ] Run full test suite and commit the finished implementation.

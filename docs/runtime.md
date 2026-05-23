@@ -32,8 +32,8 @@ The runner creates the `scriptenv` uv project lazily with `uv init`, adds
 `runner/runs/<run_id>.py`, and executes it with
 `uv run --project <scriptenv> --directory <active-cwd> python <run_id>.py`. Run
 JSONL records include the generated `run_id`, cwd, timeout, script args,
-stdout/stderr stream events, structured runtime events, exit status, truncation
-state, and script path.
+stdout/stderr stream events, runtime RPC events, exit status, truncation state,
+and script path.
 
 The number of retained run log pairs is controlled by `runner.max_run_logs`,
 defaulting to 200. The runner prunes `<run_id>.py` and `<run_id>.jsonl` together.
@@ -121,10 +121,12 @@ Available helper groups:
 | `connect_stdio` | Connect to an MCP server via a local stdio command. |
 | `list_declared_servers` | List MCP servers from user and project declarations. |
 
-## Structured Events
+## Structured Events And Host Calls
 
-Runtime events are printed as JSON lines on stdout. The runner recognizes and
-stores them, and the TUI renders common event kinds compactly.
+Managed scripts send structured runtime events to the host over a local
+JSON-RPC-over-HTTP channel. The channel is internal to the runner: stdout and
+stderr remain pure user output, so printing JSON never creates a structured
+event.
 
 ```python
 from uv_agent_runtime import emit_progress, emit_result
@@ -136,9 +138,19 @@ print(result["status"])
 
 Use structured events for machine-readable progress or results. Each event gets
 an `_uv_agent_event_id`, and events emitted from managed runs also carry
-`_uv_agent_run_id`. Runtime helpers write each JSON event line atomically within
-the Python process so threaded scripts do not interleave event text. Regular
-stdout and stderr are still captured.
+`_uv_agent_run_id`. The runner stores delivered events in the run result and as
+`run.event` records in the run JSONL. Regular stdout and stderr are captured only
+as `run.stdout` / `run.stderr`.
+
+The same channel supports explicit host calls for registered helpers:
+
+```python
+from uv_agent_runtime import call_host
+
+result = call_host("helper_name", value=1)
+```
+
+`call_host` raises if the helper is missing or the host returns an error.
 
 ## Directory Rules And Cwd
 
@@ -215,6 +227,8 @@ The runner sets useful environment variables for managed scripts:
 | `UV_AGENT_RUNTIME_THREAD_KIND` | Current thread kind when available. |
 | `UV_AGENT_RUNTIME_TURN_ID` | Current turn id when available. |
 | `UV_AGENT_RUNTIME_RUN_ID` | Current run id. |
+| `UV_AGENT_RPC_URL` | Loopback runtime RPC endpoint for structured events and host calls. |
+| `UV_AGENT_RPC_TOKEN` | Per-run bearer token for the runtime RPC endpoint. |
 | `UV_AGENT_SCRIPTENV_DIR` | Project shared `scriptenv` uv project directory. |
 | `UV_AGENT_SCRIPT_DIR` | Directory containing run scripts and logs. |
 | `UV_BIN` | Resolved `uv` executable used by the runner. |
