@@ -246,6 +246,10 @@ def _normalize_name(name: str) -> str:
 def _editable_checkout_root() -> Path | None:
     """Return the repository root when running from a source checkout."""
 
+    # This path is only used when uv-agent is bootstrapping its own managed
+    # script environment from a source checkout during development. Installed
+    # releases do not have the repository-shaped parent and fall back to the
+    # published ``uv-agent`` package dependency.
     root = Path(__file__).resolve().parents[3]
     if (root / "pyproject.toml").exists() and (root / "src" / "uv_agent_runtime").exists():
         return root
