@@ -388,6 +388,8 @@ def make_test_config(
 def test_agent_exposes_only_python_runner_tool() -> None:
     assert PYTHON_TOOL["name"] == "run_python"
     assert PYTHON_TOOL["type"] == "function"
+    assert "run commands, access the network" in PYTHON_TOOL["description"]
+    assert "call subprocesses" not in PYTHON_TOOL["description"]
     assert set(PYTHON_TOOL["parameters"]["properties"]) == {"code", "script_args", "timeout_s"}
     assert PYTHON_TOOL["parameters"]["required"] == ["code"]
 
@@ -2681,6 +2683,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "reply concisely and with a friendly, approachable tone" in prompt
     assert "Keep answers restrained in length by default" in prompt
     assert "explicitly asks for a detailed explanation of specific content" in prompt
+    assert "Actively add comments and docstrings where they help future maintainers" in prompt
+    assert "Write comments generously" not in prompt
     assert "project-shared uv environment" in prompt
     assert 'add_dependency("package-name")' in prompt
     assert "Call add_dependency before importing the package" in prompt
@@ -2693,9 +2697,15 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "For mature domain problems" in prompt
     assert "unidiff for parsing diffs" in prompt
     assert "libcst for Python source transforms" in prompt
-    assert "Use Python standard library modules such as pathlib" in prompt
+    assert "All filesystem, process, network, and verification work must happen inside run_python scripts" in prompt
+    assert "Do not assume shell, filesystem, browser, network, or MCP model tools exist outside Python" in prompt
+    assert "prefer uv_agent_runtime helpers when they fit" in prompt
+    assert "consult the appended runtime helper guidance for operation-specific details" in prompt
+    assert "raw subprocess" not in prompt
+    assert "Use Python standard library modules such as pathlib, os, and json" in prompt
     assert "When running independent work concurrently inside run_python" in prompt
-    assert "asyncio, concurrent.futures, threading, and subprocess" in prompt
+    assert "asyncio, concurrent.futures, and threading" in prompt
+    assert "asyncio, concurrent.futures, threading, and subprocess" not in prompt
     assert "Collect results deterministically and keep printed output bounded" in prompt
     assert "Do not guess helper signatures" in prompt
     assert "The system does not truncate oversized output for you" in prompt
@@ -2703,14 +2713,16 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Call enter_dir proactively whenever the task clearly belongs" in prompt
     assert "including paths discovered during execution" in prompt
     assert "<capability_use>" in prompt
-    assert "Actively use available external capabilities" in prompt
-    assert "runtime helpers, declared skills, declared MCP servers" in prompt
+    assert "Actively use available capabilities" in prompt
+    assert "Actively use available external capabilities" not in prompt
+    assert "runtime helpers, declared skills, declared MCP servers, and focused third-party packages" in prompt
+    assert "subprocesses through Python" not in prompt
     assert "Prefer existing helpers and declared external capabilities" in prompt
     assert "use simple Python for glue code or very small work" in prompt
     assert "only when it materially helps" in prompt
     assert "Use ask for bounded, tedious, or independent investigation" in prompt
     assert "Run independent steps concurrently" in prompt
-    assert "multiple ask calls or subprocesses from Python" in prompt
+    assert "multiple ask calls or independent helper operations inside run_python" in prompt
     assert "overlapping file writes sequential" in prompt
     assert "Occam's razor" not in prompt
     assert "capability explanations layered" not in prompt
