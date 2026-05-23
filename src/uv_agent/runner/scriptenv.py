@@ -97,18 +97,13 @@ def _ensure_runtime_package(scriptenv_dir: Path, python: Path) -> None:
 
 
 def _add_runtime_package(scriptenv_dir: Path) -> None:
-    subprocess.run(
-        [
-            uv_binary(),
-            "add",
-            "--project",
-            str(scriptenv_dir),
-            "-q",
-            "uv-agent",
-        ],
-        env=_uv_env(),
-        check=True,
-    )
+    args = [uv_binary(), "add", "--project", str(scriptenv_dir), "-q"]
+    checkout = _editable_checkout_root()
+    if checkout is not None:
+        args.extend(["--editable", str(checkout)])
+    else:
+        args.append("uv-agent")
+    subprocess.run(args, env=_uv_env(), check=True)
 
 
 def _ensure_runtime_version(scriptenv_dir: Path, python: Path) -> None:
@@ -223,6 +218,16 @@ def _declares_dependency(pyproject: Path, name: str) -> bool:
 
 def _normalize_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+
+def _editable_checkout_root() -> Path | None:
+    """Return the repository root when running from a source checkout."""
+
+    root = Path(__file__).resolve().parents[3]
+    if (root / "pyproject.toml").exists() and (root / "src" / "uv_agent_runtime").exists():
+        return root
+    return None
 
 
 def _uv_env() -> dict[str, str]:

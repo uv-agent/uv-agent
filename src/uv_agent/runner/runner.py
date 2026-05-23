@@ -313,9 +313,6 @@ class PythonRunner:
         env.pop("VIRTUAL_ENV", None)
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
-        src_dir = Path(__file__).resolve().parents[2]
-        existing_pythonpath = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = str(src_dir) if not existing_pythonpath else f"{src_dir}{os.pathsep}{existing_pythonpath}"
         env["UV_AGENT_RUNTIME_PROJECT_ROOT"] = str(self.project_root)
         env["UV_AGENT_RUNTIME_STATE_DIR"] = str(self.data_dir)
         env["UV_AGENT_SCRIPTENV_DIR"] = str(self.scriptenv_dir)
