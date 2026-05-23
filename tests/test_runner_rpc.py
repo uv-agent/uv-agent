@@ -4,14 +4,15 @@ import http.client
 import json
 from pathlib import Path
 
-from uv_agent.jsonl import JsonlWriter, read_jsonl
+from uv_agent.runner.run_log import RunLogStore
 from uv_agent.runner.rpc import RuntimeRPCServer
 
 
 def test_runtime_rpc_server_handles_notification_and_call(tmp_path: Path) -> None:
     server = RuntimeRPCServer()
     events: list[dict] = []
-    writer = JsonlWriter(tmp_path / "run.jsonl")
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
     server.register_method("echo", lambda text: {"text": text})
     server.register_method("run_id", lambda context: context.run_id)
     try:
@@ -48,7 +49,7 @@ def test_runtime_rpc_server_handles_notification_and_call(tmp_path: Path) -> Non
                     "_uv_agent_run_id": "run_rpc",
                 }
             ]
-            assert read_jsonl(tmp_path / "run.jsonl")[0]["type"] == "run.event"
+            assert store.read_events("run_rpc")[0]["type"] == "run.event"
 
             status, body = _post(
                 server.url,
@@ -73,7 +74,8 @@ def test_runtime_rpc_server_handles_notification_and_call(tmp_path: Path) -> Non
 
 def test_runtime_rpc_server_rejects_unknown_or_closed_token(tmp_path: Path) -> None:
     server = RuntimeRPCServer()
-    writer = JsonlWriter(tmp_path / "run.jsonl")
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
     try:
         handle = server.open_session(
             run_id="run_rpc",
@@ -97,7 +99,8 @@ def test_runtime_rpc_server_rejects_unknown_or_closed_token(tmp_path: Path) -> N
 
 def test_runtime_rpc_server_maps_method_errors(tmp_path: Path) -> None:
     server = RuntimeRPCServer()
-    writer = JsonlWriter(tmp_path / "run.jsonl")
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
     server.register_method("boom", lambda: (_ for _ in ()).throw(ValueError("bad")))
     try:
         handle = server.open_session(
@@ -131,6 +134,22 @@ def test_runtime_rpc_server_maps_method_errors(tmp_path: Path) -> None:
             handle.close()
     finally:
         server.close()
+
+
+def _run_store(tmp_path: Path, run_id: str) -> RunLogStore:
+    store = RunLogStore(tmp_path)
+    store.create_run_record(
+        run_id=run_id,
+        code="",
+        script_args=[],
+        cwd=tmp_path,
+        timeout_s=None,
+        started_at="test",
+        thread_id=None,
+        turn_id=None,
+        script_path=None,
+    )
+    return store
 
 
 def _post(url: str, token: str, payload: dict) -> tuple[int, bytes]:

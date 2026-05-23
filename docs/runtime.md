@@ -11,33 +11,30 @@ Each project has one shared script venv:
 
 ```text
 ~/.uv-agent/projects/<project-id>/
+  uv-agent.sqlite3
   runner/
     scriptenv/
       pyproject.toml
       uv.lock
       .venv/
-    runs/
-      <run_id>.py
-      <run_id>.jsonl
-  threads/
-    <thread_id>.jsonl
-    <thread_id>.json
-  subthreads/
-    <thread_id>.jsonl
-    <thread_id>.json
+    scripts/
+      <run_id>.py          # debug/export copy; SQLite is the source of truth
+  attachments/
 ```
 
 The runner creates the `scriptenv` uv project lazily with `uv init`, adds
 `uv-agent` with `uv add` (editable from the current checkout during source-tree
-development), writes each `run_python` call to
-`runner/runs/<run_id>.py`, and executes it with
+development), stores each `run_python` call and its events in
+`uv-agent.sqlite3`, exports a debug script to `runner/scripts/<run_id>.py`, and
+executes it with
 `uv run --project <scriptenv> --directory <active-cwd> python <run_id>.py`. Run
-JSONL records include the generated `run_id`, cwd, timeout, script args,
+records include the generated `run_id`, cwd, timeout, script args,
 stdout/stderr stream events, runtime RPC events, exit status, truncation state,
 and script path.
 
-The number of retained run log pairs is controlled by `runner.max_run_logs`,
-defaulting to 200. The runner prunes `<run_id>.py` and `<run_id>.jsonl` together.
+The number of retained run records is controlled by `runner.max_run_logs`,
+defaulting to 200. Pruning deletes old rows from SQLite and removes matching
+exported debug scripts.
 
 ## Dependencies
 
@@ -140,8 +137,8 @@ print(result["status"])
 Use structured events for machine-readable progress or results. Each event gets
 an `_uv_agent_event_id`, and events emitted from managed runs also carry
 `_uv_agent_run_id`. The runner stores delivered events in the run result and as
-`run.event` records in the run JSONL. Regular stdout and stderr are captured only
-as `run.stdout` / `run.stderr`.
+`run.event` rows in `uv-agent.sqlite3`. Regular stdout and stderr are captured
+only as `run.stdout` / `run.stderr` run events.
 
 The same channel supports explicit host calls for registered helpers:
 
@@ -183,7 +180,8 @@ print(image["path"])
 ```
 
 The host copies image metadata into project state and appends the image to later
-model input. Large image bytes are not embedded directly in thread JSONL.
+model input. Large image bytes are not embedded directly in the thread event
+payload.
 
 ## Nested Agents
 
@@ -198,8 +196,8 @@ print(result.text)
 
 Nested agents run through a subprocess from inside the Python runner, preserving
 the single external action surface. When project state is available, retained
-subagents are stored under `subthreads/` and linked to the parent thread, turn,
-and run ids.
+subagents are stored in SQLite with `kind='subagent'` and linked to the parent
+thread, turn, and run ids.
 
 ## MCP From Runtime
 
@@ -231,7 +229,7 @@ The runner sets useful environment variables for managed scripts:
 | `UV_AGENT_RPC_URL` | Loopback runtime RPC endpoint for structured events and host calls. |
 | `UV_AGENT_RPC_TOKEN` | Per-run bearer token for the runtime RPC endpoint. |
 | `UV_AGENT_SCRIPTENV_DIR` | Project shared `scriptenv` uv project directory. |
-| `UV_AGENT_SCRIPT_DIR` | Directory containing run scripts and logs. |
+| `UV_AGENT_SCRIPT_DIR` | Directory containing exported debug run scripts. |
 | `UV_BIN` | Resolved `uv` executable used by the runner. |
 | `PYTHONIOENCODING` | Forced to `utf-8` for child output. |
 | `PYTHONUTF8` | Forced to `1` for child Python UTF-8 behavior. |

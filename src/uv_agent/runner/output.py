@@ -3,7 +3,7 @@ from __future__ import annotations
 import codecs
 from dataclasses import dataclass, field
 
-from uv_agent.jsonl import JsonlWriter
+from uv_agent.runner.run_log import EventWriter
 from uv_agent.time import utc_now_iso
 
 STREAM_READ_CHUNK_BYTES = 64 * 1024
@@ -23,7 +23,7 @@ async def pump_stream(
     *,
     stream_name: str,
     stream,
-    writer: JsonlWriter,
+    writer: EventWriter,
     sink: list[str],
     run_id: str,
     max_output_bytes: int,
@@ -98,7 +98,7 @@ def record_output_text(
     *,
     stream_name: str,
     text: str,
-    writer: JsonlWriter,
+    writer: EventWriter,
     sink: list[str],
     run_id: str,
 ) -> None:

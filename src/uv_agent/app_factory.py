@@ -7,11 +7,9 @@ from uv_agent.config import load_config
 from uv_agent.model import UnifiedModelClient
 from uv_agent.paths import (
     project_attachments_dir,
-    project_run_logs_dir,
+    project_run_scripts_dir,
     project_scriptenv_dir,
     project_state_dir,
-    project_subthreads_dir,
-    project_threads_dir,
 )
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
@@ -25,14 +23,10 @@ def create_engine(project_root: Path | None = None, *, data_dir: Path | None = N
         project_root=root,
         data_dir=state_dir,
         config=config.runner,
-        runs_dir=project_run_logs_dir(root) if data_dir is None else state_dir / "runner" / "runs",
+        runs_dir=project_run_scripts_dir(root) if data_dir is None else state_dir / "runner" / "scripts",
         scriptenv_dir=project_scriptenv_dir(root) if data_dir is None else state_dir / "runner" / "scriptenv",
     )
-    thread_store = ThreadStore(
-        state_dir,
-        threads_dir=project_threads_dir(root) if data_dir is None else state_dir / "threads",
-        subthreads_dir=project_subthreads_dir(root) if data_dir is None else state_dir / "subthreads",
-    )
+    thread_store = ThreadStore(state_dir)
     model_client = UnifiedModelClient(config)
     return AgentEngine(
         config=config,

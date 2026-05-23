@@ -30,6 +30,7 @@ from uv_agent_runtime import (
     find_symbols,
     list_declared_servers,
     list_files,
+    list_thread_digests,
     look_at,
     make_unified_diff,
     normalize_text,
@@ -679,6 +680,30 @@ def test_runtime_thread_digest_reads_state_dir(tmp_path: Path) -> None:
 
     assert digest["latest_compaction"]["text"] == "summary"
     assert digest["items"] == [{"role": "user", "text": "after"}]
+
+
+
+def test_runtime_list_thread_digests_filters_subagents(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    parent = store.create_thread("Parent")
+    child = store.create_thread(
+        "Subagent",
+        kind="subagent",
+        parent_thread_id=parent,
+        parent_turn_id="turn_parent",
+        parent_run_id="run_parent",
+    )
+    store.append(
+        child,
+        "item.user",
+        turn_id="turn_child",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "child work"}]},
+    )
+
+    digests = list_thread_digests(state_dir=tmp_path, kind="subagent", parent_thread_id=parent)
+
+    assert [digest["thread_id"] for digest in digests] == [child]
+    assert digests[0]["items"] == [{"role": "user", "text": "child work"}]
 
 
 def test_runtime_look_at_returns_structured_event(tmp_path: Path, capsys) -> None:

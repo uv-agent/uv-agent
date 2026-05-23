@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any
+
+DB_FILENAME = "uv-agent.sqlite3"
 
 
 def thread_digest(
@@ -16,15 +19,13 @@ def thread_digest(
 ) -> dict[str, Any]:
     """Return a compact human/assistant digest for one stored thread."""
     base = _state_dir(state_dir)
-    metadata = _read_metadata(base, thread_id, kind=kind)
-    if since_last_compaction:
-        events, compaction = _read_after_latest_compaction(
-            _thread_path(base, thread_id, kind=metadata.get("kind") or kind),
-            _int_or_none(metadata.get("latest_compaction_offset")),
-        )
-    else:
-        events = _read_jsonl(_thread_path(base, thread_id, kind=metadata.get("kind") or kind))
-        compaction = None
+    with _connect(base) as db:
+        metadata = _read_metadata(db, thread_id, kind=kind)
+        if since_last_compaction:
+            events, compaction = _read_after_latest_compaction(db, thread_id, metadata)
+        else:
+            events = _read_events(db, thread_id)
+            compaction = None
     return {
         "thread_id": thread_id,
         "title": metadata.get("title") or "New thread",
@@ -49,28 +50,25 @@ def list_thread_digests(
 ) -> list[dict[str, Any]]:
     """Return compact digests for recent stored threads."""
     base = _state_dir(state_dir)
-    metadata_dir = base / ("subthreads" if kind == "subagent" else "threads")
-    summaries: list[dict[str, Any]] = []
-    for path in metadata_dir.glob("*.json"):
-        try:
-            metadata = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(metadata, dict):
-            continue
-        if parent_thread_id is not None and metadata.get("parent_thread_id") != parent_thread_id:
-            continue
-        summaries.append(metadata)
-    summaries.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    with _connect(base) as db:
+        clauses = ["kind = ?"]
+        params: list[Any] = [kind]
+        if parent_thread_id is not None:
+            clauses.append("parent_thread_id = ?")
+            params.append(parent_thread_id)
+        rows = db.execute(
+            f"SELECT thread_id FROM threads WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
     return [
         thread_digest(
-            str(summary["thread_id"]),
+            str(row["thread_id"]),
             state_dir=base,
             kind=kind,
             since_last_compaction=since_last_compaction,
             include_tools=include_tools,
         )
-        for summary in summaries[:limit]
+        for row in rows
     ]
 
 
@@ -83,70 +81,95 @@ def _state_dir(state_dir: str | Path | None) -> Path:
     return Path(env).resolve()
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+def _connect(base: Path) -> sqlite3.Connection:
+    path = base / DB_FILENAME
     if not path.exists():
-        return []
-    events: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                events.append(json.loads(line))
-    return events
+        raise FileNotFoundError(f"Missing uv-agent state database: {path}")
+    # Runtime scripts only introspect conversation state. Opening in read-only
+    # URI mode prevents helper bugs from mutating host-owned project state.
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA busy_timeout=5000")
+    return connection
+
+
+def _read_metadata(db: sqlite3.Connection, thread_id: str, *, kind: str | None) -> dict[str, Any]:
+    if kind is None:
+        row = db.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+    else:
+        row = db.execute("SELECT * FROM threads WHERE thread_id = ? AND kind = ?", (thread_id, kind)).fetchone()
+    if row is None:
+        raise FileNotFoundError(f"Missing thread metadata for {thread_id}")
+    return _metadata_from_row(row)
+
+
+def _read_events(
+    db: sqlite3.Connection,
+    thread_id: str,
+    *,
+    event_id_gte: int | None = None,
+) -> list[dict[str, Any]]:
+    clauses = ["thread_id = ?"]
+    params: list[Any] = [thread_id]
+    if event_id_gte is not None:
+        clauses.append("event_id >= ?")
+        params.append(event_id_gte)
+    rows = db.execute(
+        f"""
+        SELECT event_id, payload_json
+        FROM thread_events
+        WHERE {' AND '.join(clauses)}
+        ORDER BY event_id ASC
+        """,
+        params,
+    ).fetchall()
+    return [_event_from_row(row) for row in rows]
 
 
 def _read_after_latest_compaction(
-    path: Path,
-    compaction_offset: int | None,
+    db: sqlite3.Connection,
+    thread_id: str,
+    metadata: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    if compaction_offset is None:
-        return _read_jsonl(path), None
-    events: list[dict[str, Any]] = []
-    with path.open("rb") as handle:
-        handle.seek(compaction_offset)
-        for line in handle:
-            if line.strip():
-                events.append(json.loads(line.decode("utf-8")))
+    compaction_event_id = _int_or_none(metadata.get("latest_compaction_event_id"))
+    if compaction_event_id is None:
+        return _read_events(db, thread_id), None
+    events = _read_events(db, thread_id, event_id_gte=compaction_event_id)
     if not events:
         return [], None
     return events[1:], events[0]
 
 
-def _metadata_path(base: Path, thread_id: str, *, kind: str | None) -> Path:
-    if kind == "subagent":
-        return base / "subthreads" / f"{thread_id}.json"
-    if kind == "thread":
-        return base / "threads" / f"{thread_id}.json"
-    thread_path = base / "threads" / f"{thread_id}.json"
-    if thread_path.exists():
-        return thread_path
-    subthread_path = base / "subthreads" / f"{thread_id}.json"
-    if subthread_path.exists():
-        return subthread_path
-    return thread_path
-
-
-def _read_metadata(base: Path, thread_id: str, *, kind: str | None) -> dict[str, Any]:
-    path = _metadata_path(base, thread_id, kind=kind)
-    if not path.exists():
-        raise FileNotFoundError(f"Missing thread metadata for {thread_id}: {path}")
-    metadata = json.loads(path.read_text(encoding="utf-8"))
+def _metadata_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    metadata = _json_loads(row["metadata_json"], default={})
     if not isinstance(metadata, dict):
-        raise ValueError(f"Invalid thread metadata: {path}")
-    return metadata
+        metadata = {}
+    metadata.update(
+        {
+            "thread_id": row["thread_id"],
+            "kind": row["kind"],
+            "title": row["title"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "turn_count": int(row["turn_count"] or 0),
+            "interrupted_turn_count": int(row["interrupted_turn_count"] or 0),
+            "last_text": row["last_text"] or "",
+        }
+    )
+    for key in ("parent_thread_id", "latest_compaction_event_id"):
+        if row[key] is not None:
+            metadata[key] = row[key]
+    metadata["latest_compaction"] = _json_loads(row["latest_compaction_json"], default=None)
+    return {key: value for key, value in metadata.items() if value is not None}
 
 
-def _thread_path(base: Path, thread_id: str, *, kind: str | None) -> Path:
-    if kind == "subagent":
-        return base / "subthreads" / f"{thread_id}.jsonl"
-    if kind == "thread":
-        return base / "threads" / f"{thread_id}.jsonl"
-    thread_path = base / "threads" / f"{thread_id}.jsonl"
-    if thread_path.exists():
-        return thread_path
-    subthread_path = base / "subthreads" / f"{thread_id}.jsonl"
-    if subthread_path.exists():
-        return subthread_path
-    return thread_path
+def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    event = _json_loads(row["payload_json"], default={})
+    if not isinstance(event, dict):
+        event = {}
+    event["_event_id"] = int(row["event_id"])
+    return event
 
 
 def _digest_items(events: list[dict[str, Any]], *, include_tools: bool) -> list[dict[str, Any]]:
@@ -174,8 +197,18 @@ def _digest_items(events: list[dict[str, Any]], *, include_tools: bool) -> list[
             if text:
                 completed_assistant_turns.add(turn_id)
                 items.append({"role": "assistant", "text": text})
+        elif event_type == "item.compaction":
+            text = str(event.get("text") or "")
+            items.append({"role": "summary", "text": text})
         elif event_type == "turn.interrupted":
             items.append({"role": "system", "text": f"turn interrupted: {event.get('reason') or 'user_interrupt'}"})
+        elif event_type == "turn.error":
+            items.append(
+                {
+                    "role": "system",
+                    "text": f"turn error: {event.get('message') or event.get('error_type') or 'unknown error'}",
+                }
+            )
         elif include_tools and event_type in {"item.runner_result", "item.tool_output"}:
             items.append({"role": "tool", "text": _tool_event_text(event)})
     return items
@@ -215,6 +248,15 @@ def _compaction_summary(compaction: Any) -> dict[str, Any] | None:
         "turn_id": compaction.get("turn_id"),
         "text": compaction.get("text") or "",
     }
+
+
+def _json_loads(value: Any, *, default: Any) -> Any:
+    if value is None:
+        return default
+    try:
+        return json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return default
 
 
 def _int_or_none(value: Any) -> int | None:

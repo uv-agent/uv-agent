@@ -8,7 +8,6 @@ from time import monotonic
 
 from uv_agent.config import RunnerConfig
 from uv_agent.ids import new_id
-from uv_agent.jsonl import JsonlWriter
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RunnerEvent
 from uv_agent.runner.output import OutputCapture, pump_stream
 from uv_agent.runner.process import kill_process_tree, subprocess_group_kwargs
@@ -36,10 +35,12 @@ class PythonRunner:
     ) -> None:
         self.project_root = project_root.resolve()
         self.data_dir = data_dir.resolve()
-        self.runs_dir = (runs_dir or self.data_dir / "runner" / "runs").resolve()
+        # ``runs_dir`` is retained as an optional debug script export location;
+        # run code/events are stored in the project SQLite database.
+        self.runs_dir = (runs_dir or self.data_dir / "runner" / "scripts").resolve()
         self.scriptenv_dir = (scriptenv_dir or self.data_dir / "runner" / "scriptenv").resolve()
         self.config = config
-        self.run_logs = RunLogStore(self.runs_dir, max_run_logs=config.max_run_logs)
+        self.run_logs = RunLogStore(self.data_dir, scripts_dir=self.runs_dir, max_run_logs=config.max_run_logs)
         self.rpc_server = RuntimeRPCServer()
 
     @property
@@ -74,9 +75,21 @@ class PythonRunner:
         run_id = new_id("run")
         timeout_s = request.timeout_s or self.config.default_timeout_s
         await asyncio.to_thread(ensure_venv, self.scriptenv_dir)
-        script_path, run_log_path = self.run_logs.create_run_files(run_id, request.code)
-        writer = JsonlWriter(run_log_path)
         run_cwd = (request.cwd or self.project_root).resolve()
+        started_at = utc_now_iso()
+        script_path = await asyncio.to_thread(
+            self.run_logs.create_run_record,
+            run_id=run_id,
+            code=request.code,
+            script_args=list(request.script_args),
+            cwd=run_cwd,
+            timeout_s=timeout_s,
+            started_at=started_at,
+            thread_id=request.thread_id,
+            turn_id=request.turn_id,
+            script_path=None,
+        )
+        writer = self.run_logs.writer(run_id)
         argv = [
             uv_binary(),
             "run",
@@ -96,7 +109,7 @@ class PythonRunner:
         )
         started = {
             "type": "run.started",
-            "created_at": utc_now_iso(),
+            "created_at": started_at,
             "run_id": run_id,
             "thread_id": request.thread_id,
             "turn_id": request.turn_id,
@@ -189,7 +202,6 @@ class PythonRunner:
                     timed_out=timed_out,
                     interrupted=interrupted,
                     truncated=capture.truncated,
-                    run_log_path=run_log_path,
                     script_path=script_path,
                     events=list(capture.structured_events),
                 )
@@ -284,13 +296,24 @@ class PythonRunner:
             timed_out=timed_out,
             interrupted=interrupted,
             truncated=capture.truncated,
-            run_log_path=run_log_path,
             script_path=script_path,
             events=capture.structured_events,
         )
+        completed_at = utc_now_iso()
+        self.run_logs.complete_run(
+            run_id=run_id,
+            completed_at=completed_at,
+            returncode=returncode,
+            timed_out=timed_out,
+            interrupted=interrupted,
+            truncated=capture.truncated,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            structured_events=capture.structured_events,
+        )
         completed = {
             "type": "run.completed",
-            "created_at": utc_now_iso(),
+            "created_at": completed_at,
             "run_id": run_id,
             "returncode": returncode,
             "timed_out": timed_out,

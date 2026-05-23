@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from uv_agent.config import RunnerConfig
-from uv_agent.jsonl import read_jsonl
 from uv_agent.runner import PythonRunRequest, PythonRunner
 import uv_agent.runner.scriptenv as scriptenv
 from uv_agent.runner.scriptenv import direct_dependencies, ensure_venv
@@ -31,7 +30,7 @@ def make_runner(
 
 
 @pytest.mark.asyncio
-async def test_runner_executes_script_and_records_jsonl(
+async def test_runner_executes_script_and_records_sqlite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -50,7 +49,7 @@ async def test_runner_executes_script_and_records_jsonl(
     assert result.events[0]["kind"] == "hello"
     assert result.events[0]["value"] == 42
     assert result.script_path.exists()
-    events = read_jsonl(result.run_log_path)
+    events = runner.run_logs.read_events(result.run_id)
     assert any(event["type"] == "run.event" and event["event"]["kind"] == "hello" for event in events)
     assert events[0]["type"] == "run.started"
     assert events[-1]["type"] == "run.completed"
@@ -100,7 +99,7 @@ async def test_runner_truncates_large_output(
 
     assert result.truncated is True
     assert "[uv-agent runner output truncated]" in result.stdout + result.stderr
-    assert any(event["type"] == "run.output_truncated" for event in read_jsonl(result.run_log_path))
+    assert any(event["type"] == "run.output_truncated" for event in runner.run_logs.read_events(result.run_id))
 
 
 @pytest.mark.asyncio
@@ -274,11 +273,11 @@ async def test_runner_interrupts_script_when_cancelled(
 
     assert result.interrupted is True
     assert result.timed_out is False
-    assert any(event.get("interrupted") is True for event in read_jsonl(result.run_log_path))
+    assert any(event.get("interrupted") is True for event in runner.run_logs.read_events(result.run_id))
 
 
 @pytest.mark.asyncio
-async def test_runner_prunes_old_run_logs(
+async def test_runner_prunes_old_run_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -288,12 +287,10 @@ async def test_runner_prunes_old_run_logs(
     for index in range(3):
         await runner.run(PythonRunRequest(code=f"print({index})\n", cwd=project_root))
 
-    logs = sorted(runner.runs_dir.glob("*.jsonl"))
     scripts = sorted(runner.runs_dir.glob("*.py"))
 
-    assert len(logs) == 2
     assert len(scripts) == 2
-    assert {path.stem for path in logs} == {path.stem for path in scripts}
+    assert not sorted(runner.runs_dir.glob("*.jsonl"))
 
 
 def test_ensure_venv_installs_runtime_package(tmp_path: Path) -> None:

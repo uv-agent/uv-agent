@@ -22,8 +22,8 @@ Runtime state is stored separately under:
 ~/.uv-agent/projects/<project-id>/
 ```
 
-That directory contains thread JSONL, run JSONL, saved managed scripts, and
-attachments.
+That directory contains the project SQLite state database (`uv-agent.sqlite3`),
+exported managed scripts, the shared script environment, and attachments.
 
 ## Provider Options
 
@@ -297,7 +297,7 @@ Runner settings control managed Python script execution.
 | --- | --- | --- | --- |
 | `default_timeout_s` | number | `7200` | Default script timeout in seconds. |
 | `max_output_bytes` | integer | `1000000` | Maximum captured output bytes per run. |
-| `max_run_logs` | integer | `200` | Number of recent `runner/runs/<run_id>.py/.jsonl` pairs kept per project. |
+| `max_run_logs` | integer | `200` | Number of recent run records kept per project. Matching exported debug scripts are pruned with old rows. |
 
 ## Full Example
 

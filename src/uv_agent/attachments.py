@@ -44,7 +44,7 @@ class ImageAttachment:
 
 
 class AttachmentStore:
-    """Store binary context attachments outside JSONL history."""
+    """Store binary context attachments outside SQLite history."""
 
     def __init__(self, attachments_dir: Path) -> None:
         self.attachments_dir = attachments_dir

@@ -34,8 +34,7 @@ class PythonRunResult:
     timed_out: bool
     interrupted: bool
     truncated: bool
-    run_log_path: Path
-    script_path: Path
+    script_path: Path | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
 
     def to_payload(self) -> dict[str, Any]:
@@ -56,5 +55,4 @@ class PythonRunResult:
             "stdout": self.stdout,
             "stderr": self.stderr,
             "events": self.events,
-            "run_log_path": str(self.run_log_path),
         }

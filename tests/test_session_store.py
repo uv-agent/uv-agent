@@ -94,7 +94,7 @@ def test_thread_level_and_model_switch_warning_update_metadata(tmp_path: Path) -
     assert thread["active_level"] == "large"
     assert thread["active_model"] == "main"
     assert digest["latest_model_switch_warning"]["message"] == "context conversion is best effort"
-    assert digest["latest_model_switch_warning"]["_jsonl_offset"] == warning["_jsonl_offset"]
+    assert digest["latest_model_switch_warning"]["_event_id"] == warning["_event_id"]
 
 
 def test_billing_accumulated_events_update_thread_metadata(tmp_path: Path) -> None:
@@ -215,34 +215,6 @@ def test_read_after_latest_compaction_returns_only_needed_suffix(tmp_path: Path)
     assert events[0]["turn_id"] == "t3"
 
 
-def test_compaction_offset_reads_suffix_without_parsing_old_events(tmp_path: Path) -> None:
-    store = ThreadStore(tmp_path)
-    thread_id = store.create_thread("Compact offset")
-    store.append(
-        thread_id,
-        "item.user",
-        turn_id="t1",
-        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old"}]},
-    )
-    store.append(thread_id, "item.compaction", turn_id="t1", text="summary")
-    store.append(
-        thread_id,
-        "item.user",
-        turn_id="t2",
-        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]},
-    )
-    path = store.path(thread_id)
-    original = path.read_bytes()
-    first_newline = original.index(b"\n")
-    path.write_bytes(b"{" + (b" " * (first_newline - 1)) + original[first_newline:])
-
-    events, compaction = store.read_after_latest_compaction(thread_id)
-
-    assert compaction is not None
-    assert compaction["text"] == "summary"
-    assert [event["turn_id"] for event in events] == ["t2"]
-
-
 def test_history_segment_starts_at_latest_compaction_and_pages_to_previous_compaction(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Segmented history")
@@ -268,13 +240,13 @@ def test_history_segment_starts_at_latest_compaction_and_pages_to_previous_compa
     )
 
     latest = store.read_history_segment(thread_id)
-    previous = store.read_history_segment(thread_id, before_offset=latest.start_offset)
+    previous = store.read_history_segment(thread_id, before_event_id=latest.start_event_id)
 
-    assert latest.start_offset == second_compaction["_jsonl_offset"]
+    assert latest.start_event_id == second_compaction["_event_id"]
     assert [event["turn_id"] for event in latest.events] == ["t2", "t3"]
     assert latest.events[0]["type"] == "item.compaction"
     assert latest.has_more is True
-    assert previous.start_offset == first_compaction["_jsonl_offset"]
+    assert previous.start_event_id == first_compaction["_event_id"]
     assert [event["turn_id"] for event in previous.events] == ["t1", "t2"]
     assert previous.has_more is True
 
@@ -300,13 +272,13 @@ def test_history_segment_reads_from_start_when_no_previous_compaction(tmp_path: 
     latest = store.read_history_segment(thread_id, event_types=event_types)
     oldest = store.read_history_segment(
         thread_id,
-        before_offset=latest.start_offset,
+        before_event_id=latest.start_event_id,
         event_types=event_types,
     )
 
-    assert latest.start_offset == compaction["_jsonl_offset"]
+    assert latest.start_event_id == compaction["_event_id"]
     assert latest.has_more is True
-    assert oldest.start_offset == 0
+    assert oldest.start_event_id == 0
     assert [event["turn_id"] for event in oldest.events] == ["t1"]
     assert oldest.has_more is False
 
@@ -330,9 +302,9 @@ def test_thread_lock_blocks_other_store_writes_and_allows_owner_writes(tmp_path:
                 turn_id="t2",
                 item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "other"}]},
             )
-        assert store.lock_path(thread_id).exists()
+        assert store._read_lock_owner(thread_id)
 
-    assert not store.lock_path(thread_id).exists()
+    assert not store._read_lock_owner(thread_id)
     other.append(
         thread_id,
         "item.user",
@@ -353,10 +325,9 @@ def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -
     )
     store.append(child, "turn.completed", turn_id="turn_child", final_text="done")
 
-    assert (tmp_path / "threads" / f"{parent}.jsonl").exists()
-    assert (tmp_path / "threads" / f"{parent}.json").exists()
-    assert (tmp_path / "subthreads" / f"{child}.jsonl").exists()
-    assert (tmp_path / "subthreads" / f"{child}.json").exists()
+    assert (tmp_path / "uv-agent.sqlite3").exists()
+    assert not (tmp_path / "threads" / f"{parent}.jsonl").exists()
+    assert not (tmp_path / "subthreads" / f"{child}.jsonl").exists()
     assert [thread["thread_id"] for thread in store.list_threads()] == [parent]
 
     subthreads = store.list_subthreads(parent)

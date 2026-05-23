@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from uv_agent.state_db import SCHEMA_VERSION, connect_state_db, state_db_path
+
+
+def test_state_db_initializes_schema_and_pragmas(tmp_path: Path) -> None:
+    db_path = state_db_path(tmp_path)
+
+    with connect_state_db(tmp_path) as db:
+        version = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        busy_timeout = db.execute("PRAGMA busy_timeout").fetchone()[0]
+        foreign_keys = db.execute("PRAGMA foreign_keys").fetchone()[0]
+        journal_mode = db.execute("PRAGMA journal_mode").fetchone()[0]
+        tables = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+
+    assert db_path.exists()
+    assert version["value"] == str(SCHEMA_VERSION)
+    assert busy_timeout == 5000
+    assert foreign_keys == 1
+    assert journal_mode.lower() == "wal"
+    assert {
+        "meta",
+        "threads",
+        "thread_events",
+        "thread_locks",
+        "runs",
+        "run_events",
+    } <= tables
+
+
+def test_state_db_initialization_is_idempotent(tmp_path: Path) -> None:
+    with connect_state_db(tmp_path) as db:
+        db.execute("INSERT INTO meta(key, value) VALUES ('custom', 'kept')")
+
+    with connect_state_db(tmp_path) as db:
+        row = db.execute("SELECT value FROM meta WHERE key = 'custom'").fetchone()
+
+    assert row["value"] == "kept"

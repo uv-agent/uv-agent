@@ -495,9 +495,6 @@ def tool_detail_markup(payload: dict[str, Any], *, events_collapsed: bool = Fals
     elapsed = _payload_elapsed(payload)
     if elapsed:
         lines.append(line("elapsed: ", elapsed))
-    run_log_path = str(payload.get("run_log_path") or "")
-    if run_log_path:
-        lines.append(line("run_log_path: ", run_log_path))
     events = payload.get("events")
     if not isinstance(events, list):
         events = []

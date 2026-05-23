@@ -1359,7 +1359,7 @@ class AgentEngine:
 
     @staticmethod
     def _public_event(event: dict[str, Any]) -> dict[str, Any]:
-        """Return a streamed event payload without JSONL bookkeeping fields."""
+        """Return a streamed event payload without private storage fields."""
 
         return {key: value for key, value in event.items() if not key.startswith("_")}
 

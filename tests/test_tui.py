@@ -458,7 +458,6 @@ class StableRoundEngine(AgentEngine):
             "stdout": "ok\n",
             "stderr": "",
             "events": [],
-            "run_log_path": "",
         }
         self.thread_store.append(
             thread_id,
@@ -599,7 +598,6 @@ class InterruptedRoundEngine(AgentEngine):
             "stdout": "ok\n",
             "stderr": "",
             "events": [],
-            "run_log_path": "",
         }
         self.thread_store.append(
             thread_id,
@@ -717,7 +715,6 @@ class SteppedRoundEngine(AgentEngine):
             "stdout": "ok\n",
             "stderr": "",
             "events": [],
-            "run_log_path": "",
         }
         self.thread_store.append(
             thread_id,
@@ -1808,7 +1805,6 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
             "stdout": "ok\n",
             "stderr": "",
             "events": [],
-            "run_log_path": "",
         },
     )
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
@@ -1901,7 +1897,6 @@ async def test_tui_live_tool_partial_updates_existing_result_cell(
         "stdout": "first\n",
         "stderr": "",
         "events": [],
-        "run_log_path": "",
     }
     final_payload = {
         "run_id": "run_live",
@@ -1912,7 +1907,6 @@ async def test_tui_live_tool_partial_updates_existing_result_cell(
         "stdout": "first\nsecond\n",
         "stderr": "",
         "events": [],
-        "run_log_path": "",
     }
 
     async with app.run_test(size=(120, 30)) as pilot:
@@ -1981,7 +1975,6 @@ async def test_tui_live_tool_call_and_result_are_separate_cells(
         "stdout": "ok\n",
         "stderr": "",
         "events": [],
-        "run_log_path": "",
     }
 
     async with app.run_test(size=(120, 30)) as pilot:
@@ -2045,7 +2038,6 @@ async def test_tui_live_multiple_tool_calls_keep_call_result_boundaries(
                 "stdout": f"out {index}\n",
                 "stderr": "",
                 "events": [],
-                "run_log_path": "",
             }
             app._append_tool_started({"call": call, "tool_call_index": index})
             app._append_tool_output(
@@ -4615,7 +4607,6 @@ async def test_tui_tool_result_details_expand_on_click(
         "stdout": "visible one\nvisible two\nvisible three\nhidden tail",
         "stderr": "",
         "events": [{"kind": "subagent.completed", "thread_id": "thr_child", "summary": "child done"}],
-        "run_log_path": str(tmp_path / "run.jsonl"),
     }
 
     async with app.run_test(size=(90, 24)) as pilot:
@@ -4670,7 +4661,6 @@ async def test_tui_tool_result_details_escape_literal_brackets(
         ),
         "stderr": "",
         "events": [],
-        "run_log_path": str(tmp_path / "run.jsonl"),
     }
 
     async with app.run_test(size=(90, 24)) as pilot:
@@ -4760,7 +4750,6 @@ async def test_tui_tool_result_details_support_keyboard_navigation(
                                 "stdout": f"preview {index}\nfull tail {index}",
                                 "stderr": "",
                                 "events": [],
-                                "run_log_path": str(tmp_path / f"run-{index}.jsonl"),
                             }
                         )
                     },
@@ -5324,7 +5313,6 @@ async def test_tui_tool_details_panel_toggles_events_with_e_key(
             {"kind": "progress", "message": "halfway"},
             {"kind": "progress", "message": "done"},
         ],
-        "run_log_path": str(tmp_path / "run.jsonl"),
     }
 
     async with app.run_test(size=(90, 24)) as pilot:

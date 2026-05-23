@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from uv_agent.jsonl import JsonlWriter
+from uv_agent.runner.run_log import EventWriter
 from uv_agent.time import utc_now_iso
 
 
@@ -31,7 +31,7 @@ class RunSession:
         turn_id: str | None,
         cwd: Path,
         structured_events: list[dict[str, Any]],
-        writer: JsonlWriter,
+        writer: EventWriter,
     ) -> None:
         self.token = token
         self.context = RunContext(

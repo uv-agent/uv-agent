@@ -2,25 +2,17 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
+import sqlite3
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from uv_agent.atomic import atomic_replace
 from uv_agent.billing import decimal_or_none, decimal_or_zero, decimal_to_string, normalize_currency
 from uv_agent.context import usage_token_count
 from uv_agent.ids import new_id
-from uv_agent.jsonl import (
-    JsonlWriter,
-    has_jsonl_event_before,
-    latest_jsonl_event_before,
-    read_jsonl,
-    read_jsonl_after_latest_compaction,
-    read_jsonl_range,
-    read_jsonl_tail,
-)
+from uv_agent.state_db import connect_state_db, state_db_path
 from uv_agent.time import utc_now_iso
 
 
@@ -42,6 +34,57 @@ VISIBLE_HISTORY_EVENT_TYPES = {
     "turn.retry",
 }
 
+_METADATA_COLUMNS = {
+    "thread_id",
+    "kind",
+    "title",
+    "created_at",
+    "updated_at",
+    "parent_thread_id",
+    "parent_turn_id",
+    "parent_run_id",
+    "active_level",
+    "active_model",
+    "latest_cwd",
+    "turn_count",
+    "interrupted_turn_count",
+    "user_message_count",
+    "last_text",
+    "last_event_id",
+    "latest_compaction_event_id",
+    "latest_usage_tokens",
+    "latest_model_switch_warning",
+    "latest_compaction",
+    "billing_currency",
+    "billing_total",
+    "billing_totals",
+}
+_THREAD_UPDATE_COLUMNS = {
+    "kind",
+    "title",
+    "created_at",
+    "updated_at",
+    "parent_thread_id",
+    "parent_turn_id",
+    "parent_run_id",
+    "active_level",
+    "active_model",
+    "latest_cwd",
+    "turn_count",
+    "interrupted_turn_count",
+    "user_message_count",
+    "last_text",
+    "last_event_id",
+    "latest_compaction_event_id",
+    "latest_usage_tokens",
+    "latest_model_switch_warning_json",
+    "latest_compaction_json",
+    "billing_currency",
+    "billing_total",
+    "billing_totals_json",
+    "metadata_json",
+}
+
 
 @dataclass(frozen=True)
 class ThreadSnapshot:
@@ -53,8 +96,8 @@ class ThreadSnapshot:
 @dataclass(frozen=True)
 class ThreadHistorySegment:
     events: list[dict[str, Any]]
-    start_offset: int
-    end_offset: int
+    start_event_id: int
+    end_event_id: int
     has_more: bool
 
 
@@ -81,15 +124,19 @@ class ThreadStore:
         threads_dir: Path | None = None,
         subthreads_dir: Path | None = None,
     ) -> None:
-        self.data_dir = data_dir
-        self.threads_dir = threads_dir or data_dir / "threads"
-        self.subthreads_dir = subthreads_dir or data_dir / "subthreads"
+        self.data_dir = data_dir.resolve()
+        # threads_dir/subthreads_dir are accepted for older construction sites,
+        # but SQLite is now the only source of truth for thread state.
+        self.threads_dir = threads_dir or self.data_dir / "threads"
+        self.subthreads_dir = subthreads_dir or self.data_dir / "subthreads"
+        self.db_path = state_db_path(self.data_dir)
         self._lock_owner_id = new_id("owner")
         self._held_thread_locks: dict[str, str] = {}
         self._held_thread_lock_depth: dict[str, int] = {}
         self._history_segment_cache: dict[tuple[Any, ...], ThreadHistorySegment] = {}
-        self.threads_dir.mkdir(parents=True, exist_ok=True)
-        self.subthreads_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        with self._connect():
+            pass
 
     def create_thread(
         self,
@@ -117,37 +164,10 @@ class ThreadStore:
         self._write_event(thread_id, created, kind=kind)
         return thread_id
 
-    def writer(self, thread_id: str, *, kind: str | None = None) -> JsonlWriter:
-        return JsonlWriter(self.path(thread_id, kind=kind))
-
-    def path(self, thread_id: str, *, kind: str | None = None) -> Path:
-        if kind == "subagent":
-            return self.subthreads_dir / f"{thread_id}.jsonl"
-        if kind == "thread":
-            return self.threads_dir / f"{thread_id}.jsonl"
-        thread_path = self.threads_dir / f"{thread_id}.jsonl"
-        if thread_path.exists():
-            return thread_path
-        subthread_path = self.subthreads_dir / f"{thread_id}.jsonl"
-        if subthread_path.exists():
-            return subthread_path
-        return self.threads_dir / f"{thread_id}.jsonl"
-
-    def metadata_path(self, thread_id: str, *, kind: str | None = None) -> Path:
-        if kind == "subagent":
-            return self.subthreads_dir / f"{thread_id}.json"
-        if kind == "thread":
-            return self.threads_dir / f"{thread_id}.json"
-        thread_path = self.threads_dir / f"{thread_id}.json"
-        if thread_path.exists():
-            return thread_path
-        subthread_path = self.subthreads_dir / f"{thread_id}.json"
-        if subthread_path.exists():
-            return subthread_path
-        return self.threads_dir / f"{thread_id}.json"
-
     def lock_path(self, thread_id: str, *, kind: str | None = None) -> Path:
-        return self.path(thread_id, kind=kind).with_suffix(".lock")
+        """Return a descriptive pseudo-path for SQLite-backed lock errors."""
+
+        return self.db_path
 
     @contextmanager
     def lock_thread(self, thread_id: str, *, kind: str | None = None) -> Iterator[None]:
@@ -181,7 +201,8 @@ class ThreadStore:
         self.append(thread_id, "thread.title_updated", title=title, source=source)
 
     def read(self, thread_id: str) -> list[dict[str, Any]]:
-        return read_jsonl(self.path(thread_id))
+        with self._connect() as db:
+            return self._read_events_db(db, thread_id)
 
     def read_events(
         self,
@@ -189,11 +210,8 @@ class ThreadStore:
         *,
         event_types: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        metadata = self._read_metadata(thread_id)
-        events = read_jsonl(self.path(thread_id, kind=metadata.get("kind")))
-        if event_types is None:
-            return events
-        return [event for event in events if event.get("type") in event_types]
+        with self._connect() as db:
+            return self._read_events_db(db, thread_id, event_types=event_types)
 
     def snapshot(self, thread_id: str) -> ThreadSnapshot:
         metadata = self._read_metadata(thread_id)
@@ -207,103 +225,119 @@ class ThreadStore:
         metadata: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         metadata = metadata or self._read_metadata(thread_id)
-        return read_jsonl_after_latest_compaction(
-            self.path(thread_id, kind=metadata.get("kind")),
-            _int_or_none(metadata.get("latest_compaction_offset")),
-        )
+        compaction_event_id = _int_or_none(metadata.get("latest_compaction_event_id"))
+        with self._connect() as db:
+            if compaction_event_id is None:
+                return self._read_events_db(db, thread_id), None
+            events = self._read_events_db(db, thread_id, event_id_gte=compaction_event_id)
+        if not events:
+            return [], None
+        return events[1:], events[0]
 
     def read_recent_events(
         self,
         thread_id: str,
         *,
         limit: int,
-        before_offset: int | None = None,
+        before_event_id: int | None = None,
         event_types: set[str] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        metadata = self._read_metadata(thread_id)
-        return read_jsonl_tail(
-            self.path(thread_id, kind=metadata.get("kind")),
-            limit=limit,
-            before_offset=before_offset,
-            event_types=event_types,
-        )
+        if limit <= 0:
+            return [], False
+        with self._connect() as db:
+            clauses = ["thread_id = ?"]
+            params: list[Any] = [thread_id]
+            if before_event_id is not None:
+                clauses.append("event_id < ?")
+                params.append(before_event_id)
+            if event_types:
+                clauses.append(f"type IN ({_placeholders(event_types)})")
+                params.extend(sorted(event_types))
+            rows = db.execute(
+                f"""
+                SELECT event_id, payload_json
+                FROM thread_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY event_id DESC
+                LIMIT ?
+                """,
+                (*params, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        events = [_event_from_row(row) for row in reversed(selected)]
+        return events, has_more
 
     def read_history_segment(
         self,
         thread_id: str,
         *,
-        before_offset: int | None = None,
+        before_event_id: int | None = None,
         event_types: set[str] | None = None,
     ) -> ThreadHistorySegment:
         metadata = self._read_metadata(thread_id)
         kind = str(metadata.get("kind") or "thread")
-        path = self.path(thread_id, kind=kind)
-        file_size = path.stat().st_size if path.exists() else 0
         event_type_key = tuple(sorted(event_types)) if event_types is not None else None
-        cache_key = (thread_id, kind, before_offset, event_type_key, file_size)
+        last_event_id = int(metadata.get("last_event_id") or 0)
+        cache_key = (thread_id, kind, before_event_id, event_type_key, last_event_id)
         cached = self._history_segment_cache.get(cache_key)
         if cached is not None:
             return ThreadHistorySegment(
                 events=list(cached.events),
-                start_offset=cached.start_offset,
-                end_offset=cached.end_offset,
+                start_event_id=cached.start_event_id,
+                end_event_id=cached.end_event_id,
                 has_more=cached.has_more,
             )
 
-        if before_offset is None:
-            start_offset = _int_or_none(metadata.get("latest_compaction_offset")) or 0
-            end_offset = file_size
-        else:
-            end_offset = max(0, min(before_offset, file_size))
-            compaction = latest_jsonl_event_before(
-                path,
-                before_offset=end_offset,
-                event_type="item.compaction",
+        with self._connect() as db:
+            if before_event_id is None:
+                start_event_id = _int_or_none(metadata.get("latest_compaction_event_id")) or 0
+                end_event_id = last_event_id + 1
+            else:
+                end_event_id = max(0, before_event_id)
+                compaction = db.execute(
+                    """
+                    SELECT event_id, payload_json
+                    FROM thread_events
+                    WHERE thread_id = ? AND type = 'item.compaction' AND event_id < ?
+                    ORDER BY event_id DESC
+                    LIMIT 1
+                    """,
+                    (thread_id, end_event_id),
+                ).fetchone()
+                start_event_id = int(compaction["event_id"]) if compaction is not None else 0
+
+            rows, has_more = self._history_rows_between(
+                db,
+                thread_id,
+                start_event_id=start_event_id,
+                end_event_id=end_event_id,
+                event_types=event_types,
             )
-            start_offset = _event_offset(compaction) if compaction is not None else 0
-        start_offset = max(0, min(start_offset, end_offset))
-        events = read_jsonl_range(path, start_offset=start_offset, end_offset=end_offset)
-        if event_types is not None:
-            events = [event for event in events if event.get("type") in event_types]
-        has_more = start_offset > 0 and has_jsonl_event_before(
-            path,
-            before_offset=start_offset,
-            event_types=event_types,
-        )
+        events = [_event_from_row(row) for row in rows]
         segment = ThreadHistorySegment(
             events=events,
-            start_offset=start_offset,
-            end_offset=end_offset,
+            start_event_id=start_event_id,
+            end_event_id=end_event_id,
             has_more=has_more,
         )
         self._history_segment_cache[cache_key] = segment
         return ThreadHistorySegment(
             events=list(segment.events),
-            start_offset=segment.start_offset,
-            end_offset=segment.end_offset,
+            start_event_id=segment.start_event_id,
+            end_event_id=segment.end_event_id,
             has_more=segment.has_more,
         )
 
-    def latest_event(
-        self,
-        thread_id: str,
-        event_type: str,
-    ) -> dict[str, Any] | None:
+    def latest_event(self, thread_id: str, event_type: str) -> dict[str, Any] | None:
         events, _ = self.read_recent_events(thread_id, limit=1, event_types={event_type})
         return events[0] if events else None
 
     def list_threads(self) -> list[dict[str, Any]]:
-        return self._list_from_metadata_dir(self.threads_dir)
+        return self._list_threads(kind="thread")
 
     def list_subthreads(self, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
-        subthreads = self._list_from_metadata_dir(self.subthreads_dir)
-        if parent_thread_id is not None:
-            subthreads = [
-                thread
-                for thread in subthreads
-                if thread.get("parent_thread_id") == parent_thread_id
-            ]
-        return subthreads
+        return self._list_threads(kind="subagent", parent_thread_id=parent_thread_id)
 
     def thread_digest(
         self,
@@ -352,23 +386,51 @@ class ThreadStore:
             for thread in self.list_threads()[:limit]
         ]
 
+    def _connect(self) -> sqlite3.Connection:
+        return connect_state_db(self.data_dir)
+
     def _write_event(self, thread_id: str, event: dict[str, Any], *, kind: str | None = None) -> dict[str, Any]:
         resolved_kind = kind or self._kind_for_thread(thread_id)
         self._assert_thread_write_allowed(thread_id, kind=resolved_kind)
-        stored = self.writer(thread_id, kind=resolved_kind).write(event)
-        event_kind = resolved_kind or stored.get("kind")
-        self._update_metadata(thread_id, stored, kind=str(event_kind or "thread"))
+        with self._connect() as db:
+            metadata = self._metadata_for_update(db, thread_id, kind=resolved_kind, event=event)
+            # Thread rows must exist before thread_events can satisfy the foreign
+            # key; the final metadata update below records the assigned event_id.
+            self._upsert_metadata(db, metadata)
+            cursor = db.execute(
+                """
+                INSERT INTO thread_events(thread_id, turn_id, type, created_at, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    thread_id,
+                    event.get("turn_id"),
+                    event.get("type"),
+                    event.get("created_at") or utc_now_iso(),
+                    _json_dumps(event),
+                ),
+            )
+            event_id = int(cursor.lastrowid)
+            stored = {**event, "_event_id": event_id}
+            # Persist the full event including its assigned event_id so payloads
+            # remain self-contained for debugging and runtime helper reads.
+            db.execute(
+                "UPDATE thread_events SET payload_json = ? WHERE event_id = ?",
+                (_json_dumps(stored), event_id),
+            )
+            _apply_metadata_event(metadata, stored)
+            self._upsert_metadata(db, metadata)
         self._history_segment_cache.clear()
         return stored
 
     def _kind_for_thread(self, thread_id: str) -> str:
-        if (self.subthreads_dir / f"{thread_id}.jsonl").exists():
-            return "subagent"
+        with self._connect() as db:
+            row = db.execute("SELECT kind FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+        if row is not None:
+            return str(row["kind"] or "thread")
         return "thread"
 
     def _acquire_thread_lock(self, thread_id: str, *, token: str, kind: str) -> None:
-        path = self.lock_path(thread_id, kind=kind)
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "thread_id": thread_id,
             "kind": kind,
@@ -378,11 +440,22 @@ class ThreadStore:
             "created_at": utc_now_iso(),
         }
         try:
-            with path.open("x", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-        except FileExistsError as exc:
-            raise ThreadLockedError(thread_id, path, self._read_lock_owner(path)) from exc
+            with self._connect() as db:
+                db.execute(
+                    """
+                    INSERT INTO thread_locks(thread_id, owner_id, token, pid, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        thread_id,
+                        payload["owner_id"],
+                        payload["token"],
+                        payload["pid"],
+                        payload["created_at"],
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ThreadLockedError(thread_id, self.lock_path(thread_id, kind=kind), self._read_lock_owner(thread_id)) from exc
         self._held_thread_locks[thread_id] = token
         self._held_thread_lock_depth[thread_id] = 1
 
@@ -393,78 +466,153 @@ class ThreadStore:
             return
         self._held_thread_lock_depth.pop(thread_id, None)
         self._held_thread_locks.pop(thread_id, None)
-        path = self.lock_path(thread_id, kind=kind)
-        owner = self._read_lock_owner(path)
-        if owner.get("owner_id") != self._lock_owner_id or owner.get("token") != token:
-            return
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+        with self._connect() as db:
+            db.execute(
+                "DELETE FROM thread_locks WHERE thread_id = ? AND owner_id = ? AND token = ?",
+                (thread_id, self._lock_owner_id, token),
+            )
 
     def _assert_thread_write_allowed(self, thread_id: str, *, kind: str) -> None:
-        path = self.lock_path(thread_id, kind=kind)
-        if not path.exists():
+        owner = self._read_lock_owner(thread_id)
+        if not owner:
             return
-        owner = self._read_lock_owner(path)
         token = self._held_thread_locks.get(thread_id)
         if owner.get("owner_id") == self._lock_owner_id and owner.get("token") == token:
             return
-        raise ThreadLockedError(thread_id, path, owner)
+        raise ThreadLockedError(thread_id, self.lock_path(thread_id, kind=kind), owner)
 
-    @staticmethod
-    def _read_lock_owner(path: Path) -> dict[str, Any]:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    def _read_lock_owner(self, thread_id: str | Path) -> dict[str, Any]:
+        # Accept Path for compatibility with tests or older callers that passed
+        # lock_path objects to the private helper.
+        if isinstance(thread_id, Path):
             return {}
-        return data if isinstance(data, dict) else {}
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT thread_id, owner_id, token, pid, created_at FROM thread_locks WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+        return dict(row) if row is not None else {}
 
     def _read_metadata(self, thread_id: str, *, kind: str | None = None) -> dict[str, Any]:
-        path = self.metadata_path(thread_id, kind=kind)
-        if not path.exists():
-            raise FileNotFoundError(f"Missing thread metadata for {thread_id}: {path}")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError(f"Invalid thread metadata: {path}")
-        return data
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+        if row is None:
+            raise FileNotFoundError(f"Missing thread metadata for {thread_id}: {self.db_path}")
+        return _metadata_from_row(row)
 
-    def _write_metadata(self, thread_id: str, metadata: dict[str, Any], *, kind: str | None = None) -> None:
-        path = self.metadata_path(thread_id, kind=kind or str(metadata.get("kind") or "thread"))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        atomic_replace(tmp_path, path)
+    def _metadata_for_update(
+        self,
+        db: sqlite3.Connection,
+        thread_id: str,
+        *,
+        kind: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        row = db.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+        if row is not None:
+            return _metadata_from_row(row)
+        return {
+            "thread_id": thread_id,
+            "kind": kind,
+            "title": "New thread",
+            "created_at": event.get("created_at") or utc_now_iso(),
+            "updated_at": event.get("created_at") or utc_now_iso(),
+            "turn_count": 0,
+            "interrupted_turn_count": 0,
+            "user_message_count": 0,
+            "last_text": "",
+        }
 
-    def _update_metadata(self, thread_id: str, event: dict[str, Any], *, kind: str) -> None:
-        path = self.metadata_path(thread_id, kind=kind)
-        if path.exists():
-            metadata = json.loads(path.read_text(encoding="utf-8"))
-        else:
-            metadata = {
-                "thread_id": thread_id,
-                "kind": kind,
-                "title": "New thread",
-                "created_at": event.get("created_at"),
-                "updated_at": event.get("created_at"),
-                "turn_count": 0,
-                "interrupted_turn_count": 0,
-                "user_message_count": 0,
-                "last_text": "",
-            }
-        _apply_metadata_event(metadata, event)
-        self._write_metadata(thread_id, metadata, kind=kind)
+    def _upsert_metadata(self, db: sqlite3.Connection, metadata: dict[str, Any]) -> None:
+        row = _metadata_to_row(metadata)
+        columns = ["thread_id", *_THREAD_UPDATE_COLUMNS]
+        placeholders = ", ".join("?" for _ in columns)
+        updates = ", ".join(f"{column}=excluded.{column}" for column in _THREAD_UPDATE_COLUMNS)
+        db.execute(
+            f"""
+            INSERT INTO threads({', '.join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT(thread_id) DO UPDATE SET {updates}
+            """,
+            tuple(row.get(column) for column in columns),
+        )
 
-    def _list_from_metadata_dir(self, directory: Path) -> list[dict[str, Any]]:
-        threads: list[dict[str, Any]] = []
-        for path in sorted(directory.glob("*.json")):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if isinstance(data, dict):
-                threads.append(data)
-        return sorted(threads, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    def _read_events_db(
+        self,
+        db: sqlite3.Connection,
+        thread_id: str,
+        *,
+        event_types: set[str] | None = None,
+        event_id_gte: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["thread_id = ?"]
+        params: list[Any] = [thread_id]
+        if event_id_gte is not None:
+            clauses.append("event_id >= ?")
+            params.append(event_id_gte)
+        if event_types:
+            clauses.append(f"type IN ({_placeholders(event_types)})")
+            params.extend(sorted(event_types))
+        rows = db.execute(
+            f"""
+            SELECT event_id, payload_json
+            FROM thread_events
+            WHERE {' AND '.join(clauses)}
+            ORDER BY event_id ASC
+            """,
+            params,
+        ).fetchall()
+        return [_event_from_row(row) for row in rows]
+
+    def _history_rows_between(
+        self,
+        db: sqlite3.Connection,
+        thread_id: str,
+        *,
+        start_event_id: int,
+        end_event_id: int,
+        event_types: set[str] | None,
+    ) -> tuple[Sequence[sqlite3.Row], bool]:
+        clauses = ["thread_id = ?", "event_id >= ?", "event_id < ?"]
+        params: list[Any] = [thread_id, start_event_id, end_event_id]
+        if event_types:
+            clauses.append(f"type IN ({_placeholders(event_types)})")
+            params.extend(sorted(event_types))
+        query_tail = f"WHERE {' AND '.join(clauses)}"
+        rows = db.execute(
+            f"""
+            SELECT event_id, payload_json
+            FROM thread_events
+            {query_tail}
+            ORDER BY event_id ASC
+            """,
+            params,
+        ).fetchall()
+        has_more = False
+        if start_event_id > 0:
+            before_clauses = ["thread_id = ?", "event_id < ?"]
+            before_params: list[Any] = [thread_id, start_event_id]
+            if event_types:
+                before_clauses.append(f"type IN ({_placeholders(event_types)})")
+                before_params.extend(sorted(event_types))
+            has_more = db.execute(
+                f"SELECT 1 FROM thread_events WHERE {' AND '.join(before_clauses)} LIMIT 1",
+                before_params,
+            ).fetchone() is not None
+        return rows, has_more
+
+    def _list_threads(self, *, kind: str, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
+        clauses = ["kind = ?"]
+        params: list[Any] = [kind]
+        if parent_thread_id is not None:
+            clauses.append("parent_thread_id = ?")
+            params.append(parent_thread_id)
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT * FROM threads WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC",
+                params,
+            ).fetchall()
+        return [_metadata_from_row(row) for row in rows]
 
 
 def latest_thread_title(events: list[dict[str, Any]]) -> str:
@@ -493,8 +641,8 @@ def latest_compaction_index(events: list[dict[str, Any]]) -> int:
     return -1
 
 
-def _event_offset(event: dict[str, Any]) -> int:
-    return _int_or_none(event.get("_jsonl_offset")) or 0
+def _event_id(event: dict[str, Any]) -> int:
+    return _int_or_none(event.get("_event_id")) or 0
 
 
 def digest_items(events: list[dict[str, Any]], *, include_tools: bool = False) -> list[dict[str, Any]]:
@@ -587,7 +735,7 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
     created_at = event.get("created_at")
     if created_at:
         metadata["updated_at"] = created_at
-    metadata["last_event_offset"] = event.get("_jsonl_offset")
+    metadata["last_event_id"] = event.get("_event_id")
 
     if event_type == "thread.created":
         metadata.update(
@@ -637,7 +785,7 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
             "from_model": event.get("from_model"),
             "to_model": event.get("to_model"),
             "message": event.get("message") or "",
-            "_jsonl_offset": event.get("_jsonl_offset"),
+            "_event_id": event.get("_event_id"),
         }
         return
 
@@ -649,12 +797,12 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
     elif event_type in {"turn.interrupted", "turn.error"}:
         metadata["interrupted_turn_count"] = int(metadata.get("interrupted_turn_count") or 0) + 1
     elif event_type == "item.compaction":
-        metadata["latest_compaction_offset"] = event.get("_jsonl_offset")
+        metadata["latest_compaction_event_id"] = event.get("_event_id")
         metadata["latest_compaction"] = {
             "created_at": event.get("created_at"),
             "turn_id": event.get("turn_id"),
             "text": event.get("text") or "",
-            "_jsonl_offset": event.get("_jsonl_offset"),
+            "_event_id": event.get("_event_id"),
         }
 
     text = event_human_text(event)
@@ -700,6 +848,105 @@ def _compaction_summary(compaction: Any) -> dict[str, Any] | None:
         "turn_id": compaction.get("turn_id"),
         "text": compaction.get("text") or "",
     }
+
+
+def _metadata_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    metadata = _json_loads(row["metadata_json"], default={})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata.update(
+        {
+            "thread_id": row["thread_id"],
+            "kind": row["kind"],
+            "title": row["title"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "turn_count": int(row["turn_count"] or 0),
+            "interrupted_turn_count": int(row["interrupted_turn_count"] or 0),
+            "user_message_count": int(row["user_message_count"] or 0),
+            "last_text": row["last_text"] or "",
+        }
+    )
+    for key in (
+        "parent_thread_id",
+        "parent_turn_id",
+        "parent_run_id",
+        "active_level",
+        "active_model",
+        "latest_cwd",
+        "last_event_id",
+        "latest_compaction_event_id",
+        "latest_usage_tokens",
+        "billing_currency",
+        "billing_total",
+    ):
+        if row[key] is not None:
+            metadata[key] = row[key]
+    metadata["latest_model_switch_warning"] = _json_loads(row["latest_model_switch_warning_json"], default=None)
+    metadata["latest_compaction"] = _json_loads(row["latest_compaction_json"], default=None)
+    metadata["billing_totals"] = _json_loads(row["billing_totals_json"], default=None)
+    return {key: value for key, value in metadata.items() if value is not None}
+
+
+def _metadata_to_row(metadata: dict[str, Any]) -> dict[str, Any]:
+    extra = {key: value for key, value in metadata.items() if key not in _METADATA_COLUMNS}
+    return {
+        "thread_id": metadata["thread_id"],
+        "kind": metadata.get("kind") or "thread",
+        "title": metadata.get("title") or "New thread",
+        "created_at": metadata.get("created_at") or utc_now_iso(),
+        "updated_at": metadata.get("updated_at") or metadata.get("created_at") or utc_now_iso(),
+        "parent_thread_id": metadata.get("parent_thread_id"),
+        "parent_turn_id": metadata.get("parent_turn_id"),
+        "parent_run_id": metadata.get("parent_run_id"),
+        "active_level": metadata.get("active_level"),
+        "active_model": metadata.get("active_model"),
+        "latest_cwd": metadata.get("latest_cwd"),
+        "turn_count": int(metadata.get("turn_count") or 0),
+        "interrupted_turn_count": int(metadata.get("interrupted_turn_count") or 0),
+        "user_message_count": int(metadata.get("user_message_count") or 0),
+        "last_text": metadata.get("last_text") or "",
+        "last_event_id": metadata.get("last_event_id"),
+        "latest_compaction_event_id": metadata.get("latest_compaction_event_id"),
+        "latest_usage_tokens": metadata.get("latest_usage_tokens"),
+        "latest_model_switch_warning_json": _json_dumps(metadata.get("latest_model_switch_warning"))
+        if metadata.get("latest_model_switch_warning") is not None
+        else None,
+        "latest_compaction_json": _json_dumps(metadata.get("latest_compaction"))
+        if metadata.get("latest_compaction") is not None
+        else None,
+        "billing_currency": metadata.get("billing_currency"),
+        "billing_total": metadata.get("billing_total"),
+        "billing_totals_json": _json_dumps(metadata.get("billing_totals"))
+        if metadata.get("billing_totals") is not None
+        else None,
+        "metadata_json": _json_dumps(extra),
+    }
+
+
+def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    event = _json_loads(row["payload_json"], default={})
+    if not isinstance(event, dict):
+        event = {}
+    event["_event_id"] = int(row["event_id"])
+    return event
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_loads(value: Any, *, default: Any) -> Any:
+    if value is None:
+        return default
+    try:
+        return json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _placeholders(values: Sequence[Any] | set[Any]) -> str:
+    return ", ".join("?" for _ in values)
 
 
 def _int_or_none(value: Any) -> int | None:

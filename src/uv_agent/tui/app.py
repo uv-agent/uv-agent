@@ -230,10 +230,10 @@ def save_composer_history(items: list[str]) -> None:
     atomic_replace(tmp_path, path)
 
 
-def _event_offset(event: dict[str, Any] | None) -> int | None:
+def _event_id(event: dict[str, Any] | None) -> int | None:
     if not event:
         return None
-    value = event.get("_jsonl_offset")
+    value = event.get("_event_id")
     return value if isinstance(value, int) else None
 
 
@@ -394,7 +394,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._current_worker: Worker[None] | None = None
         self._current_cancel_event: asyncio.Event | None = None
         self._thread_runs: dict[str, ThreadRunState] = {}
-        self._history_before_offset: int | None = None
+        self._history_before_event_id: int | None = None
         self._history_has_more = False
         self._history_more_cell: LoadOlderHistoryCell | None = None
         self._selection_copy_timer: Any | None = None
@@ -2621,7 +2621,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         events: list[dict[str, Any]],
         *,
         has_more: bool,
-        start_offset: int | None = None,
+        start_event_id: int | None = None,
     ) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)
         insert_before: MountBefore = transcript.children[0] if transcript.children else None
@@ -2635,10 +2635,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._history_more_cell.remove()
             self._history_more_cell = None
         self._history_has_more = has_more
-        if start_offset is not None:
-            self._history_before_offset = start_offset
+        if start_event_id is not None:
+            self._history_before_event_id = start_event_id
         elif events:
-            self._history_before_offset = _event_offset(events[0])
+            self._history_before_event_id = _event_id(events[0])
         if has_more or events:
             marker = LoadOlderHistoryCell(has_more=has_more, classes="event")
             transcript.mount(marker, before=insert_before)
@@ -2977,7 +2977,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         transcript = self.query_one("#transcript", TranscriptScroll)
         transcript.query("*").remove()
         self._transcript_has_content = False
-        self._history_before_offset = None
+        self._history_before_event_id = None
         self._history_has_more = False
         self._history_more_cell = None
         # Brand new transcript: re-engage auto-follow so the first incoming
@@ -3201,7 +3201,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             event_types=VISIBLE_HISTORY_EVENT_TYPES | {"turn.started", "turn.completed"},
         )
         self._history_has_more = segment.has_more
-        self._history_before_offset = segment.start_offset
+        self._history_before_event_id = segment.start_event_id
         if segment.has_more:
             transcript = self.query_one("#transcript", VerticalScroll)
             marker = LoadOlderHistoryCell(has_more=True, classes="event")
@@ -3293,17 +3293,17 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         return "\n".join(parts)
 
     def _load_older_thread_history(self) -> None:
-        if not self.thread_id or self._history_before_offset is None:
+        if not self.thread_id or self._history_before_event_id is None:
             return
         segment = self.engine.thread_store.read_history_segment(
             self.thread_id,
-            before_offset=self._history_before_offset,
+            before_event_id=self._history_before_event_id,
             event_types=VISIBLE_HISTORY_EVENT_TYPES,
         )
         self._prepend_history_cells(
             segment.events,
             has_more=segment.has_more,
-            start_offset=segment.start_offset,
+            start_event_id=segment.start_event_id,
         )
 
     def _append_user_from_history(self, item: dict[str, Any], *, before: MountBefore = None) -> TranscriptCell | None:

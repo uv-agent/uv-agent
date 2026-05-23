@@ -260,7 +260,6 @@ class LookAtRunner:
             timed_out=False,
             interrupted=False,
             truncated=False,
-            run_log_path=self.image_path.parent / "run.jsonl",
             script_path=self.image_path.parent / "script.py",
             events=[
                 {
@@ -286,7 +285,6 @@ class SimpleRunner:
             timed_out=False,
             interrupted=self.interrupted,
             truncated=False,
-            run_log_path=request.cwd / "run.jsonl",
             script_path=request.cwd / "script.py",
             events=[],
         )
@@ -307,7 +305,6 @@ class LargeOutputRunner(SimpleRunner):
             timed_out=False,
             interrupted=False,
             truncated=False,
-            run_log_path=request.cwd / "run.jsonl",
             script_path=request.cwd / "script.py",
             events=[],
         )
@@ -324,7 +321,6 @@ class StreamingRunner(SimpleRunner):
             timed_out=False,
             interrupted=False,
             truncated=False,
-            run_log_path=request.cwd / "run.jsonl",
             script_path=request.cwd / "script.py",
             events=[],
         )
@@ -337,7 +333,6 @@ class StreamingRunner(SimpleRunner):
             timed_out=False,
             interrupted=False,
             truncated=False,
-            run_log_path=request.cwd / "run.jsonl",
             script_path=request.cwd / "script.py",
             events=[],
         )
@@ -1156,7 +1151,7 @@ async def test_agent_locks_thread_while_turn_is_running(tmp_path: Path) -> None:
     await blocking_client.started.wait()
     other = ThreadStore(state_dir)
 
-    assert engine.thread_store.lock_path(thread_id).exists()
+    assert engine.thread_store._read_lock_owner(thread_id)
     with pytest.raises(ThreadLockedError):
         other.append(
             thread_id,
@@ -1169,7 +1164,7 @@ async def test_agent_locks_thread_while_turn_is_running(tmp_path: Path) -> None:
     events = await asyncio.wait_for(task, timeout=5)
 
     assert events[-1]["type"] == "turn.interrupted"
-    assert not engine.thread_store.lock_path(thread_id).exists()
+    assert not engine.thread_store._read_lock_owner(thread_id)
 
 
 @pytest.mark.asyncio

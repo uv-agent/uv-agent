@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from uv_agent.jsonl import JsonlWriter
+from uv_agent.runner.run_log import EventWriter
 
 from .auth import bearer_token, is_loopback_address
 from .dispatcher import DispatchResult, JsonRpcDispatcher
@@ -111,7 +111,7 @@ class RuntimeRPCServer:
         turn_id: str | None,
         cwd: Path,
         structured_events: list[dict[str, Any]],
-        writer: JsonlWriter,
+        writer: EventWriter,
     ) -> RuntimeRPCSessionHandle:
         self.start()
         token = secrets.token_urlsafe(32)
