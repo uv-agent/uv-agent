@@ -206,7 +206,7 @@ class EmptyState(Static):
 
 
 class ComposerTextArea(TextArea):
-    """Composer text area with Ctrl+C reserved for app-level interrupt/quit."""
+    """Composer text area with app-specific history and copy feedback."""
 
     def action_cursor_up(self, select: bool = False) -> None:
         if not select:
@@ -227,14 +227,6 @@ class ComposerTextArea(TextArea):
         app = self.app
         notify = getattr(app, "_text", lambda k: k)
         app.notify(notify("copied"), timeout=1.5)
-
-    BINDINGS = [
-        binding
-        for binding in TextArea.BINDINGS
-        if not {"ctrl+c", "super+c"}.intersection(
-            key.strip() for key in binding.key.split(",")
-        )
-    ]
 
 class TranscriptCell(Static):
     """Small transcript block used by the Textual chat timeline."""

@@ -3728,6 +3728,62 @@ async def test_tui_selection_auto_copies_after_delay(
 
 
 @pytest.mark.asyncio
+async def test_tui_ctrl_c_in_focused_composer_only_copies_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = BlockingEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("long work")
+        await pilot.press("ctrl+enter")
+        await engine.started.wait()
+
+        composer.insert("queued draft")
+        composer.select_all()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert app._clipboard == "queued draft"
+        assert app.busy is True
+        assert app._interrupt_armed is False
+        assert not any(str(toast.render()) == app._text("interrupt_again") for toast in app.screen.query("Toast"))
+
+        # Finish the background turn so the test app can shut down cleanly.
+        if app._current_cancel_event is not None:
+            app._current_cancel_event.set()
+        await pilot.pause(0.2)
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_c_in_focused_empty_composer_does_not_arm_quit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        assert app.screen.focused is app.query_one("#composer", TextArea)
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert app._quit_armed is False
+        assert not list(app.screen.query("Toast"))
+
+
+@pytest.mark.asyncio
 async def test_tui_transcript_selection_auto_copies_after_delay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3982,6 +4038,7 @@ async def test_tui_ctrl_c_twice_interrupts_busy_turn_without_selection(
         composer.insert("long work")
         await pilot.press("ctrl+enter")
         await engine.started.wait()
+        composer.blur()
 
         await pilot.press("ctrl+c")
         await pilot.pause()
@@ -5058,6 +5115,8 @@ async def test_tui_ctrl_c_arms_quit_when_idle(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        app.query_one("#composer", TextArea).blur()
+
         await pilot.press("ctrl+c")
         await pilot.pause()
 
@@ -5079,6 +5138,8 @@ async def test_tui_ctrl_c_fast_second_press_quits_when_idle(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        app.query_one("#composer", TextArea).blur()
+
         await pilot.press("ctrl+c")
         await pilot.pause(0.12)
         await pilot.press("ctrl+c")
@@ -5397,6 +5458,7 @@ async def test_tui_live_and_reentry_equivalent_for_interrupted_round(
         await pilot.press("ctrl+enter")
         await engine.started.wait()
         await pilot.pause()
+        composer.blur()
 
         # Two Ctrl+C presses trigger the interrupt action.
         await pilot.press("ctrl+c")

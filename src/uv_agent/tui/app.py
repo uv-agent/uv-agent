@@ -335,6 +335,11 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 self._refresh_status()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "interrupt_turn":
+            # Let focused text inputs keep the platform-standard Ctrl+C copy
+            # binding. Interrupt/quit remains available after focus leaves the
+            # editor, which avoids destructive app-level handling while editing.
+            return not (self.is_mounted and isinstance(self.screen.focused, TextArea))
         if action == "toggle_tool_details":
             return self.is_mounted and self.screen is self.default_screen
         if action == "toggle_visible_process_folds":
