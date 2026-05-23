@@ -6,9 +6,9 @@
 Windows 体验设计，尽量避免许多 coding agent 在 PowerShell 引号、shell 语义、
 Unix-first 假设上经常“水土不服”的问题。它对外只有一个动作面：`run_python`：
 模型把 Python 脚本提交给受管理的 `uv run` runner，再由脚本完成实际工作，而不是
-依赖脆弱的 shell 片段。这种单一工具面的设计让 agent 在 Windows 上行为更可预期，
-同时仍可移植到任何安装了 Python 和 uv 的操作系统。内置成熟的上下文管理机制，
-见 [上下文管理](#上下文管理)。
+依赖脆弱的 shell 片段。围绕这个 `run_python` 边界，uv-agent 的上下文层采用
+Harness Engineering 思路：通过 checkpoint 压缩、稳定的增量更新、协议安全的中断处理
+和 epoch 重放，让模型视角在长程任务中保持一致。见 [上下文管理](#上下文管理)。
 
 公开 API、配置字段和 runtime 行为可能随项目演进而继续调整。
 
@@ -210,7 +210,14 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 
 ## 上下文管理
 
-uv-agent 使用**成熟的上下文管理系统**：基于指纹的增量更新机制确保只有变化的上下文块（runtime env、model levels、helpers、skills、MCP servers）才会重新发送；system prompt 始终稳定，所有动态上下文通过 user message 追加。上下文压缩后 epoch 重置，所有块重新全量发送。更新以 `<context_update status="current|removed">` 信封形式传递，workspace rules 按需渐进加载。
+上下文管理是 uv-agent Harness Engineering 思路的一部分：把 Agent 的输入、行动、状态和异常处理都纳入一套明确的工程协议中，让它在长时间运行时仍然可追踪、可恢复、可维护。两个机制构成核心锚点：**checkpoint 压缩**提供持久续接点，单一 **`run_python` 执行面**让所有外部动作进入同一条事件流。
+
+- **基于指纹的增量更新。** runtime environment、model levels、helpers、skills、MCP declarations 等上下文会被拆成独立部分。只有发生变化的动态部分会通过 `<context_update ...>` 重新发送；未变化内容在当前 epoch 内继续有效，被移除的 skill 或 MCP server 会显式标记为不可再依赖。
+- **稳定前缀与稳定顺序。** system prompt 保持稳定，动态上下文以 pre-user message 的形式追加，并使用固定的更新前缀和固定的章节顺序，减少长对话中因上下文变化带来的漂移。
+- **协议安全的序列补全。** 因为 `run_python` 是唯一对外动作面，tool call、runner result、工作目录变化、rule 加载、附件和依赖状态都会进入同一条持久事件流。回合被中断时，未完成的工具调用会收到显式的合成输出和桥接消息；部分流式输出、provider 错误或工具错误会被记录下来，而不会被伪装成成功完成。
+- **压缩后的 epoch 重放。** 压缩 checkpoint 保存 continuation summary 和近期保留对话，同时排除可重新加载的 runtime/rules 上下文。新的 epoch 会先重新发送当前 runtime context 和 workspace rules，再接入 retained history；工具调用后的中途压缩也使用同样顺序，让 assistant 在压缩摘要之后继续执行。
+
+这些机制让 uv-agent 在工作区变化、运行时变化、中断、错误和超长会话中，仍能保持模型视角一致、任务连续，并稳定地长程运行。
 
 ## 开发
 

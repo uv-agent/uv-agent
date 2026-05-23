@@ -7,9 +7,11 @@ to feel at home on Windows, where many coding agents stumble over PowerShell
 quoting, shell semantics, or Unix-first assumptions. Its only external action
 surface is `run_python`: the model submits Python scripts to a managed `uv run`
 runner, and those scripts do the actual work instead of relying on fragile
-shell snippets. This single-tool design keeps behavior predictable on Windows
-and portable to any OS with Python and uv. It includes a mature context management
-system — see [Context Management](#context-management) for details.
+shell snippets. Around this `run_python` boundary, uv-agent's context layer
+applies Harness Engineering ideas: checkpoint compaction, stable incremental
+updates, protocol-safe interruption handling, and epoch replay keep the model's
+view coherent during long-running work. See
+[Context Management](#context-management) for details.
 
 Public APIs, config fields, and runtime behavior may still change as the
 project evolves.
@@ -214,7 +216,14 @@ See [configuration](docs/configuration.md) for all supported options and
 
 ## Context Management
 
-uv-agent uses a **mature context management system** with fingerprint-based incremental updates: only context blocks (runtime env, model levels, helpers, skills, MCP servers) that have changed are re-sent, while the system prompt stays stable and all dynamic context is appended via user messages. After compaction, the epoch resets and all blocks are re-sent fresh. Updates arrive as explicit `<context_update status="current|removed">` envelopes, and workspace rules are progressively loaded on demand.
+uv-agent's context management is one part of its Harness Engineering approach: it brings the agent's inputs, actions, state, and exception handling into an explicit engineering protocol so long-running work remains traceable, recoverable, and maintainable. Two mechanisms anchor the design: **checkpoint compaction** creates durable continuation points, and the single **`run_python` execution surface** makes every external action flow through the same event stream.
+
+- **Incremental, fingerprinted updates.** Runtime environment, model levels, helpers, skills, and MCP declarations are split into context parts. Only changed dynamic parts are re-sent inside `<context_update ...>` messages; unchanged parts remain current within the epoch, and removed skills or MCP servers are explicitly tombstoned.
+- **Stable prefix and ordering.** The system prompt stays stable. Dynamic context is appended as pre-user messages with a fixed update prefix and stable section order, which keeps long conversations from drifting as context grows or changes.
+- **Protocol-safe sequence completion.** Because `run_python` is the only external action surface, tool calls, runner results, working-directory updates, rule loads, attachments, and dependency state all flow through one persistent event stream. If a turn is interrupted, unfinished tool calls receive explicit synthetic outputs and bridge messages; partial model streams and provider or tool errors are recorded instead of being treated as successful completions.
+- **Epoch replay after compaction.** A compaction checkpoint stores a continuation summary plus retained recent conversation while excluding reloadable runtime and rule context. The next epoch re-emits the current runtime context and workspace rules before retained history; mid-turn compaction uses the same ordering before the assistant continues after tool results.
+
+Together, these mechanisms keep the model's view coherent across workspace changes, runtime changes, interruptions, errors, and long-running sessions.
 
 ## Development
 
