@@ -227,6 +227,8 @@ Together, these mechanisms keep the model's view coherent across workspace chang
 
 ## Development
 
+uv-agent is developed in a self-bootstrapping style: the project is routinely read, edited, tested, and refined with uv-agent itself.
+
 ```powershell
 uv run pytest
 ```

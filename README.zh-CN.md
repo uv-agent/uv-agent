@@ -221,6 +221,8 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 
 ## 开发
 
+`uv-agent` 采用“自举”开发：项目日常使用 uv-agent 自身完成阅读、修改、测试和迭代。
+
 ```powershell
 uv run pytest
 ```
