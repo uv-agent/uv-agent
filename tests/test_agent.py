@@ -780,7 +780,8 @@ def test_compaction_replacement_keeps_recent_user_messages_with_budget(tmp_path:
     assert "assistant output" not in text
     assert "[truncated during context compaction]" in text
     assert "<retained_history_message" in text
-    assert "<compacted_context_continuation>" in text
+    assert "resume any unfinished task" in text
+    assert "<compacted_context_continuation>" not in text
 
 
 @pytest.mark.asyncio
