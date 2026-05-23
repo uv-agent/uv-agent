@@ -34,6 +34,7 @@ VISIBLE_HISTORY_EVENT_TYPES = {
     "item.reasoning_delta",
     "item.reasoning_partial",
     "item.compaction",
+    "thread.token_estimation_warning",
     "thread.model_switch_warning",
     "turn.stream_retry",
     "turn.interrupted",

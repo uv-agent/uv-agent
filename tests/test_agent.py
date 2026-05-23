@@ -570,6 +570,175 @@ async def test_agent_compaction_falls_back_to_current_level(tmp_path: Path) -> N
     assert client.requests[1]["level"] == "deep"
 
 
+@pytest.mark.asyncio
+async def test_compaction_trigger_prefers_provider_usage(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        context_window_tokens=100,
+        compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.5, min_tokens=1),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "ok",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {"total_tokens": 75},
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "provider summary",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "provider summary"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="tiny")]
+    stored = engine.thread_store.read(events[-1]["thread_id"])
+
+    assert any(event["type"] == "item.compaction" for event in stored)
+    assert not any(event["type"] == "thread.token_estimation_warning" for event in stored)
+
+
+@pytest.mark.asyncio
+async def test_compaction_warns_when_trigger_uses_estimate(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        context_window_tokens=20,
+        compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.1, min_tokens=1),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "ok",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "estimated summary",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "estimated summary"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="hello")]
+    stored = engine.thread_store.read(events[-1]["thread_id"])
+    warning = next(event for event in stored if event["type"] == "thread.token_estimation_warning")
+
+    assert "local estimate" in warning["message"]
+    assert any(event["type"] == "item.compaction" for event in stored)
+    assert [event["type"] for event in stored].index("thread.token_estimation_warning") < [
+        event["type"] for event in stored
+    ].index("item.compaction")
+
+
+@pytest.mark.asyncio
+async def test_compaction_warns_when_latest_provider_usage_is_stale(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        context_window_tokens=20,
+        compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.1, min_tokens=1),
+    )
+    client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_tool",
+                "output_text": "",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_stale_usage",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "print('hello')"}),
+                    }
+                ],
+                "usage": {"total_tokens": 5},
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "summary after stale usage",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "summary after stale usage"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_final",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=SimpleRunner(),  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="run a tool")]
+    stored = engine.thread_store.read(events[-1]["thread_id"])
+
+    assert any(event["type"] == "thread.token_estimation_warning" for event in events)
+    assert any(event["type"] == "thread.token_estimation_warning" for event in stored)
+    assert any(event["type"] == "item.compaction" for event in stored)
+
+
 def test_compaction_replacement_keeps_recent_user_messages_with_budget(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()

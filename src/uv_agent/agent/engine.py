@@ -268,6 +268,22 @@ class CompactionResult:
 
 
 @dataclass(frozen=True)
+class CompactionDecision:
+    """Outcome of checking whether a thread should be compacted now."""
+
+    result: CompactionResult | None = None
+    token_warning_event: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class TokenCountResult:
+    """Token count plus provenance used for context-window decisions."""
+
+    tokens: int
+    source: str
+
+
+@dataclass(frozen=True)
 class RunTurnPrelude:
     thread_id: str
     turn_id: str
@@ -441,14 +457,16 @@ class AgentEngine:
                         level=level,
                         instructions=system_instructions,
                     )
-                    if mid_turn_compaction is not None:
+                    if mid_turn_compaction.token_warning_event is not None:
+                        yield self._public_event(mid_turn_compaction.token_warning_event)
+                    if mid_turn_compaction.result is not None:
                         compacted_this_turn = True
                         yield {
                             "type": "compaction.completed",
                             "thread_id": thread_id,
                             "turn_id": turn_id,
                         }
-                        input_items = copy.deepcopy(mid_turn_compaction.replacement_input)
+                        input_items = copy.deepcopy(mid_turn_compaction.result.replacement_input)
                         turn_input.input_items = input_items
                         turn_input.previous_response_id = None
                         turn_input.use_previous_response_id = False
@@ -520,7 +538,7 @@ class AgentEngine:
                 turn_id=turn_id,
                 final_text=final_text,
             )
-            compacted = False
+            compacted = CompactionDecision()
             if not compacted_this_turn:
                 compacted = await self._maybe_compact(
                     thread_id,
@@ -529,7 +547,9 @@ class AgentEngine:
                     level=level,
                     instructions=system_instructions,
                 )
-            if compacted:
+            if compacted.token_warning_event is not None:
+                yield self._public_event(compacted.token_warning_event)
+            if compacted.result is not None:
                 yield {
                     "type": "compaction.completed",
                     "thread_id": thread_id,
@@ -718,13 +738,15 @@ class AgentEngine:
                         level=level,
                         instructions=system_instructions,
                     )
-                    if mid_turn_compaction is not None:
+                    if mid_turn_compaction.token_warning_event is not None:
+                        yield self._public_event(mid_turn_compaction.token_warning_event)
+                    if mid_turn_compaction.result is not None:
                         yield {
                             "type": "compaction.completed",
                             "thread_id": thread_id,
                             "turn_id": turn_id,
                         }
-                        retry_state.input_items = copy.deepcopy(mid_turn_compaction.replacement_input)
+                        retry_state.input_items = copy.deepcopy(mid_turn_compaction.result.replacement_input)
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
                         retry_state.pending_items.clear()
@@ -798,13 +820,15 @@ class AgentEngine:
                         level=level,
                         instructions=system_instructions,
                     )
-                    if mid_turn_compaction is not None:
+                    if mid_turn_compaction.token_warning_event is not None:
+                        yield self._public_event(mid_turn_compaction.token_warning_event)
+                    if mid_turn_compaction.result is not None:
                         yield {
                             "type": "compaction.completed",
                             "thread_id": thread_id,
                             "turn_id": turn_id,
                         }
-                        retry_state.input_items = copy.deepcopy(mid_turn_compaction.replacement_input)
+                        retry_state.input_items = copy.deepcopy(mid_turn_compaction.result.replacement_input)
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
                         retry_state.pending_items.clear()
@@ -951,14 +975,14 @@ class AgentEngine:
         *,
         level: str | None,
         instructions: str,
-    ) -> bool:
+    ) -> CompactionDecision:
         return await self._compact_if_needed(
             thread_id,
             turn_id,
             input_items,
             level=level,
             instructions=instructions,
-        ) is not None
+        )
 
     async def _maybe_compact_after_tool_results(
         self,
@@ -968,9 +992,9 @@ class AgentEngine:
         *,
         level: str | None,
         instructions: str,
-    ) -> CompactionResult | None:
+    ) -> CompactionDecision:
         if not self._has_tool_output(input_items):
-            return None
+            return CompactionDecision()
         bridged_input = copy.deepcopy(input_items)
         bridge_item = assistant_output_item(POST_TOOL_COMPACTION_BRIDGE)
         bridged_input.append(bridge_item)
@@ -987,8 +1011,8 @@ class AgentEngine:
                 "text": POST_TOOL_COMPACTION_BRIDGE,
             },
         )
-        if result is None:
-            return None
+        if result.result is None:
+            return result
         # Keep the in-memory turn state aligned with the event persisted just
         # before the compaction checkpoint.
         input_items.append(bridge_item)
@@ -1004,20 +1028,31 @@ class AgentEngine:
         instructions: str,
         allow_last_tool_output_truncation: bool = False,
         pre_compaction_event: dict[str, Any] | None = None,
-    ) -> CompactionResult | None:
+    ) -> CompactionDecision:
         if not self.config.runtime.compression.enabled:
-            return None
+            return CompactionDecision()
         compact_level = self.config.runtime.compression.model_level or level
         model = self.config.model_for_level(compact_level)
-        approx_tokens = estimate_tokens(input_items)
-        if approx_tokens < self.config.runtime.compression.min_tokens:
-            return None
-        trigger_tokens = int(
-            model.context_window_tokens
-            * self.config.runtime.compression.trigger_ratio
-        )
-        if approx_tokens < trigger_tokens:
-            return None
+        token_count = self._compaction_token_count(thread_id, input_items, instructions=instructions)
+        trigger_tokens = int(model.context_window_tokens * self.config.runtime.compression.trigger_ratio)
+        token_warning_event = None
+        if token_count.source == "estimate" and token_count.tokens >= self.config.runtime.compression.min_tokens:
+            token_warning_event = self.thread_store.append(
+                thread_id,
+                "thread.token_estimation_warning",
+                turn_id=turn_id,
+                message=(
+                    "Provider token usage is unavailable; context compaction is "
+                    "using a local estimate and may fail calls or compact too late."
+                ),
+                used_tokens=token_count.tokens,
+                threshold_tokens=trigger_tokens,
+                context_window_tokens=model.context_window_tokens,
+            )
+        if token_count.tokens < self.config.runtime.compression.min_tokens:
+            return CompactionDecision(token_warning_event=token_warning_event)
+        if token_count.tokens < trigger_tokens:
+            return CompactionDecision(token_warning_event=token_warning_event)
         compact_input = copy.deepcopy(input_items)
         compact_input.append(self._compaction_trigger_item())
         truncated_last_tool_output = False
@@ -1056,11 +1091,105 @@ class AgentEngine:
             source="compaction",
         )
         self._reset_rule_epoch(thread_id)
-        return CompactionResult(
-            replacement_input=replacement_input,
-            text=response.output_text,
-            truncated_last_tool_output=truncated_last_tool_output,
+        return CompactionDecision(
+            result=CompactionResult(
+                replacement_input=replacement_input,
+                text=response.output_text,
+                truncated_last_tool_output=truncated_last_tool_output,
+            ),
+            token_warning_event=token_warning_event,
         )
+
+    def _compaction_token_count(
+        self,
+        thread_id: str,
+        input_items: list[dict[str, Any]],
+        *,
+        instructions: str,
+    ) -> TokenCountResult:
+        """Return the authoritative token count used for compaction triggers.
+
+        Provider usage is the only accurate count because it reflects the exact
+        server-side tokenizer and hidden request framing. The local estimate is a
+        last-resort fallback so old threads or providers that omit usage can still
+        compact, but callers surface a warning whenever that fallback drives the
+        trigger decision.
+        """
+
+        provider_tokens = self._latest_compaction_provider_tokens(thread_id)
+        if provider_tokens is not None:
+            return TokenCountResult(provider_tokens, "provider")
+
+        return TokenCountResult(
+            self._estimate_compaction_tokens(input_items, instructions=instructions),
+            "estimate",
+        )
+
+    def _latest_compaction_provider_tokens(self, thread_id: str) -> int | None:
+        """Return provider usage only when it covers the current compaction input.
+
+        The latest model-response usage is authoritative for the request that
+        produced it, but a large tool result appended afterwards has never been
+        tokenized by the provider. In that case we must fall back to estimation
+        and warn instead of treating stale provider usage as a current count.
+        """
+
+        snap = self.thread_store.snapshot(thread_id)
+        events = snap.events_after_compaction
+        for index in range(len(events) - 1, -1, -1):
+            event = events[index]
+            if event.get("type") not in {"item.model_response", "item.compaction"}:
+                continue
+            used = usage_token_count(event.get("usage") or {})
+            if used is None:
+                continue
+            if any(self._event_adds_unmeasured_input_after_usage(item) for item in events[index + 1 :]):
+                return None
+            return used
+
+        compaction = snap.latest_compaction
+        if compaction is not None:
+            used = usage_token_count(compaction.get("usage") or {})
+            if used is not None and not any(
+                self._event_adds_unmeasured_input_after_usage(event)
+                for event in events
+            ):
+                return used
+        return None
+
+    @staticmethod
+    def _event_adds_unmeasured_input_after_usage(event: dict[str, Any]) -> bool:
+        """Whether an event after provider usage changes the next model input."""
+
+        return event.get("type") in {
+            "item.user",
+            "item.assistant",
+            "item.assistant_partial",
+            "item.tool_output",
+            "item.image_attachment",
+            "item.context_update",
+            "item.rule_index",
+            "item.cwd_notice",
+        }
+
+    def _estimate_compaction_tokens(
+        self,
+        input_items: list[dict[str, Any]],
+        *,
+        instructions: str,
+    ) -> int:
+        """Estimate the full request size when provider usage is unavailable."""
+
+        estimated_items = list(input_items)
+        if instructions:
+            estimated_items = [message_item("system", instructions), *estimated_items]
+        return estimate_tokens(estimated_items)
+
+    @staticmethod
+    def _public_event(event: dict[str, Any]) -> dict[str, Any]:
+        """Return a streamed event payload without JSONL bookkeeping fields."""
+
+        return {key: value for key, value in event.items() if not key.startswith("_")}
 
     @staticmethod
     def _has_tool_output(input_items: list[dict[str, Any]]) -> bool:

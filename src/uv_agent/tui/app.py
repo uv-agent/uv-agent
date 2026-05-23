@@ -845,6 +845,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             "tool.output",
             "tool.partial",
             "model.stream_retry",
+            "thread.token_estimation_warning",
             "compaction.completed",
         }:
             await self._handle_thread_event(item_thread_id, event_type, item, run_state)
@@ -1255,6 +1256,21 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             copy_text=message,
         )
 
+    def _append_token_estimation_warning(
+        self,
+        event: dict[str, Any],
+        *,
+        before: MountBefore = None,
+        flash: bool = True,
+    ) -> TranscriptCell:
+        """Show the user when compaction had to rely on token estimation."""
+
+        message = str(event.get("message") or self._text("token_estimation_warning"))
+        content = Text.assemble(("⚠ ", "yellow"), (message, "yellow"))
+        if flash:
+            self._flash(message, severity="warning")
+        return self._append_cell(content, "event", before=before, copy_text=message)
+
     def _default_screen_mounted(self) -> bool:
         try:
             self.query_one("#composer", TextArea)
@@ -1478,6 +1494,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._append_stream_retry(item)
         elif event_type == "model.stream_retry":
             pass
+        elif event_type == "thread.token_estimation_warning":
+            self._append_token_estimation_warning(item)
         elif event_type == "compaction.completed":
             self._append_cell(plain(self._text("compacted"), style="dim"), "event")
         elif event_type == "thread.billing_accumulated":
@@ -1629,6 +1647,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 if call_id and payload is not None:
                     run_state.tool_partial_payloads[call_id] = payload
                 run_state.status = self._text("running_python")
+            elif event_type == "thread.token_estimation_warning":
+                run_state.status = self._text("working")
             elif event_type == "assistant.final_response_started" and run_state.process_cells:
                 run_state.process_collapsed = True
             elif event_type == "compaction.completed":
@@ -2638,6 +2658,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             mounted.append(self._append_stream_retry(event, before=before))
         elif event_type == "item.compaction":
             mounted.append(self._append_cell(plain(self._text("compacted"), style="dim"), "event", before=before))
+        elif event_type == "thread.token_estimation_warning":
+            mounted.append(self._append_token_estimation_warning(event, before=before, flash=False))
         elif event_type == "thread.model_switch_warning":
             mounted.append(self._append_model_switch_warning_cell(event, before=before))
         return mounted
