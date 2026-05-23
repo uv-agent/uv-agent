@@ -52,8 +52,11 @@ TITLE_GENERATION_PROMPT = (
     "Keep it under 8 words or 24 CJK characters."
 )
 COMPACTED_CONTEXT_CONTINUATION = (
-    "The messages above may include several earlier user messages preserved for continuity. "
-    "Continue from this compacted context."
+    "<compacted_context_continuation>\n"
+    "The retained-history messages above may include earlier user or assistant messages preserved for continuity. "
+    "Continue from this compacted context and resume any unfinished task. "
+    "Use the summary and retained history as prior conversation state, then take the next concrete step without asking the user to repeat information already captured.\n"
+    "</compacted_context_continuation>"
 )
 TOOL_ATTACHMENT_CONTEXT_BRIDGE = (
     "Tool execution completed. Additional visual context produced by the tool "

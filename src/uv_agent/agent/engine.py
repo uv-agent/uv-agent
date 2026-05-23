@@ -16,8 +16,10 @@ from typing import Any, Callable
 
 from uv_agent.attachments import AttachmentStore, image_message_item
 from uv_agent.agent.compaction import (
+    compaction_summary_item,
     compaction_replacement_input,
     compaction_trigger_item,
+    normalize_compaction_replacement_input,
     retained_user_messages_after_compaction,
     retain_item_after_compaction,
 )
@@ -40,7 +42,6 @@ from uv_agent.mcp_probe import McpInstructionsProbe
 from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
 from uv_agent.agent.prompts import (
-    COMPACTED_CONTEXT_CONTINUATION,
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
     INTERRUPTED_TOOL_CONTEXT_BRIDGE,
     POST_TOOL_COMPACTION_BRIDGE,
@@ -473,7 +474,7 @@ class AgentEngine:
                             turn_id,
                             mid_turn_compaction.result,
                         )
-                        input_items = copy.deepcopy(mid_turn_compaction.result.replacement_input)
+                        input_items = self._input_after_compaction(thread_id, mid_turn_compaction.result)
                         turn_input.input_items = input_items
                         turn_input.previous_response_id = None
                         turn_input.use_previous_response_id = False
@@ -602,8 +603,19 @@ class AgentEngine:
         user_item = message_item("user", user_text)
         self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
 
-        input_items.extend(pre_user_items)
-        request_input_items.extend(pre_user_items)
+        # ``_reconstruct_input`` already places persisted post-compaction
+        # context ahead of the compacted history. If this turn emits additional
+        # epoch context (for example the first rules/runtime update after the
+        # checkpoint), insert it at the same front-of-epoch anchor.
+        if pre_user_items and self._has_compaction(thread_id):
+            self._insert_pre_user_context_before_history(input_items, pre_user_items)
+            if turn_input.request_previous_response_id() is None:
+                self._insert_pre_user_context_before_history(request_input_items, pre_user_items)
+            else:
+                request_input_items.extend(pre_user_items)
+        else:
+            input_items.extend(pre_user_items)
+            request_input_items.extend(pre_user_items)
         turn_input.pending_items.extend(pre_user_items)
         input_items.append(user_item)
         request_input_items.append(user_item)
@@ -758,7 +770,7 @@ class AgentEngine:
                             turn_id,
                             mid_turn_compaction.result,
                         )
-                        retry_state.input_items = copy.deepcopy(mid_turn_compaction.result.replacement_input)
+                        retry_state.input_items = self._input_after_compaction(thread_id, mid_turn_compaction.result)
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
                         retry_state.pending_items.clear()
@@ -847,7 +859,7 @@ class AgentEngine:
                             turn_id,
                             mid_turn_compaction.result,
                         )
-                        retry_state.input_items = copy.deepcopy(mid_turn_compaction.result.replacement_input)
+                        retry_state.input_items = self._input_after_compaction(thread_id, mid_turn_compaction.result)
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
                         retry_state.pending_items.clear()
@@ -1358,6 +1370,83 @@ class AgentEngine:
     @staticmethod
     def _retain_item_after_compaction(item: dict[str, Any]) -> bool:
         return retain_item_after_compaction(item)
+
+    def _input_after_compaction(
+        self,
+        thread_id: str,
+        result: CompactionResult,
+    ) -> list[dict[str, Any]]:
+        """Build post-compaction model input for continuing in the same turn.
+
+        Persisted compaction events intentionally store only the replacement
+        history. For an immediate mid-turn continuation we must also prepend the
+        freshly re-emitted epoch context, mirroring the ordering used when a
+        later turn reconstructs from disk.
+        """
+
+        return self._pre_user_context_items(thread_id) + copy.deepcopy(result.replacement_input)
+
+    @staticmethod
+    def _compaction_replacement_items(compaction: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return the model-input replacement for a persisted compaction event."""
+
+        replacement_input = compaction.get("replacement_input")
+        if isinstance(replacement_input, list):
+            return normalize_compaction_replacement_input(replacement_input)
+        summary = str(compaction.get("text") or "").strip()
+        if not summary:
+            return []
+        return [compaction_summary_item(summary)]
+
+    @staticmethod
+    def _insert_pre_user_context_before_history(
+        input_items: list[dict[str, Any]],
+        pre_user_items: list[dict[str, Any]],
+    ) -> None:
+        """Insert current epoch context before compacted retained history.
+
+        After a compaction checkpoint, reconstructed input begins with the
+        retained messages and summary. The next turn may emit fresh dynamic
+        context before adding the new user message; those environment messages
+        belong ahead of the compacted history rather than at the tail.
+        """
+
+        if not pre_user_items:
+            return
+        insert_at = 0
+        while insert_at < len(input_items) and AgentEngine._is_pre_user_context_item(input_items[insert_at]):
+            insert_at += 1
+        input_items[insert_at:insert_at] = pre_user_items
+
+    @staticmethod
+    def _is_pre_user_context_item(item: dict[str, Any]) -> bool:
+        if item.get("type") != "message" or item.get("role") != "user":
+            return False
+        text = message_item_text(item)
+        return (
+            "<runtime_environment>" in text
+            or "<model_levels>" in text
+            or "<runtime_helpers>" in text
+            or "<workspace_rules" in text
+            or "<workspace_rule_index>" in text
+            or "<active_cwd_notice>" in text
+            or "<available_skills>" in text
+            or "<available_mcp_servers>" in text
+            or "<context_update" in text
+        )
+
+    @staticmethod
+    def _is_replayable_input_event(event: dict[str, Any]) -> bool:
+        """Return whether an event contributes ordinary conversation input."""
+
+        return event.get("type") in {
+            "item.user",
+            "item.assistant",
+            "item.model_response",
+            "item.tool_output",
+            "item.image_attachment",
+            "turn.interrupted",
+        }
 
     async def _handle_tool_call(
         self,
@@ -2231,21 +2320,25 @@ class AgentEngine:
         events = snap.events_after_compaction
         compaction = snap.latest_compaction
         if compaction is not None:
-            replacement_input = compaction.get("replacement_input")
-            if isinstance(replacement_input, list):
-                input_items.extend(copy.deepcopy(replacement_input))
-            else:
-                summary = str(compaction.get("text") or "").strip()
-                if summary:
-                    input_items.append(
-                        message_item(
-                            "user",
-                            "<conversation_summary>\n"
-                            + summary
-                            + "\n</conversation_summary>\n"
-                            + COMPACTED_CONTEXT_CONTINUATION,
-                        )
-                    )
+            # A compaction checkpoint starts a new context epoch. Its re-emitted
+            # rules/runtime updates are environment context, so place the
+            # leading post-compaction pre-user block immediately after system
+            # instructions and before the retained history/summary.
+            pre_user_events: list[dict[str, Any]] = []
+            events_after_context: list[dict[str, Any]] = []
+            reached_replayable_history = False
+            for event in events:
+                pre_user_item = self._pre_user_event_item(event)
+                if pre_user_item is not None and not reached_replayable_history:
+                    pre_user_events.append(pre_user_item)
+                    continue
+                if not reached_replayable_history and not self._is_replayable_input_event(event):
+                    continue
+                reached_replayable_history = True
+                events_after_context.append(event)
+            input_items.extend(pre_user_events)
+            input_items.extend(self._compaction_replacement_items(compaction))
+            events = events_after_context
         for event in events:
             pre_user_item = self._pre_user_event_item(event)
             if pre_user_item is not None:

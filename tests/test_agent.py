@@ -779,7 +779,8 @@ def test_compaction_replacement_keeps_recent_user_messages_with_budget(tmp_path:
     assert "workspace_rule_index" not in text
     assert "assistant output" not in text
     assert "[truncated during context compaction]" in text
-    assert "The messages above may include several earlier user messages" in text
+    assert "<retained_history_message" in text
+    assert "<compacted_context_continuation>" in text
 
 
 @pytest.mark.asyncio
@@ -3935,11 +3936,168 @@ def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> 
     reconstructed = engine._reconstruct_input(thread_id)
     text = str(reconstructed)
 
-    assert reconstructed[: len(replacement)] == replacement
+    assert "<retained_history_message" in message_item_text(reconstructed[0])
     assert "kept" in text
     assert "summary" in text
     assert "new" in text
     assert "old" not in text
+
+
+def test_reconstruct_input_places_post_compaction_context_before_replacement(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    replacement = [
+        message_item("user", "kept request"),
+        message_item("user", "<conversation_summary>\nsummary\n</conversation_summary>"),
+    ]
+    engine.thread_store.append(
+        thread_id,
+        "item.compaction",
+        turn_id="t1",
+        text="summary",
+        replacement_input=replacement,
+        usage={},
+    )
+    engine.thread_store.append(
+        thread_id,
+        "item.context_update",
+        turn_id="t1",
+        context_fingerprint="fp",
+        context_state={"fingerprint": "fp", "parts": {"runtime": {}}},
+        context_kind="runtime",
+        removed=[],
+        text="<context_update id=\"runtime_context\" status=\"current\">\ncurrent context\n</context_update>",
+    )
+    engine.thread_store.append(thread_id, "item.user", turn_id="t2", item=message_item("user", "new request"))
+
+    reconstructed = engine._reconstruct_input(thread_id)
+
+    assert message_item_text(reconstructed[0]).startswith("<context_update")
+    assert "<retained_history_message" in message_item_text(reconstructed[1])
+    assert "kept request" in message_item_text(reconstructed[1])
+    assert "<conversation_summary>" in message_item_text(reconstructed[2])
+    assert message_item_text(reconstructed[3]) == "new request"
+
+
+def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "AGENTS.md").write_text("Reloaded rule.", encoding="utf-8")
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.thread_store.append(
+        thread_id,
+        "item.compaction",
+        turn_id="t1",
+        text="summary",
+        replacement_input=[
+            message_item("user", "kept request"),
+            message_item("user", "<conversation_summary>\nsummary\n</conversation_summary>"),
+        ],
+        usage={},
+    )
+
+    prelude = engine._prepare_run_turn_prelude(
+        user_text="new request",
+        thread_id=thread_id,
+        level=None,
+        image_paths=None,
+        cancel_event=None,
+    )
+
+    texts = [message_item_text(item) for item in prelude.input_items if item.get("type") == "message"]
+    assert texts[0].startswith("<workspace_rules")
+    assert "Reloaded rule." in texts[0]
+    retained_index = next(index for index, text in enumerate(texts) if "<retained_history_message" in text)
+    summary_index = next(index for index, text in enumerate(texts) if "<conversation_summary>" in text)
+    assert "kept request" in texts[retained_index]
+    assert texts[retained_index - 1].startswith("<context_update")
+    assert retained_index < summary_index
+    assert texts[-1] == "new request"
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_readds_epoch_context_before_continuing(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "AGENTS.md").write_text("Mid-turn rule.", encoding="utf-8")
+    config = make_test_config(
+        project_root,
+        context_window_tokens=20,
+        compression=CompressionConfig(enabled=True, model_level="small", trigger_ratio=0.1, min_tokens=1),
+    )
+    client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_tool",
+                "output_text": "",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_mid_compact",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "print('hello')"}),
+                    }
+                ],
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "summary includes tool result",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "summary includes tool result"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_final",
+                "output_text": "done after compaction",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done after compaction"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=SimpleRunner(),  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    [event async for event in engine.run_turn(user_text="run a tool")]
+
+    continued_input = client.requests[2]["input"]
+    continued_texts = [message_item_text(item) for item in continued_input if item.get("type") == "message"]
+    assert continued_texts[0].startswith("<workspace_rules")
+    assert "Mid-turn rule." in continued_texts[0]
+    retained_index = next(index for index, text in enumerate(continued_texts) if "<retained_history_message" in text)
+    summary_index = next(index for index, text in enumerate(continued_texts) if "<conversation_summary>" in text)
+    assert continued_texts[retained_index - 1].startswith("<context_update")
+    assert retained_index < summary_index
 
 
 def test_context_update_reconstructs_as_stable_prefix(tmp_path: Path) -> None:

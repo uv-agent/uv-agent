@@ -4,11 +4,13 @@ import copy
 from typing import Any
 
 from uv_agent.context import estimate_tokens
+from uv_agent.agent.context_builder import xml_text
 from uv_agent.agent.messages import message_item, message_item_text
 from uv_agent.agent.prompts import COMPACTED_CONTEXT_CONTINUATION, COMPACTION_SUMMARIZATION_PROMPT
 from uv_agent.model.types import ModelResponse
 
 COMPACTION_USER_MESSAGE_MAX_TOKENS = 20_000
+TEXT_CONTENT_TYPES = {"input_text", "output_text", "text", "refusal"}
 
 
 def compaction_trigger_item() -> dict[str, Any]:
@@ -28,18 +30,108 @@ def compaction_replacement_input(
     input_items: list[dict[str, Any]],
     response: ModelResponse,
 ) -> list[dict[str, Any]]:
-    replacement = retained_user_messages_after_compaction(input_items)
+    replacement = retained_history_items(retained_user_messages_after_compaction(input_items))
     summary = response.output_text.strip() or "(no summary available)"
-    replacement.append(
-        message_item(
-            "user",
-            "<conversation_summary>\n"
-            + summary
-            + "\n</conversation_summary>\n"
-            + COMPACTED_CONTEXT_CONTINUATION,
-        )
-    )
+    replacement.append(compaction_summary_item(summary))
     return replacement
+
+
+def compaction_summary_item(summary: str) -> dict[str, Any]:
+    """Return the model-visible summary item used to resume after compaction."""
+
+    return message_item(
+        "user",
+        "<conversation_summary>\n"
+        + summary
+        + "\n</conversation_summary>\n"
+        + COMPACTED_CONTEXT_CONTINUATION,
+    )
+
+
+def retained_history_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Wrap retained pre-compaction messages so future compactions can identify them.
+
+    The retained messages are historical context, not fresh user instructions. We
+    keep the original message role and non-text parts (for example images) but
+    wrap text parts in an XML-ish envelope to make that boundary explicit to the
+    model and easy to filter out during later compactions.
+    """
+
+    return [_retained_history_item(item) for item in items]
+
+
+def normalize_compaction_replacement_input(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return stored replacement input using the current retained-history shape.
+
+    Older thread files may contain replacement inputs written before retained
+    history had its own XML envelope. Normalizing on read lets resumed threads
+    get the clearer prompt contract without changing the persisted event format.
+    """
+
+    normalized: list[dict[str, Any]] = []
+    saw_summary = False
+    for item in items:
+        text = message_item_text(item)
+        if not saw_summary and "<conversation_summary>" in text:
+            normalized.append(compaction_summary_item(_conversation_summary_text(text) or text))
+            saw_summary = True
+            continue
+        if not saw_summary and _should_wrap_retained_history_item(item):
+            normalized.append(_retained_history_item(item))
+        else:
+            normalized.append(copy.deepcopy(item))
+    return normalized
+
+
+def _should_wrap_retained_history_item(item: dict[str, Any]) -> bool:
+    text = message_item_text(item)
+    return (
+        item.get("type") == "message"
+        and item.get("role") in {"user", "assistant"}
+        and "<retained_history" not in text
+    )
+
+
+def _conversation_summary_text(text: str) -> str:
+    start_tag = "<conversation_summary>"
+    end_tag = "</conversation_summary>"
+    start = text.find(start_tag)
+    if start < 0:
+        return ""
+    start += len(start_tag)
+    end = text.find(end_tag, start)
+    if end < 0:
+        return text[start:].strip()
+    return text[start:end].strip()
+
+
+def _retained_history_item(item: dict[str, Any]) -> dict[str, Any]:
+    wrapped = copy.deepcopy(item)
+    role = str(wrapped.get("role") or "user")
+    saw_text = False
+    for content in wrapped.get("content") or []:
+        if content.get("type") not in TEXT_CONTENT_TYPES:
+            continue
+        saw_text = True
+        text = str(content.get("text") or "")
+        content["text"] = (
+            f'<retained_history_message role="{xml_text(role)}">\n'
+            f"{xml_text(text)}\n"
+            "</retained_history_message>"
+        )
+    if not saw_text:
+        # Rare, but keeps even text-free retained items visibly inside the
+        # retained-history envelope instead of silently passing through as a new
+        # user/assistant message.
+        content_type = "output_text" if role == "assistant" else "input_text"
+        wrapped.setdefault("content", []).insert(
+            0,
+            {
+                "type": content_type,
+                "text": f'<retained_history_message role="{xml_text(role)}" />',
+            },
+        )
+    return wrapped
 
 
 def retained_user_messages_after_compaction(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -67,6 +159,8 @@ def retain_item_after_compaction(item: dict[str, Any]) -> bool:
     if item.get("type") != "message" or item.get("role") not in {"user", "assistant"}:
         return False
     text = message_item_text(item)
+    if "<retained_history" in text:
+        return False
     if item.get("role") == "assistant":
         return "Context is being compacted before the assistant continues" in text
     return not (
