@@ -1,0 +1,28 @@
+{
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".git",
+    ".venv",
+    ".uv-agent",
+    ".pytest_cache",
+    "build",
+    "dist"
+  ],
+  "ignore": [
+    "src/uv_agent/tui/config_panels.py",
+    "src/uv_agent/tui/image_support.py",
+    "src/uv_agent/tui/mentions.py",
+    "src/uv_agent/tui/widgets.py"
+  ],
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.12",
+  "venvPath": ".",
+  "venv": ".venv",
+  "useLibraryCodeForTypes": true,
+  "reportMissingTypeStubs": "none",
+  "reportPrivateImportUsage": "none",
+  "reportUnsupportedDunderAll": "none"
+}
