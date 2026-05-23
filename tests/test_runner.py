@@ -13,7 +13,6 @@ from uv_agent.config import RunnerConfig
 from uv_agent.jsonl import read_jsonl
 from uv_agent.runner import PythonRunRequest, PythonRunner
 import uv_agent.runner.scriptenv as scriptenv
-from uv_agent.runner.runner import parse_structured_event
 from uv_agent.runner.scriptenv import direct_dependencies, ensure_venv
 
 
@@ -47,9 +46,12 @@ async def test_runner_executes_script_and_records_jsonl(
     )
 
     assert result.returncode == 0
-    assert '"kind": "hello"' in result.stdout
+    assert result.stdout == ""
+    assert result.events[0]["kind"] == "hello"
+    assert result.events[0]["value"] == 42
     assert result.script_path.exists()
     events = read_jsonl(result.run_log_path)
+    assert any(event["type"] == "run.event" and event["event"]["kind"] == "hello" for event in events)
     assert events[0]["type"] == "run.started"
     assert events[-1]["type"] == "run.completed"
     assert events[0]["argv"][1:5] == [
@@ -117,7 +119,7 @@ async def test_runner_handles_long_single_line_output(
 
 
 @pytest.mark.asyncio
-async def test_runner_parses_structured_event_across_read_chunks(
+async def test_runner_receives_structured_event_over_rpc(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -140,7 +142,7 @@ async def test_runner_parses_structured_event_across_read_chunks(
 
 
 @pytest.mark.asyncio
-async def test_runner_does_not_parse_json_in_middle_of_long_line(
+async def test_runner_treats_printed_json_as_plain_stdout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -153,19 +155,20 @@ async def test_runner_does_not_parse_json_in_middle_of_long_line(
                 "import json\n"
                 "import os\n"
                 "run_id = os.environ['UV_AGENT_RUNTIME_RUN_ID']\n"
-                "event = json.dumps({'kind': 'fake', '_uv_agent_run_id': run_id})\n"
-                "print(('x' * 70_000) + event)\n"
+                "event = json.dumps({'kind': 'fake', '_uv_agent_event_id': 'evt_fake', '_uv_agent_run_id': run_id})\n"
+                "print(event)\n"
             ),
             cwd=project_root,
         )
     )
 
     assert result.returncode == 0
+    assert '{"kind": "fake"' in result.stdout
     assert result.events == []
 
 
 @pytest.mark.asyncio
-async def test_runner_parses_threaded_runtime_events_without_line_interleaving(
+async def test_runner_receives_threaded_runtime_events_over_rpc(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -196,6 +199,29 @@ async def test_runner_parses_threaded_runtime_events_without_line_interleaving(
     assert all(event["kind"] == "threaded" for event in result.events)
     assert all(event["_uv_agent_run_id"] == result.run_id for event in result.events)
     assert len(set(event_ids)) == len(event_ids)
+
+
+@pytest.mark.asyncio
+async def test_runner_call_host_invokes_registered_method(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = Path.cwd()
+    runner = make_runner(tmp_path, monkeypatch)
+    runner.rpc_server.register_method("echo", lambda text: {"text": text})
+
+    result = await runner.run(
+        PythonRunRequest(
+            code=(
+                "from uv_agent_runtime import call_host\n"
+                "print(call_host('echo', text='hello')['text'])\n"
+            ),
+            cwd=project_root,
+        )
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "hello"
 
 
 @pytest.mark.asyncio
@@ -249,34 +275,6 @@ async def test_runner_interrupts_script_when_cancelled(
     assert result.interrupted is True
     assert result.timed_out is False
     assert any(event.get("interrupted") is True for event in read_jsonl(result.run_log_path))
-
-
-def test_parse_structured_event_reads_runtime_json_line() -> None:
-    assert parse_structured_event(
-        '{"kind":"look_at","path":"image.png","_uv_agent_event_id":"evt_1","_uv_agent_run_id":"run_1"}\n',
-        run_id="run_1",
-    ) == {
-        "kind": "look_at",
-        "path": "image.png",
-        "_uv_agent_event_id": "evt_1",
-        "_uv_agent_run_id": "run_1",
-    }
-    assert (
-        parse_structured_event(
-            '{"kind":"look_at","path":"image.png","_uv_agent_run_id":"run_1"}\n',
-            run_id="run_1",
-        )
-        is None
-    )
-    assert parse_structured_event('{"kind":"look_at","path":"image.png"}\n', run_id="run_1") is None
-    assert (
-        parse_structured_event(
-            '{"kind":"look_at","path":"image.png","_uv_agent_event_id":"evt_2","_uv_agent_run_id":"run_other"}\n',
-            run_id="run_1",
-        )
-        is None
-    )
-    assert parse_structured_event("plain text\n") is None
 
 
 @pytest.mark.asyncio

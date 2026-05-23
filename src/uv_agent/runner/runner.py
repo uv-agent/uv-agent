@@ -9,10 +9,10 @@ from time import monotonic
 from uv_agent.config import RunnerConfig
 from uv_agent.ids import new_id
 from uv_agent.jsonl import JsonlWriter
-from uv_agent.runner.events import parse_structured_event as parse_structured_event
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RunnerEvent
 from uv_agent.runner.output import OutputCapture, pump_stream
 from uv_agent.runner.process import kill_process_tree, subprocess_group_kwargs
+from uv_agent.runner.rpc import RuntimeRPCServer
 from uv_agent.runner.run_log import RunLogStore
 from uv_agent.runner.scriptenv import ensure_venv, uv_binary
 from uv_agent.time import utc_now_iso
@@ -40,6 +40,7 @@ class PythonRunner:
         self.scriptenv_dir = (scriptenv_dir or self.data_dir / "runner" / "scriptenv").resolve()
         self.config = config
         self.run_logs = RunLogStore(self.runs_dir, max_run_logs=config.max_run_logs)
+        self.rpc_server = RuntimeRPCServer()
 
     @property
     def config(self) -> RunnerConfig:
@@ -51,6 +52,14 @@ class PythonRunner:
         if hasattr(self, "run_logs"):
             self.run_logs.max_run_logs = max(1, value.max_run_logs)
             self.run_logs.prune()
+
+    def close(self) -> None:
+        """Stop long-lived runner resources such as the runtime RPC server."""
+
+        self.rpc_server.close()
+
+    async def aclose(self) -> None:
+        await asyncio.to_thread(self.close)
 
     async def run(self, request: PythonRunRequest) -> PythonRunResult:
         completed: RunnerEvent | None = None
@@ -101,6 +110,16 @@ class PythonRunner:
         yield RunnerEvent("run.started", started)
 
         capture = OutputCapture()
+        rpc_session = self.rpc_server.open_session(
+            run_id=run_id,
+            thread_id=request.thread_id,
+            turn_id=request.turn_id,
+            cwd=run_cwd,
+            structured_events=capture.structured_events,
+            writer=writer,
+        )
+        env["UV_AGENT_RPC_URL"] = self.rpc_server.url
+        env["UV_AGENT_RPC_TOKEN"] = rpc_session.token
         returncode: int | None = None
         timed_out = False
         interrupted = False
@@ -120,7 +139,6 @@ class PythonRunner:
                     stream=process.stdout,
                     writer=writer,
                     sink=capture.stdout_parts,
-                    structured_events=capture.structured_events,
                     run_id=run_id,
                     max_output_bytes=self.config.max_output_bytes,
                     capture=capture,
@@ -132,7 +150,6 @@ class PythonRunner:
                     stream=process.stderr,
                     writer=writer,
                     sink=capture.stderr_parts,
-                    structured_events=capture.structured_events,
                     run_id=run_id,
                     max_output_bytes=self.config.max_output_bytes,
                     capture=capture,
@@ -256,6 +273,8 @@ class PythonRunner:
             writer.write(failed)
             yield RunnerEvent("run.failed", failed)
             raise
+        finally:
+            rpc_session.close()
 
         result = PythonRunResult(
             run_id=run_id,

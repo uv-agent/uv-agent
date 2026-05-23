@@ -332,6 +332,20 @@ class AgentEngine:
         self._mcp_instructions_probe = mcp_instructions_probe or McpInstructionsProbe(self.project_root)
         self._mcp_instructions_probe.start()
 
+    def close(self) -> None:
+        """Release long-lived host resources owned by the engine."""
+
+        close = getattr(self.runner, "close", None)
+        if callable(close):
+            close()
+
+    async def aclose(self) -> None:
+        close = getattr(self.runner, "aclose", None)
+        if callable(close):
+            await close()
+            return
+        await asyncio.to_thread(self.close)
+
     def refresh_config(self, *, force: bool = False) -> None:
         """Reload user/project config for long-running sessions."""
         if self._config_loader is None:

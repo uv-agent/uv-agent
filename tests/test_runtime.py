@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import sys
@@ -457,18 +456,15 @@ def test_runtime_run_process_text_decodes_explicitly() -> None:
     assert result.stdout == "✓"
 
 
-def test_runtime_enter_dir_changes_cwd_and_emits_event(tmp_path: Path, capsys) -> None:
+def test_runtime_enter_dir_changes_cwd_and_returns_event(tmp_path: Path, capsys) -> None:
     previous = Path.cwd()
     try:
         resolved = enter_dir(tmp_path)
-        out = capsys.readouterr().out
-        event = json.loads(out)
+        captured = capsys.readouterr()
 
         assert resolved == tmp_path.resolve()
         assert Path.cwd() == tmp_path.resolve()
-        assert event["kind"] == "enter_dir"
-        assert event["cwd"] == str(tmp_path.resolve())
-        assert event["_uv_agent_event_id"].startswith("evt_")
+        assert captured.out == ""
     finally:
         os.chdir(previous)
 
@@ -651,13 +647,11 @@ def test_runtime_subagent_events_do_not_include_prompt(capsys, monkeypatch: pyte
         executable=[sys.executable, "-c", "import sys; print('done'); print('[subagent-thread] thr_child', file=sys.stderr)"],
         check=True,
     )
-    out = capsys.readouterr().out
-    events = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    captured = capsys.readouterr()
 
     assert result.text == "done"
     assert result.thread_id == "thr_child"
-    assert [event["kind"] for event in events] == ["subagent.started", "subagent.completed"]
-    assert all("prompt" not in event for event in events)
+    assert captured.out == ""
 
 
 def test_extract_subagent_thread_id_from_stderr() -> None:
@@ -687,19 +681,18 @@ def test_runtime_thread_digest_reads_state_dir(tmp_path: Path) -> None:
     assert digest["items"] == [{"role": "user", "text": "after"}]
 
 
-def test_runtime_look_at_emits_structured_event(tmp_path: Path, capsys) -> None:
+def test_runtime_look_at_returns_structured_event(tmp_path: Path, capsys) -> None:
     image = tmp_path / "sample.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
 
     event = look_at(image, note="inspect")
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
 
     assert event["kind"] == "look_at"
     assert event["path"] == str(image.resolve())
     assert event["note"] == "inspect"
     assert event["_uv_agent_event_id"].startswith("evt_")
-    assert '"kind": "look_at"' in out
-    assert '"note": "inspect"' in out
+    assert captured.out == ""
 
 
 def test_runtime_emit_helpers_return_event_dict(capsys, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -708,7 +701,7 @@ def test_runtime_emit_helpers_return_event_dict(capsys, monkeypatch: pytest.Monk
     custom = emit_event("custom", value=1)
     progress = emit_progress("working", count=2)
     result = emit_result(ok=True)
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
 
     assert custom["kind"] == "custom"
     assert custom["value"] == 1
@@ -730,12 +723,10 @@ def test_runtime_emit_helpers_return_event_dict(capsys, monkeypatch: pytest.Monk
             result["_uv_agent_event_id"],
         }
     ) == 3
-    assert '"kind": "custom"' in out
-    assert '"kind": "progress"' in out
-    assert '"kind": "result"' in out
+    assert captured.out == ""
 
 
-def test_runtime_emit_event_writes_complete_lines_from_threads(
+def test_runtime_emit_event_is_thread_safe_without_stdout(
     capsys,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -751,15 +742,9 @@ def test_runtime_emit_event_writes_complete_lines_from_threads(
     for thread in threads:
         thread.join()
 
-    lines = capsys.readouterr().out.splitlines()
-    events = [json.loads(line) for line in lines]
+    captured = capsys.readouterr()
 
-    assert len(events) == 100
-    assert all(event["kind"] == "threaded" for event in events)
-    assert all(event["_uv_agent_run_id"] == "run_threads" for event in events)
-    event_ids = [event["_uv_agent_event_id"] for event in events]
-    assert all(event_id.startswith("evt_") for event_id in event_ids)
-    assert len(set(event_ids)) == len(event_ids)
+    assert captured.out == ""
 
 
 # ---- codesearch / codequery -----------------------------------------------

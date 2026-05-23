@@ -4,7 +4,6 @@ import codecs
 from dataclasses import dataclass, field
 
 from uv_agent.jsonl import JsonlWriter
-from uv_agent.runner.events import StructuredEventLineParser
 from uv_agent.time import utc_now_iso
 
 STREAM_READ_CHUNK_BYTES = 64 * 1024
@@ -26,7 +25,6 @@ async def pump_stream(
     stream,
     writer: JsonlWriter,
     sink: list[str],
-    structured_events: list[dict],
     run_id: str,
     max_output_bytes: int,
     capture: OutputCapture,
@@ -34,10 +32,6 @@ async def pump_stream(
     if stream is None:
         return
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    event_parser = StructuredEventLineParser(
-        structured_events=structured_events,
-        run_id=run_id,
-    )
     while True:
         chunk = await stream.read(STREAM_READ_CHUNK_BYTES)
         if not chunk:
@@ -55,7 +49,6 @@ async def pump_stream(
                     text=text,
                     writer=writer,
                     sink=sink,
-                    event_parser=event_parser,
                     run_id=run_id,
                 )
                 tail = decoder.decode(b"", final=True)
@@ -64,7 +57,6 @@ async def pump_stream(
                     text=tail,
                     writer=writer,
                     sink=sink,
-                    event_parser=event_parser,
                     run_id=run_id,
                 )
             capture.byte_count += len(chunk)
@@ -87,7 +79,6 @@ async def pump_stream(
             text=text,
             writer=writer,
             sink=sink,
-            event_parser=event_parser,
             run_id=run_id,
         )
 
@@ -99,11 +90,8 @@ async def pump_stream(
                 text=tail,
                 writer=writer,
                 sink=sink,
-                event_parser=event_parser,
                 run_id=run_id,
             )
-        if stream_name == "stdout":
-            event_parser.finish()
 
 
 def record_output_text(
@@ -112,14 +100,11 @@ def record_output_text(
     text: str,
     writer: JsonlWriter,
     sink: list[str],
-    event_parser: StructuredEventLineParser,
     run_id: str,
 ) -> None:
     if not text:
         return
     sink.append(text)
-    if stream_name == "stdout":
-        event_parser.feed(text)
     writer.write(
         {
             "type": f"run.{stream_name}",

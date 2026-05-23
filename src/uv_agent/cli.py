@@ -77,65 +77,68 @@ async def _ask(
     from uv_agent.app_factory import create_engine
 
     engine = create_engine(Path.cwd(), data_dir=project_state_dir)
-    if level is None:
-        ask_default = engine.config.runtime.ask_default_level
-        if ask_default:
-            level = ask_default
-    if thread_id is None and thread_kind == "subagent":
-        title = prompt.splitlines()[0].strip()
-        if len(title) > 80:
-            title = title[:77].rstrip() + "..."
-        thread_id = engine.thread_store.create_thread(
-            f"Subagent: {title or 'task'}",
-            kind="subagent",
-            parent_thread_id=parent_thread_id,
-            parent_turn_id=parent_turn_id,
-            parent_run_id=parent_run_id,
-        )
-        print(f"[subagent-thread] {thread_id}", file=sys.stderr)
-    saw_delta = False
-    async for event in engine.run_turn(user_text=prompt, thread_id=thread_id, level=level):
-        event_type = event["type"]
-        if event_type == "assistant.delta":
-            if stream:
-                print(event["text"], end="", flush=True)
-            saw_delta = True
-        elif event_type == "tool.started" and stream:
-            call = event.get("call") or {}
-            print(
-                f"\n\n[python] {call.get('name', 'run_python')} started "
-                f"({call.get('call_id') or 'call'})",
-                file=sys.stderr,
-                flush=True,
+    try:
+        if level is None:
+            ask_default = engine.config.runtime.ask_default_level
+            if ask_default:
+                level = ask_default
+        if thread_id is None and thread_kind == "subagent":
+            title = prompt.splitlines()[0].strip()
+            if len(title) > 80:
+                title = title[:77].rstrip() + "..."
+            thread_id = engine.thread_store.create_thread(
+                f"Subagent: {title or 'task'}",
+                kind="subagent",
+                parent_thread_id=parent_thread_id,
+                parent_turn_id=parent_turn_id,
+                parent_run_id=parent_run_id,
             )
-        elif event_type == "tool.partial" and stream:
-            payload = parse_tool_payload(event.get("output") or {}) or {}
-            stdout = str(payload.get("stdout") or "").strip()
-            stderr = str(payload.get("stderr") or "").strip()
-            summary = stdout.splitlines()[-1] if stdout else stderr.splitlines()[-1] if stderr else ""
-            if len(summary) > 140:
-                summary = summary[:137].rstrip() + "..."
-            status = payload.get("partial_reason") or "running"
-            print(
-                f"[python] {status} run={payload.get('run_id')} {summary}",
-                file=sys.stderr,
-                flush=True,
-            )
-        elif event_type == "tool.output" and stream:
-            payload = parse_tool_payload(event.get("output") or {}) or {}
-            stdout = str(payload.get("stdout") or "").strip()
-            stderr = str(payload.get("stderr") or "").strip()
-            summary = stdout.splitlines()[-1] if stdout else stderr.splitlines()[-1] if stderr else ""
-            if len(summary) > 140:
-                summary = summary[:137].rstrip() + "..."
-            print(
-                f"[python] rc={payload.get('returncode')} run={payload.get('run_id')} {summary}",
-                file=sys.stderr,
-                flush=True,
-            )
-        elif event_type == "turn.completed":
-            if not stream or not saw_delta:
-                print(event["final_text"])
-            elif stream:
-                print()
-            print(f"[thread] {short_thread(event['thread_id'])}", file=sys.stderr)
+            print(f"[subagent-thread] {thread_id}", file=sys.stderr)
+        saw_delta = False
+        async for event in engine.run_turn(user_text=prompt, thread_id=thread_id, level=level):
+            event_type = event["type"]
+            if event_type == "assistant.delta":
+                if stream:
+                    print(event["text"], end="", flush=True)
+                saw_delta = True
+            elif event_type == "tool.started" and stream:
+                call = event.get("call") or {}
+                print(
+                    f"\n\n[python] {call.get('name', 'run_python')} started "
+                    f"({call.get('call_id') or 'call'})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif event_type == "tool.partial" and stream:
+                payload = parse_tool_payload(event.get("output") or {}) or {}
+                stdout = str(payload.get("stdout") or "").strip()
+                stderr = str(payload.get("stderr") or "").strip()
+                summary = stdout.splitlines()[-1] if stdout else stderr.splitlines()[-1] if stderr else ""
+                if len(summary) > 140:
+                    summary = summary[:137].rstrip() + "..."
+                status = payload.get("partial_reason") or "running"
+                print(
+                    f"[python] {status} run={payload.get('run_id')} {summary}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif event_type == "tool.output" and stream:
+                payload = parse_tool_payload(event.get("output") or {}) or {}
+                stdout = str(payload.get("stdout") or "").strip()
+                stderr = str(payload.get("stderr") or "").strip()
+                summary = stdout.splitlines()[-1] if stdout else stderr.splitlines()[-1] if stderr else ""
+                if len(summary) > 140:
+                    summary = summary[:137].rstrip() + "..."
+                print(
+                    f"[python] rc={payload.get('returncode')} run={payload.get('run_id')} {summary}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif event_type == "turn.completed":
+                if not stream or not saw_delta:
+                    print(event["final_text"])
+                elif stream:
+                    print()
+                print(f"[thread] {short_thread(event['thread_id'])}", file=sys.stderr)
+    finally:
+        await engine.aclose()

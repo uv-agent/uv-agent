@@ -450,6 +450,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._mention_file_watcher_stop.set()
         if self._mention_file_watcher_worker is not None:
             self._mention_file_watcher_worker.cancel()
+        self.engine.close()
 
     def _on_near_bottom_changed(self, near: bool) -> None:
         self._refresh_composer_overlay()
