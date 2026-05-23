@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
+
 from .events import EventBus, raise_if_reentrant_submit
 from .helpers import RuntimeHelperRegistry, RuntimeHelperSpec
 
@@ -73,9 +75,10 @@ class PluginContext:
 
     def open_db(self) -> sqlite3.Connection:
         path = self.data_dir / "data.sqlite3"
-        connection = sqlite3.connect(path)
+        connection = sqlite3.connect(path, timeout=SQLITE_TIMEOUT_SECONDS)
+        connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=5000")
         return connection
 
     async def submit_turn(

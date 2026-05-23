@@ -1650,6 +1650,61 @@ async def test_agent_yields_partial_tool_output_before_final_result(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_agent_sends_all_tool_outputs_with_previous_response_id(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    runner = SimpleRunner()
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_multi_tool",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "print('one')"}),
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_2",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "print('two')"}),
+                    },
+                ],
+            },
+            {
+                "id": "resp_done",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="run both")]
+
+    assert events[-1]["type"] == "turn.completed"
+    assert len(runner.requests) == 2
+    assert client.requests[1]["previous_response_id"] == "resp_multi_tool"
+    assert [item["call_id"] for item in client.requests[1]["input"]] == ["call_1", "call_2"]
+    assert all(item["type"] == "function_call_output" for item in client.requests[1]["input"])
+
+
+@pytest.mark.asyncio
 async def test_agent_persists_model_stream_error(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()

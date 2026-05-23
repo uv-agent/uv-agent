@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import sqlite3
@@ -84,6 +85,10 @@ _THREAD_UPDATE_COLUMNS = {
     "billing_totals_json",
     "metadata_json",
 }
+_THREAD_LOCK_CONTEXT: contextvars.ContextVar[dict[tuple[str, str], tuple[str, int]]] = contextvars.ContextVar(
+    "uv_agent_thread_lock_context",
+    default={},
+)
 
 
 @dataclass(frozen=True)
@@ -132,7 +137,6 @@ class ThreadStore:
         self.db_path = state_db_path(self.data_dir)
         self._lock_owner_id = new_id("owner")
         self._held_thread_locks: dict[str, str] = {}
-        self._held_thread_lock_depth: dict[str, int] = {}
         self._history_segment_cache: dict[tuple[Any, ...], ThreadHistorySegment] = {}
         self.data_dir.mkdir(parents=True, exist_ok=True)
         with self._connect():
@@ -172,20 +176,24 @@ class ThreadStore:
     @contextmanager
     def lock_thread(self, thread_id: str, *, kind: str | None = None) -> Iterator[None]:
         resolved_kind = kind or self._kind_for_thread(thread_id)
-        token = self._held_thread_locks.get(thread_id)
-        if token is not None:
-            self._held_thread_lock_depth[thread_id] = self._held_thread_lock_depth.get(thread_id, 1) + 1
-            try:
-                yield
-            finally:
-                self._release_thread_lock(thread_id, token=token, kind=resolved_kind)
-            return
+        entry = self._context_lock_entry(thread_id)
+        if entry is not None:
+            token, depth = entry
+            if self._held_thread_locks.get(thread_id) == token:
+                reset_token = self._set_context_lock_depth(thread_id, token=token, depth=depth + 1)
+                try:
+                    yield
+                finally:
+                    _THREAD_LOCK_CONTEXT.reset(reset_token)
+                return
 
         token = new_id("lock")
         self._acquire_thread_lock(thread_id, token=token, kind=resolved_kind)
+        reset_token = self._set_context_lock_depth(thread_id, token=token, depth=1)
         try:
             yield
         finally:
+            _THREAD_LOCK_CONTEXT.reset(reset_token)
             self._release_thread_lock(thread_id, token=token, kind=resolved_kind)
 
     def append(self, thread_id: str, event_type: str, **data: Any) -> dict[str, Any]:
@@ -457,14 +465,8 @@ class ThreadStore:
         except sqlite3.IntegrityError as exc:
             raise ThreadLockedError(thread_id, self.lock_path(thread_id, kind=kind), self._read_lock_owner(thread_id)) from exc
         self._held_thread_locks[thread_id] = token
-        self._held_thread_lock_depth[thread_id] = 1
 
     def _release_thread_lock(self, thread_id: str, *, token: str, kind: str) -> None:
-        depth = self._held_thread_lock_depth.get(thread_id, 0)
-        if depth > 1:
-            self._held_thread_lock_depth[thread_id] = depth - 1
-            return
-        self._held_thread_lock_depth.pop(thread_id, None)
         self._held_thread_locks.pop(thread_id, None)
         with self._connect() as db:
             db.execute(
@@ -476,10 +478,34 @@ class ThreadStore:
         owner = self._read_lock_owner(thread_id)
         if not owner:
             return
-        token = self._held_thread_locks.get(thread_id)
+        token = self._context_lock_token(thread_id)
         if owner.get("owner_id") == self._lock_owner_id and owner.get("token") == token:
             return
         raise ThreadLockedError(thread_id, self.lock_path(thread_id, kind=kind), owner)
+
+    def _context_lock_key(self, thread_id: str) -> tuple[str, str]:
+        return (self._lock_owner_id, thread_id)
+
+    def _context_lock_entry(self, thread_id: str) -> tuple[str, int] | None:
+        return _THREAD_LOCK_CONTEXT.get().get(self._context_lock_key(thread_id))
+
+    def _context_lock_token(self, thread_id: str) -> str | None:
+        entry = self._context_lock_entry(thread_id)
+        if entry is None:
+            return None
+        token = entry[0]
+        return token if self._held_thread_locks.get(thread_id) == token else None
+
+    def _set_context_lock_depth(
+        self,
+        thread_id: str,
+        *,
+        token: str,
+        depth: int,
+    ) -> contextvars.Token[dict[tuple[str, str], tuple[str, int]]]:
+        current = dict(_THREAD_LOCK_CONTEXT.get())
+        current[self._context_lock_key(thread_id)] = (token, depth)
+        return _THREAD_LOCK_CONTEXT.set(current)
 
     def _read_lock_owner(self, thread_id: str | Path) -> dict[str, Any]:
         # Accept Path for compatibility with tests or older callers that passed

@@ -12,6 +12,8 @@ from pathlib import Path
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
 
+from uv_agent_runtime.lockfile import file_lock
+
 
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _READY_LOCK = threading.Lock()
@@ -35,10 +37,14 @@ def ensure_venv(scriptenv_dir: Path) -> Path:
     with _READY_LOCK:
         if resolved in _READY_DIRS and python.exists():
             return python
-        ensure_project(resolved)
-        _ensure_runtime_package(resolved, python)
-        _ensure_runtime_version(resolved, python)
-        _READY_DIRS.add(resolved)
+        # Multiple uv-agent processes can share one project scriptenv. Serialize
+        # uv init/add/sync so concurrent ask subprocesses do not corrupt
+        # pyproject.toml or uv.lock while the environment is being prepared.
+        with _scriptenv_lock(resolved):
+            ensure_project(resolved)
+            _ensure_runtime_package(resolved, python)
+            _ensure_runtime_version(resolved, python)
+            _READY_DIRS.add(resolved)
         return python
 
 
@@ -80,6 +86,10 @@ def ensure_project(scriptenv_dir: Path) -> None:
     needs_checkout_source = checkout is not None and not _declares_editable_checkout(pyproject, checkout)
     if needs_runtime or needs_checkout_source:
         _add_runtime_package(scriptenv_dir)
+
+
+def _scriptenv_lock(scriptenv_dir: Path):
+    return file_lock(scriptenv_dir / ".uv-agent-scriptenv.lock", timeout_s=300.0)
 
 
 def _venv_python(venv_dir: Path) -> Path:

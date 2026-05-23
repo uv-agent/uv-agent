@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Sequence
 
+from .lockfile import file_lock
 from .textops import CommandTextResult, run_process_text
 
 
@@ -29,7 +30,8 @@ def add_dependency(
 
     if not packages:
         raise ValueError("add_dependency requires at least one package")
-    args: list[str] = [_uv_binary(), "add", "--project", str(run_python_env_dir())]
+    scriptenv_dir = run_python_env_dir()
+    args: list[str] = [_uv_binary(), "add", "--project", str(scriptenv_dir)]
     if editable:
         args.append("--editable")
     if optional:
@@ -39,7 +41,11 @@ def add_dependency(
     if group:
         args.extend(["--group", group])
     args.extend(packages)
-    return run_process_text(args, timeout_s=timeout_s, check=check)
+    # uv add mutates pyproject.toml and uv.lock in the shared run_python
+    # environment. Parallel scripts can all reach this helper, so use the same
+    # coarse lock as the host-side scriptenv bootstrap.
+    with file_lock(scriptenv_dir / ".uv-agent-scriptenv.lock", timeout_s=300.0):
+        return run_process_text(args, timeout_s=timeout_s, check=check)
 
 
 def add_dependencies(

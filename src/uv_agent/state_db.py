@@ -7,6 +7,8 @@ from uv_agent.time import utc_now_iso
 
 DB_FILENAME = "uv-agent.sqlite3"
 SCHEMA_VERSION = 1
+SQLITE_TIMEOUT_SECONDS = 30.0
+SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
 
 
 class StateDbError(RuntimeError):
@@ -29,10 +31,17 @@ def connect_state_db(data_dir: Path, *, check_same_thread: bool = True) -> sqlit
 
     db_path = state_db_path(data_dir)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path, check_same_thread=check_same_thread)
+    connection = sqlite3.connect(
+        db_path,
+        timeout=SQLITE_TIMEOUT_SECONDS,
+        check_same_thread=check_same_thread,
+    )
     connection.row_factory = sqlite3.Row
+    # ``timeout`` only affects locks encountered while opening the connection.
+    # PRAGMA busy_timeout is per-connection and covers later statements, which
+    # matters when multiple ask subprocesses append to the same project DB.
+    connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute("PRAGMA busy_timeout=5000")
     _ensure_schema(connection)
     return connection
 
@@ -40,10 +49,16 @@ def connect_state_db(data_dir: Path, *, check_same_thread: bool = True) -> sqlit
 def _ensure_schema(connection: sqlite3.Connection) -> None:
     """Create the v1 schema or reject databases from a different future schema."""
 
-    # WAL is persistent for the database file, but executing it during init keeps
-    # freshly-created project state in the desired mode before any concurrent run
-    # writers appear.
-    connection.execute("PRAGMA journal_mode=WAL")
+    _ensure_wal(connection)
+    existing_version = _read_schema_version(connection)
+    if existing_version == str(SCHEMA_VERSION):
+        return
+    if existing_version is not None:
+        raise StateDbError(
+            f"Unsupported state database schema version {existing_version}; "
+            f"expected {SCHEMA_VERSION}"
+        )
+
     with connection:
         connection.executescript(
             """
@@ -178,3 +193,27 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
                 f"Unsupported state database schema version {version['value']}; "
                 f"expected {SCHEMA_VERSION}"
             )
+
+
+def _ensure_wal(connection: sqlite3.Connection) -> None:
+    """Switch to WAL only when needed so normal opens stay read-mostly."""
+
+    journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
+    current = str(journal_mode[0] if journal_mode else "").lower()
+    if current != "wal":
+        connection.execute("PRAGMA journal_mode=WAL")
+    # NORMAL is the usual durability/concurrency trade-off for SQLite WAL and
+    # avoids extra fsync pressure when many short-lived processes append events.
+    connection.execute("PRAGMA synchronous=NORMAL")
+
+
+def _read_schema_version(connection: sqlite3.Connection) -> str | None:
+    """Return the stored schema version, or None before the schema exists."""
+
+    try:
+        row = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+    return str(row["value"]) if row is not None else None

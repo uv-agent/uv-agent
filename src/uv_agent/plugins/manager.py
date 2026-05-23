@@ -14,6 +14,7 @@ import pluggy
 
 from uv_agent.config import PluginsConfig
 from uv_agent.paths import uv_agent_home
+from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
 
 from .context import PluginContext
 from .events import EventBus
@@ -197,7 +198,9 @@ class PluginManager:
     def _mark_first_load(self, name: str) -> bool:
         path = self._registry_db_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(path) as db:
+        with sqlite3.connect(path, timeout=SQLITE_TIMEOUT_SECONDS) as db:
+            db.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+            db.execute("PRAGMA journal_mode=WAL")
             db.execute("CREATE TABLE IF NOT EXISTS loaded_plugins (name TEXT PRIMARY KEY, first_seen_at TEXT NOT NULL)")
             row = db.execute("SELECT name FROM loaded_plugins WHERE name = ?", (name,)).fetchone()
             if row is not None:

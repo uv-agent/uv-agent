@@ -57,10 +57,13 @@ async def test_runner_executes_script_and_records_sqlite(
         "run",
         "--project",
         str(runner.scriptenv_dir),
-        "--directory",
+        "--frozen",
     ]
-    assert events[0]["argv"][5] == str(project_root)
-    assert events[0]["argv"][6] == "python"
+    assert events[0]["argv"][5:7] == [
+        "--directory",
+        str(project_root),
+    ]
+    assert events[0]["argv"][7] == "python"
     assert events[0]["script_path"] == str(result.script_path)
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 DB_FILENAME = "uv-agent.sqlite3"
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 
 def thread_digest(
@@ -90,7 +91,7 @@ def _connect(base: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute("PRAGMA busy_timeout=5000")
+    connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     return connection
 
 

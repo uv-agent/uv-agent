@@ -95,6 +95,7 @@ class PythonRunner:
             "run",
             "--project",
             str(self.scriptenv_dir),
+            "--frozen",
             "--directory",
             str(run_cwd),
             "python",

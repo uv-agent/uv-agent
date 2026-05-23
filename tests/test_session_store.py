@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from uv_agent.session.store import ThreadLockedError, ThreadStore
+from uv_agent.session.store import ThreadLockedError, ThreadStore, _THREAD_LOCK_CONTEXT
 
 
 def test_list_threads_returns_latest_first_with_snippet(tmp_path: Path) -> None:
@@ -311,6 +311,42 @@ def test_thread_lock_blocks_other_store_writes_and_allows_owner_writes(tmp_path:
         turn_id="t3",
         item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "after"}]},
     )
+
+
+def test_thread_lock_permission_does_not_leak_to_other_contexts(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Locked")
+    other = ThreadStore(tmp_path)
+
+    with store.lock_thread(thread_id):
+        # Simulate an unrelated asyncio task in the same process. A process-wide
+        # token would incorrectly let this write through the held thread lock.
+        reset_token = _THREAD_LOCK_CONTEXT.set({})
+        try:
+            with pytest.raises(ThreadLockedError):
+                store.append(
+                    thread_id,
+                    "item.user",
+                    turn_id="t_other_context",
+                    item={
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "other context"}],
+                    },
+                )
+            with pytest.raises(ThreadLockedError):
+                other.append(
+                    thread_id,
+                    "item.user",
+                    turn_id="t_other_store",
+                    item={
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "other store"}],
+                    },
+                )
+        finally:
+            _THREAD_LOCK_CONTEXT.reset(reset_token)
 
 
 def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -> None:

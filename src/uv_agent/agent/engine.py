@@ -193,6 +193,20 @@ class TurnInputState:
             return self.previous_response_id
         return None
 
+    def note_tool_output(self, item: dict[str, Any]) -> None:
+        """Add a tool result to both full history and incremental request input."""
+
+        self.input_items.append(item)
+        self.pending_items.append(item)
+
+    def note_tool_attachments(self, attachments: list[dict[str, Any]]) -> None:
+        if not attachments:
+            return
+        attachment_items = tool_attachment_context_items(attachments)
+        self.input_items.extend(attachment_items)
+        self.pending_items.extend(copy.deepcopy(attachment_items))
+        self.use_previous_response_id = False
+
 
 @dataclass
 class RetryState:
@@ -211,6 +225,20 @@ class RetryState:
         if self.use_previous_response_id and self.previous_response_id:
             return self.previous_response_id
         return None
+
+    def note_tool_output(self, item: dict[str, Any]) -> None:
+        """Add a tool result to both full history and incremental request input."""
+
+        self.input_items.append(item)
+        self.pending_items.append(item)
+
+    def note_tool_attachments(self, attachments: list[dict[str, Any]]) -> None:
+        if not attachments:
+            return
+        attachment_items = tool_attachment_context_items(attachments)
+        self.input_items.extend(attachment_items)
+        self.pending_items.extend(copy.deepcopy(attachment_items))
+        self.use_previous_response_id = False
 
 
 @dataclass
@@ -511,9 +539,7 @@ class AgentEngine:
                                 turn_id=turn_id,
                                 item=result.tool_output,
                             )
-                            input_items.append(result.tool_output)
-                            request_input_items.append(result.tool_output)
-                            turn_input.pending_items.append(result.tool_output)
+                            turn_input.note_tool_output(result.tool_output)
                             round_attachments.extend(result.attachments)
                     if round_attachments:
                         for attachment in round_attachments:
@@ -524,11 +550,8 @@ class AgentEngine:
                                 source="tool",
                                 attachment=attachment,
                             )
-                        attachment_items = tool_attachment_context_items(round_attachments)
-                        input_items.extend(attachment_items)
-                        turn_input.pending_items.extend(copy.deepcopy(attachment_items))
-                        turn_input.use_previous_response_id = False
-                        request_input_items = turn_input.request_input_items()
+                        turn_input.note_tool_attachments(round_attachments)
+                    request_input_items = turn_input.request_input_items()
                     if self._will_compact_after_tool_results(
                         thread_id,
                         input_items,
@@ -821,8 +844,7 @@ class AgentEngine:
                                 turn_id=turn_id,
                                 item=result.tool_output,
                             )
-                            retry_state.input_items.append(result.tool_output)
-                            retry_state.pending_items.append(result.tool_output)
+                            retry_state.note_tool_output(result.tool_output)
                             round_attachments.extend(result.attachments)
                     if round_attachments:
                         for attachment in round_attachments:
@@ -833,7 +855,7 @@ class AgentEngine:
                                 source="tool",
                                 attachment=attachment,
                             )
-                        retry_state.input_items.extend(tool_attachment_context_items(round_attachments))
+                        retry_state.note_tool_attachments(round_attachments)
                     if self._will_compact_after_tool_results(
                         thread_id,
                         retry_state.input_items,
@@ -908,8 +930,7 @@ class AgentEngine:
                                 turn_id=turn_id,
                                 item=result.tool_output,
                             )
-                            retry_state.input_items.append(result.tool_output)
-                            retry_state.pending_items.append(result.tool_output)
+                            retry_state.note_tool_output(result.tool_output)
                             round_attachments.extend(result.attachments)
                     if round_attachments:
                         for attachment in round_attachments:
@@ -920,9 +941,7 @@ class AgentEngine:
                                 source="tool",
                                 attachment=attachment,
                             )
-                        retry_state.input_items.extend(tool_attachment_context_items(round_attachments))
-                        retry_state.pending_items.extend(tool_attachment_context_items(round_attachments))
-                        retry_state.use_previous_response_id = False
+                        retry_state.note_tool_attachments(round_attachments)
                     if self._will_compact_after_tool_results(
                         thread_id,
                         retry_state.input_items,

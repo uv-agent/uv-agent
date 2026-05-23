@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from uv_agent.state_db import SCHEMA_VERSION, connect_state_db, state_db_path
+from uv_agent.state_db import SCHEMA_VERSION, SQLITE_BUSY_TIMEOUT_MS, connect_state_db, state_db_path
 
 
 def test_state_db_initializes_schema_and_pragmas(tmp_path: Path) -> None:
@@ -22,7 +22,7 @@ def test_state_db_initializes_schema_and_pragmas(tmp_path: Path) -> None:
 
     assert db_path.exists()
     assert version["value"] == str(SCHEMA_VERSION)
-    assert busy_timeout == 5000
+    assert busy_timeout == SQLITE_BUSY_TIMEOUT_MS
     assert foreign_keys == 1
     assert journal_mode.lower() == "wal"
     assert {

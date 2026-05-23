@@ -177,7 +177,12 @@ class RunLogStore:
     def prune(self) -> None:
         with connect_state_db(self.data_dir) as db:
             rows = db.execute(
-                "SELECT run_id, script_path FROM runs ORDER BY started_at DESC, rowid DESC"
+                """
+                SELECT run_id, script_path
+                FROM runs
+                WHERE completed_at IS NOT NULL
+                ORDER BY completed_at DESC, started_at DESC, rowid DESC
+                """
             ).fetchall()
             stale = rows[self.max_run_logs :]
             if stale:

@@ -268,6 +268,7 @@ def test_runtime_dependency_helpers_use_run_python_env_dir(
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     def fake_run_process_text(*args: Any, **kwargs: Any) -> CommandTextResult:
+        assert (scriptenv / ".uv-agent-scriptenv.lock").exists()
         calls.append((args, kwargs))
         return CommandTextResult(args=list(args[0]), returncode=0, stdout="", stderr="")
 
