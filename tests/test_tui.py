@@ -3761,7 +3761,7 @@ async def test_tui_ctrl_c_in_focused_composer_only_copies_selection(
 
 
 @pytest.mark.asyncio
-async def test_tui_ctrl_c_in_focused_empty_composer_does_not_arm_quit(
+async def test_tui_ctrl_c_in_focused_empty_composer_arms_quit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3779,8 +3779,8 @@ async def test_tui_ctrl_c_in_focused_empty_composer_does_not_arm_quit(
         await pilot.press("ctrl+c")
         await pilot.pause()
 
-        assert app._quit_armed is False
-        assert not list(app.screen.query("Toast"))
+        assert app._quit_armed is True
+        assert any(str(toast.render()) == app._text("quit_again") for toast in app.screen.query("Toast"))
 
 
 @pytest.mark.asyncio
@@ -4038,7 +4038,6 @@ async def test_tui_ctrl_c_twice_interrupts_busy_turn_without_selection(
         composer.insert("long work")
         await pilot.press("ctrl+enter")
         await engine.started.wait()
-        composer.blur()
 
         await pilot.press("ctrl+c")
         await pilot.pause()
@@ -5115,8 +5114,6 @@ async def test_tui_ctrl_c_arms_quit_when_idle(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24), notifications=True) as pilot:
-        app.query_one("#composer", TextArea).blur()
-
         await pilot.press("ctrl+c")
         await pilot.pause()
 
@@ -5138,8 +5135,6 @@ async def test_tui_ctrl_c_fast_second_press_quits_when_idle(
     app = UvAgentApp(project_root=project_root)
 
     async with app.run_test(size=(90, 24), notifications=True) as pilot:
-        app.query_one("#composer", TextArea).blur()
-
         await pilot.press("ctrl+c")
         await pilot.pause(0.12)
         await pilot.press("ctrl+c")
@@ -5458,7 +5453,6 @@ async def test_tui_live_and_reentry_equivalent_for_interrupted_round(
         await pilot.press("ctrl+enter")
         await engine.started.wait()
         await pilot.pause()
-        composer.blur()
 
         # Two Ctrl+C presses trigger the interrupt action.
         await pilot.press("ctrl+c")
