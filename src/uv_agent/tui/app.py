@@ -240,6 +240,17 @@ def _event_offset(event: dict[str, Any] | None) -> int | None:
 class TranscriptScreen(Screen[None]):
     """Default screen with tighter transcript selection behavior."""
 
+    def _forward_event(self, event: events.Event) -> None:
+        if isinstance(event, events.MouseDown) and not event.is_forwarded:
+            release_overlay_capture = getattr(
+                self.app,
+                "_release_stale_overlay_mouse_capture",
+                None,
+            )
+            if callable(release_overlay_capture) and release_overlay_capture(event):
+                return
+        super()._forward_event(event)
+
     def on_paste(self, event: events.Paste) -> None:
         """Forward unhandled pastes to the app-level composer fallback."""
         handler = getattr(self.app, "_handle_unfocused_composer_paste", None)
@@ -438,6 +449,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._refresh_composer_overlay()
 
     def on_click(self, event: events.Click) -> None:
+        if self._handle_bottom_overlay_pointer_event(event):
+            return
         widget = getattr(event, "widget", None)
         if widget is not None and widget.id == "pending-turns-btn":
             event.stop()
@@ -447,12 +460,80 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._open_pending_image_preview()
         elif widget is not None and widget.id == "scroll-to-bottom-btn":
             event.stop()
+            self._scroll_transcript_to_bottom_from_overlay()
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self._handle_bottom_overlay_pointer_event(event)
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        self._handle_bottom_overlay_pointer_event(event)
+
+    def _handle_bottom_overlay_pointer_event(self, event: events.MouseEvent) -> bool:
+        """Handle overlay controls by screen coordinates before stale capture wins.
+
+        Textual routes mouse events to ``app.mouse_captured`` before hit-testing the
+        screen. If the scrollbar capture is left behind after a drag/focus edge
+        case, clicks on the visually top-most composer overlay are delivered to
+        the scrollbar and stopped there. The overlay is screen-positioned, so a
+        small coordinate hit test lets these controls recover from stale capture
+        without changing normal transcript mouse handling.
+        """
+
+        if self.screen is not self.default_screen:
+            return False
+        button = self._overlay_button_at_offset(event.screen_offset)
+        if button is None:
+            return False
+        event.stop()
+        if isinstance(event, events.MouseDown):
+            self._release_stale_overlay_mouse_capture(event)
+            return True
+        if isinstance(event, events.MouseUp):
+            self._release_stale_overlay_mouse_capture(event)
+            return True
+        if isinstance(event, events.Click):
+            self._release_stale_overlay_mouse_capture(event)
+            if button.id == "pending-turns-btn":
+                self._open_pending_send_queue()
+            elif button.id == "pending-images-btn":
+                self._open_pending_image_preview()
+            elif button.id == "scroll-to-bottom-btn":
+                self._scroll_transcript_to_bottom_from_overlay()
+            return True
+        return False
+
+    def _release_stale_overlay_mouse_capture(self, event: events.MouseEvent) -> bool:
+        if self.mouse_captured is None:
+            return False
+        if self._overlay_button_at_offset(event.screen_offset) is None:
+            return False
+        self.capture_mouse(None)
+        event.stop()
+        return True
+
+    def _overlay_button_at_offset(self, offset: Offset) -> Static | None:
+        for selector in (
+            "#pending-turns-btn",
+            "#pending-images-btn",
+            "#scroll-to-bottom-btn",
+        ):
             try:
-                transcript = self.query_one("#transcript", TranscriptScroll)
+                button = self.query_one(selector, Static)
             except NoMatches:
-                return
-            transcript.engage_follow_tail()
-            self._refresh_composer_overlay()
+                continue
+            if button.has_class("hidden"):
+                continue
+            if offset in button.region:
+                return button
+        return None
+
+    def _scroll_transcript_to_bottom_from_overlay(self) -> None:
+        try:
+            transcript = self.query_one("#transcript", TranscriptScroll)
+        except NoMatches:
+            return
+        transcript.engage_follow_tail(force=True)
+        self._refresh_composer_overlay()
 
     def on_resize(self) -> None:
         self._refresh_status()

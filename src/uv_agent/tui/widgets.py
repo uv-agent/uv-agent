@@ -52,13 +52,17 @@ class TranscriptScroll(VerticalScroll):
     _BOTTOM_THRESHOLD = 2
     _scroll_pending = False
 
-    def programmatic_scroll_end(self) -> None:
+    def programmatic_scroll_end(self, *, force: bool = False) -> None:
         # Defer the actual scroll to after the next refresh so any pending
         # mount/update has had a chance to recompute virtual_size; otherwise
         # `scroll_end` reads a stale `max_scroll_y` and only crawls along
         # one row at a time during streaming. Coalesce repeated calls within
         # the same refresh cycle so streaming deltas don't pile up callbacks.
-        if self._scroll_pending:
+        # A user clicking the bottom affordance is different from an automatic
+        # stream follow: it must enqueue a fresh callback after any in-flight
+        # user scroll callbacks, otherwise the click may be lost behind stale
+        # work from a previous refresh.
+        if self._scroll_pending and not force:
             return
         self._scroll_pending = True
 
@@ -69,9 +73,9 @@ class TranscriptScroll(VerticalScroll):
 
         self.call_after_refresh(_do)
 
-    def engage_follow_tail(self) -> None:
+    def engage_follow_tail(self, *, force: bool = False) -> None:
         self.follow_tail = True
-        self.programmatic_scroll_end()
+        self.programmatic_scroll_end(force=force)
 
     def _disengage_follow_tail(self) -> None:
         if self.follow_tail:

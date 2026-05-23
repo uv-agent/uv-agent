@@ -1088,6 +1088,80 @@ async def test_tui_scrolling_back_to_bottom_reengages_auto_follow(
 
 
 @pytest.mark.asyncio
+async def test_tui_bottom_button_recovers_from_stale_mouse_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(80, 12)) as pilot:
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        for index in range(30):
+            app._append_cell(f"line {index}\nextra text", "event")
+        await pilot.pause(0.2)
+        transcript.engage_follow_tail()
+        await pilot.pause(0.2)
+        transcript.action_page_up()
+        await pilot.pause()
+
+        assert transcript.near_bottom is False
+        assert app.mouse_captured is None
+        app.capture_mouse(transcript.vertical_scrollbar)
+        await pilot.pause()
+
+        assert app.mouse_captured is transcript.vertical_scrollbar
+        assert await pilot.click("#scroll-to-bottom-btn", offset=(1, 0))
+        await pilot.pause(0.2)
+
+        assert app.mouse_captured is None
+        assert transcript.follow_tail is True
+        assert transcript.near_bottom is True
+        assert transcript.scroll_y == transcript.max_scroll_y
+
+
+@pytest.mark.asyncio
+async def test_tui_bottom_button_bypasses_pending_auto_scroll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(80, 12)) as pilot:
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        for index in range(30):
+            app._append_cell(f"line {index}\nextra text", "event")
+        await pilot.pause(0.2)
+        transcript.engage_follow_tail()
+        await pilot.pause(0.2)
+
+        transcript.programmatic_scroll_end()
+        transcript.follow_tail = False
+        transcript.scroll_y = max(0, transcript.max_scroll_y - 5)
+        transcript._recompute_near_bottom()
+        assert transcript._scroll_pending is True
+        await pilot.pause(0.2)
+
+        app._scroll_transcript_to_bottom_from_overlay()
+        await pilot.pause(0.2)
+
+        assert transcript.follow_tail is True
+        assert transcript.near_bottom is True
+        assert transcript.scroll_y == transcript.max_scroll_y
+
+
+@pytest.mark.asyncio
 async def test_tui_submit_from_bottom_reengages_auto_follow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
