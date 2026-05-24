@@ -3740,9 +3740,12 @@ async def test_tui_terminal_completion_event_only_for_background_threads(
             for child in app.query_one("#transcript", TranscriptScroll).children
             if isinstance(child, TranscriptCell)
         )
-        assert app._text("background_thread_completed") in transcript_text
-        assert short_thread(old_thread) in transcript_text
+        assert app._text("background_thread_completed") not in transcript_text
         assert "done old work" not in transcript_text
+        assert app._top_notification_unread == 1
+        assert app._top_notifications[-1].thread_id == old_thread
+        assert app._text("background_thread_completed") in app._top_notifications[-1].title
+        assert short_thread(old_thread) in app._top_notifications[-1].message
 
         composer.insert("current work")
         await pilot.press("ctrl+enter")
@@ -3751,7 +3754,7 @@ async def test_tui_terminal_completion_event_only_for_background_threads(
         assert current_thread is not None
         await engine.started[current_thread].wait()
 
-        before_count = transcript_text.count(app._text("background_thread_completed"))
+        before_count = len(app._top_notifications)
         engine.release[current_thread].set()
         await pilot.pause(0.2)
 
@@ -3760,8 +3763,16 @@ async def test_tui_terminal_completion_event_only_for_background_threads(
             for child in app.query_one("#transcript", TranscriptScroll).children
             if isinstance(child, TranscriptCell)
         )
-        assert after_text.count(app._text("background_thread_completed")) == before_count
+        assert after_text.count(app._text("background_thread_completed")) == 0
+        assert len(app._top_notifications) == before_count
         assert not list(app.screen.query("Toast"))
+
+        await pilot.click("#top-bar-notifications")
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert app._top_notification_unread == 0
+        assert short_thread(old_thread) in plain_renderable(panel.items[0].meta)
 
 
 @pytest.mark.asyncio
@@ -4443,8 +4454,9 @@ async def test_tui_clear_while_current_thread_runs_keeps_old_thread_backgrounded
         assert app.thread_id is None
         assert old_thread in app._thread_runs
         assert app.busy is False
-        footer = app.query_one("#composer-footer", Static)
-        assert app._text("background_active") in str(footer.content)
+        top_active = app.query_one("#top-bar-active", Static)
+        assert app._text("thread_activity_active") in str(top_active.content)
+        assert "1" in str(top_active.content)
 
         app._open_status_panel()
         await pilot.pause()
@@ -4452,6 +4464,14 @@ async def test_tui_clear_while_current_thread_runs_keeps_old_thread_backgrounded
         assert isinstance(panel, FullscreenPanel)
         assert app._text("active_threads") in plain_renderable(panel.body)
         assert old_thread[-8:] in plain_renderable(panel.body)
+        await pilot.press("escape")
+        await pilot.pause()
+
+        await pilot.click("#top-bar-active")
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert old_thread[-8:] in plain_renderable(panel.items[0].meta)
         await pilot.press("escape")
         await pilot.pause()
 
@@ -4469,6 +4489,8 @@ async def test_tui_clear_while_current_thread_runs_keeps_old_thread_backgrounded
 
         assert old_thread not in app._thread_runs
         assert new_thread not in app._thread_runs
+        assert app.query_one("#top-bar-active", Static).content.plain.endswith("0")
+        assert app.query_one("#top-bar-completed", Static).content.plain.endswith("2")
 
 
 @pytest.mark.asyncio

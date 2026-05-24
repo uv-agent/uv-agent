@@ -73,6 +73,38 @@ class PendingImage:
 
 
 @dataclass(frozen=True)
+class TopNotification:
+    """In-memory notification-center entry for non-transcript UI events."""
+
+    id: str
+    title: str
+    message: str
+    created_at: str
+    thread_id: str | None = None
+    severity: str = "information"
+    read: bool = False
+
+
+@dataclass
+class ThreadActivityState:
+    """Session-local activity accounting for the top status bar.
+
+    This deliberately tracks only the current TUI process lifetime. Persisted
+    thread history remains the source of truth for transcript content, while the
+    top bar answers "what has happened since I opened the app?".
+    """
+
+    thread_id: str
+    total_elapsed_s: float = 0.0
+    active_started_monotonic: float | None = None
+    completed: bool = False
+
+    @property
+    def active(self) -> bool:
+        return self.active_started_monotonic is not None
+
+
+@dataclass(frozen=True)
 class QueuedTurn:
     """A user send that is waiting behind the active turn.
 

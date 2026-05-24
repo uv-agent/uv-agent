@@ -14,7 +14,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.geometry import Offset
 from textual.screen import Screen
@@ -34,6 +34,7 @@ from uv_agent.errors import (
     is_retryable_provider_error,
 )
 from uv_agent.i18n import command_description, tr
+from uv_agent.ids import new_id
 from uv_agent.notifications import play_completion_sound
 from uv_agent.paths import project_state_dir, project_tui_clipboard_dir, uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
@@ -70,7 +71,9 @@ from uv_agent.tui.state import (
     PendingImage,
     PickerItem,
     QueuedTurn,
+    ThreadActivityState,
     ThreadRunState,
+    TopNotification,
 )
 from uv_agent.tui.styles import MAIN_APP_CSS
 from uv_agent.tui.widgets import (
@@ -411,9 +414,21 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._mention_file_watcher_stop = threading.Event()
         self._window_title_thread_title = ""
         self._last_window_title = ""
+        self._thread_activity: dict[str, ThreadActivityState] = {}
+        self._top_notifications: list[TopNotification] = []
+        self._top_notification_unread = 0
+        self._interaction_mode = "normal"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
+            with Horizontal(id="top-bar"):
+                yield Static("", id="top-bar-total")
+                yield Static("", id="top-bar-active")
+                yield Static("", id="top-bar-completed")
+                yield Static("", id="top-bar-spacer")
+                yield Static("", id="top-bar-elapsed")
+                yield Static("", id="top-bar-mode")
+                yield Static("", id="top-bar-notifications")
             with TranscriptScroll(id="transcript"):
                 yield EmptyState()
             yield Static("", id="pending-turns-btn", classes="hidden")
@@ -445,6 +460,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._refresh_pending_turns()
         self._refresh_pending_images()
         self._refresh_composer_overlay()
+        self._refresh_top_bar()
 
     def on_unmount(self) -> None:
         self._mention_file_watcher_stop.set()
@@ -459,7 +475,19 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if self._handle_bottom_overlay_pointer_event(event):
             return
         widget = getattr(event, "widget", None)
-        if widget is not None and widget.id == "pending-turns-btn":
+        if widget is not None and widget.id == "top-bar-total":
+            event.stop()
+            self._open_session_threads_panel("all")
+        elif widget is not None and widget.id == "top-bar-active":
+            event.stop()
+            self._open_session_threads_panel("active")
+        elif widget is not None and widget.id == "top-bar-completed":
+            event.stop()
+            self._open_session_threads_panel("completed")
+        elif widget is not None and widget.id == "top-bar-notifications":
+            event.stop()
+            self._open_notifications_panel()
+        elif widget is not None and widget.id == "pending-turns-btn":
             event.stop()
             self._open_pending_send_queue()
         elif widget is not None and widget.id == "pending-images-btn":
@@ -661,6 +689,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 pass
         if self.busy or self._any_thread_running():
             self._spinner_index += 1
+            self._refresh_top_bar()
         if self.busy:
             self._refresh_status()
         else:
@@ -761,6 +790,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             started_at=started_at,
         )
         self._thread_runs[thread_id] = run_state
+        self._mark_thread_active(thread_id)
         if self._is_active_thread(thread_id):
             self.query_one("#composer-shell", Vertical).add_class("busy")
             self._reset_live_view_state()
@@ -806,6 +836,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             started_at=started_at,
         )
         self._thread_runs[thread_id] = run_state
+        self._mark_thread_active(thread_id)
         if self._is_active_thread(thread_id):
             self.query_one("#composer-shell", Vertical).add_class("busy")
             self._reset_live_view_state()
@@ -897,6 +928,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                     self._refresh_pending_turns()
             else:
                 keep_state = run_state.retryable_error or run_state.terminal_error
+                self._mark_thread_inactive(thread_id, completed=not keep_state)
                 if keep_state:
                     run_state.worker = None
                     run_state.cancel_event = asyncio.Event()
@@ -1393,6 +1425,64 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             for thread_id, run_state in self._thread_runs.items()
             if not self._is_active_thread(thread_id)
         ]
+
+    def _activity_state_for_thread(self, thread_id: str) -> ThreadActivityState:
+        state = self._thread_activity.get(thread_id)
+        if state is None:
+            state = ThreadActivityState(thread_id=thread_id)
+            self._thread_activity[thread_id] = state
+        return state
+
+    def _mark_thread_active(self, thread_id: str, *, now: float | None = None) -> None:
+        activity = self._activity_state_for_thread(thread_id)
+        if activity.active_started_monotonic is None:
+            activity.active_started_monotonic = monotonic() if now is None else now
+        # A rerun/resume moves the thread out of the completed bucket until this
+        # latest piece of work finishes.
+        activity.completed = False
+        if self.is_mounted:
+            self._refresh_top_bar()
+
+    def _mark_thread_inactive(
+        self,
+        thread_id: str,
+        *,
+        completed: bool,
+        now: float | None = None,
+    ) -> None:
+        activity = self._activity_state_for_thread(thread_id)
+        ended_at = monotonic() if now is None else now
+        if activity.active_started_monotonic is not None:
+            activity.total_elapsed_s += max(0.0, ended_at - activity.active_started_monotonic)
+            activity.active_started_monotonic = None
+        activity.completed = completed
+        if self.is_mounted:
+            self._refresh_top_bar()
+
+    def _thread_elapsed_seconds(self, thread_id: str | None) -> float:
+        if thread_id is None:
+            return 0.0
+        activity = self._thread_activity.get(thread_id)
+        if activity is None:
+            return 0.0
+        total = activity.total_elapsed_s
+        if activity.active_started_monotonic is not None:
+            total += max(0.0, monotonic() - activity.active_started_monotonic)
+        return total
+
+    def _active_activity_thread_ids(self) -> list[str]:
+        return sorted(
+            thread_id
+            for thread_id, activity in self._thread_activity.items()
+            if activity.active
+        )
+
+    def _completed_activity_thread_ids(self) -> list[str]:
+        return sorted(
+            thread_id
+            for thread_id, activity in self._thread_activity.items()
+            if activity.completed and not activity.active
+        )
 
     def _run_state_for_thread(self, thread_id: str | None) -> ThreadRunState:
         if thread_id is None:
@@ -3037,6 +3127,125 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _open_status_panel(self) -> None:
         self._open_panel(self._status_panel_markup(), "status", self._text("status"))
 
+    def _session_thread_ids_for_panel(self, kind: str) -> list[str]:
+        active_ids = self._active_activity_thread_ids()
+        completed_ids = self._completed_activity_thread_ids()
+        if kind == "active":
+            return active_ids
+        if kind == "completed":
+            return completed_ids
+        return active_ids + completed_ids
+
+    def _open_session_threads_panel(self, kind: str) -> None:
+        thread_ids = self._session_thread_ids_for_panel(kind)
+        if not thread_ids:
+            key = {
+                "active": "no_active_threads",
+                "completed": "no_completed_threads",
+            }.get(kind, "no_session_threads")
+            self._open_panel(plain(self._text(key), style="dim"), "threads", self._text("threads"))
+            return
+        title_key = {
+            "active": "active_threads_title",
+            "completed": "completed_threads_title",
+        }.get(kind, "session_threads_title")
+        items = [self._session_thread_picker_item(thread_id) for thread_id in thread_ids]
+        self._open_picker(
+            self._text(title_key),
+            items,
+            self._resume_thread,
+            subtitle=self._text("thread_search_hint"),
+        )
+
+    def _session_thread_picker_item(self, thread_id: str) -> PickerItem:
+        metadata = self._thread_metadata(thread_id)
+        title = str(metadata.get("title") or self._text("new_thread")).strip()
+        state = self._thread_runs.get(thread_id)
+        status = state.status if state is not None and state.worker is not None else self._text("python_completed")
+        activity = self._thread_activity.get(thread_id)
+        elapsed = format_elapsed(self._thread_elapsed_seconds(thread_id)) or "0s"
+        marker = f"{self._text('current')} " if thread_id == self.thread_id else ""
+        turn_count = int(metadata.get("turn_count") or 0)
+        return PickerItem(
+            id=thread_id,
+            title=f"{marker}{title}",
+            description=str(metadata.get("last_text") or self._text("no_messages")).replace("\n", " ")[:120],
+            meta=(
+                f"{short_thread(thread_id)} · {status} · {self._text('elapsed')} {elapsed} · "
+                f"{turn_count} {self._text('turns')}"
+                if activity is not None
+                else short_thread(thread_id)
+            ),
+        )
+
+    def _open_notifications_panel(self) -> None:
+        self._top_notification_unread = 0
+        self._top_notifications = [
+            replace(notification, read=True) for notification in self._top_notifications
+        ]
+        if not self._top_notifications:
+            items = [
+                PickerItem(
+                    id="",
+                    title=self._text("no_notifications"),
+                    meta=self._text("notifications_hint"),
+                )
+            ]
+        else:
+            items = [self._notification_picker_item(notification) for notification in reversed(self._top_notifications[-100:])]
+        self._open_picker(
+            self._text("notifications"),
+            items,
+            self._choose_notification,
+            subtitle=self._text("notifications_hint"),
+        )
+        self._refresh_top_bar()
+
+    def _notification_picker_item(self, notification: TopNotification) -> PickerItem:
+        title = notification.title if notification.read else f"● {notification.title}"
+        meta_parts = [notification.created_at]
+        if notification.thread_id:
+            meta_parts.append(short_thread(notification.thread_id))
+        if notification.severity != "information":
+            meta_parts.append(notification.severity)
+        return PickerItem(
+            id=notification.id,
+            title=title,
+            description=notification.message,
+            meta=" · ".join(meta_parts),
+        )
+
+    def _choose_notification(self, notification_id: str) -> None:
+        notification = next(
+            (item for item in self._top_notifications if item.id == notification_id),
+            None,
+        )
+        if notification is None or not notification.thread_id:
+            return
+        self._resume_thread(notification.thread_id)
+
+    def _add_notification(
+        self,
+        title: str,
+        message: str = "",
+        *,
+        thread_id: str | None = None,
+        severity: str = "information",
+    ) -> None:
+        self._top_notifications.append(
+            TopNotification(
+                id=new_id("ntf"),
+                title=title,
+                message=message,
+                created_at=utc_now_iso(),
+                thread_id=thread_id,
+                severity=severity,
+            )
+        )
+        self._top_notification_unread += 1
+        if self.is_mounted:
+            self._refresh_top_bar()
+
     def _status_panel_markup(self) -> Text:
         self.engine.refresh_config()
         level_name = self.level or self.engine.config.runtime.default_level
@@ -3474,24 +3683,72 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if not config.enabled:
             return
         if config.terminal and not active_thread:
-            self._append_turn_completion_event(thread_id)
+            self._notify_background_thread_completed(thread_id)
         if config.bell:
             self.bell()
             play_completion_sound()
 
-    def _append_turn_completion_event(self, thread_id: str) -> None:
+    def _notify_background_thread_completed(self, thread_id: str) -> None:
         digest = self.engine.thread_store.thread_digest(thread_id)
         title = str(digest.get("title") or self._text("new_thread")).strip()
         if len(title) > 48:
             title = title[:45].rstrip() + "..."
-        markup = Text.assemble(
-            (self._text("background_thread_completed"), "dim"),
-            " ",
-            (title or self._text("new_thread"), "cyan"),
-            " ",
-            (short_thread(thread_id), "dim"),
+        self._add_notification(
+            self._text("background_thread_completed"),
+            f"{title or self._text('new_thread')} · {short_thread(thread_id)}",
+            thread_id=thread_id,
         )
-        self._append_cell(markup, "event")
+
+    def _refresh_top_bar(self) -> None:
+        if not self.is_mounted:
+            return
+        active_ids = self._active_activity_thread_ids()
+        completed_ids = self._completed_activity_thread_ids()
+        total_count = len(active_ids) + len(completed_ids)
+        elapsed = format_elapsed(self._thread_elapsed_seconds(self.thread_id)) or "0s"
+        mode = self._text("mode_normal") if self._interaction_mode == "normal" else self._interaction_mode
+        unread = self._top_notification_unread
+        notification_count = len(self._top_notifications)
+        try:
+            total_widget = self.query_one("#top-bar-total", Static)
+            active_widget = self.query_one("#top-bar-active", Static)
+            completed_widget = self.query_one("#top-bar-completed", Static)
+            elapsed_widget = self.query_one("#top-bar-elapsed", Static)
+            mode_widget = self.query_one("#top-bar-mode", Static)
+            notification_widget = self.query_one("#top-bar-notifications", Static)
+        except NoMatches:
+            return
+        total_widget.update(
+            Text.assemble(
+                (self._text("thread_activity_total"), "dim"),
+                " ",
+                (str(total_count), "cyan" if total_count else "dim"),
+            )
+        )
+        active_widget.update(
+            Text.assemble(
+                (self._text("thread_activity_active"), "dim"),
+                " ",
+                (str(len(active_ids)), "cyan" if active_ids else "dim"),
+            )
+        )
+        completed_widget.update(
+            Text.assemble(
+                (self._text("thread_activity_completed"), "dim"),
+                " ",
+                (str(len(completed_ids)), "cyan" if completed_ids else "dim"),
+            )
+        )
+        elapsed_widget.update(
+            Text.assemble((self._text("current_thread_elapsed"), "dim"), " ", (elapsed, "cyan"))
+        )
+        mode_widget.update(Text.assemble((self._text("mode"), "dim"), " ", (mode, "cyan")))
+        if unread:
+            notification_widget.update(
+                Text.assemble(("🔔 ", "cyan"), (str(unread), "bold cyan"), (f"/{notification_count}", "dim"))
+            )
+        else:
+            notification_widget.update(Text.assemble(("🔔 ", "dim"), (str(notification_count), "dim")))
 
     def _refresh_status(self, state: str | None = None) -> None:
         if state is not None:
@@ -3535,11 +3792,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if billing_label:
             footer.append(" · ", style="dim")
             footer.append(billing_label, style="dim")
-        background_count = len(self._background_run_states())
-        if background_count:
-            footer.append(" · ", style="dim")
-            footer.append(f"{background_count} {self._text('background_active')}", style="cyan")
         self._refresh_window_title()
+        self._refresh_top_bar()
         try:
             self.query_one("#composer-footer", Static).update(footer)
         except NoMatches:

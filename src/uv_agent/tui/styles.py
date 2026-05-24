@@ -334,13 +334,44 @@ ToastRack {{
     background: {t.BG_CANVAS};
 }}
 
+#top-bar {{
+    height: 1;
+    padding: 0 1;
+    background: {t.BG_CANVAS};
+    color: {t.TEXT_MUTED};
+}}
+
+#top-bar-total,
+#top-bar-active,
+#top-bar-completed,
+#top-bar-elapsed,
+#top-bar-mode,
+#top-bar-notifications {{
+    width: auto;
+    height: 1;
+    padding: 0 1;
+}}
+
+#top-bar-total:hover,
+#top-bar-active:hover,
+#top-bar-completed:hover,
+#top-bar-notifications:hover {{
+    background: {t.BORDER};
+    color: #ffffff;
+}}
+
+#top-bar-spacer {{
+    width: 1fr;
+    height: 1;
+}}
+
 #transcript {{
     height: 1fr;
     min-height: 6;
     /* No right padding so the vertical scrollbar can sit flush against the
      * screen's right column. Right-side breathing room for transcript text is
      * provided by ``TranscriptCell``'s right padding instead. */
-    padding: 1 0 0 1;
+    padding: 0 0 0 1;
     background: {t.BG_CANVAS};
     overflow-x: auto;
     scrollbar-size: 1 1;
