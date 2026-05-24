@@ -28,6 +28,7 @@ from uv_agent.config import (
     CompletionNotificationConfig,
     UiConfig,
 )
+from uv_agent.context import ContextStats
 from uv_agent.model import FakeModelClient, ModelResponse, ToolCallDelta, parse_responses_response
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
@@ -56,6 +57,7 @@ from uv_agent.tui.app import (
     ToolDetailsPanel,
     UvAgentApp,
 )
+from uv_agent.tui.timeline import ThreadTimelineState
 
 
 _MARKUP_TAG_RE = re.compile(r"\[/?[^\[\]]*\]")
@@ -190,6 +192,28 @@ class ImageCaptureEngine(AgentEngine):
         self.thread_store.append(thread_id, "item.assistant", turn_id=turn_id, text=text)
         self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text=text)
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": text}
+
+
+class CountingStatusEngine(AgentEngine):
+    def __init__(self, engine: AgentEngine) -> None:
+        self.__dict__.update(engine.__dict__)
+        self.refresh_config_calls = 0
+        self.context_stats_calls = 0
+
+    def refresh_config(self, *, force: bool = False) -> None:
+        self.refresh_config_calls += 1
+        super().refresh_config(force=force)
+
+    def context_stats(self, thread_id: str | None, level: str | None = None) -> ContextStats:
+        self.context_stats_calls += 1
+        return ContextStats(
+            used_tokens=0,
+            context_window_tokens=258_000,
+            percent=0,
+            threshold_tokens=206_400,
+            headroom_tokens=258_000,
+            source="test",
+        )
 
 
 class ErrorEngine(AgentEngine):
@@ -2205,6 +2229,38 @@ async def test_tui_reasoning_deltas_stream_without_inserted_spaces(
         assert timeline.active_turns["turn:unknown"].reasoning_buffer == "alphabeta"
 
 
+def test_timeline_live_deltas_keep_chunked_buffers_until_joined() -> None:
+    timeline = ThreadTimelineState("thread_live")
+
+    timeline.apply_live_event(
+        "assistant.delta",
+        {"type": "assistant.delta", "thread_id": "thread_live", "turn_id": "turn_live", "text": "hello"},
+    )
+    timeline.apply_live_event(
+        "assistant.delta",
+        {"type": "assistant.delta", "thread_id": "thread_live", "turn_id": "turn_live", "text": " world"},
+    )
+    timeline.apply_live_event(
+        "assistant.reasoning_delta",
+        {"type": "assistant.reasoning_delta", "thread_id": "thread_live", "turn_id": "turn_live", "text": " alpha"},
+    )
+    timeline.apply_live_event(
+        "assistant.reasoning_delta",
+        {"type": "assistant.reasoning_delta", "thread_id": "thread_live", "turn_id": "turn_live", "text": "beta"},
+    )
+
+    acc = timeline.active_turns["turn_live"]
+    assert acc.assistant_parts == ["hello", " world"]
+    assert acc.assistant_buffer == "hello world"
+    assert acc.reasoning_parts == ["alpha", "beta"]
+    assert acc.reasoning_buffer == "alphabeta"
+
+    assistant_item = timeline.items_by_id[acc.assistant_item_id or ""]
+    reasoning_item = timeline.items_by_id[acc.reasoning_item_id or ""]
+    assert assistant_item.content["text"] == ["hello", " world"]
+    assert reasoning_item.content["text"] == ["alpha", "beta"]
+
+
 @pytest.mark.asyncio
 async def test_tui_compaction_completion_folds_prior_process_and_shows_summary(
     tmp_path: Path,
@@ -2586,6 +2642,70 @@ async def test_tui_renders_tool_delta_before_tool_started(
         assert len(app.query(".tool_pending").nodes) == 1
         cell = app.query_one(ExpandableTranscriptCell)
         assert "print(1)" in strip_markup(plain_renderable(cell.details))
+
+
+@pytest.mark.asyncio
+async def test_tui_streaming_events_are_coalesced_before_render(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)):
+        run_state = app._run_state_for_thread("thread_1")
+        run_state.worker = object()  # type: ignore[assignment]
+        app.thread_id = "thread_1"
+        app._refresh_active_run_state()
+
+        for text in ("a", "b"):
+            await app._handle_thread_event(
+                "thread_1",
+                "assistant.delta",
+                {"type": "assistant.delta", "turn_id": "turn_1", "text": text},
+                run_state,
+            )
+        await app._handle_thread_event(
+            "thread_1",
+            "tool.partial",
+            {
+                "type": "tool.partial",
+                "turn_id": "turn_1",
+                "call": {"call_id": "call_1"},
+                "output": {
+                    "output": json.dumps(
+                        {
+                            "run_id": "run_1",
+                            "returncode": None,
+                            "partial": True,
+                            "stdout": "preview\n",
+                            "stderr": "",
+                            "events": [],
+                        }
+                    )
+                },
+            },
+            run_state,
+        )
+
+        timeline = app._timeline_for_active()
+        assert timeline is not None
+        assert timeline.active_turns["turn_1"].assistant_buffer == "ab"
+        # No widget work has run yet; stream timers will coalesce these events.
+        assert not app.query(".assistant").nodes
+        assert not app.query(ExpandableTranscriptCell).nodes
+        assert app._stream_render_due is True
+        assert app._stream_status_due is True
+
+        app._flush_stream_updates()
+
+        assert [cell.copy_text for cell in app.query(".assistant").nodes] == ["ab"]
+        assert any("preview" in plain_renderable(cell.summary) for cell in app.query(ExpandableTranscriptCell).nodes)
 
 
 @pytest.mark.asyncio
@@ -3817,6 +3937,56 @@ async def test_tui_goal_mode_uses_top_bar_indicator_only(
             for span in top_mode.content.spans
         )
         assert "Goal" not in plain_renderable(footer.content)
+
+
+@pytest.mark.asyncio
+async def test_tui_busy_tick_uses_lightweight_status_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = CountingStatusEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)):
+        app.thread_id = "thread_busy"
+        run_state = app._run_state_for_thread("thread_busy")
+        run_state.worker = object()  # type: ignore[assignment]
+        app._refresh_active_run_state()
+        app._refresh_status(app._text("working"))
+        refresh_calls = engine.refresh_config_calls
+        stats_calls = engine.context_stats_calls
+
+        app._tick()
+        app._tick()
+
+        assert engine.refresh_config_calls == refresh_calls
+        assert engine.context_stats_calls == stats_calls
+
+
+@pytest.mark.asyncio
+async def test_tui_composer_edit_uses_cached_status_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = CountingStatusEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)):
+        app._refresh_status()
+        refresh_calls = engine.refresh_config_calls
+        stats_calls = engine.context_stats_calls
+
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("hello")
+
+        assert engine.refresh_config_calls == refresh_calls
+        assert engine.context_stats_calls == stats_calls
 
 
 @pytest.mark.asyncio

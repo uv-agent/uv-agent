@@ -204,6 +204,14 @@ def _elapsed_between(started_at: str | None, ended_at: str | None = None) -> flo
     return max(0.0, (ended - started).total_seconds())
 
 
+def _timeline_text(content: object) -> str:
+    """Return timeline text while allowing live items to store text chunks."""
+
+    if isinstance(content, list):
+        return "".join(str(part) for part in content)
+    return str(content or "")
+
+
 def composer_history_path() -> Path:
     return uv_agent_home() / COMPOSER_HISTORY_FILENAME
 
@@ -440,6 +448,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._stream_status_due = False
         self._last_stream_render_at = 0.0
         self._last_stream_status_at = 0.0
+        self._status_level_name = self.level or self.engine.config.runtime.default_level
+        self._status_compact_context = "0%"
+        self._status_thread_label = short_thread(self.thread_id)
+        self._status_billing_label = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -622,7 +634,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._reset_composer_history_navigation()
         self._last_composer_text = current
         self._resize_composer()
-        self._refresh_status()
+        self._refresh_status_from_cache()
         if current == "/" and previous == "":
             event.text_area.load_text("")
             self._last_composer_text = ""
@@ -705,7 +717,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._reset_composer_history_navigation()
         self._last_composer_text = current
         self._resize_composer()
-        self._refresh_status()
+        self._refresh_status_from_cache()
         self._maybe_open_mention_picker(composer, previous=previous, current=current)
         composer.focus()
 
@@ -717,9 +729,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 pass
         if self.busy or self._any_thread_running():
             self._spinner_index += 1
-            self._refresh_top_bar()
         if self.busy:
-            self._refresh_status()
+            self._refresh_busy_status()
         else:
             self._apply_window_title()
 
@@ -854,6 +865,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         follow_tail = transcript.follow_tail
         previous_scroll_y = transcript.scroll_y
         changed_item_ids, changed_groups = timeline.consume_changes()
+        force_item_update = bool(changed_item_ids)
         if not changed_item_ids and not changed_groups:
             changed_item_ids = {item.id for item in timeline.items}
 
@@ -867,7 +879,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             item = items_by_id.get(item_id)
             if item is None:
                 continue
-            old_group = self._sync_timeline_item_widget(item)
+            old_group = self._sync_timeline_item_widget(item, force_update=force_item_update)
             if item.process_group:
                 changed_groups.add(item.process_group)
             if old_group and old_group != item.process_group:
@@ -959,6 +971,61 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         ]
 
     def _timeline_item_signature(self, item: TimelineItem) -> tuple[Any, ...]:
+        """Return a cheap widget freshness key for timeline updates.
+
+        The live streaming path calls this often. Avoid serializing ever-growing
+        assistant text, tool arguments, or partial stdout on every flush; length
+        plus a tail slice is enough to detect the append-only updates we render.
+        Stable events still fall back to full JSON so history/final content keeps
+        exact change detection.
+        """
+
+        if item.kind in {"assistant", "reasoning"} and isinstance(item.content, dict):
+            text = item.content.get("text")
+            if isinstance(text, list):
+                return (
+                    item.kind,
+                    item.process_group,
+                    bool(item.content.get("partial")),
+                    len(text),
+                    text[-1] if text else "",
+                )
+        if item.kind == "tool_call" and isinstance(item.content, dict):
+            call = item.content.get("call") if isinstance(item.content.get("call"), dict) else {}
+            status = str(item.content.get("status") or "")
+            if status != "called" and isinstance(call, dict):
+                arguments = str(call.get("arguments") or "")
+                return (
+                    item.kind,
+                    item.process_group,
+                    status,
+                    str(call.get("call_id") or ""),
+                    str(call.get("name") or ""),
+                    len(arguments),
+                    arguments[-120:],
+                )
+        if item.kind == "tool_result" and isinstance(item.content, dict):
+            payload = item.content.get("payload") if isinstance(item.content.get("payload"), dict) else {}
+            if isinstance(payload, dict) and payload.get("partial"):
+                stdout = str(payload.get("stdout") or "")
+                stderr = str(payload.get("stderr") or "")
+                events = payload.get("events")
+                if not isinstance(events, list):
+                    events = []
+                return (
+                    item.kind,
+                    item.process_group,
+                    "partial",
+                    str(payload.get("run_id") or ""),
+                    str(payload.get("call_id") or ""),
+                    payload.get("returncode"),
+                    len(stdout),
+                    stdout[-120:],
+                    len(stderr),
+                    stderr[-120:],
+                    len(events),
+                    repr(events[-1])[:240] if events else "",
+                )
         return (
             item.kind,
             item.process_group,
@@ -971,12 +1038,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         setattr(widget, "timeline_process_group", item.process_group)
         setattr(widget, "timeline_signature", self._timeline_item_signature(item))
 
-    def _sync_timeline_item_widget(self, item: TimelineItem) -> str | None:
+    def _sync_timeline_item_widget(self, item: TimelineItem, *, force_update: bool = False) -> str | None:
         existing = self._timeline_cells.get(item.id)
         old_group = getattr(existing, "timeline_process_group", None) if isinstance(existing, Widget) else None
-        signature = self._timeline_item_signature(item)
+        signature = None if force_update else self._timeline_item_signature(item)
         if isinstance(existing, Widget) and existing.is_mounted:
-            if getattr(existing, "timeline_signature", None) == signature:
+            if not force_update and getattr(existing, "timeline_signature", None) == signature:
                 setattr(existing, "timeline_process_group", item.process_group)
                 return old_group if isinstance(old_group, str) else None
             if self._update_timeline_item_widget(existing, item):
@@ -999,20 +1066,20 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
                 return False
             label = "你" if self.language.is_chinese else "you"
-            text = str(item.content.get("text") or "")
+            text = _timeline_text(item.content.get("text"))
             widget.update(join_lines([Text(f"› {label}", style="bold #7dd3fc"), plain(text)]))
             return True
         if item.kind == "assistant":
             if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
                 return False
-            text = str(item.content.get("text") or "")
+            text = _timeline_text(item.content.get("text"))
             if item.content.get("partial"):
                 widget.update(plain(text, style="#d7e0ea"), copy_text=text)
                 return True
             widget.update(_markdown(text), copy_text=text)
             return True
         if item.kind == "reasoning":
-            text = str(item.content.get("text") or "")
+            text = _timeline_text(item.content.get("text"))
             if item.content.get("partial"):
                 if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
                     return False
@@ -1087,7 +1154,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if item.kind == "compaction":
             if not isinstance(widget, ExpandableTranscriptCell):
                 return False
-            summary_text = str(item.content.get("text") or "").strip()
+            summary_text = _timeline_text(item.content.get("text")).strip()
             if not summary_text:
                 return False
             summary = Text.assemble(
@@ -1217,11 +1284,11 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if item.kind == "user":
             cell = self._append_user(str(item.content.get("text") or ""), before=before)
         elif item.kind == "assistant":
-            text = str(item.content.get("text") or "")
+            text = _timeline_text(item.content.get("text"))
             content = plain(text, style="#d7e0ea") if item.content.get("partial") else _markdown(text)
             cell = self._append_cell(content, "assistant", before=before, copy_text=text)
         elif item.kind == "reasoning":
-            text = str(item.content.get("text") or "")
+            text = _timeline_text(item.content.get("text"))
             if item.content.get("partial"):
                 first = text.strip().splitlines()[0] if text.strip() else ""
                 if len(first) > 120:
@@ -2217,7 +2284,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._sync_transcript_from_timeline()
 
     def _stream_event_needs_throttle(self, event_type: str) -> bool:
-        return event_type in {"assistant.delta", "assistant.reasoning_delta", "tool.delta"}
+        return event_type in {"assistant.delta", "assistant.reasoning_delta", "tool.delta", "tool.partial"}
 
     def _schedule_stream_render(self) -> None:
         if not self.is_mounted:
@@ -2257,7 +2324,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return
         self._stream_status_due = False
         self._last_stream_status_at = monotonic()
-        self._refresh_status()
+        if self.busy:
+            self._refresh_busy_status()
+        else:
+            self._refresh_status()
 
     def _flush_stream_updates(self) -> None:
         if self._stream_render_timer is not None:
@@ -2277,7 +2347,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if self._stream_status_due:
             self._stream_status_due = False
             self._last_stream_status_at = monotonic()
-            self._refresh_status()
+            if self.busy:
+                self._refresh_busy_status()
+            else:
+                self._refresh_status()
 
     def _mark_run_error_state(self, run_state: ThreadRunState, event: dict[str, Any]) -> None:
         retryable = self._is_retryable_error_event(event)
@@ -2379,6 +2452,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._mark_run_error_state(run_state, item)
         if self._is_active_thread(thread_id):
             if self._stream_event_needs_throttle(event_type):
+                self._last_status = run_state.status
                 self._schedule_stream_render()
                 self._schedule_stream_status_refresh()
                 return
@@ -4256,6 +4330,20 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 Text.assemble((self._text("notifications_short"), "dim"), " ", (str(notification_count), "dim"))
             )
 
+    def _refresh_top_bar_elapsed(self) -> None:
+        """Refresh only the top-bar fields that visibly change during ticks."""
+
+        if not self.is_mounted:
+            return
+        elapsed = format_elapsed(self._thread_elapsed_seconds(self.thread_id)) or "0s"
+        try:
+            elapsed_widget = self.query_one("#top-bar-elapsed", Static)
+        except NoMatches:
+            return
+        elapsed_widget.update(
+            Text.assemble((self._text("current_thread_elapsed"), "dim"), " ", (elapsed, "cyan"))
+        )
+
     def _refresh_status(self, state: str | None = None) -> None:
         if state is not None:
             self._last_status = state
@@ -4272,36 +4360,79 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             compact_context = f"{stats.percent}%"
         except ConfigError:
             compact_context = "?"
+        self._status_level_name = level_name
+        self._status_compact_context = compact_context
+        self._status_thread_label = short_thread(self.thread_id)
+        self._status_billing_label = billing_label
         state_text = self._last_status
         if self.busy and state_text == self._text("idle"):
             state_text = self._text("working")
-        spinner = ""
-        elapsed_suffix = ""
-        if self.busy:
-            spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)] + " "
-            elapsed_seconds = _elapsed_between(self._turn_started_at)
-            if elapsed_seconds is None and self._busy_started_at is not None:
-                elapsed_seconds = monotonic() - self._busy_started_at
-            if elapsed_seconds is not None:
-                elapsed = format_elapsed(elapsed_seconds)
-                elapsed_suffix = f" ({elapsed})"
-
-        if self.busy:
-            footer = Text.assemble(
-                (f"{spinner}{state_text}", "cyan"),
-                (elapsed_suffix, "dim"),
-                " ",
-                (f"{level_name} · {compact_context} · {short_thread(self.thread_id)}", "dim"),
-            )
-        else:
-            footer = Text(f"{level_name} · {compact_context} · {short_thread(self.thread_id)}", style="dim")
-        if billing_label:
-            footer.append(" · ", style="dim")
-            footer.append(billing_label, style="dim")
+        footer = self._status_footer(state_text=state_text)
         self._refresh_window_title()
         self._refresh_top_bar()
         try:
             self.query_one("#composer-footer", Static).update(footer)
+        except NoMatches:
+            return
+        self._refresh_pending_images()
+        self._refresh_pending_turns()
+
+    def _status_footer(self, *, state_text: str) -> Text:
+        """Render the footer from cached status metadata.
+
+        Busy spinner ticks happen several times per second; keeping this pure and
+        cache-backed avoids re-reading config, context stats, and thread metadata
+        just to advance the elapsed timer by one frame.
+        """
+
+        level_name = self._status_level_name
+        compact_context = self._status_compact_context
+        thread_label = self._status_thread_label
+        billing_label = self._status_billing_label
+        if self.busy:
+            spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)] + " "
+            elapsed_suffix = ""
+            elapsed_seconds = _elapsed_between(self._turn_started_at)
+            if elapsed_seconds is None and self._busy_started_at is not None:
+                elapsed_seconds = monotonic() - self._busy_started_at
+            if elapsed_seconds is not None:
+                elapsed_suffix = f" ({format_elapsed(elapsed_seconds)})"
+            footer = Text.assemble(
+                (f"{spinner}{state_text}", "cyan"),
+                (elapsed_suffix, "dim"),
+                " ",
+                (f"{level_name} · {compact_context} · {thread_label}", "dim"),
+            )
+        else:
+            footer = Text(f"{level_name} · {compact_context} · {thread_label}", style="dim")
+        if billing_label:
+            footer.append(" · ", style="dim")
+            footer.append(billing_label, style="dim")
+        return footer
+
+    def _refresh_busy_status(self) -> None:
+        """Advance spinner/elapsed UI without the heavyweight status refresh."""
+
+        state_text = self._last_status
+        if state_text == self._text("idle"):
+            state_text = self._text("working")
+        self._apply_window_title()
+        self._refresh_top_bar_elapsed()
+        try:
+            self.query_one("#composer-footer", Static).update(self._status_footer(state_text=state_text))
+        except NoMatches:
+            return
+
+    def _refresh_status_from_cache(self) -> None:
+        """Refresh footer/top-bar chrome without re-reading config or history."""
+
+        state_text = self._last_status
+        if self.busy and state_text == self._text("idle"):
+            state_text = self._text("working")
+        self._apply_window_title()
+        self._refresh_top_bar_elapsed() if self.busy else self._refresh_top_bar()
+        try:
+            self.query_one("#composer-footer", Static).update(self._status_footer(state_text=state_text))
         except NoMatches:
             return
         self._refresh_pending_images()

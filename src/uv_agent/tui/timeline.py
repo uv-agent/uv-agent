@@ -63,6 +63,12 @@ def _response_text(output: list[dict[str, Any]]) -> str:
     )
 
 
+def _content_text(value: object) -> str:
+    if isinstance(value, list):
+        return "".join(str(part) for part in value)
+    return str(value or "")
+
+
 def _call_id(call: dict[str, Any]) -> str:
     return str(call.get("call_id") or "").strip()
 
@@ -147,13 +153,40 @@ class TurnAccumulator:
     turn_id: str
     started_at: str | None = None
     completed_at: str | None = None
-    assistant_buffer: str = ""
     assistant_item_id: str | None = None
-    reasoning_buffer: str = ""
     reasoning_item_id: str | None = None
+    assistant_parts: list[str] = field(default_factory=list)
+    reasoning_parts: list[str] = field(default_factory=list)
     tool_delta_calls: dict[int, dict[str, Any]] = field(default_factory=dict)
     tool_call_ids_by_index: dict[int, str] = field(default_factory=dict)
     pending_stream_retries: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def assistant_buffer(self) -> str:
+        return "".join(self.assistant_parts)
+
+    @assistant_buffer.setter
+    def assistant_buffer(self, value: str) -> None:
+        self.assistant_parts = [value] if value else []
+
+    @property
+    def reasoning_buffer(self) -> str:
+        return "".join(self.reasoning_parts)
+
+    @reasoning_buffer.setter
+    def reasoning_buffer(self, value: str) -> None:
+        self.reasoning_parts = [value] if value else []
+
+    def append_assistant_part(self, text: str) -> None:
+        self.assistant_parts.append(text)
+
+    def append_reasoning_part(self, text: str) -> None:
+        if self.reasoning_parts:
+            self.reasoning_parts.append(text)
+            return
+        stripped = text.lstrip()
+        if stripped:
+            self.reasoning_parts.append(stripped)
 
 
 @dataclass
@@ -311,7 +344,7 @@ class ThreadTimelineState:
                 if call_id:
                     return (item.kind, "call_id", call_id)
         if item.kind in {"user", "assistant", "reasoning"}:
-            text = str(item.content.get("text") or "") if isinstance(item.content, dict) else ""
+            text = _content_text(item.content.get("text")) if isinstance(item.content, dict) else ""
             if text:
                 return (item.kind, "text", text)
         return (item.kind, item.turn_id, json.dumps(item.content, sort_keys=True, default=str))
@@ -780,10 +813,11 @@ class ThreadTimelineState:
     def _apply_assistant_delta(self, acc: TurnAccumulator, text: str) -> None:
         if not text:
             return
-        acc.assistant_buffer += text
-        self._upsert_assistant_item(acc, acc.assistant_buffer, process=False)
+        acc.append_assistant_part(text)
+        text_parts = acc.assistant_parts if len(acc.assistant_parts) > 1 else acc.assistant_buffer
+        self._upsert_assistant_item(acc, text_parts, process=False)
 
-    def _upsert_assistant_item(self, acc: TurnAccumulator, text: str, *, process: bool) -> None:
+    def _upsert_assistant_item(self, acc: TurnAccumulator, text: str | list[str], *, process: bool) -> None:
         if acc.assistant_item_id is None or acc.assistant_item_id not in self.items_by_id:
             suffix = len([item for item in self.items if item.turn_id == acc.turn_id and item.kind == "assistant"])
             acc.assistant_item_id = f"assistant:live:{acc.turn_id}:{suffix}"
@@ -798,13 +832,14 @@ class ThreadTimelineState:
     def _apply_reasoning_delta(self, acc: TurnAccumulator, text: str) -> None:
         if not text:
             return
-        acc.reasoning_buffer = text.lstrip() if not acc.reasoning_buffer else acc.reasoning_buffer + text
+        acc.append_reasoning_part(text)
+        reasoning: str | list[str] = acc.reasoning_parts if len(acc.reasoning_parts) > 1 else acc.reasoning_buffer
         if acc.reasoning_item_id is None or acc.reasoning_item_id not in self.items_by_id:
             acc.reasoning_item_id = f"reasoning:live:{acc.turn_id}"
         self._append_or_update(TimelineItem(
             id=acc.reasoning_item_id,
             kind="reasoning",
-            content={"text": acc.reasoning_buffer, "partial": True},
+            content={"text": reasoning, "partial": True},
             turn_id=acc.turn_id,
             process_group=None,
         ))
