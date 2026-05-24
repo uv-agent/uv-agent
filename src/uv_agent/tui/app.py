@@ -3745,10 +3745,17 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         mode_widget.update(Text.assemble((self._text("mode"), "dim"), " ", (mode, "cyan")))
         if unread:
             notification_widget.update(
-                Text.assemble(("🔔 ", "cyan"), (str(unread), "bold cyan"), (f"/{notification_count}", "dim"))
+                Text.assemble(
+                    (self._text("notifications_short"), "cyan"),
+                    " ",
+                    (str(unread), "bold cyan"),
+                    (f"/{notification_count}", "dim"),
+                )
             )
         else:
-            notification_widget.update(Text.assemble(("🔔 ", "dim"), (str(notification_count), "dim")))
+            notification_widget.update(
+                Text.assemble((self._text("notifications_short"), "dim"), " ", (str(notification_count), "dim"))
+            )
 
     def _refresh_status(self, state: str | None = None) -> None:
         if state is not None:

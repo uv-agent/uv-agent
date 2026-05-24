@@ -337,7 +337,7 @@ ToastRack {{
 #top-bar {{
     height: 1;
     padding: 0 1;
-    background: {t.BG_CANVAS};
+    background: {t.BG_SURFACE};
     color: {t.TEXT_MUTED};
 }}
 
@@ -356,7 +356,7 @@ ToastRack {{
 #top-bar-active:hover,
 #top-bar-completed:hover,
 #top-bar-notifications:hover {{
-    background: {t.BORDER};
+    background: {t.BG_OVERLAY};
     color: #ffffff;
 }}
 
