@@ -7,7 +7,9 @@ to feel at home on Windows, where many coding agents stumble over PowerShell
 quoting, shell semantics, or Unix-first assumptions. Its only external action
 surface is `run_python`: the model submits Python scripts to a managed `uv run`
 runner, and those scripts do the actual work instead of relying on fragile
-shell snippets. Around this `run_python` boundary, uv-agent's context layer
+shell snippets. Installed plugins can extend that runtime with new helpers,
+event subscriptions, and external turn sources without adding extra model tools.
+Around this `run_python` boundary, uv-agent's context layer
 applies Harness Engineering ideas: checkpoint compaction, stable incremental
 updates, protocol-safe interruption handling, and epoch replay keep the model's
 view coherent during long-running work. See
@@ -181,6 +183,10 @@ API keys in environment variables or ignored local config.
     "completion_notification": {
       "enabled": true
     }
+  },
+  "plugins": {
+    "disabled": [],
+    "config": {}
   }
 }
 
@@ -201,6 +207,7 @@ See [configuration](docs/configuration.md) for all supported options and
 - [Full config example](docs/config.example.json)
 - [TUI and slash commands](docs/tui.md)
 - [Runtime and managed scripts](docs/runtime.md)
+- [Plugin system](docs/plugins.md)
 
 ## Core Ideas
 
@@ -209,6 +216,9 @@ See [configuration](docs/configuration.md) for all supported options and
   third-party dependencies to that environment with `add_dependency`.
 - The distributed package includes both `uv_agent` and `uv_agent_runtime`; managed
   scripts import helpers from `uv_agent_runtime`.
+- Installed plugins can register additional `uv_agent_runtime` helpers, subscribe
+  to agent events, and submit turns from external systems while preserving the
+  single `run_python` action boundary.
 - Workspace rules, skills, and MCP declarations are progressively disclosed as
   context. MCP calls happen from Python runtime helpers, not direct model tools.
 - Thread state, run logs, the shared script environment, and attachments live under

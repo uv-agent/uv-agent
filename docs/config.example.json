@@ -114,6 +114,10 @@
       "bell": true
     }
   },
+  "plugins": {
+    "disabled": [],
+    "config": {}
+  },
   "pricing": {
     "currency": "USD",
     "unit": "1M_tokens",

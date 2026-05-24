@@ -6,7 +6,8 @@
 Windows 体验设计，尽量避免许多 coding agent 在 PowerShell 引号、shell 语义、
 Unix-first 假设上经常“水土不服”的问题。它对外只有一个动作面：`run_python`：
 模型把 Python 脚本提交给受管理的 `uv run` runner，再由脚本完成实际工作，而不是
-依赖脆弱的 shell 片段。围绕这个 `run_python` 边界，uv-agent 的上下文层采用
+依赖脆弱的 shell 片段。已安装插件可以在不增加额外模型工具的前提下，为这个 runtime
+扩展新的 helper、事件订阅和外部 turn 入口。围绕这个 `run_python` 边界，uv-agent 的上下文层采用
 Harness Engineering 思路：通过 checkpoint 压缩、稳定的增量更新、协议安全的中断处理
 和 epoch 重放，让模型视角在长程任务中保持一致。见 [上下文管理](#上下文管理)。
 
@@ -176,6 +177,10 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
     "completion_notification": {
       "enabled": true
     }
+  },
+  "plugins": {
+    "disabled": [],
+    "config": {}
   }
 }
 
@@ -195,6 +200,7 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 - [Full config example](docs/config.example.json)
 - [TUI and slash commands](docs/tui.md)
 - [Runtime and managed scripts](docs/runtime.md)
+- [Plugin system](docs/plugins.md)
 
 ## 核心思路
 
@@ -203,6 +209,8 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
   `add_dependency` 添加到这个环境。
 - 发布包同时包含 `uv_agent` 和 `uv_agent_runtime`；受管理脚本从
   `uv_agent_runtime` 导入快捷 helper。
+- 已安装插件可以注册额外的 `uv_agent_runtime` helper、订阅 agent 事件，并从外部系统
+  提交 turn，同时保持单一 `run_python` 动作边界。
 - workspace rules、skills 和 MCP declarations 作为上下文渐进披露。MCP 调用通过
   Python runtime helper 完成，不直接暴露成模型工具。
 - thread 状态、run 日志、共享脚本环境和附件位于

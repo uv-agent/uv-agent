@@ -286,8 +286,34 @@ Completion notification options:
 
 The `/config` panel can edit `runtime.default_level`,
 `runtime.compression.enabled`, `ui.language`, and
-`ui.completion_notification.enabled`. Model, provider, and level definitions are
-edited in JSON.
+`ui.completion_notification.enabled`. Model, provider, level, and plugin settings
+are edited in JSON.
+
+## Plugin Options
+
+Plugins are installed Python packages discovered through the `uv_agent.plugins`
+entry point group. They are enabled by default unless listed in
+`plugins.disabled`.
+
+```json
+{
+  "plugins": {
+    "disabled": ["my-plugin"],
+    "config": {
+      "another-plugin": {
+        "option": "value"
+      }
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `disabled` | list of strings | `[]` | Entry point names of installed plugins that should not be loaded. |
+| `config` | object | `{}` | Per-plugin config objects, keyed by plugin entry point name and passed to `PluginContext.config`. |
+
+See [Plugin system](plugins.md) for the plugin API and examples.
 
 ## Runner Options
 
