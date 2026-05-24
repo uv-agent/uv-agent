@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from uv_agent.attachments import AttachmentStore, image_message_item
 from uv_agent.agent.compaction import (
+    compaction_response_summary_text,
     compaction_summary_item,
     compaction_replacement_input,
     compaction_trigger_item,
@@ -1263,16 +1264,21 @@ class AgentEngine:
         response = await self.model_client.create_response(
             input_items=compact_input,
             level=compact_level,
-            tools=[PYTHON_TOOL],
+            # Compaction is a pure summarization pass. Exposing run_python here
+            # lets tool-capable providers choose a function_call instead of a
+            # summary, which creates an empty checkpoint and a misleading TUI
+            # "conversation compacted" block.
+            tools=[],
             instructions=instructions,
         )
+        summary_text = compaction_response_summary_text(response)
         replacement_input = self._compaction_replacement_input(input_items, response)
         context_state = self._latest_context_state(thread_id)
         self.thread_store.append(
             thread_id,
             "item.compaction",
             turn_id=turn_id,
-            text=response.output_text,
+            text=summary_text,
             output=response.output,
             replacement_input=replacement_input,
             context_state=context_state,
@@ -1289,7 +1295,7 @@ class AgentEngine:
         return CompactionDecision(
             result=CompactionResult(
                 replacement_input=replacement_input,
-                text=response.output_text,
+                text=summary_text,
                 truncated_last_tool_output=truncated_last_tool_output,
             ),
             token_warning_event=token_warning_event,

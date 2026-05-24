@@ -2281,16 +2281,24 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         event: dict[str, Any],
         *,
         before: MountBefore = None,
-    ) -> ExpandableTranscriptCell:
-        """Append an expandable checkpoint cell containing the compaction text."""
+    ) -> ExpandableTranscriptCell | None:
+        """Append an expandable checkpoint cell containing the compaction text.
+
+        Older checkpoints may have been written with an empty summary when a
+        provider unexpectedly answered a compaction request with a tool call.
+        Hiding those avoids showing a misleading "conversation compacted" block
+        whose details contain no actual summary.
+        """
 
         summary_text = str(event.get("text") or "").strip()
+        if not summary_text:
+            return None
         summary = Text.assemble(
             (self._text("compacted"), "dim"),
             " · ",
             (self._text("compacted_summary_hint"), "cyan dim"),
         )
-        details = plain(summary_text or self._text("compacted"))
+        details = plain(summary_text)
         return self._append_expandable_cell(
             summary,
             details,
@@ -2790,7 +2798,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         elif event_type == "turn.stream_retry":
             mounted.append(self._append_stream_retry(event, before=before))
         elif event_type == "item.compaction":
-            mounted.append(self._append_compaction_cell(event, before=before))
+            cell = self._append_compaction_cell(event, before=before)
+            if cell is not None:
+                mounted.append(cell)
         elif event_type == "thread.token_estimation_warning":
             mounted.append(self._append_token_estimation_warning(event, before=before, flash=False))
         elif event_type == "thread.model_switch_warning":

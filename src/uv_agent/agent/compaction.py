@@ -31,9 +31,31 @@ def compaction_replacement_input(
     response: ModelResponse,
 ) -> list[dict[str, Any]]:
     replacement = retained_history_items(retained_user_messages_after_compaction(input_items))
-    summary = response.output_text.strip() or "(no summary available)"
+    summary = compaction_response_summary_text(response).strip() or "(no summary available)"
     replacement.append(compaction_summary_item(summary))
     return replacement
+
+
+def compaction_response_summary_text(response: ModelResponse) -> str:
+    """Return the user-visible summary from a compaction model response.
+
+    Some Responses-compatible providers may ignore ``tool_choice=none`` or still
+    emit tool calls when tools are present. In that case ``output_text`` is empty
+    even though earlier message items may contain useful summary text. Treat the
+    message text as the compaction result and ignore function_call items so the
+    checkpoint does not become an empty "conversation compacted" block.
+    """
+
+    if response.output_text.strip():
+        return response.output_text
+    parts: list[str] = []
+    for item in response.output:
+        if item.get("type") != "message":
+            continue
+        text = message_item_text(item)
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
 
 
 def compaction_summary_item(summary: str) -> dict[str, Any]:

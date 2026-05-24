@@ -155,6 +155,16 @@ def test_thread_digest_starts_after_latest_compaction_and_hides_tools(tmp_path: 
     ]
 
 
+def test_thread_digest_omits_empty_compaction_summary_item(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Empty compact")
+    store.append(thread_id, "item.compaction", turn_id="t1", text="")
+
+    digest = store.thread_digest(thread_id, since_last_compaction=False)
+
+    assert digest["items"] == []
+
+
 def test_thread_digest_includes_turn_error(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Errored")

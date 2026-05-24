@@ -200,7 +200,8 @@ def _digest_items(events: list[dict[str, Any]], *, include_tools: bool) -> list[
                 items.append({"role": "assistant", "text": text})
         elif event_type == "item.compaction":
             text = str(event.get("text") or "")
-            items.append({"role": "summary", "text": text})
+            if text:
+                items.append({"role": "summary", "text": text})
         elif event_type == "turn.interrupted":
             items.append({"role": "system", "text": f"turn interrupted: {event.get('reason') or 'user_interrupt'}"})
         elif event_type == "turn.error":

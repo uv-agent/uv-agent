@@ -2263,6 +2263,37 @@ async def test_tui_compaction_completion_folds_prior_process_and_shows_summary(
 
 
 @pytest.mark.asyncio
+async def test_tui_ignores_compaction_event_without_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app.thread_id = "thread_empty_compact"
+        run_state = app._run_state_for_thread(app.thread_id)
+        await app._handle_thread_event(
+            app.thread_id,
+            "compaction.completed",
+            {"type": "compaction.completed", "turn_id": "turn_1", "text": ""},
+            run_state,
+        )
+        await pilot.pause()
+
+        compaction_cells = [
+            child
+            for child in app.query_one("#transcript", TranscriptScroll).children
+            if isinstance(child, ExpandableTranscriptCell)
+            and child.detail_title == "compaction_summary"
+        ]
+        assert compaction_cells == []
+
+
+@pytest.mark.asyncio
 async def test_tui_process_fold_shows_persisted_turn_elapsed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2457,6 +2488,44 @@ async def test_tui_thread_resume_pages_older_history(
         )
         assert "old segment" in transcript_text
         assert app._history_has_more is False
+
+
+@pytest.mark.asyncio
+async def test_tui_thread_history_ignores_compaction_event_without_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Empty compacted work")
+    engine.thread_store.append(
+        thread_id,
+        "item.user",
+        turn_id="turn_1",
+        item={
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "before empty summary"}],
+        },
+    )
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="turn_1", text="")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app.thread_id = thread_id
+        app._reset_transcript(show_empty=False)
+        app._render_thread_history(thread_id)
+        await pilot.pause()
+
+        compaction_cells = [
+            child
+            for child in app.query_one("#transcript", TranscriptScroll).children
+            if isinstance(child, ExpandableTranscriptCell)
+            and child.detail_title == "compaction_summary"
+        ]
+        assert compaction_cells == []
 
 
 @pytest.mark.asyncio

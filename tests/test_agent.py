@@ -18,6 +18,7 @@ from uv_agent.agent import (
     tool_attachment_context_items,
     usage_token_count,
 )
+from uv_agent.agent.compaction import compaction_response_summary_text
 from uv_agent.billing import billing_charge_for_usage, billing_token_breakdown, format_billing_total
 from uv_agent.config import (
     AppConfig,
@@ -494,12 +495,36 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
     compaction = next(event for event in stored if event["type"] == "item.compaction")
     assert compaction["replacement_input"]
     assert client.requests[1]["level"] == "small"
-    assert client.requests[1]["tools"] == [PYTHON_TOOL]
+    assert client.requests[1]["tools"] == []
     assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
     assert "context_compaction_request" in str(client.requests[1]["input"][-1])
     assert "CONTEXT CHECKPOINT COMPACTION" in str(client.requests[1]["input"][-1])
     assert "Target length" not in str(client.requests[1]["input"][-1])
     assert "Continue from this compacted context" in str(compaction["replacement_input"])
+
+
+def test_compaction_summary_falls_back_to_message_text_when_tool_call_is_present() -> None:
+    response = parse_responses_response(
+        {
+            "id": "resp_compact",
+            "output_text": "",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "summary before stray tool"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_unwanted",
+                    "name": "run_python",
+                    "arguments": "{}",
+                },
+            ],
+        }
+    )
+
+    assert compaction_response_summary_text(response) == "summary before stray tool"
 
 
 @pytest.mark.asyncio
