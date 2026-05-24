@@ -108,7 +108,6 @@ class McpClient:
                 self._ready.put_nowait(exc)
 
     async def _worker(self) -> None:
-        import anyio
         from anyio import to_thread
 
         async with AsyncExitStack() as stack:
