@@ -792,6 +792,94 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             transcript = self.query_one("#transcript", TranscriptScroll)
         except NoMatches:
             return
+
+        # Full rebuilds are still the clearest path for history loads, thread
+        # switches, and structural changes such as inserting/removing old items.
+        # The hot live path below handles append/update-only streams without
+        # tearing down the whole widget tree on every token/tool partial.
+        if not restore_view and self._can_patch_timeline_incrementally(timeline):
+            self._patch_transcript_from_timeline(timeline, transcript)
+            return
+
+        self._rebuild_transcript_from_timeline(
+            timeline,
+            transcript,
+            restore_view=restore_view,
+        )
+
+    def _can_patch_timeline_incrementally(self, timeline: ThreadTimelineState) -> bool:
+        if self._history_more_cell is not None:
+            return False
+        item_ids = self._timeline_cell_item_ids()
+        if len(timeline.items) < len(item_ids):
+            return False
+        timeline_ids = [item.id for item in timeline.items]
+        if item_ids != timeline_ids[:len(item_ids)]:
+            return False
+        if len(set(item_ids)) != len(item_ids):
+            return False
+        for item_id in item_ids:
+            cell = self._timeline_cells.get(item_id)
+            if not isinstance(cell, Widget) or not cell.is_mounted:
+                return False
+        return True
+
+    def _patch_transcript_from_timeline(
+        self,
+        timeline: ThreadTimelineState,
+        transcript: TranscriptScroll,
+    ) -> None:
+        follow_tail = transcript.follow_tail
+        previous_scroll_y = transcript.scroll_y
+        group_order: list[str] = []
+        changed_groups: set[str] = set()
+
+        rendered_ids: set[str] = set()
+        for item in timeline.items:
+            rendered_ids.add(item.id)
+            old_group = self._sync_timeline_item_widget(item)
+            if item.process_group:
+                if item.process_group not in group_order:
+                    group_order.append(item.process_group)
+                changed_groups.add(item.process_group)
+            if old_group and old_group != item.process_group:
+                changed_groups.add(old_group)
+
+        stale_ids = [
+            item_id
+            for item_id in self._timeline_cell_item_ids()
+            if item_id not in rendered_ids
+        ]
+        if stale_ids:
+            self._rebuild_transcript_from_timeline(timeline, transcript)
+            return
+
+        for group_id in group_order:
+            if group_id in changed_groups or f"process_fold:{group_id}" not in self._timeline_cells:
+                self._refresh_timeline_process_fold(timeline, group_id)
+
+        if timeline.items:
+            self._mark_transcript_content()
+        else:
+            self._reset_transcript(show_empty=True)
+            return
+        self._history_before_event_id = timeline.loaded_start_event_id
+        self._history_has_more = timeline.has_older
+        self._history_more_cell = None
+        transcript.follow_tail = follow_tail
+        if follow_tail:
+            self._scroll_end()
+        else:
+            transcript.scroll_y = transcript.validate_scroll_y(previous_scroll_y)
+            transcript._recompute_near_bottom()
+
+    def _rebuild_transcript_from_timeline(
+        self,
+        timeline: ThreadTimelineState,
+        transcript: TranscriptScroll,
+        *,
+        restore_view: bool = False,
+    ) -> None:
         follow_tail = transcript.follow_tail
         previous_scroll_y = transcript.scroll_y
         transcript.query("*").remove()
@@ -809,8 +897,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._history_before_event_id = timeline.loaded_start_event_id
         self._history_has_more = timeline.has_older
         self._history_more_cell = None
-        if timeline.has_older or timeline.items:
-            marker = LoadOlderHistoryCell(has_more=timeline.has_older, classes="event")
+        if timeline.has_older:
+            marker = LoadOlderHistoryCell(has_more=True, classes="event")
             transcript.mount(marker)
             self._history_more_cell = marker
         group_order: list[str] = []
@@ -818,12 +906,17 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             if item.process_group and item.process_group not in group_order:
                 group_order.append(item.process_group)
             self._mount_timeline_item(item)
-        fold_state = self._active_fold_state()
+        # Saved view state is a one-shot restore concern.  During normal live
+        # updates the timeline group is the source of truth; reapplying an older
+        # ThreadViewState on every sync makes a user-toggled fold snap back on
+        # the next stream event or queued-turn refresh.
+        fold_state = self._active_fold_state() if restore_view else {}
         for group_id in group_order:
             group = timeline.process_groups.get(group_id)
             if group is None or not group.item_ids:
                 continue
-            group.collapsed = fold_state.get(group.id, group.collapsed)
+            if restore_view:
+                group.collapsed = fold_state.get(group.id, group.collapsed)
             self._mount_timeline_process_fold(timeline, group_id)
         if timeline.items:
             self._mark_transcript_content()
@@ -840,36 +933,258 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             transcript.scroll_y = transcript.validate_scroll_y(previous_scroll_y)
             transcript._recompute_near_bottom()
 
-    def _mount_timeline_process_fold(self, timeline: ThreadTimelineState, group_id: str) -> FoldedProcessCell | None:
+    def _timeline_cell_item_ids(self) -> list[str]:
+        return [
+            item_id
+            for item_id in self._timeline_cells
+            if not item_id.startswith("process_fold:")
+        ]
+
+    def _timeline_item_signature(self, item: TimelineItem) -> tuple[Any, ...]:
+        return (
+            item.kind,
+            item.process_group,
+            json.dumps(item.content, sort_keys=True, default=str),
+        )
+
+    def _set_timeline_widget_metadata(self, widget: Widget, item: TimelineItem) -> None:
+        self._timeline_cells[item.id] = widget
+        self._timeline_item_ids[widget] = item.id
+        setattr(widget, "timeline_process_group", item.process_group)
+        setattr(widget, "timeline_signature", self._timeline_item_signature(item))
+
+    def _sync_timeline_item_widget(self, item: TimelineItem) -> str | None:
+        existing = self._timeline_cells.get(item.id)
+        old_group = getattr(existing, "timeline_process_group", None) if isinstance(existing, Widget) else None
+        signature = self._timeline_item_signature(item)
+        if isinstance(existing, Widget) and existing.is_mounted:
+            if getattr(existing, "timeline_signature", None) == signature:
+                setattr(existing, "timeline_process_group", item.process_group)
+                return old_group if isinstance(old_group, str) else None
+            if self._update_timeline_item_widget(existing, item):
+                self._set_timeline_widget_metadata(existing, item)
+                return old_group if isinstance(old_group, str) else None
+            replacement = self._mount_timeline_item(item, before=existing)
+            self._timeline_item_ids.pop(existing, None)
+            existing.remove()
+            if replacement is None:
+                self._timeline_cells.pop(item.id, None)
+            return old_group if isinstance(old_group, str) else None
+        if isinstance(existing, Widget):
+            self._timeline_item_ids.pop(existing, None)
+        self._timeline_cells.pop(item.id, None)
+        self._mount_timeline_item(item)
+        return old_group if isinstance(old_group, str) else None
+
+    def _update_timeline_item_widget(self, widget: Widget, item: TimelineItem) -> bool:
+        if item.kind == "user":
+            if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
+                return False
+            label = "你" if self.language.is_chinese else "you"
+            text = str(item.content.get("text") or "")
+            widget.update(join_lines([Text(f"› {label}", style="bold #7dd3fc"), plain(text)]))
+            return True
+        if item.kind == "assistant":
+            if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
+                return False
+            text = str(item.content.get("text") or "")
+            widget.update(_markdown(text), copy_text=text)
+            return True
+        if item.kind == "reasoning":
+            text = str(item.content.get("text") or "")
+            if item.content.get("partial"):
+                if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
+                    return False
+                first = text.strip().splitlines()[0] if text.strip() else ""
+                if len(first) > 120:
+                    first = first[:117].rstrip() + "..."
+                widget.update(Text.assemble(
+                    (self._text("thinking"), "dim italic"),
+                    "  ",
+                    (first, "italic #a3b1c2"),
+                ))
+                return True
+            if not isinstance(widget, ExpandableTranscriptCell):
+                return False
+            stripped = text.strip()
+            if not stripped:
+                return False
+            summary, details = self._reasoning_markup(stripped)
+            widget.set_details(summary, details)
+            return True
+        if item.kind == "tool_call":
+            if not isinstance(widget, ExpandableTranscriptCell):
+                return False
+            call = dict(item.content.get("call") or {})
+            status = str(item.content.get("status") or "called")
+            status_label = str(
+                call.get("_status_label")
+                or (self._text("python_called") if status == "called" else self._text("python_running"))
+            )
+            widget.set_details(
+                tool_call_summary_markup({**call, "_status_label": status_label}),
+                tool_call_detail_highlight_markup(call),
+            )
+            if status == "called":
+                if widget.has_class("tool_pending"):
+                    widget.remove_class("tool_pending")
+                if not widget.has_class("event"):
+                    widget.add_class("event")
+            else:
+                if widget.has_class("event"):
+                    widget.remove_class("event")
+                if not widget.has_class("tool_pending"):
+                    widget.add_class("tool_pending")
+            return True
+        if item.kind == "tool_result":
+            if not isinstance(widget, ExpandableTranscriptCell):
+                return False
+            payload = dict(item.content.get("payload") or {})
+            widget.set_details(tool_timeline_markup(payload), tool_detail_markup(payload))
+            widget.tool_payload = payload
+            self._last_tool_payload = payload
+            return True
+        if item.kind == "image":
+            if not isinstance(widget, ImageAttachmentCell):
+                return False
+            widget.attachment = dict(item.content.get("attachment") or {})
+            widget._refresh_content()
+            return True
+        if item.kind == "compaction":
+            if not isinstance(widget, ExpandableTranscriptCell):
+                return False
+            summary_text = str(item.content.get("text") or "").strip()
+            if not summary_text:
+                return False
+            summary = Text.assemble(
+                (self._text("compacted"), "dim"),
+                " · ",
+                (self._text("compacted_summary_hint"), "cyan dim"),
+            )
+            widget.detail_title = "compaction_summary"
+            widget.detail_hint = "compaction_summary_hint"
+            widget.set_details(summary, plain(summary_text))
+            self._process_anchor_cell = widget
+            return True
+        if item.kind == "warning":
+            if not isinstance(widget, TranscriptCell) or isinstance(widget, FoldedProcessCell):
+                return False
+            event = dict(item.content.get("event") or {})
+            if item.content.get("warning_kind") == "model_switch":
+                message = str(event.get("message") or self._text("model_switch_warning"))
+                from_level = str(event.get("from_level") or "")
+                to_level = str(event.get("to_level") or "")
+                content = Text(message, style="yellow")
+                if from_level or to_level:
+                    content.append("\n")
+                    content.append(f"{from_level or '?'} -> {to_level or '?'}", style="dim")
+                widget.update(content, copy_text=message)
+            else:
+                message = str(event.get("message") or self._text("token_estimation_warning"))
+                widget.update(Text.assemble(("⚠ ", "yellow"), (message, "yellow")), copy_text=message)
+            return True
+        if item.kind == "error":
+            if not isinstance(widget, TranscriptCell) or isinstance(widget, FoldedProcessCell):
+                return False
+            event = dict(item.content.get("event") or {})
+            error_type = str(event.get("error_type") or "Turn error")
+            message = str(event.get("message") or "The turn stopped before producing a final response.")
+            retryable = self._is_retryable_error_event(event)
+            hint = self._text("retry_network_error_hint") if retryable else self._text("thread_stopped_after_error")
+            widget.update(
+                join_lines([Text.assemble((error_type, "bold red"), " ", message), plain(hint, style="dim")]),
+                copy_text=f"{error_type}: {message}\n{hint}",
+            )
+            return True
+        if item.kind == "stream_retry":
+            if not isinstance(widget, TranscriptCell) or isinstance(widget, FoldedProcessCell):
+                return False
+            event = dict(item.content.get("event") or {})
+            attempt = event.get("attempt")
+            max_attempts = event.get("max_attempts")
+            delay_s = event.get("delay_s")
+            error_type = str(event.get("error_type") or "stream")
+            try:
+                if delay_s is None:
+                    raise TypeError("delay_s is missing")
+                delay_text = f"{float(delay_s):.1f}s"
+            except (TypeError, ValueError):
+                delay_text = "?s"
+            widget.update(plain(
+                f"⟳ stream empty, retrying {attempt or '?'}/{max_attempts or '?'} "
+                f"in {delay_text} ({error_type})",
+                style="dim",
+            ))
+            return True
+        if item.kind == "queued":
+            if not isinstance(widget, TranscriptCell) or isinstance(widget, FoldedProcessCell):
+                return False
+            widget.update(self._queued_turn_markup(
+                str(item.content.get("prompt") or ""),
+                list(item.content.get("image_paths") or []),
+            ))
+            return True
+        return False
+
+    def _timeline_process_cells(self, timeline: ThreadTimelineState, group_id: str) -> list[TranscriptCell]:
         group = timeline.process_groups.get(group_id)
         if group is None or not group.item_ids:
-            return None
-        cells = [
-            self._timeline_cells[item_id]
-            for item_id in group.item_ids
-            if isinstance(self._timeline_cells.get(item_id), TranscriptCell)
-        ]
+            return []
+        process_cells: list[TranscriptCell] = []
         seen: set[Widget] = set()
-        process_cells = []
-        for cell in cells:
-            if not isinstance(cell, TranscriptCell) or cell in seen:
+        for item_id in group.item_ids:
+            cell = self._timeline_cells.get(item_id)
+            if not isinstance(cell, TranscriptCell) or isinstance(cell, FoldedProcessCell):
+                continue
+            if cell in seen:
                 continue
             seen.add(cell)
             process_cells.append(cell)
-        if not process_cells:
+        return process_cells
+
+    def _mount_timeline_process_fold(self, timeline: ThreadTimelineState, group_id: str) -> FoldedProcessCell | None:
+        group = timeline.process_groups.get(group_id)
+        process_cells = self._timeline_process_cells(timeline, group_id)
+        if group is None or not process_cells:
             return None
         elapsed_label = self._process_elapsed_label(started_at=group.started_at, completed_at=group.completed_at)
-        fold = self._append_process_fold_cell(process_cells, collapsed=group.collapsed, elapsed_label=elapsed_label)
-        setattr(fold, "timeline_group_id", group_id)
+        fold = self._append_process_fold_cell(
+            process_cells,
+            collapsed=group.collapsed,
+            elapsed_label=elapsed_label,
+            timeline_group_id=group_id,
+        )
+        self._timeline_cells[f"process_fold:{group_id}"] = fold
+        self._timeline_item_ids[fold] = f"process_fold:{group_id}"
         return fold
 
-    def _mount_timeline_item(self, item: TimelineItem) -> Widget | None:
+    def _refresh_timeline_process_fold(self, timeline: ThreadTimelineState, group_id: str) -> None:
+        group = timeline.process_groups.get(group_id)
+        key = f"process_fold:{group_id}"
+        existing = self._timeline_cells.get(key)
+        process_cells = self._timeline_process_cells(timeline, group_id)
+        if group is None or not process_cells:
+            if isinstance(existing, Widget):
+                existing.remove()
+                self._timeline_item_ids.pop(existing, None)
+            self._timeline_cells.pop(key, None)
+            return
+        elapsed_label = self._process_elapsed_label(started_at=group.started_at, completed_at=group.completed_at)
+        if isinstance(existing, FoldedProcessCell) and existing.is_mounted:
+            existing.set_cells(process_cells)
+            existing.set_elapsed_label(elapsed_label)
+            if existing.collapsed != group.collapsed:
+                existing.set_collapsed(group.collapsed)
+            return
+        self._mount_timeline_process_fold(timeline, group_id)
+
+    def _mount_timeline_item(self, item: TimelineItem, *, before: MountBefore = None) -> Widget | None:
         cell: Widget | None = None
         if item.kind == "user":
-            cell = self._append_user(str(item.content.get("text") or ""))
+            cell = self._append_user(str(item.content.get("text") or ""), before=before)
         elif item.kind == "assistant":
             text = str(item.content.get("text") or "")
-            cell = self._append_cell(_markdown(text), "assistant", copy_text=text)
+            cell = self._append_cell(_markdown(text), "assistant", before=before, copy_text=text)
         elif item.kind == "reasoning":
             text = str(item.content.get("text") or "")
             if item.content.get("partial"):
@@ -883,37 +1198,38 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                         (first, "italic #a3b1c2"),
                     ),
                     "reasoning",
+                    before=before,
                 )
             else:
-                cell = self._append_reasoning_history(text)
+                cell = self._append_reasoning_history(text, before=before)
         elif item.kind == "tool_call":
             call = dict(item.content.get("call") or {})
             status = str(item.content.get("status") or "called")
             status_label = self._text("python_called") if status == "called" else self._text("python_running")
-            cell = self._append_tool_call_history({**call, "_status_label": status_label})
+            cell = self._append_tool_call_history({**call, "_status_label": status_label}, before=before)
             if status != "called" and isinstance(cell, TranscriptCell):
                 cell.remove_class("event")
                 cell.add_class("tool_pending")
         elif item.kind == "tool_result":
             payload = dict(item.content.get("payload") or {})
-            cell = self._append_expandable_cell(tool_timeline_markup(payload), tool_detail_markup(payload), "event")
+            cell = self._append_expandable_cell(tool_timeline_markup(payload), tool_detail_markup(payload), "event", before=before)
             cell.tool_payload = payload
         elif item.kind == "image":
-            cell = self._append_image_attachment_cell(dict(item.content.get("attachment") or {}))
+            cell = self._append_image_attachment_cell(dict(item.content.get("attachment") or {}), before=before)
         elif item.kind == "compaction":
-            cell = self._append_compaction_cell(dict(item.content.get("event") or {}))
+            cell = self._append_compaction_cell(dict(item.content.get("event") or {}), before=before)
             if isinstance(cell, TranscriptCell):
                 self._process_anchor_cell = cell
         elif item.kind == "warning":
             event = dict(item.content.get("event") or {})
             if item.content.get("warning_kind") == "model_switch":
-                cell = self._append_model_switch_warning_cell(event)
+                cell = self._append_model_switch_warning_cell(event, before=before)
             else:
-                cell = self._append_token_estimation_warning(event, flash=False)
+                cell = self._append_token_estimation_warning(event, before=before, flash=False)
         elif item.kind == "error":
-            cell = self._append_turn_error(dict(item.content.get("event") or {}))
+            cell = self._append_turn_error(dict(item.content.get("event") or {}), before=before)
         elif item.kind == "stream_retry":
-            cell = self._append_stream_retry(dict(item.content.get("event") or {}))
+            cell = self._append_stream_retry(dict(item.content.get("event") or {}), before=before)
         elif item.kind == "queued":
             cell = self._append_cell(
                 self._queued_turn_markup(
@@ -921,10 +1237,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                     list(item.content.get("image_paths") or []),
                 ),
                 "event",
+                before=before,
             )
         if cell is not None:
-            self._timeline_cells[item.id] = cell
-            self._timeline_item_ids[cell] = item.id
+            self._set_timeline_widget_metadata(cell, item)
         return cell
 
     def _commands(self) -> list[CommandSpec]:
@@ -1900,6 +2216,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         run_state: ThreadRunState,
     ) -> None:
         self._update_turn_timestamps(item, run_state)
+        if event_type == "assistant.reasoning_absent":
+            self._reasoning_cell = None
+            self._reasoning_buffer = ""
         if event_type == "model.stream_retry":
             self._defer_stream_retry_event(run_state, item)
             run_state.status = self._text("working")
@@ -2322,9 +2641,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if timeline is not None:
             timeline.seed_assistant_delta(text)
             self._sync_transcript_from_timeline()
-            cell = self._timeline_cells.get("assistant:live:manual:0")
-            self._assistant_cell = cell if isinstance(cell, TranscriptCell) else None
             acc = timeline.active_turns.get("manual")
+            cell = self._timeline_cells.get(acc.assistant_item_id or "") if acc is not None else None
+            self._assistant_cell = cell if isinstance(cell, TranscriptCell) else None
             self._assistant_buffer = acc.assistant_buffer if acc is not None else self._assistant_buffer + text
             return
         self._assistant_buffer += text
@@ -2443,6 +2762,11 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             group = timeline.process_groups.get(group_id)
             if group is not None:
                 group.collapsed = collapsed
+            if self.thread_id and self.thread_id in self._thread_view_states:
+                # Keep saved per-thread UI state in step with manual toggles so
+                # a later restore or full transcript sync cannot resurrect an
+                # older fold value.
+                self._thread_view_states[self.thread_id].fold_collapsed[group_id] = collapsed
 
     def _replace_process_cell(self, old_cell: TranscriptCell, new_cell: TranscriptCell) -> None:
         self._process_cells = [
@@ -2537,6 +2861,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         before: MountBefore = None,
         after: TranscriptCell | None = None,
         elapsed_label: str | None = None,
+        timeline_group_id: str | None = None,
     ) -> FoldedProcessCell:
         self._mark_transcript_content()
         insert_before = before
@@ -2550,6 +2875,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             elapsed_label=elapsed_label if elapsed_label is not None else self._process_elapsed_label(),
             classes="process_fold",
         )
+        if timeline_group_id:
+            setattr(cell, "timeline_group_id", timeline_group_id)
         self.query_one("#transcript", VerticalScroll).mount(cell, before=insert_before)
         self._process_fold_cell = cell
         self._scroll_end()
