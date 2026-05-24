@@ -139,8 +139,22 @@ class ThreadStore:
         self._held_thread_locks: dict[str, str] = {}
         self._history_segment_cache: dict[tuple[Any, ...], ThreadHistorySegment] = {}
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._remove_empty_legacy_thread_dirs()
         with self._connect():
             pass
+
+    def _remove_empty_legacy_thread_dirs(self) -> None:
+        """Remove obsolete empty JSONL directories left by pre-SQLite stores."""
+
+        for path in (self.threads_dir, self.subthreads_dir):
+            try:
+                path.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # Preserve non-empty directories so legacy JSONL history is not
+                # discarded implicitly during startup.
+                pass
 
     def create_thread(
         self,

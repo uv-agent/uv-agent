@@ -381,3 +381,27 @@ def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -
     assert [thread["thread_id"] for thread in subthreads] == [child]
     assert subthreads[0]["kind"] == "subagent"
     assert subthreads[0]["parent_turn_id"] == "turn_1"
+
+
+def test_store_removes_empty_legacy_jsonl_directories(tmp_path: Path) -> None:
+    (tmp_path / "threads").mkdir()
+    (tmp_path / "subthreads").mkdir()
+
+    ThreadStore(tmp_path)
+
+    assert not (tmp_path / "threads").exists()
+    assert not (tmp_path / "subthreads").exists()
+
+
+def test_store_preserves_non_empty_legacy_jsonl_directories(tmp_path: Path) -> None:
+    threads_dir = tmp_path / "threads"
+    subthreads_dir = tmp_path / "subthreads"
+    threads_dir.mkdir()
+    subthreads_dir.mkdir()
+    (threads_dir / "legacy.jsonl").write_text("{}\n", encoding="utf-8")
+    (subthreads_dir / "legacy.jsonl").write_text("{}\n", encoding="utf-8")
+
+    ThreadStore(tmp_path)
+
+    assert (threads_dir / "legacy.jsonl").exists()
+    assert (subthreads_dir / "legacy.jsonl").exists()
