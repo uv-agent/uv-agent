@@ -140,5 +140,10 @@ async def _ask(
                 elif stream:
                     print()
                 print(f"[thread] {short_thread(event['thread_id'])}", file=sys.stderr)
+            elif event_type == "turn.error":
+                message = str(event.get("message") or "turn failed")
+                error_type = str(event.get("error_type") or "TurnError")
+                print(f"[{error_type}] {message}", file=sys.stderr)
+                raise SystemExit(1)
     finally:
         await engine.aclose()

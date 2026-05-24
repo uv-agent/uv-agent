@@ -23,6 +23,7 @@ class SubagentResult:
     returncode: int
     stdout: str
     stderr: str
+    timed_out: bool = False
     thread_id: str | None = None
 
     @property
@@ -63,6 +64,7 @@ def ask(
             returncode=2,
             stdout="",
             stderr=NESTED_ASK_BLOCKED_MESSAGE,
+            timed_out=False,
             thread_id=None,
         )
         if check:
@@ -85,6 +87,11 @@ def ask(
             args.extend(["--parent-turn", parent_turn_id])
         if parent_run_id:
             args.extend(["--parent-run", parent_run_id])
+    if using_default_executable:
+        # ``ask`` is consumed programmatically by the parent agent. Capturing
+        # only the completed answer avoids mistaking streamed pre-tool narration
+        # for a final subagent result when a timeout or provider error happens.
+        args.append("--no-stream")
     emit_event(
         "subagent.started",
         level=selected_level,
@@ -110,6 +117,7 @@ def ask(
         "subagent.completed",
         level=selected_level,
         returncode=result.returncode,
+        timed_out=result.timed_out,
         thread_id=thread_id,
         summary=result.stdout.strip()[:500],
     )
@@ -118,6 +126,7 @@ def ask(
         returncode=result.returncode,
         stdout=result.stdout,
         stderr=result.stderr,
+        timed_out=result.timed_out,
         thread_id=thread_id,
     )
     if check:

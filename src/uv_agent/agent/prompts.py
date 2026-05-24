@@ -188,7 +188,7 @@ enter_dir("src")
 from uv_agent_runtime import ask
 
 # ask(prompt: str, *, level=None, model_level=None, cwd=None, env=None, executable=None,
-#     timeout_s=300, check=False, retain=True) -> SubagentResult  # .text, .stdout, .stderr, .thread_id, .returncode, .raise_for_error()
+#     timeout_s=300, check=False, retain=True) -> SubagentResult  # .text, .stdout, .stderr, .thread_id, .returncode, .timed_out, .raise_for_error()
 result = ask("Inspect parser tests and summarize likely failures", check=True, timeout_s=300)
 print(result.text[:2000])
 ]]></example>

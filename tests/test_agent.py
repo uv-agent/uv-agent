@@ -1752,6 +1752,33 @@ async def test_agent_persists_model_stream_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cli_ask_exits_nonzero_on_turn_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from uv_agent import cli
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = AgentEngine(
+        config=make_test_config(project_root),
+        model_client=FailingStreamClient(RuntimeError("provider exploded")),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=RunnerConfig()),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    monkeypatch.setattr("uv_agent.app_factory.create_engine", lambda *_args, **_kwargs: engine)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await cli._ask("try provider", None, None, stream=False, project_state_dir=tmp_path / "state")
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert "[RuntimeError] provider exploded" in captured.err
+
+
+@pytest.mark.asyncio
 async def test_agent_marks_provider_network_errors_retryable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

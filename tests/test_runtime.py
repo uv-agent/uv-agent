@@ -581,6 +581,19 @@ def test_runtime_subagent_ask_with_custom_executable() -> None:
     )
 
     assert result.text == "ignored"
+    assert result.timed_out is False
+
+
+def test_runtime_subagent_ask_exposes_timeout() -> None:
+    result = ask(
+        "ignored",
+        executable=[sys.executable, "-c", "import time; time.sleep(5)"],
+        timeout_s=0.1,
+    )
+
+    assert result.timed_out is True
+    assert result.returncode != 0
+    assert "timed_out=True" in repr(result)
 
 
 def test_runtime_subagent_accepts_model_level_alias() -> None:
@@ -592,6 +605,25 @@ def test_runtime_subagent_accepts_model_level_alias() -> None:
     )
 
     assert "--level small ask ignored" in result.text
+
+
+def test_runtime_subagent_default_executable_disables_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run_process_text(args: list[str], **kwargs: Any) -> CommandTextResult:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return CommandTextResult(args=args, returncode=0, stdout="final\n", stderr="[subagent-thread] thr_child\n")
+
+    monkeypatch.setattr("uv_agent_runtime.subagent.run_process_text", fake_run_process_text)
+
+    result = ask("inspect", timeout_s=12, retain=False)
+
+    assert result.text == "final"
+    assert result.thread_id == "thr_child"
+    assert "--no-stream" in captured["args"]
+    assert captured["args"].index("--no-stream") < captured["args"].index("ask")
+    assert captured["kwargs"]["timeout_s"] == 12
 
 
 def test_runtime_subagent_ask_uses_temporary_project_state_without_host_state() -> None:
