@@ -6,7 +6,11 @@ from typing import Any
 from uv_agent.context import estimate_tokens
 from uv_agent.agent.context_builder import xml_text
 from uv_agent.agent.messages import message_item, message_item_text
-from uv_agent.agent.prompts import COMPACTED_CONTEXT_CONTINUATION, COMPACTION_SUMMARIZATION_PROMPT
+from uv_agent.agent.prompts import (
+    COMPACTED_CONTEXT_CONTINUATION,
+    COMPACTION_SUMMARIZATION_PROMPT,
+    POST_TOOL_COMPACTION_BRIDGE,
+)
 from uv_agent.model.types import ModelResponse
 
 COMPACTION_USER_MESSAGE_MAX_TOKENS = 20_000
@@ -187,7 +191,7 @@ def retain_item_after_compaction(item: dict[str, Any]) -> bool:
     if "<retained_history" in text:
         return False
     if item.get("role") == "assistant":
-        return "Context is being compacted before the assistant continues" in text
+        return POST_TOOL_COMPACTION_BRIDGE in text
     return not (
         "<runtime_environment>" in text
         or "<model_levels>" in text

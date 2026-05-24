@@ -61,9 +61,10 @@ TOOL_ATTACHMENT_CONTEXT_BRIDGE = (
     "is provided in the next user message."
 )
 POST_TOOL_COMPACTION_BRIDGE = (
-    "Tool results have been received. Context is being compacted before the "
-    "assistant continues. Continue from the compacted summary and preserve the "
-    "tool results accurately."
+    "I have received the tool results. When the next user message asks for "
+    "context compaction, I will produce the requested compaction summary "
+    "according to those instructions, preserving tool results, decisions, "
+    "file changes, constraints, and unresolved tasks accurately."
 )
 INTERRUPTED_TOOL_CONTEXT_BRIDGE = (
     "A tool call did not produce a complete tool result. Continue from the available context."

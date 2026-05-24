@@ -19,6 +19,7 @@ from uv_agent.agent import (
     usage_token_count,
 )
 from uv_agent.agent.compaction import compaction_response_summary_text
+from uv_agent.agent.prompts import POST_TOOL_COMPACTION_BRIDGE
 from uv_agent.billing import billing_charge_for_usage, billing_token_breakdown, format_billing_total
 from uv_agent.config import (
     AppConfig,
@@ -938,7 +939,7 @@ async def test_agent_compacts_after_tool_outputs_before_next_model_request(tmp_p
     assert events[-1]["final_text"] == "done after compaction"
     assert len(client.requests) == 3
     assert "context_compaction_request" in str(client.requests[1]["input"][-1])
-    assert "Context is being compacted before the assistant continues" in str(client.requests[1]["input"])
+    assert POST_TOOL_COMPACTION_BRIDGE in str(client.requests[1]["input"])
     assert client.requests[2]["previous_response_id"] is None
     assert "conversation_summary" in str(client.requests[2]["input"])
     assert "summary includes tool result" in str(client.requests[2]["input"])
