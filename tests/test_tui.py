@@ -44,6 +44,7 @@ from uv_agent.tui.app import (
     ExpandableTranscriptCell,
     FoldedProcessCell,
     FullscreenPanel,
+    GOAL_MODE_STYLE,
     ImageAttachmentCell,
     ImagePreviewPanel,
     PendingImage,
@@ -3704,6 +3705,32 @@ async def test_tui_goal_panel_enables_and_resets_only_when_disabled(
         await pilot.pause()
         assert "# Goal Checklist" in state.paths.checklist.read_text(encoding="utf-8")
         assert "custom" not in state.paths.checklist.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_tui_goal_mode_uses_top_bar_indicator_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Goal work")
+    engine.enable_goal_mode(thread_id)
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+    app.thread_id = thread_id
+
+    async with app.run_test(size=(90, 24)):
+        top_mode = app.query_one("#top-bar-mode", Static)
+        footer = app.query_one("#composer-footer", Static)
+
+        assert plain_renderable(top_mode.content) == "mode Goal"
+        assert any(
+            span.start == 5 and span.end == 9 and str(span.style) == GOAL_MODE_STYLE
+            for span in top_mode.content.spans
+        )
+        assert "Goal" not in plain_renderable(footer.content)
 
 
 @pytest.mark.asyncio

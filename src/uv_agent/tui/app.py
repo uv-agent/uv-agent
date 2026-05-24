@@ -102,6 +102,7 @@ QUIT_KEY_DEBOUNCE_SECONDS = 0.08
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+GOAL_MODE_STYLE = "bold #ff5a36"
 MountBefore: TypeAlias = int | str | Widget | None
 NotificationSeverity: TypeAlias = Literal["information", "warning", "error"]
 
@@ -4033,6 +4034,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         total_count = len(active_ids) + len(completed_ids)
         elapsed = format_elapsed(self._thread_elapsed_seconds(self.thread_id)) or "0s"
         mode = self._current_mode_label()
+        mode_style = GOAL_MODE_STYLE if self._goal_mode_enabled() else "cyan"
         unread = self._top_notification_unread
         notification_count = len(self._top_notifications)
         try:
@@ -4068,7 +4070,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         elapsed_widget.update(
             Text.assemble((self._text("current_thread_elapsed"), "dim"), " ", (elapsed, "cyan"))
         )
-        mode_widget.update(Text.assemble((self._text("mode"), "dim"), " ", (mode, "cyan")))
+        mode_widget.update(Text.assemble((self._text("mode"), "dim"), " ", (mode, mode_style)))
         if unread:
             notification_widget.update(
                 Text.assemble(
@@ -4122,10 +4124,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             )
         else:
             footer = Text(f"{level_name} · {compact_context} · {short_thread(self.thread_id)}", style="dim")
-        goal_state = self.engine.goal_state(self.thread_id)
-        if goal_state is not None and goal_state.enabled:
-            footer.append(" · ", style="dim")
-            footer.append(self._text("goal"), style="cyan")
         if billing_label:
             footer.append(" · ", style="dim")
             footer.append(billing_label, style="dim")
@@ -4139,11 +4137,15 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._refresh_pending_turns()
 
     def _current_mode_label(self) -> str:
-        if self.thread_id:
-            goal_state = self.engine.goal_state(self.thread_id)
-            if goal_state is not None and goal_state.enabled:
-                return self._text("goal")
+        if self._goal_mode_enabled():
+            return self._text("goal")
         return self._text("mode_normal") if self._interaction_mode == "normal" else self._interaction_mode
+
+    def _goal_mode_enabled(self) -> bool:
+        if not self.thread_id:
+            return False
+        goal_state = self.engine.goal_state(self.thread_id)
+        return goal_state is not None and goal_state.enabled
 
     def _thread_billing_label(self, *, decimals: int) -> str:
         """Return the current thread's formatted cost, or empty when disabled."""
