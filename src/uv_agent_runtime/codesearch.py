@@ -219,6 +219,7 @@ def search_text(
     pattern: str,
     *,
     root: str | Path = ".",
+    roots: Sequence[str | Path] | None = None,
     globs: Sequence[str] | None = None,
     file_types: Sequence[str] | None = None,
     ignore_case: bool = False,
@@ -236,14 +237,65 @@ def search_text(
     """Search file contents with ripgrep and return structured matches.
 
     `pattern` is a regex unless `fixed_string=True`. Paths are returned relative
-    to `root` when ripgrep emits them that way (typical for recursive search).
-    Honors `.gitignore` and skips binary files by default; toggle with `hidden`
-    and `no_ignore`. `globs` is a list of include/exclude rg glob patterns
-    (prefix with `!` to exclude); `file_types` uses rg's `--type` aliases.
+    to `root` when ripgrep emits them that way (typical for recursive search). If
+    `roots` is supplied, each result path is relative to the root that produced
+    it. Honors `.gitignore` and skips binary files by default; toggle with
+    `hidden` and `no_ignore`. `globs` is a list of include/exclude rg glob
+    patterns (prefix with `!` to exclude); `file_types` uses rg's `--type`
+    aliases.
     """
     if not pattern:
         raise ValueError("pattern must be non-empty")
-    resolved = resolve_workspace_path(root)
+    resolved_roots = _resolve_roots(root=root, roots=roots)
+    if max_total is not None and max_total <= 0:
+        return []
+
+    matches: list[Match] = []
+    remaining = max_total
+    for resolved in resolved_roots:
+        root_matches = _search_text_one(
+            pattern,
+            resolved=resolved,
+            globs=globs,
+            file_types=file_types,
+            ignore_case=ignore_case,
+            case_sensitive=case_sensitive,
+            fixed_string=fixed_string,
+            literal=literal,
+            multiline=multiline,
+            word=word,
+            max_count_per_file=max_count_per_file,
+            max_total=remaining,
+            hidden=hidden,
+            no_ignore=no_ignore,
+            extra_args=extra_args,
+        )
+        matches.extend(root_matches)
+        if remaining is not None:
+            remaining -= len(root_matches)
+            if remaining <= 0:
+                break
+    return matches
+
+
+def _search_text_one(
+    pattern: str,
+    *,
+    resolved: Path,
+    globs: Sequence[str] | None,
+    file_types: Sequence[str] | None,
+    ignore_case: bool,
+    case_sensitive: bool | None,
+    fixed_string: bool,
+    literal: bool | None,
+    multiline: bool,
+    word: bool,
+    max_count_per_file: int | None,
+    max_total: int | None,
+    hidden: bool,
+    no_ignore: bool,
+    extra_args: Sequence[str] | None,
+) -> list[Match]:
     cwd_path, target_paths = _split_root(resolved)
     effective_ignore_case = ignore_case if case_sensitive is None else not case_sensitive
     effective_fixed_string = fixed_string if literal is None else literal
@@ -262,8 +314,6 @@ def search_text(
         extra=extra_args,
     )
     args.extend(target_paths)
-    if max_total is not None and max_total <= 0:
-        return []
     if max_total is None:
         code, stdout, stderr = _run(args, cwd_path)
         # rg exits 1 when no matches; 2+ for real errors.
@@ -326,6 +376,7 @@ def _parse_search_matches(lines: Sequence[str], *, max_total: int | None) -> lis
 def find_files(
     root: str | Path = ".",
     *,
+    roots: Sequence[str | Path] | None = None,
     globs: Sequence[str] | None = None,
     file_types: Sequence[str] | None = None,
     max_total: int | None = None,
@@ -335,10 +386,44 @@ def find_files(
 ) -> list[str]:
     """List workspace files via ripgrep, respecting `.gitignore` by default.
 
-    Returns paths relative to `root` using ripgrep's own enumeration, which is
-    typically far faster than `Path.rglob` on large repositories.
+    Returns paths relative to `root` using ripgrep's own enumeration, or relative
+    to each producing root when `roots` is supplied. This is typically far faster
+    than `Path.rglob` on large repositories.
     """
-    resolved = resolve_workspace_path(root)
+    resolved_roots = _resolve_roots(root=root, roots=roots)
+    if max_total is not None and max_total <= 0:
+        return []
+
+    files: list[str] = []
+    remaining = max_total
+    for resolved in resolved_roots:
+        root_files = _find_files_one(
+            resolved=resolved,
+            globs=globs,
+            file_types=file_types,
+            max_total=remaining,
+            hidden=hidden,
+            no_ignore=no_ignore,
+            extra_args=extra_args,
+        )
+        files.extend(root_files)
+        if remaining is not None:
+            remaining -= len(root_files)
+            if remaining <= 0:
+                break
+    return files
+
+
+def _find_files_one(
+    *,
+    resolved: Path,
+    globs: Sequence[str] | None,
+    file_types: Sequence[str] | None,
+    max_total: int | None,
+    hidden: bool,
+    no_ignore: bool,
+    extra_args: Sequence[str] | None,
+) -> list[str]:
     cwd_path, target_paths = _split_root(resolved)
     args = _build_args(
         pattern=None,
@@ -355,8 +440,6 @@ def find_files(
         extra=extra_args,
     )
     args.extend(target_paths)
-    if max_total is not None and max_total <= 0:
-        return []
     if max_total is None:
         code, stdout, stderr = _run(args, cwd_path)
         if code >= 2:
@@ -366,6 +449,21 @@ def find_files(
     if code >= 2 and not terminated:
         raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
     return [line for line in lines if line][:max_total]
+
+
+def _resolve_roots(
+    *,
+    root: str | Path,
+    roots: Sequence[str | Path] | None,
+) -> list[Path]:
+    """Resolve either the legacy single root or the newer multi-root list."""
+    if roots is None:
+        return [resolve_workspace_path(root)]
+    if isinstance(roots, (str, bytes, Path)):
+        raise TypeError("roots must be a sequence of paths; use root= for a single path")
+    if Path(root) != Path("."):
+        raise ValueError("root and roots are mutually exclusive")
+    return [resolve_workspace_path(item) for item in roots]
 
 
 def _split_root(resolved: Path) -> tuple[Path, list[str]]:

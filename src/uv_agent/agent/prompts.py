@@ -389,11 +389,11 @@ with connect_url("http://localhost:3001/mcp") as client:
 ]]></example>
 </helper>
 <helper name="search_text">
-<description>Use for grep-like content search across the workspace instead of broad file reads or manual scanning. It wraps the system `rg` (ripgrep), honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). `root` may be a directory or a single file (scopes the search to that file). Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `literal=True` or `fixed_string=True` to disable regex, `case_sensitive=False` for case-insensitive search, and `max_count_per_file`/`max_total` to bound output.</description>
+<description>Use for grep-like content search across the workspace instead of broad file reads or manual scanning. It wraps the system `rg` (ripgrep), honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). `root` may be a directory or a single file (scopes the search to that file); use `roots=[...]` to search multiple roots. Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `literal=True` or `fixed_string=True` to disable regex, `case_sensitive=False` for case-insensitive search, and `max_count_per_file`/`max_total` to bound output.</description>
 <example><![CDATA[
 from uv_agent_runtime import search_text
 
-# search_text(pattern: str, *, root=".", globs=None, file_types=None, ignore_case=False,
+# search_text(pattern: str, *, root=".", roots=None, globs=None, file_types=None, ignore_case=False,
 #     case_sensitive=None, fixed_string=False, literal=None, multiline=False, word=False,
 #     max_count_per_file=None, max_total=None, hidden=False, no_ignore=False,
 #     extra_args=None) -> list[Match]  # Match: .path, .line, .column, .text, .submatches (Submatch: .start, .end, .text)
@@ -403,16 +403,20 @@ from uv_agent_runtime import search_text
 # ["--type-not", "py"], ["--ignore-file", ".ignore.extra"], ["--no-ignore-vcs"].
 for hit in search_text(r"def\\s+handle_\\w+", root="src", file_types=["py"], max_total=20):
     print(hit.path, hit.line, hit.text)
+for hit in search_text("TODO", roots=["src", "tests"], max_total=20):
+    print(hit.path, hit.line, hit.text)
 ]]></example>
 </helper>
 <helper name="find_files">
-<description>Use to enumerate workspace files honoring .gitignore via `rg --files` instead of manual directory walking. It is much faster than Path.rglob on large repositories. `root` may be a directory or a single file (returns just that file).</description>
+<description>Use to enumerate workspace files honoring .gitignore via `rg --files` instead of manual directory walking. It is much faster than Path.rglob on large repositories. `root` may be a directory or a single file (returns just that file); use `roots=[...]` to enumerate multiple roots.</description>
 <example><![CDATA[
 from uv_agent_runtime import find_files
 
-# find_files(root=".", *, globs=None, file_types=None, max_total=None,
+# find_files(root=".", *, roots=None, globs=None, file_types=None, max_total=None,
 #     hidden=False, no_ignore=False, extra_args=None) -> list[str]
 for path in find_files("src", globs=["*.py", "!**/migrations/**"], max_total=30):
+    print(path)
+for path in find_files(roots=["src", "tests"], globs=["*.py"], max_total=30):
     print(path)
 ]]></example>
 </helper>

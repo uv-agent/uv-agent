@@ -876,6 +876,46 @@ def test_codesearch_accepts_file_root(tmp_path: Path) -> None:
 
 
 @requires_rg
+def test_codesearch_accepts_multiple_roots(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _make_python_workspace(first)
+    _make_python_workspace(second)
+
+    files = find_files(roots=[first / "src" / "a.py", second / "src"], globs=["*.py"])
+    assert sorted(p.replace("\\", "/") for p in files) == ["a.py", "a.py", "b.py"]
+
+    hits = search_text("hello", roots=[first / "src" / "a.py", second / "src"])
+    paths = [h.path.replace("\\", "/") for h in hits]
+    assert "a.py" in paths
+    assert "b.py" not in paths
+
+
+@requires_rg
+def test_codesearch_multiple_roots_share_max_total(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _make_python_workspace(first)
+    _make_python_workspace(second)
+
+    files = find_files(roots=[first, second], globs=["*.py"], max_total=2)
+    hits = search_text("def ", roots=[first, second], fixed_string=True, max_total=2)
+
+    assert len(files) == 2
+    assert len(hits) == 2
+
+
+def test_codesearch_roots_rejects_single_path_string() -> None:
+    with pytest.raises(TypeError, match="roots must be a sequence"):
+        find_files(roots="src")  # type: ignore[arg-type]
+
+
+def test_codesearch_root_and_roots_are_mutually_exclusive(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        search_text("hello", root=tmp_path, roots=[tmp_path])
+
+
+@requires_rg
 def test_codequery_accepts_file_root(
     tmp_path: Path,
     codequery_home: Path,
