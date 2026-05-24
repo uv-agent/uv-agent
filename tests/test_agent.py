@@ -3986,6 +3986,36 @@ def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> N
     assert text.index('name="apply_patch"') < text.index('name="run_process_text"')
 
 
+def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    engine.runtime_helpers.register(
+        plugin="demo-plugin",
+        name="demo_helper",
+        fn=lambda: None,
+        doc="Demo helper.",
+    )
+
+    update = engine._turn_context_update(None)
+
+    assert update is not None
+    text = update["text"]
+    assert text.index("<runtime_helpers>") < text.index("<plugin_runtime_helpers>")
+    assert (
+        "Use the helper name attribute as the Python import/callable name; "
+        "the plugin attribute identifies the provider plugin only."
+    ) in text
+    assert '<helper name="demo_helper" plugin="demo-plugin">Demo helper.</helper>' in text
+
+
 def test_goal_mode_notice_emits_once_per_epoch_and_after_disable(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()

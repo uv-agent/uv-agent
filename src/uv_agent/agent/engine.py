@@ -3272,7 +3272,12 @@ class AgentEngine:
         lines = [
             "<plugin_runtime_helpers>",
             "These helpers are provided by installed uv-agent plugins and can be imported from uv_agent_runtime in run_python.",
+            "Use the helper name attribute as the Python import/callable name; the plugin attribute identifies the provider plugin only.",
         ]
+        # TODO: When plugins can load or unload after startup, split this into
+        # per-plugin context parts so runtime context updates can mention only
+        # the changed plugin. Startup-time loading means the current block-level
+        # refresh is enough for now.
         for helper in helpers:
             doc = xml_text(helper.doc or "")
             lines.append(f'<helper name="{xml_text(helper.name)}" plugin="{xml_text(helper.plugin)}">{doc}</helper>')
