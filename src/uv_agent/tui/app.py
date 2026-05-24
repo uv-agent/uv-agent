@@ -171,6 +171,7 @@ COMMAND_SPECS = [
     ("/status", "/status"),
     ("/level", "/level"),
     ("/threads", "/threads"),
+    ("/goal", "/goal"),
     ("/config", "/config"),
     ("/quit", "/quit"),
     ("/help", "/help"),
@@ -2177,7 +2178,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return None
         try:
             return self.engine.thread_store.latest_event(thread_id, event_type)
-        except (OSError, ValueError):
+        except (OSError, ValueError, FileNotFoundError):
             return None
 
     def _retry_thread(self, thread_id: str | None) -> None:
@@ -2564,6 +2565,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return True
         if command == "/status":
             self._open_status_panel()
+            return True
+        if command == "/goal":
+            self._open_goal_panel()
             return True
         if command == "/config":
             self._open_config_panel()
@@ -3384,6 +3388,124 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _open_status_panel(self) -> None:
         self._open_panel(self._status_panel_markup(), "status", self._text("status"))
 
+    def _open_goal_panel(self, *, replace_current: bool = False) -> None:
+        thread_id = self._ensure_active_thread()
+        self.level = self._thread_metadata_level(thread_id) or self.level
+        state = self.engine.goal_state(thread_id)
+        enabled = bool(state and state.enabled)
+        status = self._text("goal_enabled") if enabled else self._text("goal_disabled")
+        items = [
+            PickerItem(
+                id="enable",
+                title=self._text("goal_enable"),
+                description=self._text("current") if enabled else "",
+                meta=self._text("goal_enable_hint"),
+            ),
+            PickerItem(
+                id="disable",
+                title=self._text("goal_disable"),
+                description=self._text("current") if not enabled else "",
+                meta=self._goal_disable_meta(thread_id, enabled),
+            ),
+            PickerItem(
+                id="files",
+                title=self._text("goal_files"),
+                description=status,
+                meta=self._text("goal_files_hint"),
+            ),
+            PickerItem(
+                id="reset",
+                title=self._text("goal_reset"),
+                description="" if not enabled else self._text("goal_reset_disabled_active"),
+                meta=self._text("goal_reset_hint"),
+            ),
+        ]
+        self._open_picker(
+            self._text("goal"),
+            items,
+            self._choose_goal_item,
+            subtitle=self._text("goal_panel_hint"),
+            navigate=True,
+            replace_current=replace_current,
+        )
+
+    def _goal_disable_meta(self, thread_id: str, enabled: bool) -> str:
+        if not enabled:
+            return self._text("goal_disable_hint")
+        if not self._goal_can_disable(thread_id):
+            return self._text("goal_disable_requires_completed")
+        return self._text("goal_disable_hint")
+
+    def _choose_goal_item(self, item_id: str) -> None:
+        thread_id = self._ensure_active_thread()
+        self.level = self._thread_metadata_level(thread_id) or self.level
+        state = self.engine.goal_state(thread_id)
+        enabled = bool(state and state.enabled)
+        if item_id == "enable":
+            self.engine.enable_goal_mode(thread_id)
+            self.level = self._thread_metadata_level(thread_id) or self.level
+            self._flash(self._text("goal_enabled_flash"))
+            self._refresh_status()
+            self._open_goal_panel(replace_current=True)
+            return
+        if item_id == "disable":
+            if not enabled:
+                self._flash(self._text("goal_already_disabled"))
+                self._open_goal_panel(replace_current=True)
+                return
+            if not self._goal_can_disable(thread_id):
+                self._flash(self._text("goal_disable_requires_completed"), severity="warning")
+                self._open_goal_panel(replace_current=True)
+                return
+            self.engine.disable_goal_mode(thread_id)
+            self.level = self._thread_metadata_level(thread_id) or self.level
+            self._flash(self._text("goal_disabled_flash"))
+            self._refresh_status()
+            self._open_goal_panel(replace_current=True)
+            return
+        if item_id == "files":
+            self._open_goal_files_panel(thread_id)
+            return
+        if item_id == "reset":
+            if enabled:
+                self._flash(self._text("goal_reset_disabled_active"), severity="warning")
+                self._open_goal_panel(replace_current=True)
+                return
+            self.engine.reset_goal_files(thread_id)
+            self.level = self._thread_metadata_level(thread_id) or self.level
+            self._flash(self._text("goal_reset_flash"))
+            self._open_goal_panel(replace_current=True)
+
+    def _goal_can_disable(self, thread_id: str) -> bool:
+        run_state = self._thread_state(thread_id)
+        if run_state is not None and (run_state.worker is not None or run_state.queue):
+            return False
+        events, _ = self.engine.thread_store.read_recent_events(
+            thread_id,
+            limit=1,
+            event_types={"turn.completed", "turn.interrupted", "turn.error"},
+        )
+        return bool(events and events[-1].get("type") == "turn.completed")
+
+    def _open_goal_files_panel(self, thread_id: str) -> None:
+        state = self.engine.goal_state(thread_id)
+        if state is None:
+            self.engine.reset_goal_files(thread_id)
+            state = self.engine.goal_state(thread_id)
+        if state is None:
+            return
+        status = self._text("goal_enabled") if state.enabled else self._text("goal_disabled")
+        lines = [
+            Text.assemble((self._text("goal"), "bold"), " ", (status, "cyan")),
+            Text(),
+            Text.assemble("- state: ", str(state.paths.state)),
+            Text.assemble("- checklist: ", str(state.paths.checklist)),
+            Text.assemble("- document: ", str(state.paths.notes)),
+        ]
+        if state.objective:
+            lines.extend([Text(), Text.assemble("- objective: ", state.objective)])
+        self._open_panel(join_lines(lines), "goal", self._text("goal_files"))
+
     def _session_thread_ids_for_panel(self, kind: str) -> list[str]:
         active_ids = self._active_activity_thread_ids()
         completed_ids = self._completed_activity_thread_ids()
@@ -3537,6 +3659,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         lines: list[Text] = [
             Text.assemble("- state: ", (self._last_status, "cyan")),
             Text.assemble("- version: ", (application_version(), "cyan")),
+            Text.assemble("- goal: ", self._goal_status_line()),
             Text.assemble("- level: ", (level_name, "cyan")),
             Text.assemble("- model: ", model_line),
             Text.assemble("- provider/api: ", provider_line),
@@ -3576,6 +3699,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             if len(rules.rules) > 6:
                 lines.append(Text(f"- ... {len(rules.rules) - 6} more"))
         return join_lines(lines)  # type: ignore[return-value]
+
+    def _goal_status_line(self) -> Text:
+        state = self.engine.goal_state(self.thread_id)
+        if state is not None and state.enabled:
+            return Text(self._text("goal_enabled"), style="cyan")
+        return Text(self._text("goal_disabled"), style="dim")
 
     def _thread_billing_status_line(self) -> str:
         if not self.engine.config.pricing.models:
@@ -3903,7 +4032,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         completed_ids = self._completed_activity_thread_ids()
         total_count = len(active_ids) + len(completed_ids)
         elapsed = format_elapsed(self._thread_elapsed_seconds(self.thread_id)) or "0s"
-        mode = self._text("mode_normal") if self._interaction_mode == "normal" else self._interaction_mode
+        mode = self._current_mode_label()
         unread = self._top_notification_unread
         notification_count = len(self._top_notifications)
         try:
@@ -3993,6 +4122,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             )
         else:
             footer = Text(f"{level_name} · {compact_context} · {short_thread(self.thread_id)}", style="dim")
+        goal_state = self.engine.goal_state(self.thread_id)
+        if goal_state is not None and goal_state.enabled:
+            footer.append(" · ", style="dim")
+            footer.append(self._text("goal"), style="cyan")
         if billing_label:
             footer.append(" · ", style="dim")
             footer.append(billing_label, style="dim")
@@ -4004,6 +4137,13 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return
         self._refresh_pending_images()
         self._refresh_pending_turns()
+
+    def _current_mode_label(self) -> str:
+        if self.thread_id:
+            goal_state = self.engine.goal_state(self.thread_id)
+            if goal_state is not None and goal_state.enabled:
+                return self._text("goal")
+        return self._text("mode_normal") if self._interaction_mode == "normal" else self._interaction_mode
 
     def _thread_billing_label(self, *, decimals: int) -> str:
         """Return the current thread's formatted cost, or empty when disabled."""

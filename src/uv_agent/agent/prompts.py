@@ -160,6 +160,7 @@ from uv_agent_runtime import (
     search_text,
     find_files,
     find_symbols,
+    goal_paths,
     query_code,
     supported_symbol_languages,  # list languages with a built-in tree-sitter symbol query
     clear_codequery_cache,  # drop the tree-sitter capture cache (root=path scopes the wipe)
@@ -433,6 +434,16 @@ from uv_agent_runtime import find_symbols, supported_symbol_languages
 print(supported_symbol_languages())
 for sym in find_symbols("src", kind="class", contains="Engine"):
     print(sym.path, sym.start_row, sym.name)
+]]></example>
+</helper>
+<helper name="goal_paths">
+<description>Use when goal mode is active and you need the stable internal files for the current thread. It returns paths for goal.json, checklist.md, and notes.md; the files are created/reset by the host goal mode UI, not by this helper.</description>
+<example><![CDATA[
+from uv_agent_runtime import goal_paths
+
+# goal_paths() -> RuntimeGoalPaths  # .directory, .state, .checklist, .notes
+paths = goal_paths()
+print(paths.checklist)
 ]]></example>
 </helper>
 <helper name="query_code">

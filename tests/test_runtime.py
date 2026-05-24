@@ -714,6 +714,32 @@ def test_runtime_thread_digest_reads_state_dir(tmp_path: Path) -> None:
     assert digest["latest_compaction"]["text"] == "summary"
     assert digest["items"] == [{"role": "user", "text": "after"}]
 
+def test_runtime_goal_paths_uses_runner_thread_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uv_agent_runtime import goal_paths
+
+    monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thr_goal")
+
+    paths = goal_paths()
+
+    assert paths.directory == tmp_path / "goals" / "thr_goal"
+    assert paths.state == paths.directory / "goal.json"
+    assert paths.checklist == paths.directory / "checklist.md"
+    assert paths.notes == paths.directory / "notes.md"
+
+
+def test_runtime_goal_paths_requires_thread_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uv_agent_runtime import goal_paths
+
+    monkeypatch.delenv("UV_AGENT_RUNTIME_STATE_DIR", raising=False)
+    monkeypatch.delenv("UV_AGENT_RUNTIME_THREAD_ID", raising=False)
+
+    with pytest.raises(RuntimeError, match="goal_paths requires"):
+        goal_paths()
+
 
 
 def test_runtime_list_thread_digests_filters_subagents(tmp_path: Path) -> None:

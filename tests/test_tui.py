@@ -1593,11 +1593,12 @@ async def test_tui_command_palette_starts_with_priority_commands(
 
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
-        assert [item.id for item in panel.items[:5]] == [
+        assert [item.id for item in panel.items[:6]] == [
             "/clear",
             "/status",
             "/level",
             "/threads",
+            "/goal",
             "/config",
         ]
 
@@ -3648,6 +3649,88 @@ async def test_tui_status_summarizes_context_and_rules(
         assert "258K" in plain_renderable(panel.body)
         assert "AGENTS.md" in plain_renderable(panel.body)
         assert "Use local rules" not in plain_renderable(panel.body)
+
+
+@pytest.mark.asyncio
+async def test_tui_goal_panel_enables_and_resets_only_when_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_goal_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("goal")
+        assert app.thread_id is not None
+        thread_id = app.thread_id
+
+        await pilot.press("enter")
+        await pilot.pause()
+        state = engine.goal_state(thread_id)
+        assert state is not None and state.enabled
+        assert state.paths.checklist.exists()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        ids = [item.id for item in panel.items]
+        reset_item = panel.items[ids.index("reset")]
+        assert reset_item.description == app._text("goal_reset_disabled_active")
+        state.paths.checklist.write_text("custom", encoding="utf-8")
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("reset")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert state.paths.checklist.read_text(encoding="utf-8") == "custom"
+
+        engine.thread_store.append(thread_id, "turn.completed", turn_id="t1", final_text="done")
+        panel = app.screen_stack[-1]
+        ids = [item.id for item in panel.items]
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("disable")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert engine.goal_state(thread_id).enabled is False
+        assert state.paths.checklist.read_text(encoding="utf-8") == "custom"
+
+        panel = app.screen_stack[-1]
+        ids = [item.id for item in panel.items]
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("reset")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "# Goal Checklist" in state.paths.checklist.read_text(encoding="utf-8")
+        assert "custom" not in state.paths.checklist.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_tui_goal_panel_blocks_disable_before_final_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Goal work")
+    engine.enable_goal_mode(thread_id)
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app.thread_id = thread_id
+        app._open_goal_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        ids = [item.id for item in panel.items]
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("disable")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert engine.goal_state(thread_id).enabled is True
 
 
 @pytest.mark.asyncio

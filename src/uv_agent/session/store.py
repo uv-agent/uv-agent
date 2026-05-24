@@ -389,6 +389,7 @@ class ThreadStore:
             "turn_count": int(metadata.get("turn_count") or 0),
             "interrupted_turn_count": int(metadata.get("interrupted_turn_count") or 0),
             "latest_compaction": _compaction_summary(compaction or metadata.get("latest_compaction")),
+            "goal_mode": metadata.get("goal_mode"),
             "items": digest_items(events, include_tools=include_tools),
         }
 
@@ -828,6 +829,36 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
             "message": event.get("message") or "",
             "_event_id": event.get("_event_id"),
         }
+        return
+
+    if event_type == "thread.goal_mode_updated":
+        enabled = bool(event.get("enabled"))
+        previous = metadata.get("goal_mode")
+        if not isinstance(previous, dict):
+            previous = {}
+        metadata["goal_mode"] = {
+            "enabled": enabled,
+            "status": "enabled" if enabled else "disabled",
+            "updated_at": event.get("created_at"),
+            "objective": event.get("objective") or previous.get("objective") or "",
+            "files": event.get("files") or previous.get("files") or {},
+            "_event_id": event.get("_event_id"),
+        }
+        return
+
+    if event_type == "thread.goal_files_reset":
+        current = metadata.get("goal_mode")
+        if not isinstance(current, dict):
+            current = {"enabled": False, "status": "disabled"}
+        current = dict(current)
+        current["enabled"] = False
+        current["status"] = "disabled"
+        current["objective"] = event.get("objective") or ""
+        current["files"] = event.get("files") or current.get("files") or {}
+        current["reset_at"] = event.get("created_at")
+        current["updated_at"] = event.get("created_at")
+        current["_reset_event_id"] = event.get("_event_id")
+        metadata["goal_mode"] = current
         return
 
     if event_type == "item.user":

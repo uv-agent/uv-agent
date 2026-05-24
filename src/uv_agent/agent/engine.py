@@ -36,6 +36,12 @@ from uv_agent.agent.context_builder import (
 from uv_agent.context import ContextStats, estimate_tokens, usage_token_count
 from uv_agent.environment import detect_user_language, host_environment
 from uv_agent.errors import EmptyModelStreamError, is_retryable_provider_error
+from uv_agent.goal_mode import (
+    GoalState,
+    ensure_goal_files,
+    read_goal_state,
+    render_goal_mode_notice,
+)
 from uv_agent.ids import new_id
 from uv_agent.agent.messages import assistant_output_item, message_item, message_item_text
 from uv_agent.mcp_config import McpInstructionsPreview, McpServerSummary, discover_mcp_servers, render_mcp_entry
@@ -1541,6 +1547,7 @@ class AgentEngine:
             or "<workspace_rules" in text
             or "<workspace_rule_index>" in text
             or "<active_cwd_notice>" in text
+            or "<goal_mode" in text
             or "<available_skills>" in text
             or "<available_mcp_servers>" in text
             or "<context_update" in text
@@ -2508,6 +2515,8 @@ class AgentEngine:
         event_type = event.get("type")
         if event_type == "item.context_update":
             text = str(event.get("text") or "")
+        elif event_type == "item.goal_mode_notice":
+            text = str(event.get("text") or "")
         elif event_type == "item.rules_loaded" and event.get("source") in {
             "project",
             "active_cwd",
@@ -2587,8 +2596,139 @@ class AgentEngine:
         items: list[dict[str, Any]] = []
         for text in self._rule_context_texts(thread_id):
             items.append(message_item("user", text))
+        items.extend(self._goal_context_items(thread_id))
         items.extend(self._runtime_context_items(thread_id))
         return items
+
+    def enable_goal_mode(self, thread_id: str, *, objective: str = "") -> GoalState:
+        """Enable per-thread goal mode and preserve any existing goal files."""
+
+        state = ensure_goal_files(self.thread_store.data_dir, thread_id, objective=objective)
+        event = self.thread_store.append(
+            thread_id,
+            "thread.goal_mode_updated",
+            enabled=True,
+            objective=state.objective,
+            files=self._goal_files_payload(state),
+        )
+        return GoalState(
+            enabled=True,
+            status="enabled",
+            paths=state.paths,
+            objective=state.objective,
+            created_at=state.created_at,
+            updated_at=str(event.get("created_at") or state.updated_at),
+        )
+
+    def disable_goal_mode(self, thread_id: str) -> GoalState:
+        """Disable per-thread goal mode without modifying the durable files."""
+
+        previous = self.goal_state(thread_id)
+        if previous is None:
+            previous = read_goal_state(self.thread_store.data_dir, thread_id, enabled=False)
+        event = self.thread_store.append(
+            thread_id,
+            "thread.goal_mode_updated",
+            enabled=False,
+            objective=previous.objective,
+            files=self._goal_files_payload(previous),
+        )
+        return GoalState(
+            enabled=False,
+            status="disabled",
+            paths=previous.paths,
+            objective=previous.objective,
+            created_at=previous.created_at,
+            updated_at=str(event.get("created_at") or previous.updated_at),
+        )
+
+    def reset_goal_files(self, thread_id: str, *, objective: str = "") -> GoalState:
+        """Reset the durable goal files while leaving goal mode disabled."""
+
+        current = self.goal_state(thread_id)
+        if current is not None and current.enabled:
+            raise ValueError("goal files can only be reset while goal mode is disabled")
+        state = ensure_goal_files(self.thread_store.data_dir, thread_id, objective=objective, reset=True)
+        event = self.thread_store.append(
+            thread_id,
+            "thread.goal_files_reset",
+            objective=state.objective,
+            files=self._goal_files_payload(state),
+        )
+        return GoalState(
+            enabled=False,
+            status="disabled",
+            paths=state.paths,
+            objective=state.objective,
+            created_at=state.created_at,
+            updated_at=str(event.get("created_at") or state.updated_at),
+        )
+
+    def goal_state(self, thread_id: str | None) -> GoalState | None:
+        """Return the current goal-mode state for a thread, if one is active."""
+
+        if not thread_id:
+            return None
+        try:
+            metadata = self.thread_store.snapshot(thread_id).metadata
+        except FileNotFoundError:
+            return None
+        raw_goal = metadata.get("goal_mode")
+        enabled = isinstance(raw_goal, dict) and bool(raw_goal.get("enabled"))
+        return read_goal_state(self.thread_store.data_dir, thread_id, enabled=enabled)
+
+    def _goal_context_items(self, thread_id: str) -> list[dict[str, Any]]:
+        notice = self._goal_mode_notice_text(thread_id)
+        if not notice:
+            return []
+        status = "enabled" if 'status="enabled"' in notice else "disabled"
+        self.thread_store.append(
+            thread_id,
+            "item.goal_mode_notice",
+            text=notice,
+            status=status,
+        )
+        return [message_item("user", notice)]
+
+    def _goal_mode_notice_text(self, thread_id: str) -> str:
+        state = self.goal_state(thread_id)
+        if state is None:
+            return ""
+        previous_notice = self._latest_goal_notice_status(thread_id)
+        if state.enabled:
+            if previous_notice in {"enabled", "pending_disabled"}:
+                return ""
+            return render_goal_mode_notice(state, status="enabled")
+        if previous_notice == "pending_disabled":
+            return render_goal_mode_notice(state, status="disabled")
+        return ""
+
+    def _latest_goal_notice_status(self, thread_id: str) -> str | None:
+        snap = self.thread_store.snapshot(thread_id)
+        status: str | None = None
+        for event in snap.events_after_compaction:
+            event_type = event.get("type")
+            if event_type == "item.goal_mode_notice":
+                status = str(event.get("status") or "") or None
+            elif event_type == "thread.goal_mode_updated":
+                enabled = bool(event.get("enabled"))
+                if enabled:
+                    status = "pending_enabled"
+                else:
+                    status = "pending_disabled"
+            elif event_type == "thread.goal_files_reset":
+                # Reset is only allowed while disabled; it does not require a
+                # model-visible notice unless the mode is enabled afterwards.
+                status = None
+        return status
+
+    @staticmethod
+    def _goal_files_payload(state: GoalState) -> dict[str, str]:
+        return {
+            "state": str(state.paths.state),
+            "checklist": str(state.paths.checklist),
+            "notes": str(state.paths.notes),
+        }
 
     def _rule_context_texts(self, thread_id: str) -> list[str]:
         state = self._rule_state(thread_id)

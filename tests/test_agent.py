@@ -18,7 +18,7 @@ from uv_agent.agent import (
     tool_attachment_context_items,
     usage_token_count,
 )
-from uv_agent.agent.compaction import compaction_response_summary_text
+from uv_agent.agent.compaction import compaction_response_summary_text, retain_item_after_compaction
 from uv_agent.agent.prompts import POST_TOOL_COMPACTION_BRIDGE
 from uv_agent.billing import billing_charge_for_usage, billing_token_breakdown, format_billing_total
 from uv_agent.config import (
@@ -3984,6 +3984,118 @@ def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> N
     assert text.index('name="workspace_transaction"') < text.index('name="read_text_lossless"')
     assert text.index('name="read_text_lossless"') < text.index('name="apply_patch"')
     assert text.index('name="apply_patch"') < text.index('name="run_process_text"')
+
+
+def test_goal_mode_notice_emits_once_per_epoch_and_after_disable(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+
+    enabled_state = engine.enable_goal_mode(thread_id, objective="Ship the goal feature")
+    first = engine._pre_user_context_items(thread_id)
+    repeated = engine._pre_user_context_items(thread_id)
+
+    first_text = "\n".join(message_item_text(item) for item in first)
+    assert '<goal_mode status="enabled">' in first_text
+    assert "Ship the goal feature" in first_text
+    assert str(enabled_state.paths.checklist) in first_text
+    assert '<goal_mode status="enabled">' not in str(repeated)
+
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    after_compaction = engine._pre_user_context_items(thread_id)
+    assert '<goal_mode status="enabled">' in str(after_compaction)
+
+    engine.disable_goal_mode(thread_id)
+    disabled = engine._pre_user_context_items(thread_id)
+    repeated_disabled = engine._pre_user_context_items(thread_id)
+    assert '<goal_mode status="disabled">' in str(disabled)
+    assert '<goal_mode status="disabled">' not in str(repeated_disabled)
+
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t2", text="summary", usage={})
+    assert '<goal_mode' not in str(engine._pre_user_context_items(thread_id))
+
+
+def test_goal_mode_reenable_before_next_turn_emits_enabled_notice(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.enable_goal_mode(thread_id)
+    assert '<goal_mode status="enabled">' in str(engine._pre_user_context_items(thread_id))
+
+    engine.disable_goal_mode(thread_id)
+    engine.reset_goal_files(thread_id, objective="fresh goal")
+    engine.enable_goal_mode(thread_id)
+
+    notice = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
+    assert '<goal_mode status="enabled">' in notice
+    assert '<goal_mode status="disabled">' not in notice
+    assert "fresh goal" in notice
+
+
+def test_goal_mode_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.enable_goal_mode(thread_id)
+    goal_item = engine._pre_user_context_items(thread_id)[0]
+    engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=message_item("user", "do work"))
+
+    assert engine._is_pre_user_context_item(goal_item)
+    assert retain_item_after_compaction(goal_item) is False
+    reconstructed = engine._reconstruct_input(thread_id)
+    reconstructed_texts = [message_item_text(item) for item in reconstructed]
+    assert "<goal_mode" in reconstructed_texts[0]
+    assert "do work" in reconstructed_texts
+
+
+def test_goal_mode_reset_requires_disabled_mode_and_preserves_files_on_disable(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    state = engine.enable_goal_mode(thread_id)
+    state.paths.checklist.write_text("custom checklist", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        engine.reset_goal_files(thread_id)
+
+    engine.disable_goal_mode(thread_id)
+    assert state.paths.checklist.read_text(encoding="utf-8") == "custom checklist"
+    reset_state = engine.reset_goal_files(thread_id, objective="new objective")
+    assert "new objective" in reset_state.paths.checklist.read_text(encoding="utf-8")
+    assert engine.goal_state(thread_id) is not None
+    assert engine.goal_state(thread_id).enabled is False
 
 
 @pytest.mark.asyncio
