@@ -3,14 +3,11 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable
 
 from uv_agent.ids import new_id
 
-if TYPE_CHECKING:
-    from textual.worker import Worker
-
-    from uv_agent.tui.widgets import TranscriptCell
+from textual.worker import Worker
 
 
 @dataclass(frozen=True)
@@ -129,31 +126,6 @@ class ThreadRunState:
     turn_id: str | None = None
     started_at: str | None = None
     completed_at: str | None = None
+    pending_user_turn_id: str | None = None
     retryable_error: bool = False
     terminal_error: bool = False
-    live_events: list[dict[str, Any]] = field(default_factory=list)
-    pending_stream_retries: list[dict[str, Any]] = field(default_factory=list)
-    assistant_buffer: str = ""
-    assistant_cell: TranscriptCell | None = None
-    reasoning_buffer: str = ""
-    reasoning_cell: TranscriptCell | None = None
-    tool_cells: dict[str, TranscriptCell] = field(default_factory=dict)
-    tool_started_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
-    tool_partial_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
-    tool_delta_cells: dict[int, TranscriptCell] = field(default_factory=dict)
-    tool_delta_calls: dict[int, dict[str, Any]] = field(default_factory=dict)
-    process_cells: list[TranscriptCell] = field(default_factory=list)
-    process_fold_cell: TranscriptCell | None = None
-    process_collapsed: bool = False
-    process_anchor_cell: TranscriptCell | None = None
-
-    def detach_widgets(self) -> None:
-        self.assistant_cell = None
-        self.reasoning_cell = None
-        self.tool_cells.clear()
-        self.tool_started_calls.clear()
-        self.tool_partial_payloads.clear()
-        self.tool_delta_cells.clear()
-        self.process_cells = []
-        self.process_fold_cell = None
-        self.process_anchor_cell = None

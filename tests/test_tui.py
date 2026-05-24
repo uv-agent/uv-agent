@@ -2198,7 +2198,9 @@ async def test_tui_reasoning_deltas_stream_without_inserted_spaces(
             {"type": "assistant.reasoning_delta", "text": "beta"},
             run_state,
         )
-        assert run_state.reasoning_buffer == "alphabeta"
+        timeline = app._timeline_for_thread("background")
+        assert timeline is not None
+        assert timeline.active_turns["turn:unknown"].reasoning_buffer == "alphabeta"
 
 
 @pytest.mark.asyncio
@@ -4534,8 +4536,10 @@ async def test_tui_resume_running_thread_rebinds_live_cells(
         app._handle_command("/clear")
         await pilot.pause()
         assert app.thread_id is None
-        assert run_state.assistant_cell is None
-        assert run_state.tool_delta_cells == {}
+        assert not any(
+            isinstance(child, TranscriptCell) and (child.has_class("assistant") or child.has_class("tool_pending"))
+            for child in app.query_one("#transcript", TranscriptScroll).children
+        )
 
         app._resume_thread(thread_id)
         await pilot.pause()
@@ -4571,6 +4575,113 @@ async def test_tui_resume_running_thread_rebinds_live_cells(
         assert len(app.query(".tool_pending").nodes) == 1
         cell = app.query_one(ExpandableTranscriptCell)
         assert "print(1)" in strip_markup(plain_renderable(cell.details))
+
+
+@pytest.mark.asyncio
+async def test_tui_thread_switch_restores_draft_scroll_and_fold_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    first_thread = engine.thread_store.create_thread("First")
+    second_thread = engine.thread_store.create_thread("Second")
+
+    for index in range(24):
+        turn_id = f"filler_{index}"
+        engine.thread_store.append(first_thread, "turn.started", turn_id=turn_id)
+        engine.thread_store.append(
+            first_thread,
+            "item.user",
+            turn_id=turn_id,
+            item={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": f"filler line {index}"}],
+            },
+        )
+        engine.thread_store.append(first_thread, "turn.completed", turn_id=turn_id, final_text="")
+
+    process_turn = "turn_process"
+    engine.thread_store.append(first_thread, "turn.started", turn_id=process_turn)
+    engine.thread_store.append(
+        first_thread,
+        "item.user",
+        turn_id=process_turn,
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+    )
+    engine.thread_store.append(
+        first_thread,
+        "item.model_response",
+        turn_id=process_turn,
+        response_id="resp_process",
+        output=[
+            {
+                "type": "function_call",
+                "call_id": "call_process",
+                "name": "run_python",
+                "arguments": '{"code":"print(1)"}',
+            }
+        ],
+        reasoning_text="make a plan",
+        usage={},
+    )
+    engine.thread_store.append(
+        first_thread,
+        "item.runner_result",
+        turn_id=process_turn,
+        call_id="call_process",
+        result={
+            "run_id": "run_process",
+            "returncode": 0,
+            "stdout": "ok\n",
+            "stderr": "",
+            "events": [],
+        },
+    )
+    engine.thread_store.append(first_thread, "turn.completed", turn_id=process_turn, final_text="done")
+    engine.thread_store.append(
+        second_thread,
+        "item.user",
+        turn_id="second_turn",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "second"}]},
+    )
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(100, 12)) as pilot:
+        app._resume_thread(first_thread)
+        await pilot.pause(0.2)
+
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        composer = app.query_one("#composer", TextArea)
+        fold = next(child for child in transcript.children if isinstance(child, FoldedProcessCell))
+        fold.set_collapsed(False)
+        transcript.scroll_y = min(5, transcript.max_scroll_y)
+        await pilot.pause()
+        transcript.follow_tail = False
+        saved_scroll_y = transcript.scroll_y
+        composer.insert("draft for first")
+
+        app._resume_thread(second_thread)
+        await pilot.pause(0.2)
+        assert composer.text == ""
+        composer.insert("draft for second")
+
+        app._resume_thread(first_thread)
+        await pilot.pause(0.2)
+
+        restored_transcript = app.query_one("#transcript", TranscriptScroll)
+        restored_fold = next(child for child in restored_transcript.children if isinstance(child, FoldedProcessCell))
+        assert composer.text == "draft for first"
+        assert restored_fold.collapsed is False
+        assert restored_transcript.follow_tail is False
+        assert restored_transcript.scroll_y == restored_transcript.validate_scroll_y(saved_scroll_y)
+
+        app._resume_thread(second_thread)
+        await pilot.pause(0.2)
+        assert composer.text == "draft for second"
 
 
 @pytest.mark.asyncio
@@ -5327,8 +5438,10 @@ async def test_tui_final_response_is_not_folded_into_process(
         assert not final_cell.has_class("process_fold_hidden")
         # And it should not be tracked as a process cell.
         assert final_cell not in app._process_cells
-        # The process fold itself should exist for the intermediate steps.
-        assert app._process_fold_cell is not None
+        # The process fold itself should exist for the intermediate steps in the data model.
+        timeline = app._timeline_for_active()
+        assert timeline is not None
+        assert any(group.collapsed for group in timeline.process_groups.values())
 
 
 def test_tool_detail_markup_strips_runtime_event_lines_from_stdout() -> None:
