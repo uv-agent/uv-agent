@@ -2261,6 +2261,44 @@ def test_timeline_live_deltas_keep_chunked_buffers_until_joined() -> None:
     assert reasoning_item.content["text"] == ["alpha", "beta"]
 
 
+def test_timeline_live_reasoning_rounds_get_distinct_cells() -> None:
+    timeline = ThreadTimelineState("thread_live")
+    turn_id = "turn_live"
+
+    timeline.apply_live_event(
+        "assistant.reasoning_delta",
+        {"type": "assistant.reasoning_delta", "thread_id": "thread_live", "turn_id": turn_id, "text": " first"},
+    )
+    timeline.apply_live_event(
+        "assistant.reasoning_completed",
+        {"type": "assistant.reasoning_completed", "thread_id": "thread_live", "turn_id": turn_id, "text": "first"},
+    )
+    timeline.apply_live_event(
+        "tool.started",
+        {
+            "type": "tool.started",
+            "thread_id": "thread_live",
+            "turn_id": turn_id,
+            "call": {"call_id": "call_1", "name": "run_python", "arguments": '{"code":"print(1)"}'},
+        },
+    )
+    timeline.apply_live_event(
+        "assistant.reasoning_delta",
+        {"type": "assistant.reasoning_delta", "thread_id": "thread_live", "turn_id": turn_id, "text": " second"},
+    )
+    timeline.apply_live_event(
+        "assistant.reasoning_completed",
+        {"type": "assistant.reasoning_completed", "thread_id": "thread_live", "turn_id": turn_id, "text": "second"},
+    )
+
+    reasoning_items = [item for item in timeline.items if item.kind == "reasoning"]
+    assert [item.content["text"] for item in reasoning_items] == ["first", "second"]
+    assert len({item.id for item in reasoning_items}) == 2
+
+    group = timeline.process_groups[turn_id]
+    assert group.item_ids == [reasoning_items[0].id, "tool_call:call_1", reasoning_items[1].id]
+
+
 @pytest.mark.asyncio
 async def test_tui_compaction_completion_folds_prior_process_and_shows_summary(
     tmp_path: Path,

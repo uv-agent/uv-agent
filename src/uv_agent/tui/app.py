@@ -2885,9 +2885,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if timeline is not None:
             timeline.seed_reasoning_delta(text)
             self._sync_transcript_from_timeline()
-            cell = self._timeline_cells.get("reasoning:live:manual")
-            self._reasoning_cell = cell if isinstance(cell, TranscriptCell) else None
             acc = timeline.active_turns.get("manual")
+            cell = self._timeline_cells.get(acc.reasoning_item_id or "") if acc is not None else None
+            self._reasoning_cell = cell if isinstance(cell, TranscriptCell) else None
             self._reasoning_buffer = acc.reasoning_buffer if acc is not None else self._append_reasoning_text(self._reasoning_buffer, text)
             return
         self._reasoning_buffer = self._append_reasoning_text(self._reasoning_buffer, text)

@@ -155,6 +155,7 @@ class TurnAccumulator:
     completed_at: str | None = None
     assistant_item_id: str | None = None
     reasoning_item_id: str | None = None
+    reasoning_item_index: int = 0
     assistant_parts: list[str] = field(default_factory=list)
     reasoning_parts: list[str] = field(default_factory=list)
     tool_delta_calls: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -835,7 +836,7 @@ class ThreadTimelineState:
         acc.append_reasoning_part(text)
         reasoning: str | list[str] = acc.reasoning_parts if len(acc.reasoning_parts) > 1 else acc.reasoning_buffer
         if acc.reasoning_item_id is None or acc.reasoning_item_id not in self.items_by_id:
-            acc.reasoning_item_id = f"reasoning:live:{acc.turn_id}"
+            acc.reasoning_item_id = self._next_reasoning_item_id(acc)
         self._append_or_update(TimelineItem(
             id=acc.reasoning_item_id,
             kind="reasoning",
@@ -849,7 +850,7 @@ class ThreadTimelineState:
         if not stripped:
             self._remove_live_reasoning(acc)
             return
-        item_id = acc.reasoning_item_id or f"reasoning:live:{acc.turn_id}"
+        item_id = acc.reasoning_item_id or self._next_reasoning_item_id(acc)
         acc.reasoning_item_id = item_id
         self._append_or_update(TimelineItem(
             id=item_id,
@@ -860,6 +861,20 @@ class ThreadTimelineState:
         ))
         acc.reasoning_buffer = ""
         acc.reasoning_item_id = None
+
+    def _next_reasoning_item_id(self, acc: TurnAccumulator) -> str:
+        """Return a fresh live reasoning id for one model round.
+
+        A single user turn may contain several model responses separated by tool
+        calls. Completed reasoning remains in the process fold, so a later live
+        reasoning delta must not reuse and overwrite the previous cell.
+        """
+
+        while True:
+            item_id = f"reasoning:live:{acc.turn_id}:{acc.reasoning_item_index}"
+            acc.reasoning_item_index += 1
+            if item_id not in self.items_by_id:
+                return item_id
 
     def _remove_live_reasoning(self, acc: TurnAccumulator) -> None:
         if acc.reasoning_item_id:
