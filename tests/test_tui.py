@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
+import io
 import json
 import re
 import threading
@@ -9,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from PIL import Image as PILImage
 import pytest
+from rich.console import Console
 from textual import events
 from textual.widgets import Button, OptionList, Static, TextArea
 from textual_image.widget import Image as TerminalImage
@@ -70,7 +72,12 @@ def strip_markup(text: str) -> str:
 
 def plain_renderable(value: object) -> str:
     """Return plain text from the renderables used by TUI tests."""
-    return renderable_plain(value) or str(value)
+    direct = renderable_plain(value)
+    if direct is not None:
+        return direct
+    console = Console(file=io.StringIO(), record=True, width=100, color_system=None)
+    console.print(value)
+    return console.export_text()
 
 
 @pytest.fixture(autouse=True)
@@ -3967,6 +3974,78 @@ async def test_tui_goal_panel_enables_and_resets_only_when_disabled(
         await pilot.pause()
         assert "# Goal Checklist" in state.paths.checklist.read_text(encoding="utf-8")
         assert "custom" not in state.paths.checklist.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_tui_goal_files_panel_renders_existing_file_contents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Goal work")
+    state = engine.enable_goal_mode(thread_id, objective="show previews")
+    state.paths.checklist.write_text("# Checklist\n\n- [ ] render checklist", encoding="utf-8")
+    state.paths.notes.write_text("# Notes\n\nRemember the handoff.", encoding="utf-8")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+    app.thread_id = thread_id
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_goal_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        ids = [item.id for item in panel.items]
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("files")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        files_panel = app.screen_stack[-1]
+        assert isinstance(files_panel, FullscreenPanel)
+        assert files_panel.panel_title == app._text("goal_files")
+        body = plain_renderable(files_panel.body)
+        assert "goal.json" in body
+        assert '"objective": "show previews"' in body
+        assert "checklist.md" in body
+        assert "render checklist" in body
+        assert "notes.md" in body
+        assert "Remember the handoff." in body
+
+
+@pytest.mark.asyncio
+async def test_tui_goal_files_panel_does_not_create_missing_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Goal work")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+    app.thread_id = thread_id
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_goal_panel()
+        await pilot.pause()
+        panel = app.screen_stack[-1]
+        ids = [item.id for item in panel.items]
+        panel.query_one("#panel-content", OptionList).highlighted = ids.index("files")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        state = engine.goal_state(thread_id)
+        assert state is not None
+        assert not state.paths.state.exists()
+        assert not state.paths.checklist.exists()
+        assert not state.paths.notes.exists()
+
+        files_panel = app.screen_stack[-1]
+        assert isinstance(files_panel, FullscreenPanel)
+        body = plain_renderable(files_panel.body)
+        assert "goal.json" in body
+        assert app._text("goal_file_missing") in body
 
 
 @pytest.mark.asyncio

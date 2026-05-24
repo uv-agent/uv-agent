@@ -103,6 +103,7 @@ MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 GOAL_MODE_STYLE = "bold #ff5a36"
+GOAL_FILE_PREVIEW_MAX_CHARS = 100_000
 STREAM_RENDER_INTERVAL_SECONDS = 0.05
 STREAM_STATUS_INTERVAL_SECONDS = 0.25
 MountBefore: TypeAlias = int | str | Widget | None
@@ -3747,12 +3748,10 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _open_goal_files_panel(self, thread_id: str) -> None:
         state = self.engine.goal_state(thread_id)
         if state is None:
-            self.engine.reset_goal_files(thread_id)
-            state = self.engine.goal_state(thread_id)
-        if state is None:
+            self._open_panel(plain(self._text("goal_files_pending"), style="dim"), "goal", self._text("goal_files"))
             return
         status = self._text("goal_enabled") if state.enabled or self._goal_enable_pending(thread_id) else self._text("goal_disabled")
-        lines = [
+        sections: list[object] = [
             Text.assemble((self._text("goal"), "bold"), " ", (status, "cyan")),
             Text(),
             Text.assemble("- state: ", str(state.paths.state)),
@@ -3760,8 +3759,64 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             Text.assemble("- document: ", str(state.paths.notes)),
         ]
         if state.objective:
-            lines.extend([Text(), Text.assemble("- objective: ", state.objective)])
-        self._open_panel(join_lines(lines), "goal", self._text("goal_files"))
+            sections.extend([Text(), Text.assemble("- objective: ", state.objective)])
+        sections.extend(
+            [
+                Text(),
+                *self._goal_file_preview("goal.json", state.paths.state, kind="json"),
+                Text(),
+                *self._goal_file_preview("checklist.md", state.paths.checklist, kind="markdown"),
+                Text(),
+                *self._goal_file_preview("notes.md", state.paths.notes, kind="markdown"),
+            ]
+        )
+        self._open_panel(join_lines(sections), "goal", self._text("goal_files"))
+
+    def _goal_file_preview(self, label: str, path: Path, *, kind: Literal["json", "markdown"]) -> list[object]:
+        """Render one durable goal file if it already exists.
+
+        The goal files panel is a read-only inspection surface. Missing files are
+        reported inline instead of being created as a side effect of opening the
+        panel; creation/reset remains owned by the explicit goal-mode actions.
+        """
+
+        heading = Text.assemble((label, "bold cyan"), " ", (str(path), "dim"))
+        if not path.is_file():
+            return [heading, plain(self._text("goal_file_missing"), style="dim")]
+        try:
+            content, truncated = self._read_goal_file_preview(path)
+        except OSError as exc:
+            return [heading, plain(f"{self._text('goal_file_read_error')}: {exc}", style="red")]
+        if not content:
+            body: object = plain(self._text("goal_file_empty"), style="dim")
+        elif kind == "json":
+            body = plain(self._format_goal_json_preview(content))
+        else:
+            body = _markdown(content)
+        parts: list[object] = [heading, body]
+        if truncated:
+            parts.append(
+                plain(
+                    self._text("goal_file_truncated").format(limit=GOAL_FILE_PREVIEW_MAX_CHARS),
+                    style="dim",
+                )
+            )
+        return parts
+
+    def _read_goal_file_preview(self, path: Path) -> tuple[str, bool]:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            content = handle.read(GOAL_FILE_PREVIEW_MAX_CHARS + 1)
+        if len(content) <= GOAL_FILE_PREVIEW_MAX_CHARS:
+            return content, False
+        return content[:GOAL_FILE_PREVIEW_MAX_CHARS].rstrip() + "\n", True
+
+    @staticmethod
+    def _format_goal_json_preview(content: str) -> str:
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return content
+        return json.dumps(parsed, ensure_ascii=False, indent=2)
 
     def _session_thread_ids_for_panel(self, kind: str) -> list[str]:
         active_ids = self._active_activity_thread_ids()
