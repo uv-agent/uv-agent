@@ -2848,7 +2848,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "reply concisely and with a friendly, approachable tone" in prompt
     assert "Keep answers restrained in length by default" in prompt
     assert "explicitly asks for a detailed explanation of specific content" in prompt
-    assert "Actively add comments and docstrings where they help future maintainers" in prompt
+    assert "When no project rules or user instructions say otherwise" in prompt
+    assert "lean toward fuller in-code documentation" in prompt
+    assert "what changed, why, and how it was verified" in prompt
     assert "Write comments generously" not in prompt
     assert "project-shared uv environment" in prompt
     assert 'add_dependency("package-name")' in prompt
