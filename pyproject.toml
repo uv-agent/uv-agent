@@ -1,6 +1,6 @@
 [project]
 name = "uv-agent"
-version = "0.10.0"
+version = "0.11.0"
 description = "Experimental Python-runner coding agent with a Textual TUI"
 readme = "README.md"
 license = "MIT"
