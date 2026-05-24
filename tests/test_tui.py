@@ -2299,6 +2299,112 @@ def test_timeline_live_reasoning_rounds_get_distinct_cells() -> None:
     assert group.item_ids == [reasoning_items[0].id, "tool_call:call_1", reasoning_items[1].id]
 
 
+def test_timeline_live_reasoning_keeps_group_order_when_finalized_after_tool_delta() -> None:
+    timeline = ThreadTimelineState("thread_live")
+    turn_id = "turn_live"
+
+    timeline.apply_live_event(
+        "assistant.reasoning_delta",
+        {"type": "assistant.reasoning_delta", "thread_id": "thread_live", "turn_id": turn_id, "text": " plan"},
+    )
+    timeline.apply_live_event(
+        "tool.delta",
+        {
+            "type": "tool.delta",
+            "thread_id": "thread_live",
+            "turn_id": turn_id,
+            "tool_call": ToolCallDelta(
+                index=0,
+                call_id="call_1",
+                name="run_python",
+                arguments='{"code":"print(1)"}',
+            ),
+        },
+    )
+    timeline.apply_live_event(
+        "assistant.reasoning_completed",
+        {"type": "assistant.reasoning_completed", "thread_id": "thread_live", "turn_id": turn_id, "text": "plan"},
+    )
+
+    group = timeline.process_groups[turn_id]
+    reasoning_item = next(item for item in timeline.items if item.kind == "reasoning")
+    assert timeline.items.index(reasoning_item) < timeline.items.index(timeline.items_by_id["tool_call:call_1"])
+    assert group.item_ids == [reasoning_item.id, "tool_call:call_1"]
+
+
+@pytest.mark.asyncio
+async def test_tui_repositions_existing_fold_before_late_finalized_reasoning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: fake_engine(root, tmp_path / "state"))
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        thread_id = "thread_live"
+        turn_id = "turn_live"
+        run_state = app._run_state_for_thread(thread_id)
+        app.thread_id = thread_id
+        user_cell = app._append_user("inspect")
+        app._process_anchor_cell = user_cell
+
+        await app._handle_thread_event(
+            thread_id,
+            "assistant.reasoning_delta",
+            {"type": "assistant.reasoning_delta", "thread_id": thread_id, "turn_id": turn_id, "text": " plan"},
+            run_state,
+        )
+        await app._handle_thread_event(
+            thread_id,
+            "tool.delta",
+            {
+                "type": "tool.delta",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "tool_call": ToolCallDelta(
+                    index=0,
+                    call_id="call_1",
+                    name="run_python",
+                    arguments='{"code":"print(1)"}',
+                ),
+            },
+            run_state,
+        )
+        await app._handle_model_response_item(
+            thread_id,
+            {
+                "type": "model.response",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "reasoning_text": "plan",
+                "response": ModelResponse(
+                    id="resp_1",
+                    output=[],
+                    output_text="",
+                    raw={},
+                    usage={},
+                    reasoning_text="plan",
+                ),
+            },
+            run_state,
+        )
+        await pilot.pause()
+
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        children = list(transcript.children)
+        fold_cell = next(child for child in children if isinstance(child, FoldedProcessCell))
+        reasoning_cell = next(
+            child
+            for child in children
+            if isinstance(child, ExpandableTranscriptCell) and child.detail_title == "reasoning_details"
+        )
+        assert fold_cell.cells[0] is reasoning_cell
+        assert reasoning_cell.has_class("process_fold_hidden")
+        assert children.index(fold_cell) < children.index(reasoning_cell)
+
+
 @pytest.mark.asyncio
 async def test_tui_compaction_completion_folds_prior_process_and_shows_summary(
     tmp_path: Path,

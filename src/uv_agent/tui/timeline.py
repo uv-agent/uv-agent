@@ -711,8 +711,22 @@ class ThreadTimelineState:
     def _track_process_item(self, group_id: str, item_id: str) -> None:
         group = self._group(group_id)
         if item_id not in group.item_ids:
-            group.item_ids.append(item_id)
+            group.item_ids.insert(self._process_group_insert_index(group_id, item_id), item_id)
             self.changed_process_group_ids.add(group_id)
+
+    def _process_group_insert_index(self, group_id: str, item_id: str) -> int:
+        """Return the group position matching the transcript item order."""
+
+        item_order = {item.id: index for index, item in enumerate(self.items)}
+        item_position = item_order.get(item_id)
+        if item_position is None:
+            return len(self._group(group_id).item_ids)
+        group = self._group(group_id)
+        for index, existing_id in enumerate(group.item_ids):
+            existing_position = item_order.get(existing_id)
+            if existing_position is not None and item_position < existing_position:
+                return index
+        return len(group.item_ids)
 
     def _update_turn_timestamps(self, acc: TurnAccumulator, event_type: str, event: dict[str, Any]) -> None:
         started = str(event.get("turn_started_at") or event.get("started_at") or "").strip()

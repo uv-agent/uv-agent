@@ -1274,6 +1274,16 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if isinstance(existing, FoldedProcessCell) and existing.is_mounted:
             existing.set_cells(process_cells)
             existing.set_elapsed_label(elapsed_label)
+            first_cell = process_cells[0]
+            if first_cell.is_mounted:
+                children = list(first_cell.parent.children) if first_cell.parent is not None else []
+                fold_is_after_first_cell = (
+                    existing in children
+                    and first_cell in children
+                    and children.index(existing) > children.index(first_cell)
+                )
+                if fold_is_after_first_cell:
+                    first_cell.parent.move_child(existing, before=first_cell)
             if existing.collapsed != group.collapsed:
                 existing.set_collapsed(group.collapsed)
             return
