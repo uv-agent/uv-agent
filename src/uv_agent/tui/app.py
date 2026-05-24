@@ -429,6 +429,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._top_notifications: list[TopNotification] = []
         self._top_notification_unread = 0
         self._interaction_mode = "normal"
+        # Enabling Goal should not create thread records or goal files until the
+        # user actually sends. ``None`` represents the unsaved draft thread.
+        self._pending_goal_enable_threads: set[str | None] = set()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -1420,6 +1423,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     ) -> None:
         run_state = self._thread_runs[thread_id]
         try:
+            if not retry:
+                self._materialize_pending_goal_enable(thread_id)
             turn_kwargs: dict[str, Any] = {
                 "thread_id": thread_id,
                 "level": level,
@@ -1831,7 +1836,33 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def _ensure_active_thread(self) -> str:
         if self.thread_id is None:
             self.thread_id = self.engine.thread_store.create_thread()
+            self._move_draft_goal_enable_to_thread(self.thread_id)
         return self.thread_id
+
+    def _move_draft_goal_enable_to_thread(self, thread_id: str) -> None:
+        if None not in self._pending_goal_enable_threads:
+            return
+        self._pending_goal_enable_threads.discard(None)
+        self._pending_goal_enable_threads.add(thread_id)
+
+    def _set_pending_goal_enable(self, thread_id: str | None, enabled: bool) -> None:
+        if enabled:
+            self._pending_goal_enable_threads.add(thread_id)
+        else:
+            self._pending_goal_enable_threads.discard(thread_id)
+
+    def _goal_enable_pending(self, thread_id: str | None) -> bool:
+        return thread_id in self._pending_goal_enable_threads
+
+    def _materialize_pending_goal_enable(self, thread_id: str) -> None:
+        if thread_id not in self._pending_goal_enable_threads:
+            return
+        state = self.engine.goal_state(thread_id)
+        if state is None or not state.enabled:
+            self.engine.enable_goal_mode(thread_id)
+        self._pending_goal_enable_threads.discard(thread_id)
+        if self.is_mounted:
+            self._refresh_status()
 
     def _current_level_for_thread(self, thread_id: str | None = None) -> str | None:
         if self.level:
@@ -2038,6 +2069,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if thread_id is None:
             thread_id = self.engine.thread_store.create_thread()
             self.thread_id = thread_id
+            self._move_draft_goal_enable_to_thread(thread_id)
         run_state = self._thread_runs.get(thread_id)
         if run_state is None:
             run_state = ThreadRunState(
@@ -2549,6 +2581,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             old_thread_id = self.thread_id
             self._save_active_thread_view_state()
             self._close_active_panel()
+            self._set_pending_goal_enable(old_thread_id, False)
+            self._set_pending_goal_enable(None, False)
             self.thread_id = None
             self.level = None
             self._reset_live_view_state()
@@ -3390,11 +3424,15 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._open_panel(self._status_panel_markup(), "status", self._text("status"))
 
     def _open_goal_panel(self, *, replace_current: bool = False) -> None:
-        thread_id = self._ensure_active_thread()
-        self.level = self._thread_metadata_level(thread_id) or self.level
-        state = self.engine.goal_state(thread_id)
-        enabled = bool(state and state.enabled)
+        thread_id = self.thread_id
+        if thread_id is not None:
+            self.level = self._thread_metadata_level(thread_id) or self.level
+        state = self.engine.goal_state(thread_id) if thread_id is not None else None
+        persisted_enabled = bool(state and state.enabled)
+        pending_enabled = not persisted_enabled and self._goal_enable_pending(thread_id)
+        enabled = pending_enabled or persisted_enabled
         status = self._text("goal_enabled") if enabled else self._text("goal_disabled")
+        files_hint = self._text("goal_files_pending") if thread_id is None else self._text("goal_files_hint")
         items = [
             PickerItem(
                 id="enable",
@@ -3412,7 +3450,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 id="files",
                 title=self._text("goal_files"),
                 description=status,
-                meta=self._text("goal_files_hint"),
+                meta=files_hint,
             ),
             PickerItem(
                 id="reset",
@@ -3430,27 +3468,46 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             replace_current=replace_current,
         )
 
-    def _goal_disable_meta(self, thread_id: str, enabled: bool) -> str:
+    def _goal_disable_meta(self, thread_id: str | None, enabled: bool) -> str:
         if not enabled:
+            return self._text("goal_disable_hint")
+        if thread_id is None or self._goal_enable_pending(thread_id):
             return self._text("goal_disable_hint")
         if not self._goal_can_disable(thread_id):
             return self._text("goal_disable_requires_completed")
         return self._text("goal_disable_hint")
 
     def _choose_goal_item(self, item_id: str) -> None:
-        thread_id = self._ensure_active_thread()
-        self.level = self._thread_metadata_level(thread_id) or self.level
-        state = self.engine.goal_state(thread_id)
-        enabled = bool(state and state.enabled)
-        if item_id == "enable":
-            self.engine.enable_goal_mode(thread_id)
+        thread_id = self.thread_id
+        if thread_id is not None:
             self.level = self._thread_metadata_level(thread_id) or self.level
+        state = self.engine.goal_state(thread_id) if thread_id is not None else None
+        persisted_enabled = bool(state and state.enabled)
+        pending_enabled = not persisted_enabled and self._goal_enable_pending(thread_id)
+        enabled = pending_enabled or persisted_enabled
+        if item_id == "enable":
+            if persisted_enabled:
+                self._flash(self._text("goal_enabled_flash"))
+                self._refresh_status()
+                self._open_goal_panel(replace_current=True)
+                return
+            self._set_pending_goal_enable(thread_id, True)
             self._flash(self._text("goal_enabled_flash"))
             self._refresh_status()
             self._open_goal_panel(replace_current=True)
             return
         if item_id == "disable":
-            if not enabled:
+            if pending_enabled:
+                self._set_pending_goal_enable(thread_id, False)
+                self._flash(self._text("goal_disabled_flash"))
+                self._refresh_status()
+                self._open_goal_panel(replace_current=True)
+                return
+            if not persisted_enabled:
+                self._flash(self._text("goal_already_disabled"))
+                self._open_goal_panel(replace_current=True)
+                return
+            if thread_id is None:
                 self._flash(self._text("goal_already_disabled"))
                 self._open_goal_panel(replace_current=True)
                 return
@@ -3465,11 +3522,19 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._open_goal_panel(replace_current=True)
             return
         if item_id == "files":
+            if thread_id is None:
+                self._flash(self._text("goal_files_pending"), severity="warning")
+                self._open_goal_panel(replace_current=True)
+                return
             self._open_goal_files_panel(thread_id)
             return
         if item_id == "reset":
             if enabled:
                 self._flash(self._text("goal_reset_disabled_active"), severity="warning")
+                self._open_goal_panel(replace_current=True)
+                return
+            if thread_id is None:
+                self._flash(self._text("goal_files_pending"), severity="warning")
                 self._open_goal_panel(replace_current=True)
                 return
             self.engine.reset_goal_files(thread_id)
@@ -3481,6 +3546,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         run_state = self._thread_state(thread_id)
         if run_state is not None and (run_state.worker is not None or run_state.queue):
             return False
+        return self._thread_has_final_reply(thread_id)
+
+    def _thread_has_final_reply(self, thread_id: str) -> bool:
         events, _ = self.engine.thread_store.read_recent_events(
             thread_id,
             limit=1,
@@ -3495,7 +3563,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             state = self.engine.goal_state(thread_id)
         if state is None:
             return
-        status = self._text("goal_enabled") if state.enabled else self._text("goal_disabled")
+        status = self._text("goal_enabled") if state.enabled or self._goal_enable_pending(thread_id) else self._text("goal_disabled")
         lines = [
             Text.assemble((self._text("goal"), "bold"), " ", (status, "cyan")),
             Text(),
@@ -3702,8 +3770,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         return join_lines(lines)  # type: ignore[return-value]
 
     def _goal_status_line(self) -> Text:
-        state = self.engine.goal_state(self.thread_id)
-        if state is not None and state.enabled:
+        if self._goal_mode_enabled():
             return Text(self._text("goal_enabled"), style="cyan")
         return Text(self._text("goal_disabled"), style="dim")
 
@@ -4142,6 +4209,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         return self._text("mode_normal") if self._interaction_mode == "normal" else self._interaction_mode
 
     def _goal_mode_enabled(self) -> bool:
+        if self._goal_enable_pending(self.thread_id):
+            return True
         if not self.thread_id:
             return False
         goal_state = self.engine.goal_state(self.thread_id)

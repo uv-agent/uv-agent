@@ -3660,8 +3660,11 @@ async def test_tui_goal_panel_enables_and_resets_only_when_disabled(
     project_root = tmp_path / "project"
     project_root.mkdir()
     engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Goal work")
+    state = engine.enable_goal_mode(thread_id)
     monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
     app = UvAgentApp(project_root=project_root)
+    app.thread_id = thread_id
 
     async with app.run_test(size=(90, 24)) as pilot:
         app._open_goal_panel()
@@ -3669,13 +3672,8 @@ async def test_tui_goal_panel_enables_and_resets_only_when_disabled(
         panel = app.screen_stack[-1]
         assert isinstance(panel, FullscreenPanel)
         assert panel.panel_title == app._text("goal")
-        assert app.thread_id is not None
-        thread_id = app.thread_id
-
-        await pilot.press("enter")
-        await pilot.pause()
-        state = engine.goal_state(thread_id)
-        assert state is not None and state.enabled
+        assert app.thread_id == thread_id
+        assert state.enabled
         assert state.paths.checklist.exists()
 
         panel = app.screen_stack[-1]
@@ -3705,6 +3703,94 @@ async def test_tui_goal_panel_enables_and_resets_only_when_disabled(
         await pilot.pause()
         assert "# Goal Checklist" in state.paths.checklist.read_text(encoding="utf-8")
         assert "custom" not in state.paths.checklist.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_tui_goal_mode_new_thread_initializes_on_first_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = ReleasableEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_goal_panel()
+        await pilot.pause()
+
+        assert app.thread_id is None
+        assert engine.thread_store.list_threads() == []
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.thread_id is None
+        assert engine.thread_store.list_threads() == []
+        assert not (engine.thread_store.data_dir / "goals").exists()
+        assert plain_renderable(app.query_one("#top-bar-mode", Static).content) == "mode Goal"
+
+        app._close_active_panel()
+        await pilot.pause()
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("start goal")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+
+        thread_id = app.thread_id
+        assert thread_id is not None
+        await engine.started[thread_id].wait()
+        state = engine.goal_state(thread_id)
+        assert state is not None and state.enabled
+        assert state.paths.checklist.exists()
+        assert state.paths.notes.exists()
+
+        engine.release[thread_id].set()
+        await pilot.pause(0.2)
+
+
+@pytest.mark.asyncio
+async def test_tui_goal_mode_existing_thread_initializes_on_next_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = ReleasableEngine(fake_engine(project_root, tmp_path / "state"))
+    thread_id = engine.thread_store.create_thread("Existing work")
+    engine.thread_store.append(thread_id, "turn.completed", turn_id="old", final_text="done")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+    app.thread_id = thread_id
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        app._open_goal_panel()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        pending_state = engine.goal_state(thread_id)
+        assert pending_state is not None and pending_state.enabled is False
+        assert not pending_state.paths.state.exists()
+        assert not engine.thread_store.read_events(thread_id, event_types={"thread.goal_mode_updated"})
+        assert plain_renderable(app.query_one("#top-bar-mode", Static).content) == "mode Goal"
+
+        app._close_active_panel()
+        await pilot.pause()
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("continue with goal")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+
+        await engine.started[thread_id].wait()
+        state = engine.goal_state(thread_id)
+        assert state is not None and state.enabled
+        assert state.paths.checklist.exists()
+        assert engine.thread_store.read_events(thread_id, event_types={"thread.goal_mode_updated"})
+
+        engine.release[thread_id].set()
+        await pilot.pause(0.2)
 
 
 @pytest.mark.asyncio

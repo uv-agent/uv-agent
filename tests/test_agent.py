@@ -4023,6 +4023,45 @@ def test_goal_mode_notice_emits_once_per_epoch_and_after_disable(tmp_path: Path)
     assert '<goal_mode' not in str(engine._pre_user_context_items(thread_id))
 
 
+@pytest.mark.asyncio
+async def test_goal_mode_enable_notice_reaches_first_send(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root, title_generation=TitleGenerationConfig(enabled=False))
+    model_client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=model_client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+
+    engine.enable_goal_mode(thread_id, objective="lazy goal")
+    events = [event async for event in engine.run_turn(user_text="start", thread_id=thread_id)]
+
+    assert any(event.get("type") == "turn.completed" for event in events)
+    request_text = "\n".join(message_item_text(item) for item in model_client.requests[0]["input"])
+    assert '<goal_mode status="enabled">' in request_text
+    assert "lazy goal" in request_text
+    assert engine.thread_store.read_events(thread_id, event_types={"item.goal_mode_notice"})
+
+
 def test_goal_mode_reenable_before_next_turn_emits_enabled_notice(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
