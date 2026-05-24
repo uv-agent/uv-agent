@@ -739,6 +739,29 @@ def test_runtime_list_thread_digests_filters_subagents(tmp_path: Path) -> None:
     assert digests[0]["items"] == [{"role": "user", "text": "child work"}]
 
 
+def test_runtime_thread_helpers_do_not_create_legacy_thread_directories(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    parent = store.create_thread("Parent")
+    child = store.create_thread("Subagent", kind="subagent", parent_thread_id=parent)
+    store.append(
+        child,
+        "item.user",
+        turn_id="turn_child",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "child work"}]},
+    )
+
+    assert not (tmp_path / "threads").exists()
+    assert not (tmp_path / "subthreads").exists()
+
+    assert thread_digest(parent, state_dir=tmp_path)["thread_id"] == parent
+    assert list_thread_digests(state_dir=tmp_path, kind="subagent", parent_thread_id=parent)[0][
+        "thread_id"
+    ] == child
+
+    assert not (tmp_path / "threads").exists()
+    assert not (tmp_path / "subthreads").exists()
+
+
 def test_runtime_look_at_returns_structured_event(tmp_path: Path, capsys) -> None:
     image = tmp_path / "sample.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")

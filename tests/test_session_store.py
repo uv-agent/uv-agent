@@ -383,6 +383,32 @@ def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -
     assert subthreads[0]["parent_turn_id"] == "turn_1"
 
 
+def test_sqlite_store_does_not_create_legacy_thread_directories(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    parent = store.create_thread("Parent")
+    child = store.create_thread("Subagent", kind="subagent", parent_thread_id=parent)
+    store.append(
+        parent,
+        "item.user",
+        turn_id="turn_parent",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "parent"}]},
+    )
+    store.append(
+        child,
+        "item.user",
+        turn_id="turn_child",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "child"}]},
+    )
+
+    assert store.read(parent)
+    assert store.thread_digest(child)["items"] == [{"role": "user", "text": "child"}]
+    assert [thread["thread_id"] for thread in store.list_threads()] == [parent]
+    assert [thread["thread_id"] for thread in store.list_subthreads(parent)] == [child]
+    assert (tmp_path / "uv-agent.sqlite3").exists()
+    assert not (tmp_path / "threads").exists()
+    assert not (tmp_path / "subthreads").exists()
+
+
 def test_store_removes_empty_legacy_jsonl_directories(tmp_path: Path) -> None:
     (tmp_path / "threads").mkdir()
     (tmp_path / "subthreads").mkdir()
