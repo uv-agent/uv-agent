@@ -22,14 +22,14 @@ def compaction_trigger_item() -> dict[str, Any]:
         "user",
         "<context_compaction_request>\n"
         + COMPACTION_SUMMARIZATION_PROMPT
+        + "</context_compaction_request>"
         + "\n\n"
         + "Return only the continuation summary as plain prose, with no code fences "
         + "or tool-call markup. Preserve user intent, decisions, file changes, "
         + "tool results, and unresolved tasks. Summarize tool calls by what was "
         + "done and learned; do not reproduce invocation payloads, scripts, JSON, "
         + "DSML/XML protocol blocks, stdout wrappers, or run IDs. Do not restate "
-        + "AGENTS directory rules; they are reloaded automatically when needed.\n"
-        + "</context_compaction_request>",
+        + "AGENTS directory rules; they are reloaded automatically when needed.\n",
     )
 
 
