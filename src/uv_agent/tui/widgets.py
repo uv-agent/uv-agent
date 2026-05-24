@@ -248,6 +248,12 @@ class TranscriptCell(Static):
         self._rendered_copy_lines.clear()
         super().update(content, layout=layout)
 
+    def update_copy_text(self, copy_text: str | None) -> None:
+        """Refresh copy/selection text without invalidating the rendered cell."""
+
+        self.copy_text = copy_text
+        self._rendered_copy_lines.clear()
+
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         text = self._current_copy_text()
         if text is not None:

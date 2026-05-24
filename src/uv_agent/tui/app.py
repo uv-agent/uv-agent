@@ -103,6 +103,8 @@ MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 GOAL_MODE_STYLE = "bold #ff5a36"
+STREAM_RENDER_INTERVAL_SECONDS = 0.05
+STREAM_STATUS_INTERVAL_SECONDS = 0.25
 MountBefore: TypeAlias = int | str | Widget | None
 NotificationSeverity: TypeAlias = Literal["information", "warning", "error"]
 
@@ -432,6 +434,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         # Enabling Goal should not create thread records or goal files until the
         # user actually sends. ``None`` represents the unsaved draft thread.
         self._pending_goal_enable_threads: set[str | None] = set()
+        self._stream_render_timer: Any | None = None
+        self._stream_status_timer: Any | None = None
+        self._stream_render_due = False
+        self._stream_status_due = False
+        self._last_stream_render_at = 0.0
+        self._last_stream_status_at = 0.0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
@@ -481,6 +489,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if self._mention_file_watcher_worker is not None:
             self._mention_file_watcher_worker.cancel()
         self.engine.close()
+        if self._stream_render_timer is not None:
+            self._stream_render_timer.stop()
+            self._stream_render_timer = None
+        if self._stream_status_timer is not None:
+            self._stream_status_timer.stop()
+            self._stream_status_timer = None
 
     def _on_near_bottom_changed(self, near: bool) -> None:
         self._refresh_composer_overlay()
@@ -818,9 +832,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         item_ids = self._timeline_cell_item_ids()
         if len(timeline.items) < len(item_ids):
             return False
-        timeline_ids = [item.id for item in timeline.items]
-        if item_ids != timeline_ids[:len(item_ids)]:
-            return False
+        # This predicate runs on the live streaming path. Building a full list of
+        # timeline ids for every token made each delta O(history) before the
+        # actual patcher even ran. Compare only the mounted prefix instead.
+        for index, item_id in enumerate(item_ids):
+            if timeline.items[index].id != item_id:
+                return False
         if len(set(item_ids)) != len(item_ids):
             return False
         for item_id in item_ids:
@@ -836,32 +853,28 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     ) -> None:
         follow_tail = transcript.follow_tail
         previous_scroll_y = transcript.scroll_y
-        group_order: list[str] = []
-        changed_groups: set[str] = set()
+        changed_item_ids, changed_groups = timeline.consume_changes()
+        if not changed_item_ids and not changed_groups:
+            changed_item_ids = {item.id for item in timeline.items}
 
-        rendered_ids: set[str] = set()
-        for item in timeline.items:
-            rendered_ids.add(item.id)
-            old_group = self._sync_timeline_item_widget(item)
-            if item.process_group:
-                if item.process_group not in group_order:
-                    group_order.append(item.process_group)
-                changed_groups.add(item.process_group)
-            if old_group and old_group != item.process_group:
-                changed_groups.add(old_group)
-
-        stale_ids = [
-            item_id
-            for item_id in self._timeline_cell_item_ids()
-            if item_id not in rendered_ids
-        ]
+        items_by_id = {item.id: item for item in timeline.items}
+        stale_ids = [item_id for item_id in self._timeline_cell_item_ids() if item_id not in items_by_id]
         if stale_ids:
             self._rebuild_transcript_from_timeline(timeline, transcript)
             return
 
-        for group_id in group_order:
-            if group_id in changed_groups or f"process_fold:{group_id}" not in self._timeline_cells:
-                self._refresh_timeline_process_fold(timeline, group_id)
+        for item_id in changed_item_ids:
+            item = items_by_id.get(item_id)
+            if item is None:
+                continue
+            old_group = self._sync_timeline_item_widget(item)
+            if item.process_group:
+                changed_groups.add(item.process_group)
+            if old_group and old_group != item.process_group:
+                changed_groups.add(old_group)
+
+        for group_id in changed_groups:
+            self._refresh_timeline_process_fold(timeline, group_id)
 
         if timeline.items:
             self._mark_transcript_content()
@@ -993,6 +1006,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
                 return False
             text = str(item.content.get("text") or "")
+            if item.content.get("partial"):
+                widget.update(plain(text, style="#d7e0ea"), copy_text=text)
+                return True
             widget.update(_markdown(text), copy_text=text)
             return True
         if item.kind == "reasoning":
@@ -1026,6 +1042,19 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 call.get("_status_label")
                 or (self._text("python_called") if status == "called" else self._text("python_running"))
             )
+            if status != "called":
+                # The streamed tool-call arguments may update every few bytes.
+                # Re-highlighting the growing details pane on each delta makes
+                # live JSON/function-call output increasingly expensive. Keep
+                # the compact row fresh and defer the full highlighted body to
+                # tool.started/tool.output, where the call is stable.
+                widget.update(tool_call_summary_markup({**call, "_status_label": status_label}))
+                widget.update_copy_text(renderable_plain(tool_call_detail_highlight_markup(call)))
+                if widget.has_class("event"):
+                    widget.remove_class("event")
+                if not widget.has_class("tool_pending"):
+                    widget.add_class("tool_pending")
+                return True
             widget.set_details(
                 tool_call_summary_markup({**call, "_status_label": status_label}),
                 tool_call_detail_highlight_markup(call),
@@ -1189,7 +1218,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             cell = self._append_user(str(item.content.get("text") or ""), before=before)
         elif item.kind == "assistant":
             text = str(item.content.get("text") or "")
-            cell = self._append_cell(_markdown(text), "assistant", before=before, copy_text=text)
+            content = plain(text, style="#d7e0ea") if item.content.get("partial") else _markdown(text)
+            cell = self._append_cell(content, "assistant", before=before, copy_text=text)
         elif item.kind == "reasoning":
             text = str(item.content.get("text") or "")
             if item.content.get("partial"):
@@ -1460,6 +1490,8 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 self._append_turn_error(item, display_content=error_renderable(error))
                 self._refresh_status(self._text("error"))
         finally:
+            if self._is_active_thread(thread_id):
+                self._flush_stream_updates()
             next_turn = run_state.queue.pop(0) if run_state.queue else None
             if next_turn is not None:
                 remaining_queue = list(run_state.queue)
@@ -1602,6 +1634,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                     },
                 )
             if self._is_active_thread(item_thread_id):
+                self._flush_stream_updates()
                 self._sync_transcript_from_timeline()
         run_state.status = self._text("reading")
         if self._is_active_thread(item_thread_id):
@@ -1622,6 +1655,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         run_state.status = self._text("idle")
         self._notify_turn_completed(item_thread_id, text, active_thread=was_active_thread)
         if was_active_thread:
+            self._flush_stream_updates()
             self._sync_transcript_from_timeline()
             self._refresh_status(self._text("idle"))
 
@@ -1647,6 +1681,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             timeline.apply_live_event("turn.interrupted", item)
         run_state.status = self._text("interrupted")
         if self._is_active_thread(item_thread_id):
+            self._flush_stream_updates()
             self._sync_transcript_from_timeline()
             self._refresh_status(self._text("interrupted"))
 
@@ -1663,6 +1698,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             timeline.flush_pending_stream_retries(str(item.get("turn_id") or run_state.turn_id or ""))
             timeline.apply_live_event("turn.error", item)
         if self._is_active_thread(item_thread_id):
+            self._flush_stream_updates()
             self._sync_transcript_from_timeline()
             self._refresh_status(self._text("error"))
 
@@ -2180,6 +2216,69 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         timeline.apply_live_event(event_type, item)
         self._sync_transcript_from_timeline()
 
+    def _stream_event_needs_throttle(self, event_type: str) -> bool:
+        return event_type in {"assistant.delta", "assistant.reasoning_delta", "tool.delta"}
+
+    def _schedule_stream_render(self) -> None:
+        if not self.is_mounted:
+            return
+        self._stream_render_due = True
+        if self._stream_render_timer is not None:
+            return
+        delay = max(0.001, STREAM_RENDER_INTERVAL_SECONDS - (monotonic() - self._last_stream_render_at))
+        self._stream_render_timer = self.set_timer(delay, self._flush_stream_render, name="stream-render")
+
+    def _flush_stream_render(self) -> None:
+        self._stream_render_timer = None
+        if not self._stream_render_due:
+            return
+        if not self._default_screen_mounted():
+            self._stream_render_due = False
+            return
+        self._stream_render_due = False
+        self._last_stream_render_at = monotonic()
+        self._sync_transcript_from_timeline()
+
+    def _schedule_stream_status_refresh(self) -> None:
+        if not self.is_mounted:
+            return
+        self._stream_status_due = True
+        if self._stream_status_timer is not None:
+            return
+        delay = max(0.001, STREAM_STATUS_INTERVAL_SECONDS - (monotonic() - self._last_stream_status_at))
+        self._stream_status_timer = self.set_timer(delay, self._flush_stream_status_refresh, name="stream-status")
+
+    def _flush_stream_status_refresh(self) -> None:
+        self._stream_status_timer = None
+        if not self._stream_status_due:
+            return
+        if not self._default_screen_mounted():
+            self._stream_status_due = False
+            return
+        self._stream_status_due = False
+        self._last_stream_status_at = monotonic()
+        self._refresh_status()
+
+    def _flush_stream_updates(self) -> None:
+        if self._stream_render_timer is not None:
+            self._stream_render_timer.stop()
+            self._stream_render_timer = None
+        if self._stream_status_timer is not None:
+            self._stream_status_timer.stop()
+            self._stream_status_timer = None
+        if not self._default_screen_mounted():
+            self._stream_render_due = False
+            self._stream_status_due = False
+            return
+        if self._stream_render_due:
+            self._stream_render_due = False
+            self._last_stream_render_at = monotonic()
+            self._sync_transcript_from_timeline()
+        if self._stream_status_due:
+            self._stream_status_due = False
+            self._last_stream_status_at = monotonic()
+            self._refresh_status()
+
     def _mark_run_error_state(self, run_state: ThreadRunState, event: dict[str, Any]) -> None:
         retryable = self._is_retryable_error_event(event)
         run_state.retryable_error = retryable
@@ -2279,6 +2378,11 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         elif event_type == "turn.error":
             self._mark_run_error_state(run_state, item)
         if self._is_active_thread(thread_id):
+            if self._stream_event_needs_throttle(event_type):
+                self._schedule_stream_render()
+                self._schedule_stream_status_refresh()
+                return
+            self._flush_stream_updates()
             self._sync_transcript_from_timeline()
             if event_type == "assistant.delta":
                 self._refresh_status(self._text("writing_answer"))

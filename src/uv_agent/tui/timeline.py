@@ -185,6 +185,8 @@ class ThreadTimelineState:
         self.has_older = False
         self.history_loaded = False
         self.active_turns: dict[str, TurnAccumulator] = {}
+        self.changed_item_ids: set[str] = set()
+        self.changed_process_group_ids: set[str] = set()
 
     def clear(self) -> None:
         self.items.clear()
@@ -195,6 +197,17 @@ class ThreadTimelineState:
         self.has_older = False
         self.history_loaded = False
         self.active_turns.clear()
+        self.changed_item_ids.clear()
+        self.changed_process_group_ids.clear()
+
+    def consume_changes(self) -> tuple[set[str], set[str]]:
+        """Return and clear item/group ids changed since the last render pass."""
+
+        item_ids = set(self.changed_item_ids)
+        group_ids = set(self.changed_process_group_ids)
+        self.changed_item_ids.clear()
+        self.changed_process_group_ids.clear()
+        return item_ids, group_ids
 
     def load_history_segment(
         self,
@@ -210,6 +223,8 @@ class ThreadTimelineState:
         self.has_older = has_older
         self.history_loaded = True
         self._apply_history_events(events, prepend=False)
+        self.changed_item_ids.clear()
+        self.changed_process_group_ids.clear()
 
     def merge_history_segment(
         self,
@@ -278,6 +293,8 @@ class ThreadTimelineState:
             self.items.append(item)
         self._rebuild_process_groups()
         self.active_turns = active_turns
+        self.changed_item_ids.clear()
+        self.changed_process_group_ids.clear()
 
     @staticmethod
     def _merge_signature(item: TimelineItem) -> tuple[Any, ...]:
@@ -374,6 +391,8 @@ class ThreadTimelineState:
             self.items.append(item)
         self.loaded_start_event_id = start_event_id
         self.has_older = has_older
+        self.changed_item_ids.clear()
+        self.changed_process_group_ids.clear()
 
     def apply_live_event(self, event_type: str, event: dict[str, Any]) -> None:
         turn_id = _turn_id(event)
@@ -393,13 +412,22 @@ class ThreadTimelineState:
         elif event_type == "assistant.response_with_tools":
             text = str(event.get("assistant_text") or acc.assistant_buffer or "")
             if text:
-                self._upsert_assistant_item(acc, text, process=True)
+                if acc.assistant_item_id and acc.assistant_item_id in self.items_by_id:
+                    self._finalize_assistant_item(acc, text)
+                    item = self.items_by_id[acc.assistant_item_id]
+                    if item.process_group != acc.turn_id:
+                        self._upsert_assistant_item(acc, text, process=True)
+                else:
+                    self._upsert_assistant_item(acc, text, process=True)
             acc.assistant_buffer = ""
             acc.assistant_item_id = None
         elif event_type == "assistant.final_response_started":
             text = str(event.get("assistant_text") or acc.assistant_buffer or "")
             if text:
-                self._upsert_assistant_item(acc, text, process=False)
+                if acc.assistant_item_id and acc.assistant_item_id in self.items_by_id:
+                    self._finalize_assistant_item(acc, text)
+                else:
+                    self._upsert_assistant_item(acc, text, process=False)
             acc.assistant_buffer = ""
             acc.assistant_item_id = None
             self._collapse_process_group(acc.turn_id)
@@ -614,6 +642,7 @@ class ThreadTimelineState:
         if existing is None:
             self.items_by_id[item.id] = item
             self.items.append(item)
+            self.changed_item_ids.add(item.id)
             if item.process_group:
                 self._track_process_item(item.process_group, item.id)
             return item
@@ -627,8 +656,10 @@ class ThreadTimelineState:
             group = self.process_groups.get(old_group)
             if group is not None and item.id in group.item_ids:
                 group.item_ids.remove(item.id)
+            self.changed_process_group_ids.add(old_group)
         if item.process_group:
             self._track_process_item(item.process_group, item.id)
+        self.changed_item_ids.add(item.id)
         return existing
 
     def _remove_item(self, item_id: str) -> None:
@@ -640,11 +671,14 @@ class ThreadTimelineState:
             group = self.process_groups.get(item.process_group)
             if group is not None and item_id in group.item_ids:
                 group.item_ids.remove(item_id)
+            self.changed_process_group_ids.add(item.process_group)
+        self.changed_item_ids.add(item_id)
 
     def _track_process_item(self, group_id: str, item_id: str) -> None:
         group = self._group(group_id)
         if item_id not in group.item_ids:
             group.item_ids.append(item_id)
+            self.changed_process_group_ids.add(group_id)
 
     def _update_turn_timestamps(self, acc: TurnAccumulator, event_type: str, event: dict[str, Any]) -> None:
         started = str(event.get("turn_started_at") or event.get("started_at") or "").strip()
@@ -688,6 +722,7 @@ class ThreadTimelineState:
             group.completed_at = group.completed_at or old_group.completed_at
             group.collapsed = group.collapsed or old_group.collapsed
             group.anchor_item_id = group.anchor_item_id or old_group.anchor_item_id
+        self.changed_item_ids.add(item.id)
 
     def add_queued_turn(self, queue_id: str, prompt: str, image_paths: list[Any]) -> None:
         self._append_or_update(TimelineItem(
@@ -755,7 +790,7 @@ class ThreadTimelineState:
         self._append_or_update(TimelineItem(
             id=acc.assistant_item_id,
             kind="assistant",
-            content={"text": text},
+            content={"text": text, "partial": acc.turn_id != "manual"},
             turn_id=acc.turn_id,
             process_group=acc.turn_id if process else None,
         ))
@@ -874,16 +909,34 @@ class ThreadTimelineState:
         acc.assistant_buffer = ""
         acc.assistant_item_id = None
 
+    def _finalize_assistant_item(self, acc: TurnAccumulator, text: str) -> None:
+        item_id = acc.assistant_item_id
+        if item_id is None or item_id not in self.items_by_id:
+            return
+        item = self.items_by_id[item_id]
+        if not item.content.get("partial") and item.content.get("text") == text:
+            return
+        self._append_or_update(TimelineItem(
+            id=item.id,
+            kind="assistant",
+            content={"text": text},
+            turn_id=acc.turn_id,
+            process_group=item.process_group,
+            event_id=item.event_id,
+        ))
+
     def _collapse_process_group(self, turn_id: str) -> None:
         group = self.process_groups.get(turn_id)
         if group is not None and group.item_ids:
             group.collapsed = True
+            self.changed_process_group_ids.add(turn_id)
 
     def _reset_process_group_after_compaction(self, turn_id: str, compaction_item_id: str) -> None:
         group = self.process_groups.get(turn_id)
         if group is not None:
             group.anchor_item_id = compaction_item_id
             group.collapsed = True
+            self.changed_process_group_ids.add(turn_id)
 
     def _apply_warning(self, event: dict[str, Any]) -> None:
         self._append_or_update(self._warning_item(event, kind="token_estimation"))
