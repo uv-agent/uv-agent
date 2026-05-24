@@ -141,6 +141,37 @@ class FakeMcpInstructionsProbe:
         return dict(self.instructions)
 
 
+class DelayedPluginManager:
+    def __init__(self, engine: AgentEngine) -> None:
+        self.engine = engine
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.start_count = 0
+
+    def start_background(self) -> asyncio.Task[None]:
+        self.start_count += 1
+        return asyncio.create_task(self._start())
+
+    async def _start(self) -> None:
+        self.started.set()
+        await self.release.wait()
+        self.engine.runtime_helpers.register(
+            plugin="delayed-plugin",
+            name="delayed_helper",
+            fn=lambda: None,
+            doc="Delayed helper.",
+        )
+
+    async def stop(self) -> None:
+        self.release.set()
+
+    def helper_specs(self):
+        return self.engine.runtime_helpers.list()
+
+    def resolve_helper(self, name: str) -> dict[str, Any]:
+        return self.engine.runtime_helpers.resolve_payload(name)
+
+
 class CompletedOnlyStreamClient(FakeModelClient):
     async def stream_response(self, **kwargs):
         self.requests.append(
@@ -4014,6 +4045,53 @@ def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) ->
         "the plugin attribute identifies the provider plugin only."
     ) in text
     assert '<helper name="demo_helper" plugin="demo-plugin">Demo helper.</helper>' in text
+
+
+@pytest.mark.asyncio
+async def test_run_turn_waits_for_plugin_start_before_context_update(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    plugins = DelayedPluginManager(engine)
+    engine.plugins = plugins  # type: ignore[assignment]
+
+    async def collect_events() -> list[dict[str, Any]]:
+        return [event async for event in engine.run_turn(user_text="hello")]
+
+    turn_task = asyncio.create_task(collect_events())
+    await asyncio.wait_for(plugins.started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert not client.requests
+
+    plugins.release.set()
+    events = await asyncio.wait_for(turn_task, timeout=2)
+
+    assert plugins.start_count == 1
+    assert events[-1]["type"] == "turn.completed"
+    request_text = "\n".join(message_item_text(item) for item in client.requests[0]["input"])
+    assert '<helper name="delayed_helper" plugin="delayed-plugin">Delayed helper.</helper>' in request_text
 
 
 def test_goal_mode_notice_emits_once_per_epoch_and_after_disable(tmp_path: Path) -> None:

@@ -381,6 +381,7 @@ class AgentEngine:
         if rpc_server is not None:
             rpc_server.register_method("helper.resolve", self.plugins.resolve_helper)
         self._plugins_started = False
+        self._plugins_start_task: asyncio.Task[None] | None = None
 
     def close(self) -> None:
         """Release long-lived host resources owned by the engine."""
@@ -399,11 +400,21 @@ class AgentEngine:
 
     def start_plugins_background(self) -> asyncio.Task[None]:
         self._plugins_started = True
-        return self.plugins.start_background()
+        self._plugins_start_task = self.plugins.start_background()
+        return self._plugins_start_task
 
-    def _ensure_plugins_started(self) -> None:
-        if not self._plugins_started:
+    async def _ensure_plugins_started(self) -> None:
+        if not self._plugins_started or self._plugins_start_task is None:
             self.start_plugins_background()
+        task = self._plugins_start_task
+        if task is None or task is asyncio.current_task():
+            return
+        try:
+            await task
+        except Exception:
+            # Individual plugin startup errors are recorded by PluginManager;
+            # unexpected manager-level failures should not block an agent turn.
+            return
 
     async def _plugin_submit_turn(
         self,
@@ -460,7 +471,7 @@ class AgentEngine:
         image_paths: list[str | Path] | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        self._ensure_plugins_started()
+        await self._ensure_plugins_started()
         thread_id = thread_id or await asyncio.to_thread(self.thread_store.create_thread, "New thread")
         with self.thread_store.lock_thread(thread_id):
             prelude = await asyncio.to_thread(
@@ -811,7 +822,7 @@ class AgentEngine:
         level: str | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        self._ensure_plugins_started()
+        await self._ensure_plugins_started()
         self.refresh_config(force=True)
         with self.thread_store.lock_thread(thread_id):
             retry_state = self._prepare_retry_input(thread_id, level=level)
