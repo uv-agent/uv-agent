@@ -6,6 +6,9 @@ import re
 from pathlib import Path
 
 
+PROJECT_LOCAL_GITIGNORE = "*\n"
+
+
 def uv_agent_home() -> Path:
     """Return the user-level uv-agent home directory."""
     override = os.environ.get("UV_AGENT_HOME")
@@ -17,6 +20,25 @@ def uv_agent_home() -> Path:
 def project_local_dir(project_root: Path) -> Path:
     """Return the project-local uv-agent directory used for overrides only."""
     return project_root.resolve() / ".uv-agent"
+
+
+def ensure_project_local_dir(project_root: Path) -> Path:
+    """Create and protect the project-local uv-agent directory.
+
+    The project-local ``.uv-agent`` tree stores machine-local config and, for
+    worktrees, entire alternate checkouts. Some repositories do not ignore that
+    directory themselves, so every writer that materializes it should also place
+    a local ``.gitignore`` that hides all contents from the parent repository.
+    Existing ignore files are left untouched so users can keep stricter local
+    policies if they have already customized the directory.
+    """
+
+    directory = project_local_dir(project_root)
+    directory.mkdir(parents=True, exist_ok=True)
+    gitignore = directory / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(PROJECT_LOCAL_GITIGNORE, encoding="utf-8")
+    return directory
 
 
 def user_config_path() -> Path:

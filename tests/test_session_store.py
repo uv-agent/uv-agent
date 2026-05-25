@@ -97,6 +97,43 @@ def test_thread_level_and_model_switch_warning_update_metadata(tmp_path: Path) -
     assert digest["latest_model_switch_warning"]["_event_id"] == warning["_event_id"]
 
 
+def test_thread_worktree_events_update_metadata(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Worktree")
+    worktree_path = tmp_path / "project" / ".uv-agent" / "worktrees" / "feature"
+
+    store.append(
+        thread_id,
+        "thread.worktree_created",
+        worktree_status="active",
+        worktree_branch="feature",
+        worktree_path=str(worktree_path),
+        worktree_base_ref="HEAD",
+        worktree_origin_root=str(tmp_path / "project"),
+        worktree_head="abc123",
+        worktree_created_at="2026-01-01T00:00:00Z",
+    )
+    store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
+
+    active = store.thread_digest(thread_id)
+    assert active["worktree_status"] == "active"
+    assert active["worktree_branch"] == "feature"
+    assert active["worktree_path"] == str(worktree_path)
+    assert active["latest_cwd"] == str(worktree_path)
+
+    store.append(
+        thread_id,
+        "thread.worktree_deleted",
+        worktree_deleted_head="def456",
+        worktree_deleted_status=" M file.py",
+    )
+
+    deleted = store.thread_digest(thread_id)
+    assert deleted["worktree_status"] == "deleted"
+    assert deleted["worktree_deleted_head"] == "def456"
+    assert deleted["worktree_deleted_status"] == " M file.py"
+
+
 def test_billing_accumulated_events_update_thread_metadata(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Billing")

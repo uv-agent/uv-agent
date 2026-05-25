@@ -341,18 +341,27 @@ ToastRack {{
     color: {t.TEXT_MUTED};
 }}
 
-#top-bar-total,
-#top-bar-active,
-#top-bar-completed,
 #top-bar-elapsed,
 #top-bar-mode,
+#top-bar-worktree,
+#top-bar-active,
+#top-bar-completed,
 #top-bar-notifications {{
     width: auto;
     height: 1;
     padding: 0 1;
 }}
 
-#top-bar-total:hover,
+#top-bar-worktree.hidden {{
+    display: none;
+}}
+
+#top-bar-worktree {{
+    color: {t.ACCENT};
+    text-style: bold;
+}}
+
+#top-bar-worktree:hover,
 #top-bar-active:hover,
 #top-bar-completed:hover,
 #top-bar-notifications:hover {{

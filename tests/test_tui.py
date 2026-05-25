@@ -58,6 +58,7 @@ from uv_agent.tui.app import (
     TranscriptScroll,
     ToolDetailsPanel,
     UvAgentApp,
+    WorktreeBranchPanel,
 )
 from uv_agent.tui.timeline import ThreadTimelineState
 
@@ -948,6 +949,81 @@ async def test_tui_slash_picker_does_not_open_when_deleting_existing_command(
 
         assert not isinstance(app.screen_stack[-1], FullscreenPanel)
         assert composer.text == "/"
+
+
+@pytest.mark.asyncio
+async def test_tui_worktree_panel_opens_branch_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(
+        "uv_agent.tui.app.create_engine",
+        lambda root: fake_engine(root, tmp_path / "state"),
+    )
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.press("ctrl+o")
+        await pilot.press("w", "o")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert panel.panel_title == app._text("worktree_title")
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        branch_panel = app.screen_stack[-1]
+        assert isinstance(branch_panel, WorktreeBranchPanel)
+
+
+@pytest.mark.asyncio
+async def test_tui_worktree_status_and_merge_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Worktree")
+    worktree_path = project_root / ".uv-agent" / "worktrees" / "feature"
+    engine.thread_store.append(
+        thread_id,
+        "thread.worktree_created",
+        worktree_status="active",
+        worktree_branch="feature",
+        worktree_path=str(worktree_path),
+        worktree_base_ref="HEAD",
+        worktree_origin_root=str(project_root),
+    )
+    engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+    app.thread_id = thread_id
+
+    async with app.run_test(size=(90, 24)) as pilot:
+        worktree_marker = app.query_one("#top-bar-worktree", Static)
+        assert not worktree_marker.has_class("hidden")
+        assert plain_renderable(worktree_marker.content) == app._text("worktree")
+
+        await pilot.click("#top-bar-worktree")
+        await pilot.pause()
+
+        panel = app.screen_stack[-1]
+        assert isinstance(panel, FullscreenPanel)
+        assert [item.id for item in panel.items] == ["info", "merge", "delete"]
+
+        panel.query_one("#panel-content", OptionList).highlighted = 1
+        await pilot.press("enter")
+        await pilot.pause()
+
+        composer = app.query_one("#composer", TextArea)
+        assert "feature" in composer.text
+        assert str(project_root) in composer.text
 
 
 @pytest.mark.asyncio

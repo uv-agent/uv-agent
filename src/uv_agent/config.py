@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from uv_agent.paths import project_config_path, project_local_dir, user_config_path
+from uv_agent.paths import ensure_project_local_dir, project_config_path, project_local_dir, user_config_path
 
 
 SENSITIVE_KEYS = {"api_key", "authorization", "token", "secret", "password"}
@@ -639,4 +639,5 @@ def editable_config_path(project_root: Path) -> Path:
     user_path = user_config_path()
     if user_path.exists():
         return user_path
+    ensure_project_local_dir(project_root)
     return project_config_path(project_root)

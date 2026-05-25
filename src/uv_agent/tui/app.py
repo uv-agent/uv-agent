@@ -64,6 +64,7 @@ from uv_agent.tui.panels import (
     PendingImagePreviewPanel,
     PendingSendQueuePanel,
     ToolDetailsPanel,
+    WorktreeBranchPanel,
 )
 from uv_agent.tui.state import (
     CommandSpec,
@@ -93,6 +94,13 @@ from uv_agent.tui.widgets import (
     TranscriptScroll,
 )
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
+from uv_agent.worktree import (
+    CommandResult,
+    WorktreeError,
+    cleanup_worktree,
+    create_worktree,
+    validate_worktree_branch_name,
+)
 
 
 COMPOSER_COLLAPSED_HEIGHT = 5
@@ -125,6 +133,7 @@ __all__ = [
     "TranscriptCell",
     "TranscriptScroll",
     "UvAgentApp",
+    "WorktreeBranchPanel",
 ]
 
 
@@ -457,12 +466,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="main-column"):
             with Horizontal(id="top-bar"):
-                yield Static("", id="top-bar-total")
-                yield Static("", id="top-bar-active")
-                yield Static("", id="top-bar-completed")
-                yield Static("", id="top-bar-spacer")
                 yield Static("", id="top-bar-elapsed")
                 yield Static("", id="top-bar-mode")
+                yield Static("", id="top-bar-worktree", classes="hidden")
+                yield Static("", id="top-bar-spacer")
+                yield Static("", id="top-bar-active")
+                yield Static("", id="top-bar-completed")
                 yield Static("", id="top-bar-notifications")
             with TranscriptScroll(id="transcript"):
                 yield EmptyState()
@@ -516,15 +525,15 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         if self._handle_bottom_overlay_pointer_event(event):
             return
         widget = getattr(event, "widget", None)
-        if widget is not None and widget.id == "top-bar-total":
-            event.stop()
-            self._open_session_threads_panel("all")
-        elif widget is not None and widget.id == "top-bar-active":
+        if widget is not None and widget.id == "top-bar-active":
             event.stop()
             self._open_session_threads_panel("active")
         elif widget is not None and widget.id == "top-bar-completed":
             event.stop()
             self._open_session_threads_panel("completed")
+        elif widget is not None and widget.id == "top-bar-worktree":
+            event.stop()
+            self._open_worktree_panel()
         elif widget is not None and widget.id == "top-bar-notifications":
             event.stop()
             self._open_notifications_panel()
@@ -4023,6 +4032,236 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         label = self._thread_billing_label(decimals=6)
         return label if label else "-"
 
+    def _active_worktree_metadata(self) -> dict[str, Any] | None:
+        """Return active worktree metadata for the current thread, if any."""
+
+        if not self.thread_id:
+            return None
+        metadata = self._thread_metadata(self.thread_id)
+        if str(metadata.get("worktree_status") or "").strip() != "active":
+            return None
+        if not metadata.get("worktree_branch") or not metadata.get("worktree_path"):
+            return None
+        return metadata
+
+    def _open_worktree_panel(self, *, replace_current: bool = False) -> None:
+        metadata = self._active_worktree_metadata()
+        if metadata is None:
+            items = [
+                PickerItem(
+                    id="create",
+                    title=self._text("worktree_create"),
+                    description=self._text("worktree_create_hint"),
+                )
+            ]
+        else:
+            branch = str(metadata.get("worktree_branch") or "")
+            path = str(metadata.get("worktree_path") or "")
+            items = [
+                PickerItem(
+                    id="info",
+                    title=self._text("worktree_current"),
+                    description=branch,
+                    meta=path,
+                ),
+                PickerItem(
+                    id="merge",
+                    title=self._text("worktree_merge"),
+                    description=self._text("worktree_merge_hint"),
+                    meta=branch,
+                ),
+                PickerItem(
+                    id="delete",
+                    title=self._text("worktree_delete"),
+                    description=self._text("worktree_delete_hint"),
+                    meta=branch,
+                ),
+            ]
+        self._open_picker(
+            self._text("worktree_title"),
+            items,
+            self._choose_worktree_item,
+            subtitle=self._text("worktree_panel_hint"),
+            navigate=True,
+            replace_current=replace_current,
+        )
+
+    def _choose_worktree_item(self, item_id: str) -> None:
+        if item_id == "create":
+            self._open_worktree_create_panel()
+            return
+        if item_id == "info":
+            self._open_worktree_info_panel()
+            return
+        if item_id == "merge":
+            self._append_worktree_merge_prompt()
+            self._close_active_panel()
+            return
+        if item_id == "delete":
+            self._open_worktree_delete_panel()
+
+    def _open_worktree_create_panel(self) -> None:
+        self._close_active_panel()
+        panel = WorktreeBranchPanel(
+            title=self._text("worktree_create_title"),
+            subtitle=self._text("worktree_branch_hint"),
+            placeholder=self._text("worktree_branch_placeholder"),
+        )
+
+        def handle(branch: str | None) -> None:
+            if branch:
+                self._create_worktree_from_input(branch)
+            self.query_one("#composer", TextArea).focus()
+
+        self.push_screen(panel, handle)
+
+    def _create_worktree_from_input(self, value: str) -> None:
+        branch = value.strip()
+        try:
+            validate_worktree_branch_name(branch)
+            info = create_worktree(self.project_root, branch, run=self._run_worktree_command)
+        except WorktreeError as exc:
+            self._flash(f"{self._text('worktree_error')}: {exc}", severity="error")
+            self._open_worktree_create_panel()
+            return
+        thread_id = self.engine.thread_store.create_thread(f"Worktree {info.branch}")
+        self.engine.thread_store.append(thread_id, "thread.worktree_created", **info.metadata())
+        self.engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(info.path))
+        self._thread_timelines.pop(thread_id, None)
+        self._resume_thread(thread_id)
+        self._append_cell(
+            Text.assemble(
+                (self._text("worktree_created"), "dim"),
+                " ",
+                (info.branch, "cyan"),
+                " · ",
+                str(info.path),
+            ),
+            "event",
+        )
+        self._refresh_status(self._text("worktree_created"))
+
+    def _open_worktree_info_panel(self) -> None:
+        metadata = self._active_worktree_metadata()
+        if metadata is None:
+            self._open_panel(plain(self._text("worktree_none"), style="dim"), "worktree", self._text("worktree_title"))
+            return
+        lines = [
+            Text(self._text("worktree_current"), style="bold cyan"),
+            Text.assemble("- branch: ", str(metadata.get("worktree_branch") or "")),
+            Text.assemble("- path: ", str(metadata.get("worktree_path") or "")),
+            Text.assemble("- base: ", str(metadata.get("worktree_base_ref") or "")),
+            Text.assemble("- origin: ", str(metadata.get("worktree_origin_root") or "")),
+            Text(),
+            Text.assemble("- ", (self._text("worktree_merge"), "cyan"), ": ", self._text("worktree_merge_hint")),
+            Text.assemble("- ", (self._text("worktree_delete"), "red"), ": ", self._text("worktree_delete_hint")),
+        ]
+        self._open_panel(join_lines(lines), "worktree", self._text("worktree_title"))
+
+    def _append_worktree_merge_prompt(self) -> None:
+        metadata = self._active_worktree_metadata()
+        if metadata is None:
+            self._flash(self._text("worktree_none"), severity="warning")
+            return
+        branch = str(metadata.get("worktree_branch") or "")
+        path = str(metadata.get("worktree_path") or "")
+        origin = str(metadata.get("worktree_origin_root") or self.project_root)
+        prompt = (
+            f"请将当前 worktree 分支 `{branch}` 的工作合并回主工作区 `{origin}`。\n"
+            f"当前 worktree 路径是 `{path}`。请先检查 worktree 和主工作区的 `git status`、"
+            "当前分支、`git worktree list` 和差异。若主工作区有未提交改动、合并会覆盖用户改动、"
+            "或者需要处理冲突，请先说明情况并谨慎处理。合并后运行合适的验证。"
+            "不要自动删除 worktree 或分支；完成后告诉我可以在 Worktree 面板中点击“删除 worktree 和分支”。"
+        )
+        composer = self.query_one("#composer", TextArea)
+        existing = composer.text.rstrip()
+        composer.load_text(f"{existing}\n\n{prompt}" if existing else prompt)
+        composer.focus()
+        if self.thread_id:
+            self.engine.thread_store.append(self.thread_id, "thread.worktree_merge_prompted")
+        self._flash(self._text("worktree_prompt_appended"))
+
+    def _open_worktree_delete_panel(self) -> None:
+        metadata = self._active_worktree_metadata()
+        if metadata is None:
+            self._flash(self._text("worktree_none"), severity="warning")
+            return
+        branch = str(metadata.get("worktree_branch") or "")
+        path = str(metadata.get("worktree_path") or "")
+        items = [
+            PickerItem(
+                id="confirm_delete",
+                title=self._text("worktree_delete_confirm"),
+                description=self._text("worktree_delete_confirm_hint"),
+                meta=f"{branch} · {path}",
+            )
+        ]
+        self._open_picker(
+            self._text("worktree_delete"),
+            items,
+            self._delete_worktree_from_panel,
+            subtitle=self._text("worktree_delete_confirm_hint"),
+            navigate=True,
+        )
+
+    def _delete_worktree_from_panel(self, item_id: str) -> None:
+        if item_id != "confirm_delete" or not self.thread_id:
+            return
+        metadata = self._active_worktree_metadata()
+        if metadata is None:
+            self._flash(self._text("worktree_none"), severity="warning")
+            return
+        branch = str(metadata.get("worktree_branch") or "")
+        path = Path(str(metadata.get("worktree_path") or ""))
+        try:
+            result = cleanup_worktree(self.project_root, branch, path, run=self._run_worktree_command)
+        except WorktreeError as exc:
+            self._flash(f"{self._text('worktree_error')}: {exc}", severity="error")
+            return
+        self.engine.thread_store.append(
+            self.thread_id,
+            "thread.worktree_deleted",
+            worktree_branch=result.branch,
+            worktree_path=str(result.path),
+            worktree_origin_root=str(result.origin_root),
+            worktree_deleted_at=utc_now_iso(),
+            worktree_deleted_head=result.head,
+            worktree_deleted_status=result.status,
+            worktree_removed=result.worktree_removed,
+            branch_deleted=result.branch_deleted,
+        )
+        self.engine.thread_store.append(self.thread_id, "thread.cwd_updated", cwd=str(self.project_root.resolve()))
+        rule_states = getattr(self.engine, "_rule_states", None)
+        if isinstance(rule_states, dict):
+            rule_states.pop(self.thread_id, None)
+        self._append_cell(
+            Text.assemble((self._text("worktree_deleted"), "dim"), " ", (result.branch, "cyan")),
+            "event",
+        )
+        self._close_active_panel()
+        self._refresh_status(self._text("worktree_deleted"))
+
+    def _run_worktree_command(self, args: list[str], *, cwd: Path, timeout_s: float | None = None) -> CommandResult:
+        import subprocess
+
+        completed = subprocess.run(
+            args,
+            cwd=str(cwd),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_s,
+            check=False,
+        )
+        return CommandResult(
+            args=list(args),
+            returncode=completed.returncode,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+        )
+
     def _open_command_palette(self, *, query: str = "") -> None:
         self._open_picker(
             self._text("command_palette"),
@@ -4042,6 +4281,13 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             )
             for spec in self._commands()
         ]
+        items.append(
+            PickerItem(
+                id="worktree",
+                title=self._text("worktree_title"),
+                description=self._text("worktree_panel_hint"),
+            )
+        )
         mention_items: list[PickerItem] = []
         for item in self._mcp_mention_items():
             mention_items.append(
@@ -4067,6 +4313,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         return items
 
     def _choose_command(self, command: str) -> None:
+        if command == "worktree":
+            self._open_worktree_panel()
+            return
         if command.startswith("mcp:"):
             self._choose_mcp_mention(command.removeprefix("mcp:"))
             self._close_active_panel()
@@ -4341,28 +4590,30 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return
         active_ids = self._active_activity_thread_ids()
         completed_ids = self._completed_activity_thread_ids()
-        total_count = len(active_ids) + len(completed_ids)
         elapsed = format_elapsed(self._thread_elapsed_seconds(self.thread_id)) or "0s"
         mode = self._current_mode_label()
         mode_style = GOAL_MODE_STYLE if self._goal_mode_enabled() else "cyan"
         unread = self._top_notification_unread
         notification_count = len(self._top_notifications)
         try:
-            total_widget = self.query_one("#top-bar-total", Static)
-            active_widget = self.query_one("#top-bar-active", Static)
-            completed_widget = self.query_one("#top-bar-completed", Static)
             elapsed_widget = self.query_one("#top-bar-elapsed", Static)
             mode_widget = self.query_one("#top-bar-mode", Static)
+            worktree_widget = self.query_one("#top-bar-worktree", Static)
+            active_widget = self.query_one("#top-bar-active", Static)
+            completed_widget = self.query_one("#top-bar-completed", Static)
             notification_widget = self.query_one("#top-bar-notifications", Static)
         except NoMatches:
             return
-        total_widget.update(
-            Text.assemble(
-                (self._text("thread_activity_total"), "dim"),
-                " ",
-                (str(total_count), "cyan" if total_count else "dim"),
-            )
+        elapsed_widget.update(
+            Text.assemble((self._text("current_thread_elapsed"), "dim"), " ", (elapsed, "cyan"))
         )
+        mode_widget.update(Text.assemble((self._text("mode"), "dim"), " ", (mode, mode_style)))
+        if self._active_worktree_metadata():
+            worktree_widget.remove_class("hidden")
+            worktree_widget.update(Text(self._text("worktree"), style="bold cyan"))
+        else:
+            worktree_widget.add_class("hidden")
+            worktree_widget.update("")
         active_widget.update(
             Text.assemble(
                 (self._text("thread_activity_active"), "dim"),
@@ -4377,10 +4628,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 (str(len(completed_ids)), "cyan" if completed_ids else "dim"),
             )
         )
-        elapsed_widget.update(
-            Text.assemble((self._text("current_thread_elapsed"), "dim"), " ", (elapsed, "cyan"))
-        )
-        mode_widget.update(Text.assemble((self._text("mode"), "dim"), " ", (mode, mode_style)))
         if unread:
             notification_widget.update(
                 Text.assemble(

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from uv_agent.config import config_paths, editable_config_path, load_config, redact_config
-from uv_agent.paths import project_config_path, project_state_dir, user_config_path
+from uv_agent.paths import ensure_project_local_dir, project_config_path, project_state_dir, user_config_path
 
 
 def test_load_config_merges_project_file(tmp_path: Path) -> None:
@@ -399,3 +399,24 @@ def test_editable_config_falls_back_to_project_config(monkeypatch, tmp_path: Pat
     project_root.mkdir()
 
     assert editable_config_path(project_root) == project_config_path(project_root)
+
+
+def test_project_local_dir_writes_protective_gitignore(tmp_path: Path) -> None:
+    project_root = tmp_path / "workspace"
+    project_root.mkdir()
+
+    local_dir = ensure_project_local_dir(project_root)
+
+    assert local_dir == project_root / ".uv-agent"
+    assert (local_dir / ".gitignore").read_text(encoding="utf-8") == "*\n"
+
+
+def test_project_local_dir_does_not_overwrite_existing_gitignore(tmp_path: Path) -> None:
+    project_root = tmp_path / "workspace"
+    existing = project_root / ".uv-agent" / ".gitignore"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("custom\n", encoding="utf-8")
+
+    ensure_project_local_dir(project_root)
+
+    assert existing.read_text(encoding="utf-8") == "custom\n"

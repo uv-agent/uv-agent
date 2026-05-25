@@ -374,7 +374,7 @@ class ThreadStore:
         else:
             events = self.read(thread_id)
             compaction = None
-        return {
+        digest = {
             "thread_id": thread_id,
             "title": metadata.get("title") or "New thread",
             "created_at": metadata.get("created_at"),
@@ -392,6 +392,23 @@ class ThreadStore:
             "goal_mode": metadata.get("goal_mode"),
             "items": digest_items(events, include_tools=include_tools),
         }
+        for key in (
+            "latest_cwd",
+            "worktree_status",
+            "worktree_branch",
+            "worktree_path",
+            "worktree_base_ref",
+            "worktree_origin_root",
+            "worktree_head",
+            "worktree_created_at",
+            "worktree_merge_prompted_at",
+            "worktree_deleted_at",
+            "worktree_deleted_head",
+            "worktree_deleted_status",
+        ):
+            if metadata.get(key) is not None:
+                digest[key] = metadata.get(key)
+        return digest
 
     def list_thread_digests(
         self,
@@ -804,6 +821,40 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
         cwd = str(event.get("cwd") or "").strip()
         if cwd:
             metadata["latest_cwd"] = cwd
+        return
+
+    if event_type == "thread.worktree_created":
+        for key in (
+            "worktree_status",
+            "worktree_branch",
+            "worktree_path",
+            "worktree_base_ref",
+            "worktree_origin_root",
+            "worktree_head",
+            "worktree_created_at",
+        ):
+            value = str(event.get(key) or "").strip()
+            if value:
+                metadata[key] = value
+        metadata["worktree_status"] = metadata.get("worktree_status") or "active"
+        return
+
+    if event_type == "thread.worktree_merge_prompted":
+        metadata["worktree_merge_prompted_at"] = event.get("created_at")
+        return
+
+    if event_type == "thread.worktree_deleted":
+        metadata["worktree_status"] = "deleted"
+        for key in (
+            "worktree_deleted_at",
+            "worktree_deleted_head",
+        ):
+            value = str(event.get(key) or "").strip()
+            if value:
+                metadata[key] = value
+        status = str(event.get("worktree_deleted_status") or "")
+        if status:
+            metadata["worktree_deleted_status"] = status
         return
 
     if event_type == "thread.level_updated":

@@ -417,6 +417,46 @@ class FullscreenPanel(ModalScreen[str | None]):
         if callable(handler):
             handler(kind)
 
+
+class WorktreeBranchPanel(ModalScreen[str | None]):
+    """Small modal input used to collect a raw Git branch name."""
+
+    CSS = FULLSCREEN_PANEL_CSS
+    BINDINGS = [Binding("escape", "dismiss_panel", "Close", priority=True, show=False)]
+
+    def __init__(self, *, title: str, subtitle: str, placeholder: str) -> None:
+        super().__init__()
+        self.panel_title = title
+        self.subtitle = subtitle
+        self.placeholder = placeholder
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="panel-shell"):
+            with Horizontal(id="panel-titlebar"):
+                yield Static(self.panel_title, id="panel-header")
+                yield Static(self.subtitle, id="panel-subtitle")
+            yield Input(placeholder=self.placeholder, id="panel-filter")
+            yield Static("", id="panel-footer")
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one("#panel-filter", Input).focus()
+            self.query_one("#panel-footer", Static).update(self.subtitle)
+        except NoMatches:
+            pass
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "panel-filter":
+            return
+        event.stop()
+        value = event.value.strip()
+        if value:
+            self.dismiss(value)
+
+    def action_dismiss_panel(self) -> None:
+        self.dismiss(None)
+
+
 class ToolDetailsPanel(FullscreenPanel):
     """Full-screen tool detail panel with j/k navigation between tool results."""
 

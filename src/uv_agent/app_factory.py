@@ -6,6 +6,7 @@ from uv_agent.agent import AgentEngine
 from uv_agent.config import load_config
 from uv_agent.model import UnifiedModelClient
 from uv_agent.paths import (
+    ensure_project_local_dir,
     project_attachments_dir,
     project_run_scripts_dir,
     project_scriptenv_dir,
@@ -17,6 +18,7 @@ from uv_agent.session import ThreadStore
 
 def create_engine(project_root: Path | None = None, *, data_dir: Path | None = None) -> AgentEngine:
     root = (project_root or Path.cwd()).resolve()
+    ensure_project_local_dir(root)
     config = load_config(root)
     state_dir = (data_dir or project_state_dir(root)).resolve()
     runner = PythonRunner(
