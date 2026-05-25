@@ -176,47 +176,47 @@ from uv_agent_runtime import (
 </helper_selection>
 <helper name="enter_dir">
 <description>Use early when the task belongs in a repository, subdirectory, or path discovered during execution. It changes the Python cwd, persists that cwd for later runs in the thread, and may load directory rules.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import enter_dir
 
 # enter_dir(path: str | Path) -> Path
 enter_dir("src")
-]]></example>
+</example>
 </helper>
 <helper name="ask">
 <description>Use for isolated, tedious, or parallelizable investigation through a nested uv-agent subagent. It returns .text, .stdout, .stderr, .thread_id, and .raise_for_error().</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import ask
 
 # ask(prompt: str, *, level=None, model_level=None, cwd=None, env=None, executable=None,
 #     timeout_s=300, check=False, retain=True) -> SubagentResult  # .text, .stdout, .stderr, .thread_id, .returncode, .timed_out, .raise_for_error()
 result = ask("Inspect parser tests and summarize likely failures", check=True, timeout_s=300)
 print(result.text[:2000])
-]]></example>
+</example>
 </helper>
 <helper name="add_dependency">
 <description>Use to add direct packages to the run_python uv project. Call it before importing the package in the current script; do not use it to upgrade a package already imported in this Python process. Added packages persist for later run_python calls in the same project and appear in the runtime context dependency list after context refresh. Use run_python_env_dir() only when you need the exact environment directory or want to inspect its pyproject.toml.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import add_dependency
 
 # add_dependency(*packages: str, editable=False, optional=None, dev=False, group=None,
 #     timeout_s=None, check=True) -> CommandTextResult  # .args, .returncode, .stdout, .stderr, .ok, .raise_for_error()
 add_dependency("requests", check=True)
 import requests
-]]></example>
+</example>
 </helper>
 <helper name="look_at">
 <description>Use when a script produces or discovers an image that should be visible to the model on future turns. It emits structured image context with an optional note.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import look_at
 
 # look_at(path: str | Path, *, note="") -> dict[str, Any]  # {path, note}
 look_at("screenshots/failure.png", note="inspect failing UI state")
-]]></example>
+</example>
 </helper>
 <helper name="workspace_transaction">
 <description>Use around risky edits, multi-file changes, generated transformations, or experiments that may need automatic rollback.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import apply_patch, workspace_transaction
 
 # workspace_transaction(paths: Sequence[str | Path] | None = None, *, root=".") -> Iterator[Snapshot]  # Snapshot: .root, .files (dict[str, bytes|None])
@@ -228,21 +228,21 @@ with workspace_transaction(["src", "tests"]):
 +new
 *** End Patch
 ''')
-]]></example>
+</example>
 </helper>
 <helper name="snapshot_files">
 <description>Use before manual experiments when you want an explicit restore point without wrapping a block. It captures file bytes under a root.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import snapshot_files
 
 # snapshot_files(paths: Sequence[str | Path], *, root=".") -> Snapshot  # .root, .files (dict[str, bytes|None])
 snapshot = snapshot_files(["src/app.py", "tests/test_app.py"])
 print(snapshot.files.keys())
-]]></example>
+</example>
 </helper>
 <helper name="restore_snapshot">
 <description>Use to undo files captured by snapshot_files or inspect what a failed transaction restored. It writes captured bytes back and removes paths recorded as missing.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import restore_snapshot, snapshot_files
 
 # snapshot_files(paths: Sequence[str | Path], *, root=".") -> Snapshot
@@ -250,21 +250,21 @@ from uv_agent_runtime import restore_snapshot, snapshot_files
 snapshot = snapshot_files(["src/app.py"])
 # ... try an experiment ...
 print(restore_snapshot(snapshot))
-]]></example>
+</example>
 </helper>
 <helper name="read_text_lossless">
 <description>Use when line endings, BOM, or final newline matter. It reads text plus encoding, newline style, final-newline, and BOM metadata.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import read_text_lossless
 
 # read_text_lossless(path: str | Path, *, encoding="utf-8") -> TextFile  # .path, .text, .encoding, .newline, .final_newline, .bom
 file = read_text_lossless("src/app.py")
 print(file.newline, file.final_newline, file.bom)
-]]></example>
+</example>
 </helper>
 <helper name="write_text_lossless">
 <description>Use when writing generated or substantially transformed text while preserving or explicitly choosing text metadata. Passing like=read_text_lossless(path) preserves encoding, BOM, newline style, and final newline policy.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import read_text_lossless, write_text_lossless
 
 # read_text_lossless(path: str | Path, *, encoding="utf-8") -> TextFile
@@ -272,31 +272,31 @@ from uv_agent_runtime import read_text_lossless, write_text_lossless
 #     final_newline=None, bom=None, atomic=True) -> Path  # written path
 before = read_text_lossless("src/app.py")
 write_text_lossless("src/app.py", before.text.replace("old", "new"), like=before)
-]]></example>
+</example>
 </helper>
 <helper name="replace_text">
 <description>Use for small text replacements in existing files. By default old and new use logical \n newlines while the helper matches and writes with the file's original newline style; pass newlines="raw" only when raw exact matching is intended.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import replace_text
 
 # replace_text(path: str | Path, old: str, new: str, *, count=1,
 #     newlines="logical") -> ReplacementResult  # .path, .replacements, .before (TextFile), .after (TextFile)
 replace_text("README.md", "old paragraph\n\nnext", "new paragraph\n\nnext")
-]]></example>
+</example>
 </helper>
 <helper name="path_info">
 <description>Use before risky filesystem work to inspect a resolved path, existence, kind, size, and whether it stays under a base directory.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import path_info
 
 # path_info(path: str | Path, *, base=None) -> PathInfo  # .path, .exists, .kind, .size, .cwd, .base, .is_absolute, .is_relative_to_base
 info = path_info("../maybe-outside.txt", base=".")
 print(info.kind, info.is_relative_to_base)
-]]></example>
+</example>
 </helper>
 <helper name="apply_patch">
 <description>Use for small to medium localized edits where a patch is clearer than reconstructing file text. It validates context before writing and avoids partial writes; patch hunks use the uv-agent patch envelope shown below.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import apply_patch
 
 # apply_patch(patch: str, *, cwd=None, check=True) -> PatchResult  # .returncode, .stdout, .stderr, .changed_files (list[str])
@@ -308,11 +308,11 @@ apply_patch('''*** Begin Patch
 +new value
 *** End Patch
 ''')
-]]></example>
+</example>
 </helper>
 <helper name="apply_patch_any">
 <description>Use when you have either a uv-agent patch envelope or a unified diff. It auto-detects formats by default and supports dry_run before writing.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import apply_patch_any, run_process_text
 
 # run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace",
@@ -320,11 +320,11 @@ from uv_agent_runtime import apply_patch_any, run_process_text
 # apply_patch_any(patch: str, *, cwd=None, format="auto", dry_run=False, check=True) -> PatchResult  # .returncode, .stdout, .stderr, .changed_files (list[str])
 diff = run_process_text(["git", "diff", "--", "src/app.py"]).stdout
 apply_patch_any(diff, format="unified", dry_run=True)
-]]></example>
+</example>
 </helper>
 <helper name="convert_patch">
 <description>Use when you need to inspect or apply a unified diff through apply_patch. It converts supported unified diffs into the uv-agent patch envelope.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import convert_patch, make_unified_diff
 
 # make_unified_diff(before: str, after: str, *, path=None, context=3) -> str
@@ -332,31 +332,31 @@ from uv_agent_runtime import convert_patch, make_unified_diff
 #     to_format: "apply_patch" | "unified") -> str
 diff = make_unified_diff("old\n", "new\n", path="src/app.py")
 print(convert_patch(diff, from_format="unified", to_format="apply_patch"))
-]]></example>
+</example>
 </helper>
 <helper name="make_unified_diff">
 <description>Use to create a reviewable unified diff from before/after text, often before convert_patch or for concise reporting.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import make_unified_diff
 
 # make_unified_diff(before: str, after: str, *, path=None, context=3) -> str
 print(make_unified_diff("old\n", "new\n", path="src/app.py"))
-]]></example>
+</example>
 </helper>
 <helper name="run_process_text">
 <description>Use to run external commands with explicit stdout/stderr decoding, env/env_patch support, timeout control, and optional check=True failure raising. Prefer it over raw subprocess for ordinary command execution. On timeout it best-effort kills the process tree and returns buffered output with timed_out=True. The result has args, returncode, stdout, stderr, timed_out, ok, and raise_for_error().</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import run_process_text
 
 # run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace",
 #     env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult  # .args, .returncode, .stdout, .stderr, .timed_out, .ok, .raise_for_error()
 result = run_process_text(["git", "status", "--short"], encoding="utf-8", check=True)
 print(result.stdout)
-]]></example>
+</example>
 </helper>
 <helper name="threads">
 <description>Use to inspect compact summaries from this or other threads when the user references @thread:id, asks about prior work, or needs a recent-thread lookup. list_thread_digests lists recent thread ids/titles/last text; thread_digest reads one thread's compact conversation digest. These helpers do not switch the active TUI thread.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import list_thread_digests, thread_digest
 
 # list_thread_digests(*, state_dir=None, limit=10, kind="thread", parent_thread_id=None,
@@ -366,11 +366,11 @@ from uv_agent_runtime import list_thread_digests, thread_digest
 threads = list_thread_digests(limit=5)
 if threads:
     print(thread_digest(threads[0]["thread_id"]))
-]]></example>
+</example>
 </helper>
 <helper name="mcp">
 <description>Use to discover and call declared MCP servers from Python through the official MCP SDK. Declarations may use stdio, streamable_http, or sse transport. Call list_declared_servers(), connect_named(name), connect_declared(name, config_path), or connect_url(url); MCP is not a direct model tool. When using an MCP server, call client.initialize() first and inspect its returned instructions before listing or calling tools. The available_mcp_servers context may include only a truncated instructions preview.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import connect_named, connect_url, list_declared_servers
 
 # list_declared_servers(*, config_paths=None, cwd=None) -> list[dict[str, Any]]  # each: name, scope, path, description, transport, command, url
@@ -387,11 +387,11 @@ with connect_named("server-name") as client:
 with connect_url("http://localhost:3001/mcp") as client:
     client.initialize()
     print(client.list_tools())
-]]></example>
+</example>
 </helper>
 <helper name="search_text">
 <description>Use for grep-like content search across the workspace instead of broad file reads or manual scanning. It wraps the system `rg` (ripgrep), honors .gitignore, returns structured Match objects with path, line, column, line text, and per-hit Submatch byte ranges. Requires `rg` on PATH (install via winget/brew/apt). `root` may be a directory or a single file (scopes the search to that file); use `roots=[...]` to search multiple roots. Use `globs=["!tests/**"]` style filters, `file_types=["py","ts"]` for rg type aliases, `literal=True` or `fixed_string=True` to disable regex, `case_sensitive=False` for case-insensitive search, and `max_count_per_file`/`max_total` to bound output.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import search_text
 
 # search_text(pattern: str, *, root=".", roots=None, globs=None, file_types=None, ignore_case=False,
@@ -406,11 +406,11 @@ for hit in search_text(r"def\\s+handle_\\w+", root="src", file_types=["py"], max
     print(hit.path, hit.line, hit.text)
 for hit in search_text("TODO", roots=["src", "tests"], max_total=20):
     print(hit.path, hit.line, hit.text)
-]]></example>
+</example>
 </helper>
 <helper name="find_files">
 <description>Use to enumerate workspace files honoring .gitignore via `rg --files` instead of manual directory walking. It is much faster than Path.rglob on large repositories. `root` may be a directory or a single file (returns just that file); use `roots=[...]` to enumerate multiple roots.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import find_files
 
 # find_files(root=".", *, roots=None, globs=None, file_types=None, max_total=None,
@@ -419,11 +419,11 @@ for path in find_files("src", globs=["*.py", "!**/migrations/**"], max_total=30)
     print(path)
 for path in find_files(roots=["src", "tests"], globs=["*.py"], max_total=30):
     print(path)
-]]></example>
+</example>
 </helper>
 <helper name="find_symbols">
 <description>Use to locate function/class/method/struct/interface/... definitions across the workspace via tree-sitter. Results are cached per file in ~/.uv-agent/cache/codequery so repeat calls only re-parse files whose (mtime, size) changed. `root` may be a directory or a single file. Filter with `language="python"` or `languages=[...]`, `kind="class"` or `kinds=[...]`, exact `name="Engine"`, substring `contains="Engine"`, or regex `name_pattern=r"^test_"`. Built-in language support: see supported_symbol_languages().</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import find_symbols, supported_symbol_languages
 
 # supported_symbol_languages() -> list[str]
@@ -433,21 +433,21 @@ from uv_agent_runtime import find_symbols, supported_symbol_languages
 print(supported_symbol_languages())
 for sym in find_symbols("src", kind="class", contains="Engine"):
     print(sym.path, sym.start_row, sym.name)
-]]></example>
+</example>
 </helper>
 <helper name="goal_paths">
 <description>Use when goal mode is active and you need the stable internal files for the current thread. It returns paths for goal.json, checklist.md, and notes.md; the files are created/reset by the host goal mode UI, not by this helper.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import goal_paths
 
 # goal_paths() -> RuntimeGoalPaths  # .directory, .state, .checklist, .notes
 paths = goal_paths()
 print(paths.checklist)
-]]></example>
+</example>
 </helper>
 <helper name="query_code">
 <description>Use to run a custom tree-sitter query (S-expression text) over a single language across the workspace. Each capture in the query becomes a Capture with path, position, and source text. Results are cached identically to find_symbols and keyed by query SHA, so repeated identical queries are nearly free.</description>
-<example><![CDATA[
+<example>
 from uv_agent_runtime import query_code
 
 # query_code(query_text: str, *, language: str, root=".", globs=None, file_types=None,
@@ -458,6 +458,6 @@ for cap in query_code(
     root="src",
 ):
     print(cap.path, cap.start_row, cap.text)
-]]></example>
+</example>
 </helper>
 </runtime_helpers>"""

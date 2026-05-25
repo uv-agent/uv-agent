@@ -2990,7 +2990,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Use ask for bounded independent work" in turn_context
     assert "uv-agent patch envelope shown below" in turn_context
     assert turn_context.count("<description>") >= 18
-    assert turn_context.count("<example><![CDATA[") >= 18
+    assert turn_context.count("<example>") >= 18
+    assert "<![CDATA[" not in turn_context
     assert '<helper name="replace_text">' in turn_context
     assert '<helper name="mcp">' in turn_context
     assert '<helper name="stdlib">' not in turn_context
