@@ -3,31 +3,40 @@
 [简体中文](README.zh-CN.md)
 
 `uv-agent` is a Windows-first coding agent with a Textual TUI. It is designed
-to feel at home on Windows, where many coding agents stumble over PowerShell
-quoting, shell semantics, or Unix-first assumptions. Its only external action
-surface is `run_python`: the model submits Python scripts to a managed `uv run`
-runner, and those scripts do the actual work instead of relying on fragile
-shell snippets. Installed plugins can extend that runtime with new helpers,
-event subscriptions, and external turn sources without adding extra model tools.
-Around this `run_python` boundary, uv-agent's context layer
-applies Harness Engineering ideas: checkpoint compaction, stable incremental
-updates, protocol-safe interruption handling, and epoch replay keep the model's
-view coherent during long-running work. See
-[Context Management](#context-management) for details.
+around one external action surface: `run_python`. The model writes managed Python
+scripts, uv-agent runs them through `uv run`, and the runtime exposes focused
+helpers for editing files, running commands, searching code, using MCP, launching
+subagents, and attaching images.
 
-Public APIs, config fields, and runtime behavior may still change as the
-project evolves.
+That single boundary keeps coding-agent work easier to inspect, replay, interrupt,
+and compact during long sessions. The project is still experimental, so public
+APIs, config fields, and runtime behavior may change.
 
-## Prerequisites
+## Why uv-agent?
 
-Install the following tools:
+- **Windows-first coding UI.** A Textual transcript with a multi-line composer,
+  command palette, model/tool timeline, file and thread mentions, image
+  attachments, and English or Chinese UI.
+- **One action boundary.** No direct shell, filesystem, browser, or MCP model
+  tools; external work flows through managed Python runs and one persistent event
+  stream.
+- **Long-task friendly.** Checkpoint compaction, workspace rules, skills, MCP
+  declarations, Goal state, and Worktree state are replayed as structured context
+  when needed.
+- **Practical coding workflows.** `/goal` adds lightweight per-thread
+  checklist/notes for longer tasks; Worktree mode creates an isolated Git branch
+  worktree for task-focused changes.
+- **Extensible runtime.** Plugins can add `uv_agent_runtime` helpers, subscribe
+  to agent events, and submit turns from external systems without adding extra
+  model-visible tools.
+
+## Quick Start
+
+Install the required tools:
 
 - **uv** — https://docs.astral.sh/uv/getting-started/installation/
-  Python package and project manager used to run the agent.
 - **ripgrep** — https://github.com/BurntSushi/ripgrep#installation
-  Used for fast file-content searches inside the workspace.
-
-## Install And Run
+- **Git** — needed for normal coding workflows and Worktree mode.
 
 Run the latest published package:
 
@@ -53,22 +62,25 @@ Resume an existing thread:
 uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 ```
 
-## Configuration
+## Model Configuration
 
-User config lives at `~/.uv-agent/config.json`. A project can override it with
-`.uv-agent/config.json`; that project-local directory is ignored by git. Keep
-API keys in environment variables or ignored local config.
+uv-agent does not ship a real provider configuration. Configure at least one
+provider, model, and level before making model calls.
 
-> **API compatibility**  
-> This project supports three API formats — set `api` on your model config:
-> 
-> | `api` value | Format | Status |
-> |---|---|---|
-> | `"chat_completions"` | OpenAI Chat Completions API | ✅ Supported |
-> | `"responses"` | OpenAI Responses API | ✅ Supported |
-> | `"anthropic_messages"` | Anthropic Messages API | ✅ Supported |
-> 
-> Issues and PRs are welcome for any format!Example configuration:
+Config is loaded from `~/.uv-agent/config.json`, then optional project overrides
+from `.uv-agent/config.json`. The project-local `.uv-agent/` directory is ignored
+by git. Prefer environment variables or ignored local config for API keys.
+
+Supported model API formats:
+
+| `api` value | Format |
+| --- | --- |
+| `"responses"` | OpenAI Responses API |
+| `"chat_completions"` | OpenAI Chat Completions API |
+| `"anthropic_messages"` | Anthropic Messages API |
+
+<details>
+<summary>Full configuration example</summary>
 
 ```json
 {
@@ -192,14 +204,57 @@ API keys in environment variables or ignored local config.
 
 ```
 
-Use `/config` in the TUI to switch the default level, language, and automatic
-compression. Set `ui.language` to `zh-CN` for a Chinese UI. Completion
-notifications can be configured under `ui.completion_notification`. Non-Windows
-platforms use the terminal bell for completion sound.
+</details>
 
+Use `/config` in the TUI to switch user-facing settings such as default level,
+language, completion notification, and automatic compression. See
+[configuration](docs/configuration.md) for every supported option and
+[config.example.json](docs/config.example.json) for a detailed standalone example.
 
-See [configuration](docs/configuration.md) for all supported options and
-[config.example.json](docs/config.example.json) for a detailed example.
+## Everyday Workflow
+
+- `Ctrl+Enter` or `Ctrl+J` sends the composer; `Enter` inserts a newline.
+- `/` from an empty composer or `Ctrl+O` opens the command palette.
+- `@` inserts file mentions, `@@` inserts thread mentions, and `/threads` resumes
+  past work.
+- `/goal` toggles durable checklist/notes for the current thread.
+- **Worktree** in the command palette creates or manages a task worktree under
+  `.uv-agent/worktrees/`.
+- `F2` attaches a clipboard image; `F3` previews pending images.
+- `/status`, `/models`, `/level`, `/mcp`, and `/skills` inspect runtime state and
+  available capabilities.
+
+See [TUI and slash commands](docs/tui.md) for the full command and shortcut list.
+
+## Plugins
+
+Plugins are normal Python packages discovered through the `uv_agent.plugins`
+entry point group. They run in the uv-agent host process and can register runtime
+helpers, subscribe to events, or submit turns from external systems.
+
+For a one-off run with an extra plugin package, add it beside the app launched by
+`uvx`:
+
+```powershell
+uvx --with your-uv-agent-plugin uv-agent@latest
+```
+
+Disable installed plugins with `plugins.disabled` in config. See
+[Plugin system](docs/plugins.md) for the plugin API, event bus, helper
+registration, and examples.
+
+## Runtime And Context
+
+Managed scripts run in a project-shared uv environment stored under
+`~/.uv-agent/projects/<project-id>/runner/scriptenv/`. Scripts import helpers
+from `uv_agent_runtime` for file edits, search, subprocesses, dependency
+installation, nested agents, image context, MCP clients, and more.
+
+Thread state, run logs, shared script dependencies, attachments, Goal files, and
+other project runtime data live under `~/.uv-agent/projects/<project-id>/`.
+Dynamic context is sent incrementally and replayed after compaction or resume, so
+long-running tasks keep a coherent model view across workspace changes,
+interruptions, and runtime updates.
 
 ## Documentation
 
@@ -209,35 +264,10 @@ See [configuration](docs/configuration.md) for all supported options and
 - [Runtime and managed scripts](docs/runtime.md)
 - [Plugin system](docs/plugins.md)
 
-## Core Ideas
-
-- The agent has exactly one external action surface: `run_python`.
-- Managed scripts run in a project-shared uv environment; scripts add
-  third-party dependencies to that environment with `add_dependency`.
-- The distributed package includes both `uv_agent` and `uv_agent_runtime`; managed
-  scripts import helpers from `uv_agent_runtime`.
-- Installed plugins can register additional `uv_agent_runtime` helpers, subscribe
-  to agent events, and submit turns from external systems while preserving the
-  single `run_python` action boundary.
-- Workspace rules, skills, and MCP declarations are progressively disclosed as
-  context. MCP calls happen from Python runtime helpers, not direct model tools.
-- Thread state, run logs, the shared script environment, and attachments live under
-  `~/.uv-agent/projects/<project-id>/`.
-
-## Context Management
-
-uv-agent's context management is one part of its Harness Engineering approach: it brings the agent's inputs, actions, state, and exception handling into an explicit engineering protocol so long-running work remains traceable, recoverable, and maintainable. Two mechanisms anchor the design: **checkpoint compaction** creates durable continuation points, and the single **`run_python` execution surface** makes every external action flow through the same event stream.
-
-- **Incremental, fingerprinted updates.** Runtime environment, model levels, helpers, skills, and MCP declarations are split into context parts. Only changed dynamic parts are re-sent inside `<context_update ...>` messages; unchanged parts remain current within the epoch, and removed skills or MCP servers are explicitly tombstoned.
-- **Stable prefix and ordering.** The system prompt stays stable. Dynamic context is appended as pre-user messages with a fixed update prefix and stable section order, which keeps long conversations from drifting as context grows or changes.
-- **Protocol-safe sequence completion.** Because `run_python` is the only external action surface, tool calls, runner results, working-directory updates, rule loads, attachments, and dependency state all flow through one persistent event stream. If a turn is interrupted, unfinished tool calls receive explicit synthetic outputs and bridge messages; partial model streams and provider or tool errors are recorded instead of being treated as successful completions.
-- **Epoch replay after compaction.** A compaction checkpoint stores a continuation summary plus retained recent conversation while excluding reloadable runtime and rule context. The next epoch re-emits the current runtime context and workspace rules before retained history; mid-turn compaction uses the same ordering before the assistant continues after tool results.
-
-Together, these mechanisms keep the model's view coherent across workspace changes, runtime changes, interruptions, errors, and long-running sessions.
-
 ## Development
 
-uv-agent is developed in a self-bootstrapping style: the project is routinely read, edited, tested, and refined with uv-agent itself.
+uv-agent is developed in a self-bootstrapping style: the project is routinely
+read, edited, tested, and refined with uv-agent itself.
 
 ```powershell
 uv run pytest

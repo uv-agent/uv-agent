@@ -2,27 +2,34 @@
 
 [English](README.md)
 
-`uv-agent` 是一个 Windows-first 的 coding agent，提供 Textual TUI。它首先面向
-Windows 体验设计，尽量避免许多 coding agent 在 PowerShell 引号、shell 语义、
-Unix-first 假设上经常“水土不服”的问题。它对外只有一个动作面：`run_python`：
-模型把 Python 脚本提交给受管理的 `uv run` runner，再由脚本完成实际工作，而不是
-依赖脆弱的 shell 片段。已安装插件可以在不增加额外模型工具的前提下，为这个 runtime
-扩展新的 helper、事件订阅和外部 turn 入口。围绕这个 `run_python` 边界，uv-agent 的上下文层采用
-Harness Engineering 思路：通过 checkpoint 压缩、稳定的增量更新、协议安全的中断处理
-和 epoch 重放，让模型视角在长程任务中保持一致。见 [上下文管理](#上下文管理)。
+`uv-agent` 是一个 Windows-first 的 coding agent，提供 Textual TUI。它围绕单一
+对外动作面 `run_python` 设计：模型编写受管理的 Python 脚本，uv-agent 通过
+`uv run` 执行，再由 `uv_agent_runtime` 提供文件编辑、命令执行、代码搜索、MCP、
+subagent、图片附件等 helper。
 
-公开 API、配置字段和 runtime 行为可能随项目演进而继续调整。
+这个边界让编码任务更容易检查、重放、中断和压缩。项目仍处于实验阶段，公开 API、
+配置字段和 runtime 行为可能继续变化。
 
-## 前置要求
+## 为什么用 uv-agent？
 
-请先安装以下工具：
+- **Windows-first 编码界面。** Textual transcript、多行输入框、命令面板、模型/tool
+  时间线、文件和 thread mention、图片附件，以及中英文界面。
+- **单一动作边界。** 模型没有直接 shell、文件系统、浏览器或 MCP 工具；外部工作都通过
+  受管理的 Python run 和同一条持久事件流完成。
+- **适合长任务。** checkpoint 压缩、workspace rules、skills、MCP declarations、
+  Goal 状态和 Worktree 状态会按需作为结构化上下文重放。
+- **实用编码工作流。** `/goal` 为较长任务提供轻量的 per-thread checklist/notes；
+  Worktree mode 为任务创建隔离的 Git 分支 worktree。
+- **可扩展 runtime。** 插件可以注册 `uv_agent_runtime` helper、订阅事件，也可以从外部
+  系统提交 turn，同时不增加额外的模型可见工具。
+
+## 快速开始
+
+先安装：
 
 - **uv** — https://docs.astral.sh/uv/getting-started/installation/
-  Python 包与项目管理器，用于运行 agent。
 - **ripgrep** — https://github.com/BurntSushi/ripgrep#installation
-  用于在工作区内快速搜索文件内容。
-
-## 安装与运行
+- **Git** — 常规编码工作流和 Worktree mode 需要。
 
 运行最新发布版本：
 
@@ -48,21 +55,25 @@ uvx uv-agent@latest ask "Reply with exactly: ok"
 uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 ```
 
-## 配置
+## 模型配置
 
-用户级配置默认位于 `~/.uv-agent/config.json`。项目可以用 `.uv-agent/config.json`
-覆盖；这个项目本地目录已被 git 忽略。API key 应放在环境变量或被忽略的本地配置里。
+uv-agent 不内置真实 provider 配置。发起模型请求前，需要至少配置一个 provider、一个
+model 和一个 level。
 
-> **API 兼容**  
-> 本项目支持三种 API 格式——在模型配置中设置 `api` 字段即可：
-> 
-> | `api` 取值 | 格式 | 状态 |
-> |---|---|---|
-> | `"chat_completions"` | OpenAI Chat Completions API | ✅ 支持 |
-> | `"responses"` | OpenAI Responses API | ✅ 支持 |
-> | `"anthropic_messages"` | Anthropic Messages API | ✅ 支持 |
-> 
-> 欢迎提交 Issue 和 PR！示例配置
+配置从 `~/.uv-agent/config.json` 读取，项目可以用 `.uv-agent/config.json` 覆盖。
+项目本地 `.uv-agent/` 目录已被 git 忽略。API key 建议放在环境变量或被忽略的本地
+配置里。
+
+支持的模型 API 格式：
+
+| `api` 取值 | 格式 |
+| --- | --- |
+| `"responses"` | OpenAI Responses API |
+| `"chat_completions"` | OpenAI Chat Completions API |
+| `"anthropic_messages"` | Anthropic Messages API |
+
+<details>
+<summary>完整配置示例</summary>
 
 ```json
 {
@@ -186,13 +197,47 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 
 ```
 
-在 TUI 中可以用 `/config` 切换默认 level、界面语言和自动压缩。把 `ui.language`
-设为 `zh-CN` 可使用中文界面。完成通知可通过 `ui.completion_notification`
-配置；非 Windows 平台使用终端 bell 作为完成提示音。
+</details>
 
-
-完整字段见 [configuration](docs/configuration.md)，详细示例见
+在 TUI 中可以用 `/config` 切换默认 level、界面语言、完成通知和自动压缩等用户侧设置。
+完整字段见 [configuration](docs/configuration.md)，单独示例文件见
 [config.example.json](docs/config.example.json)。
+
+## 日常工作流
+
+- `Ctrl+Enter` 或 `Ctrl+J` 发送；`Enter` 插入换行。
+- 空输入框按 `/` 或按 `Ctrl+O` 打开命令面板。
+- `@` 插入文件 mention，`@@` 插入 thread mention，`/threads` 恢复历史任务。
+- `/goal` 为当前 thread 开关持久 checklist/notes。
+- 命令面板里的 **Worktree** 可在 `.uv-agent/worktrees/` 下创建或管理任务 worktree。
+- `F2` 附加剪贴板图片，`F3` 预览待发送图片。
+- `/status`、`/models`、`/level`、`/mcp`、`/skills` 可查看 runtime 状态和可用能力。
+
+完整命令和快捷键见 [TUI and slash commands](docs/tui.md)。
+
+## 插件
+
+插件是通过 `uv_agent.plugins` entry point 发现的普通 Python 包。插件运行在 uv-agent
+host 进程中，可以注册 runtime helper、订阅事件，或从外部系统提交 turn。
+
+一次性带插件运行时，把插件包加到 `uvx` 启动的同一个环境即可：
+
+```powershell
+uvx --with your-uv-agent-plugin uv-agent@latest
+```
+
+已经安装但不想启用的插件，可以在配置里的 `plugins.disabled` 中禁用。插件 API、事件总线、
+helper 注册和示例见 [Plugin system](docs/plugins.md)。
+
+## Runtime 与上下文
+
+受管理脚本运行在项目共享 uv 环境中，路径类似：
+`~/.uv-agent/projects/<project-id>/runner/scriptenv/`。脚本从 `uv_agent_runtime`
+导入 helper，用于文件编辑、搜索、子进程、依赖安装、nested agents、图片上下文、MCP 客户端等。
+
+thread 状态、run 日志、共享脚本依赖、附件、Goal 文件和其他项目 runtime 数据位于
+`~/.uv-agent/projects/<project-id>/`。动态上下文会增量发送，并在压缩或恢复后重放，让长任务
+在工作区变化、中断和 runtime 更新后仍保持连续的模型视角。
 
 ## 文档
 
@@ -201,31 +246,6 @@ uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
 - [TUI and slash commands](docs/tui.md)
 - [Runtime and managed scripts](docs/runtime.md)
 - [Plugin system](docs/plugins.md)
-
-## 核心思路
-
-- agent 对外只有一个动作面：`run_python`。
-- 受管理脚本运行在项目共享 uv 环境中；第三方依赖通过
-  `add_dependency` 添加到这个环境。
-- 发布包同时包含 `uv_agent` 和 `uv_agent_runtime`；受管理脚本从
-  `uv_agent_runtime` 导入快捷 helper。
-- 已安装插件可以注册额外的 `uv_agent_runtime` helper、订阅 agent 事件，并从外部系统
-  提交 turn，同时保持单一 `run_python` 动作边界。
-- workspace rules、skills 和 MCP declarations 作为上下文渐进披露。MCP 调用通过
-  Python runtime helper 完成，不直接暴露成模型工具。
-- thread 状态、run 日志、共享脚本环境和附件位于
-  `~/.uv-agent/projects/<project-id>/`。
-
-## 上下文管理
-
-上下文管理是 uv-agent Harness Engineering 思路的一部分：把 Agent 的输入、行动、状态和异常处理都纳入一套明确的工程协议中，让它在长时间运行时仍然可追踪、可恢复、可维护。两个机制构成核心锚点：**checkpoint 压缩**提供持久续接点，单一 **`run_python` 执行面**让所有外部动作进入同一条事件流。
-
-- **基于指纹的增量更新。** runtime environment、model levels、helpers、skills、MCP declarations 等上下文会被拆成独立部分。只有发生变化的动态部分会通过 `<context_update ...>` 重新发送；未变化内容在当前 epoch 内继续有效，被移除的 skill 或 MCP server 会显式标记为不可再依赖。
-- **稳定前缀与稳定顺序。** system prompt 保持稳定，动态上下文以 pre-user message 的形式追加，并使用固定的更新前缀和固定的章节顺序，减少长对话中因上下文变化带来的漂移。
-- **协议安全的序列补全。** 因为 `run_python` 是唯一对外动作面，tool call、runner result、工作目录变化、rule 加载、附件和依赖状态都会进入同一条持久事件流。回合被中断时，未完成的工具调用会收到显式的合成输出和桥接消息；部分流式输出、provider 错误或工具错误会被记录下来，而不会被伪装成成功完成。
-- **压缩后的 epoch 重放。** 压缩 checkpoint 保存 continuation summary 和近期保留对话，同时排除可重新加载的 runtime/rules 上下文。新的 epoch 会先重新发送当前 runtime context 和 workspace rules，再接入 retained history；工具调用后的中途压缩也使用同样顺序，让 assistant 在压缩摘要之后继续执行。
-
-这些机制让 uv-agent 在工作区变化、运行时变化、中断、错误和超长会话中，仍能保持模型视角一致、任务连续，并稳定地长程运行。
 
 ## 开发
 
