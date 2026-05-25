@@ -3,8 +3,12 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
+      version:
+        description: "Version to release, for example 0.12.0. Leave empty to use pyproject.toml."
+        required: false
+        type: string
       tag:
-        description: "Release tag. Leave empty to use v<pyproject.toml version>."
+        description: "Release tag. Leave empty to use v<version>."
         required: false
         type: string
       prerelease:
@@ -23,16 +27,18 @@ jobs:
     name: Build and verify distributions
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
+      commit_sha: ${{ steps.release-ref.outputs.commit_sha }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ github.ref_name }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -48,6 +54,7 @@ jobs:
         id: meta
         shell: bash
         env:
+          INPUT_VERSION: ${{ inputs.version }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
@@ -55,8 +62,13 @@ jobs:
           import re
           import tomllib
 
+          input_version = os.environ.get("INPUT_VERSION", "").strip()
           with open("pyproject.toml", "rb") as file:
-              version = tomllib.load(file)["project"]["version"]
+              current_version = tomllib.load(file)["project"]["version"]
+
+          version = input_version or current_version
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?", version):
+              raise SystemExit(f"Invalid release version: {version!r}")
 
           tag = os.environ.get("INPUT_TAG", "").strip() or f"v{version}"
           if not re.fullmatch(r"v?[A-Za-z0-9][A-Za-z0-9._+-]*", tag):
@@ -65,13 +77,36 @@ jobs:
           tag_version = tag[1:] if tag.startswith("v") else tag
           if tag_version != version:
               raise SystemExit(
-                  f"Release tag {tag!r} does not match pyproject.toml version {version!r}. "
-                  "Update pyproject.toml or rerun with the matching tag."
+                  f"Release tag {tag!r} does not match release version {version!r}. "
+                  "Use the matching tag or leave tag empty."
               )
 
           print(f"version={version}")
           print(f"tag={tag}")
           PY
+
+      - name: Update version files
+        run: python scripts/bump_version.py ${{ steps.meta.outputs.version }}
+
+      - name: Verify version files
+        run: python scripts/bump_version.py --check
+
+      - name: Commit version bump
+        id: version-commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml uv.lock src/uv_agent/__init__.py
+          if git diff --cached --quiet; then
+            echo "No version changes to commit."
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Release uv-agent ${RELEASE_TAG}"
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install dependencies
         run: uv sync --locked --dev
@@ -84,6 +119,21 @@ jobs:
 
       - name: Check distributions
         run: uvx twine check --strict dist/*
+
+      - name: Push version bump
+        if: ${{ steps.version-commit.outputs.committed == 'true' }}
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "branch" ]; then
+            echo "Version bump commits require running the workflow from a branch." >&2
+            exit 1
+          fi
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Resolve release revision
+        id: release-ref
+        shell: bash
+        run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@v4
@@ -110,7 +160,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.build.outputs.tag }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ needs.build.outputs.commit_sha }}
           name: uv-agent ${{ needs.build.outputs.tag }}
           generate_release_notes: true
           prerelease: ${{ inputs.prerelease }}
