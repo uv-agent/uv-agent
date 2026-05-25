@@ -7,8 +7,8 @@
 `uv run` 执行，再由 `uv_agent_runtime` 提供文件编辑、命令执行、代码搜索、MCP、
 subagent、图片附件等 helper。
 
-这个边界让编码任务更容易检查、重放、中断和压缩。项目仍处于实验阶段，公开 API、
-配置字段和 runtime 行为可能继续变化。
+这个边界让编码任务更容易检查、重放、中断和压缩。这一设计让它可以轻松移植到任何
+Python 和 uv 环境。项目仍处于实验阶段，公开 API、配置字段和 runtime 行为可能继续变化。
 
 ## 为什么用 uv-agent？
 
@@ -231,13 +231,31 @@ helper 注册和示例见 [Plugin system](docs/plugins.md)。
 
 ## Runtime 与上下文
 
-受管理脚本运行在项目共享 uv 环境中，路径类似：
-`~/.uv-agent/projects/<project-id>/runner/scriptenv/`。脚本从 `uv_agent_runtime`
-导入 helper，用于文件编辑、搜索、子进程、依赖安装、nested agents、图片上下文、MCP 客户端等。
+模型每一轮看到的输入，都由稳定的 system prompt 和可重放的 pre-user 上下文组成。
+system prompt 保持精简，通常不变；项目和运行时信息则会在用户消息之前，以结构化消息按需注入。
 
-thread 状态、run 日志、共享脚本依赖、附件、Goal 文件和其他项目 runtime 数据位于
-`~/.uv-agent/projects/<project-id>/`。动态上下文会增量发送，并在压缩或恢复后重放，让长任务
-在工作区变化、中断和 runtime 更新后仍保持连续的模型视角。
+- **受管理的运行时。** `run_python` 是唯一对外动作面。受管理脚本运行在项目共享 uv 环境中：
+  `~/.uv-agent/projects/<project-id>/runner/scriptenv/`，并通过 `uv_agent_runtime`
+  使用文件编辑、搜索、子进程、依赖安装、subagent、图片上下文、MCP 客户端、插件 helper 等能力。
+  脚本使用的 uv 环境与当前工作目录是两个独立概念；工作目录可以随 `enter_dir` 或 Worktree mode 变化。
+- **增量 runtime 上下文。** runtime environment、model levels、helper 列表、脚本环境的直接依赖、
+  skills、MCP servers 和插件 helper 会拆成带指纹的 context part。uv-agent 只把变化的部分放进
+  `<context_update ...>` 发送；skill 或 MCP server 消失时，也会显式标记移除，避免模型继续依赖旧能力。
+- **工作区与 thread 上下文。** workspace rules 会渐进披露：模型先收到规则索引；只有进入相关目录时，
+  才会收到对应 AGENTS.md 的完整内容。active cwd 变化、图片附件、Worktree 通知、tool 结果、run 日志和
+  thread metadata 都进入同一条持久事件流，并在重建 turn 时重放。
+- **Goal mode 的持久任务记忆。** `/goal` 会在
+  `~/.uv-agent/projects/<project-id>/goals/<thread-id>/` 下为当前 thread 建立一层持久记忆，包含
+  `goal.json`、`checklist.md` 和 `notes.md`。Goal mode 开启后，uv-agent 会重放 `<goal_mode>` 通知，告诉模型
+  这些文件的位置和维护规则。模型用 `checklist.md` 记录验收标准、进度、阻塞和下一步，用 `notes.md`
+  记录决策、调查结果、约束和交接上下文。受管理脚本可通过 `goal_paths()` 找到这些文件，不需要硬编码路径。
+- **压缩与恢复。** checkpoint compaction 会总结对话，但会把可重新加载的 runtime context、
+  workspace rules，以及 Goal/Worktree 通知排除在 retained history 之外。新的 epoch 会先重放
+  当前结构化上下文，再接入保留历史；对于长任务进度，压缩或恢复后应优先参考 Goal 文件，
+  而不是只依赖聊天记录。
+
+thread 状态、run 日志、共享脚本依赖、附件、Goal 文件和其他项目 runtime 数据，统一保存在
+`~/.uv-agent/projects/<project-id>/`。
 
 ## 文档
 

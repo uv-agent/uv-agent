@@ -9,8 +9,9 @@ helpers for editing files, running commands, searching code, using MCP, launchin
 subagents, and attaching images.
 
 That single boundary keeps coding-agent work easier to inspect, replay, interrupt,
-and compact during long sessions. The project is still experimental, so public
-APIs, config fields, and runtime behavior may change.
+and compact during long sessions. The design also makes it easy to port to any
+Python and uv environment. The project is still experimental, so public APIs,
+config fields, and runtime behavior may change.
 
 ## Why uv-agent?
 
@@ -245,16 +246,44 @@ registration, and examples.
 
 ## Runtime And Context
 
-Managed scripts run in a project-shared uv environment stored under
-`~/.uv-agent/projects/<project-id>/runner/scriptenv/`. Scripts import helpers
-from `uv_agent_runtime` for file edits, search, subprocesses, dependency
-installation, nested agents, image context, MCP clients, and more.
+Every model-visible turn is built from a stable system prompt plus replayable
+pre-user context items. The system prompt stays compact and rarely changes;
+project and runtime details are delivered as structured messages immediately
+before the user turn.
+
+- **Managed runtime.** `run_python` is the only external action surface. Managed
+  scripts run in the project-shared uv environment at
+  `~/.uv-agent/projects/<project-id>/runner/scriptenv/` and import
+  `uv_agent_runtime` helpers for file edits, search, subprocesses, dependency
+  installation, subagents, image context, MCP clients, plugin helpers, and more.
+  The script uv environment and the active working directory are separate; the
+  cwd can move with `enter_dir` or Worktree mode.
+- **Incremental runtime context.** Runtime environment, model levels, helper
+  lists, direct script-environment dependencies, skills, MCP servers, and plugin
+  helpers are split into fingerprinted context parts. uv-agent sends only
+  changed parts inside `<context_update ...>` envelopes and explicitly marks
+  removed skills or MCP servers so the model does not rely on stale capabilities.
+- **Workspace and thread context.** Workspace rules are disclosed progressively:
+  the model first receives a rule index, then full AGENTS.md content when it
+  enters a relevant directory. Active cwd changes, image attachments, Worktree
+  notices, tool results, run logs, and thread metadata are persisted in the same
+  event stream and replayed when reconstructing a turn.
+- **Goal mode durable memory.** `/goal` adds a per-thread memory layer under
+  `~/.uv-agent/projects/<project-id>/goals/<thread-id>/` with `goal.json`,
+  `checklist.md`, and `notes.md`. When Goal mode is active, uv-agent replays a
+  `<goal_mode>` notice containing those paths and maintenance rules. The model
+  uses `checklist.md` for acceptance criteria, progress, blockers, and next
+  steps, and `notes.md` for decisions, investigation notes, constraints, and
+  handoff context. The `goal_paths()` runtime helper lets managed scripts find
+  those files without hard-coding paths.
+- **Compaction and resume.** Checkpoint compaction summarizes the conversation
+  while excluding reloadable runtime context, workspace rules, Goal notices, and
+  Worktree notices from retained history. A new epoch replays current structured
+  context before retained history, and Goal files remain the preferred source for
+  long-running task progress after compaction or resume.
 
 Thread state, run logs, shared script dependencies, attachments, Goal files, and
 other project runtime data live under `~/.uv-agent/projects/<project-id>/`.
-Dynamic context is sent incrementally and replayed after compaction or resume, so
-long-running tasks keep a coherent model view across workspace changes,
-interruptions, and runtime updates.
 
 ## Documentation
 
