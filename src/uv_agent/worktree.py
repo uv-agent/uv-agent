@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from html import escape as xml_escape
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Literal, Mapping, Protocol
 
 from uv_agent.paths import ensure_project_local_dir
 from uv_agent.time import utc_now_iso
+
+
+WorktreeNoticeStatus = Literal["active", "deleted"]
 
 
 class WorktreeError(RuntimeError):
@@ -66,8 +70,107 @@ class CommandRunner(Protocol):
     def __call__(self, args: list[str], *, cwd: Path, timeout_s: float | None = None) -> CommandResult: ...
 
 
+def render_worktree_notice(metadata: Mapping[str, Any], *, status: WorktreeNoticeStatus) -> str:
+    """Render the model-visible notice for a worktree transition/epoch.
+
+    The notice mirrors goal-mode context: it is persisted as a synthetic
+    pre-user item, omitted from retained compaction history, and re-emitted from
+    thread metadata when a new context epoch starts. Keep it self-contained so a
+    resumed model can choose the correct filesystem location before calling
+    ``run_python``.
+    """
+
+    branch = _metadata_value(metadata, "worktree_branch")
+    path = _metadata_value(metadata, "worktree_path")
+    origin = _metadata_value(metadata, "worktree_origin_root")
+    latest_cwd = _metadata_value(metadata, "latest_cwd")
+    current_cwd = latest_cwd or path
+    if status == "deleted":
+        # Cleanup records a cwd update back to the origin root, but prefer the
+        # origin if a deleted notice is rendered from partially updated legacy
+        # metadata that still points at the removed worktree path.
+        current_cwd = latest_cwd if latest_cwd and latest_cwd != path else origin
+    base_ref = _metadata_value(metadata, "worktree_base_ref")
+    head = _metadata_value(metadata, "worktree_deleted_head") or _metadata_value(metadata, "worktree_head")
+    created_at = _metadata_value(metadata, "worktree_created_at")
+    deleted_at = _metadata_value(metadata, "worktree_deleted_at")
+    # Preserve the leading status columns from `git status --short`; stripping
+    # would make staged/unstaged state ambiguous in the model-visible notice.
+    deleted_status = str(metadata.get("worktree_deleted_status") or "")
+
+    if status == "deleted":
+        lines = [
+            '<worktree status="deleted">',
+            "Worktree mode was closed for this thread.",
+            "",
+            "<workspace>",
+            f"<branch>{_xml_text(branch)}</branch>",
+            f"<path>{_xml_text(path)}</path>",
+            f"<origin>{_xml_text(origin)}</origin>",
+            f"<current_cwd>{_xml_text(current_cwd)}</current_cwd>",
+        ]
+        if deleted_at:
+            lines.append(f"<deleted_at>{_xml_text(deleted_at)}</deleted_at>")
+        if head:
+            lines.append(f"<deleted_head>{_xml_text(head)}</deleted_head>")
+        if deleted_status:
+            lines.append(f"<deleted_git_status>{_xml_text(deleted_status)}</deleted_git_status>")
+        lines.extend(
+            [
+                "</workspace>",
+                "",
+                "<rules>",
+                "<rule>The worktree directory and local branch have been removed; do not rely on the deleted path or branch.</rule>",
+                "<rule>The thread active cwd is now the current_cwd shown above, usually the main project root.</rule>",
+                "<rule>If goal mode is also active, continue following the goal-mode memory rules; worktree closure does not disable goal mode.</rule>",
+                "</rules>",
+                "</worktree>",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines = [
+        '<worktree status="active">',
+        "Worktree mode is active for this thread.",
+        "",
+        "<workspace>",
+        f"<branch>{_xml_text(branch)}</branch>",
+        f"<path>{_xml_text(path)}</path>",
+        f"<origin>{_xml_text(origin)}</origin>",
+        f"<current_cwd>{_xml_text(current_cwd)}</current_cwd>",
+    ]
+    if base_ref:
+        lines.append(f"<base_ref>{_xml_text(base_ref)}</base_ref>")
+    if head:
+        lines.append(f"<head>{_xml_text(head)}</head>")
+    if created_at:
+        lines.append(f"<created_at>{_xml_text(created_at)}</created_at>")
+    lines.extend(
+        [
+            "</workspace>",
+            "",
+            "<rules>",
+            "<rule>Perform this thread's filesystem, Git, build, and test work inside the worktree path/current_cwd above, not in the origin workspace, unless the user explicitly asks otherwise.</rule>",
+            "<rule>Call enter_dir with the worktree path early when using run_python so subsequent commands operate in the worktree.</rule>",
+            "<rule>Worktree mode is independent from goal mode; if goal mode is also active, follow both worktree and goal-mode instructions.</rule>",
+            "<rule>Do not merge, delete, or clean up this worktree/branch automatically unless the user explicitly asks; the Worktree panel manages cleanup.</rule>",
+            "</rules>",
+            "</worktree>",
+        ]
+    )
+    return "\n".join(lines)
+
+
 _INVALID_WINDOWS_PATH_CHARS = set('<>:"|?*')
 _BRANCH_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _metadata_value(metadata: Mapping[str, Any], key: str) -> str:
+    return str(metadata.get(key) or "").strip()
+
+
+def _xml_text(value: object) -> str:
+    return xml_escape(str(value), quote=False)
 
 
 def validate_worktree_branch_name(branch: str) -> str:

@@ -200,6 +200,7 @@ def retain_item_after_compaction(item: dict[str, Any]) -> bool:
         or "<workspace_rule_index>" in text
         or "<active_cwd_notice>" in text
         or "<goal_mode" in text
+        or "<worktree" in text
         or "<conversation_summary>" in text
         or "<available_skills>" in text
         or "<available_mcp_servers>" in text

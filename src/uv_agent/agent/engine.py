@@ -71,6 +71,7 @@ from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.skills import SkillSummary, discover_skills, render_skill_entry
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.agent.tool_results import function_output, model_tool_payload
+from uv_agent.worktree import render_worktree_notice
 
 
 async def _await_next_stream_event(awaitable: Awaitable[Any]) -> Any:
@@ -1559,6 +1560,7 @@ class AgentEngine:
             or "<workspace_rule_index>" in text
             or "<active_cwd_notice>" in text
             or "<goal_mode" in text
+            or "<worktree" in text
             or "<available_skills>" in text
             or "<available_mcp_servers>" in text
             or "<context_update" in text
@@ -2528,6 +2530,8 @@ class AgentEngine:
             text = str(event.get("text") or "")
         elif event_type == "item.goal_mode_notice":
             text = str(event.get("text") or "")
+        elif event_type == "item.worktree_notice":
+            text = str(event.get("text") or "")
         elif event_type == "item.rules_loaded" and event.get("source") in {
             "project",
             "active_cwd",
@@ -2608,6 +2612,7 @@ class AgentEngine:
         for text in self._rule_context_texts(thread_id):
             items.append(message_item("user", text))
         items.extend(self._goal_context_items(thread_id))
+        items.extend(self._worktree_context_items(thread_id))
         items.extend(self._runtime_context_items(thread_id))
         return items
 
@@ -2740,6 +2745,60 @@ class AgentEngine:
             "checklist": str(state.paths.checklist),
             "notes": str(state.paths.notes),
         }
+
+    def _worktree_context_items(self, thread_id: str) -> list[dict[str, Any]]:
+        notice = self._worktree_notice_text(thread_id)
+        if not notice:
+            return []
+        status = "active" if 'status="active"' in notice else "deleted"
+        self.thread_store.append(
+            thread_id,
+            "item.worktree_notice",
+            text=notice,
+            status=status,
+        )
+        return [message_item("user", notice)]
+
+    def _worktree_notice_text(self, thread_id: str) -> str:
+        state = self._worktree_state(thread_id)
+        if state is None:
+            return ""
+        previous_notice = self._latest_worktree_notice_status(thread_id)
+        status = str(state.get("worktree_status") or "").strip()
+        if status == "active":
+            if previous_notice == "active":
+                return ""
+            return render_worktree_notice(state, status="active")
+        if status == "deleted" and previous_notice == "pending_deleted":
+            return render_worktree_notice(state, status="deleted")
+        return ""
+
+    def _worktree_state(self, thread_id: str) -> dict[str, Any] | None:
+        try:
+            metadata = self.thread_store.snapshot(thread_id).metadata
+        except FileNotFoundError:
+            return None
+        status = str(metadata.get("worktree_status") or "").strip()
+        if status not in {"active", "deleted"}:
+            return None
+        branch = str(metadata.get("worktree_branch") or "").strip()
+        path = str(metadata.get("worktree_path") or "").strip()
+        if not branch or not path:
+            return None
+        return dict(metadata)
+
+    def _latest_worktree_notice_status(self, thread_id: str) -> str | None:
+        snap = self.thread_store.snapshot(thread_id)
+        status: str | None = None
+        for event in snap.events_after_compaction:
+            event_type = event.get("type")
+            if event_type == "item.worktree_notice":
+                status = str(event.get("status") or "") or None
+            elif event_type == "thread.worktree_created":
+                status = "pending_active"
+            elif event_type == "thread.worktree_deleted":
+                status = "pending_deleted"
+        return status
 
     def _rule_context_texts(self, thread_id: str) -> list[str]:
         state = self._rule_state(thread_id)

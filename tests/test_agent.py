@@ -4219,6 +4219,153 @@ def test_goal_mode_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -
     assert "do work" in reconstructed_texts
 
 
+def test_worktree_notice_emits_once_per_epoch_and_after_delete(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread("Worktree feature")
+    worktree_path = project_root / ".uv-agent" / "worktrees" / "feature"
+
+    engine.thread_store.append(
+        thread_id,
+        "thread.worktree_created",
+        worktree_status="active",
+        worktree_branch="feature",
+        worktree_path=str(worktree_path),
+        worktree_base_ref="HEAD",
+        worktree_origin_root=str(project_root),
+        worktree_head="abc123",
+        worktree_created_at="2026-01-01T00:00:00Z",
+    )
+    engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
+    first = engine._pre_user_context_items(thread_id)
+    repeated = engine._pre_user_context_items(thread_id)
+
+    first_text = "\n".join(message_item_text(item) for item in first)
+    assert '<worktree status="active">' in first_text
+    assert str(worktree_path) in first_text
+    assert "not in the origin workspace" in first_text
+    assert '<worktree status="active">' not in str(repeated)
+
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    after_compaction = engine._pre_user_context_items(thread_id)
+    assert '<worktree status="active">' in str(after_compaction)
+
+    engine.thread_store.append(
+        thread_id,
+        "thread.worktree_deleted",
+        worktree_branch="feature",
+        worktree_path=str(worktree_path),
+        worktree_origin_root=str(project_root),
+        worktree_deleted_at="2026-01-02T00:00:00Z",
+        worktree_deleted_head="def456",
+        worktree_deleted_status=" M file.py",
+    )
+    engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(project_root))
+    deleted = engine._pre_user_context_items(thread_id)
+    repeated_deleted = engine._pre_user_context_items(thread_id)
+    assert '<worktree status="deleted">' in str(deleted)
+    assert "def456" in str(deleted)
+    assert '<worktree status="deleted">' not in str(repeated_deleted)
+
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t2", text="summary", usage={})
+    assert "<worktree" not in str(engine._pre_user_context_items(thread_id))
+
+
+@pytest.mark.asyncio
+async def test_worktree_notice_reaches_first_send_and_coexists_with_goal_mode(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root, title_generation=TitleGenerationConfig(enabled=False))
+    model_client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=model_client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread("Goal worktree")
+    worktree_path = project_root / ".uv-agent" / "worktrees" / "feature"
+    engine.enable_goal_mode(thread_id, objective="ship from worktree")
+    engine.thread_store.append(
+        thread_id,
+        "thread.worktree_created",
+        worktree_status="active",
+        worktree_branch="feature",
+        worktree_path=str(worktree_path),
+        worktree_base_ref="HEAD",
+        worktree_origin_root=str(project_root),
+        worktree_head="abc123",
+        worktree_created_at="2026-01-01T00:00:00Z",
+    )
+    engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
+
+    events = [event async for event in engine.run_turn(user_text="start", thread_id=thread_id)]
+
+    assert any(event.get("type") == "turn.completed" for event in events)
+    request_text = "\n".join(message_item_text(item) for item in model_client.requests[0]["input"])
+    assert '<goal_mode status="enabled">' in request_text
+    assert '<worktree status="active">' in request_text
+    assert request_text.index('<goal_mode status="enabled">') < request_text.index('<worktree status="active">')
+    assert engine.thread_store.read_events(thread_id, event_types={"item.worktree_notice"})
+
+
+def test_worktree_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread("Worktree")
+    worktree_path = project_root / ".uv-agent" / "worktrees" / "feature"
+    engine.thread_store.append(
+        thread_id,
+        "thread.worktree_created",
+        worktree_status="active",
+        worktree_branch="feature",
+        worktree_path=str(worktree_path),
+        worktree_base_ref="HEAD",
+        worktree_origin_root=str(project_root),
+    )
+    engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
+    worktree_item = engine._pre_user_context_items(thread_id)[0]
+    engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=message_item("user", "do work"))
+
+    assert engine._is_pre_user_context_item(worktree_item)
+    assert retain_item_after_compaction(worktree_item) is False
+    reconstructed = engine._reconstruct_input(thread_id)
+    reconstructed_texts = [message_item_text(item) for item in reconstructed]
+    assert any("<worktree" in text for text in reconstructed_texts[:2])
+    assert "do work" in reconstructed_texts
+
+
 def test_goal_mode_reset_requires_disabled_mode_and_preserves_files_on_disable(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
