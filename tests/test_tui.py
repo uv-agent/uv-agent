@@ -2489,6 +2489,73 @@ async def test_tui_repositions_existing_fold_before_late_finalized_reasoning(
 
 
 @pytest.mark.asyncio
+async def test_tui_live_reasoning_mounts_process_fold_without_later_reposition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: fake_engine(root, tmp_path / "state"))
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        thread_id = "thread_live"
+        turn_id = "turn_live"
+        run_state = app._run_state_for_thread(thread_id)
+        app.thread_id = thread_id
+
+        await app._handle_thread_event(
+            thread_id,
+            "assistant.reasoning_delta",
+            {"type": "assistant.reasoning_delta", "thread_id": thread_id, "turn_id": turn_id, "text": " plan"},
+            run_state,
+        )
+        await pilot.pause()
+
+        transcript = app.query_one("#transcript", TranscriptScroll)
+        children = list(transcript.children)
+        fold_cell = next(child for child in children if isinstance(child, FoldedProcessCell))
+        reasoning_cell = next(child for child in children if isinstance(child, TranscriptCell) and child.has_class("reasoning"))
+        initial_fold_index = children.index(fold_cell)
+        assert initial_fold_index < children.index(reasoning_cell)
+        assert fold_cell.collapsed is False
+        assert fold_cell.cells == [reasoning_cell]
+        assert not reasoning_cell.has_class("process_fold_hidden")
+
+        await app._handle_model_response_item(
+            thread_id,
+            {
+                "type": "model.response",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "reasoning_text": "plan",
+                "response": ModelResponse(
+                    id="resp_1",
+                    output=[],
+                    output_text="",
+                    raw={},
+                    usage={},
+                    reasoning_text="plan",
+                ),
+            },
+            run_state,
+        )
+        await pilot.pause()
+
+        children = list(transcript.children)
+        fold_cell = next(child for child in children if isinstance(child, FoldedProcessCell))
+        finalized_reasoning = next(
+            child
+            for child in children
+            if isinstance(child, ExpandableTranscriptCell) and child.detail_title == "reasoning_details"
+        )
+        assert children.index(fold_cell) == initial_fold_index
+        assert fold_cell.cells == [finalized_reasoning]
+        assert fold_cell.collapsed is True
+        assert finalized_reasoning.has_class("process_fold_hidden")
+
+
+@pytest.mark.asyncio
 async def test_tui_compaction_completion_folds_prior_process_and_shows_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2533,7 +2600,11 @@ async def test_tui_compaction_completion_folds_prior_process_and_shows_summary(
 
         transcript = app.query_one("#transcript", TranscriptScroll)
         children = list(transcript.children)
-        fold = next(child for child in children if isinstance(child, FoldedProcessCell))
+        fold = next(
+            child
+            for child in children
+            if isinstance(child, FoldedProcessCell) and getattr(child, "timeline_group_id", "") == "turn_1"
+        )
         compaction_cell = next(
             child
             for child in children

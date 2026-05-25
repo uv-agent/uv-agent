@@ -1332,7 +1332,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                 if fold_is_after_first_cell:
                     first_cell.parent.move_child(existing, before=first_cell)
             if existing.collapsed != group.collapsed:
-                existing.set_collapsed(group.collapsed)
+                existing.set_collapsed(group.collapsed, notify=False)
             return
         self._mount_timeline_process_fold(timeline, group_id)
 

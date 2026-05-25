@@ -468,7 +468,15 @@ class ThreadTimelineState:
         elif event_type == "tool.delta":
             self._apply_tool_delta(acc, event)
         elif event_type == "tool.started":
-            self._remove_live_reasoning(acc)
+            if acc.reasoning_item_id:
+                item = self.items_by_id.get(acc.reasoning_item_id)
+                if item is not None and item.process_group:
+                    group = self.process_groups.get(item.process_group)
+                    if group is not None:
+                        group.collapsed = True
+                        self.changed_process_group_ids.add(group.id)
+                else:
+                    self._remove_live_reasoning(acc)
             self._apply_tool_started(acc, event)
         elif event_type == "tool.partial":
             self._apply_tool_partial(acc, event)
@@ -856,7 +864,11 @@ class ThreadTimelineState:
             kind="reasoning",
             content={"text": reasoning, "partial": True},
             turn_id=acc.turn_id,
-            process_group=None,
+            # Treat live reasoning as part of the turn process from its first
+            # visible chunk.  Otherwise the fold bar is mounted only after the
+            # reasoning is finalized or a tool starts, which makes it appear
+            # late and then jump above the already-rendered thinking row.
+            process_group=acc.turn_id if acc.turn_id != "manual" else None,
         ))
 
     def _finalize_reasoning(self, acc: TurnAccumulator, text: str) -> None:

@@ -424,10 +424,12 @@ class FoldedProcessCell(TranscriptCell, can_focus=True):
         self.elapsed_label = elapsed_label
         self._refresh()
 
-    def set_collapsed(self, collapsed: bool) -> None:
+    def set_collapsed(self, collapsed: bool, *, notify: bool = True) -> None:
         self.collapsed = collapsed
         self._apply_visibility()
         self._refresh()
+        if not notify:
+            return
         try:
             self.app._process_fold_toggled(self, collapsed)
         except Exception:
