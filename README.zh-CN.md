@@ -1,3 +1,5 @@
+<img align="right" src="docs/t1.png" alt="uv-agent TUI 截图" width="360">
+
 # uv-agent
 
 [English](README.md)
