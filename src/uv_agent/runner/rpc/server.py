@@ -157,29 +157,36 @@ class RuntimeRPCServer:
 
             def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
                 if self.path != "/rpc":
+                    self._discard_request_body()
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
                 if not is_loopback_address(self.client_address[0]):
+                    self._discard_request_body()
                     self.send_error(HTTPStatus.UNAUTHORIZED)
                     return
                 session = rpc_server.session_for_token(bearer_token(self.headers.get("Authorization")))
                 if session is None:
+                    self._discard_request_body()
                     self.send_error(HTTPStatus.UNAUTHORIZED)
                     return
                 content_length = self.headers.get("Content-Length")
                 try:
                     length = int(content_length or "0")
                 except ValueError:
+                    self._discard_request_body()
                     self.send_error(HTTPStatus.LENGTH_REQUIRED)
                     return
                 if length < 0:
+                    self._discard_request_body()
                     self.send_error(HTTPStatus.BAD_REQUEST)
                     return
                 if length > rpc_server.max_body_bytes:
+                    self._discard_request_body(max_bytes=0)
                     self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
                     return
                 content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
                 if content_type and content_type != "application/json":
+                    self._discard_request_body(max_bytes=length)
                     self.send_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
                     return
                 body = self.rfile.read(length)
@@ -196,6 +203,28 @@ class RuntimeRPCServer:
                 # Runtime RPC is an internal transport; request logs would add
                 # noise and risk exposing method names from user scripts.
                 return
+
+            def _discard_request_body(self, *, max_bytes: int | None = None) -> None:
+                """Best-effort drain before early POST errors.
+
+                Windows can reset a loopback HTTP connection if the server sends
+                an error response and closes while the client is still writing
+                the request body. Draining bounded bodies first keeps auth/path
+                failures deterministic without changing the RPC surface.
+                """
+
+                try:
+                    remaining = int(self.headers.get("Content-Length") or "0")
+                except ValueError:
+                    return
+                if max_bytes is None:
+                    max_bytes = rpc_server.max_body_bytes
+                remaining = max(0, min(remaining, max_bytes))
+                while remaining:
+                    chunk = self.rfile.read(min(remaining, 64 * 1024))
+                    if not chunk:
+                        return
+                    remaining -= len(chunk)
 
             def _send_bytes(self, status: int, body: bytes, *, content_type: str) -> None:
                 self.send_response(status)
