@@ -2936,6 +2936,112 @@ async def test_tui_streaming_events_are_coalesced_before_render(
 
 
 @pytest.mark.asyncio
+async def test_tui_live_updates_after_pending_prompt_stay_incremental(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = fake_engine(project_root, tmp_path / "state")
+    thread_id = engine.thread_store.create_thread("Long history")
+    for index in range(24):
+        turn_id = f"history_{index}"
+        engine.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        engine.thread_store.append(
+            thread_id,
+            "item.user",
+            turn_id=turn_id,
+            item={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": f"history prompt {index}"}],
+            },
+        )
+        engine.thread_store.append(
+            thread_id,
+            "item.model_response",
+            turn_id=turn_id,
+            response_id=f"history_response_{index}",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": f"history reply {index}"}],
+                }
+            ],
+            reasoning_text="",
+            usage={},
+        )
+        engine.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text=f"history reply {index}")
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        app._resume_thread(thread_id)
+        await pilot.pause()
+        timeline = app._timeline_for_thread(thread_id)
+        assert timeline is not None
+        assert app._can_patch_timeline_incrementally(timeline)
+
+        rebuild_calls = 0
+        original_rebuild = app._rebuild_transcript_from_timeline
+
+        def counted_rebuild(*args: object, **kwargs: object) -> None:
+            nonlocal rebuild_calls
+            rebuild_calls += 1
+            original_rebuild(*args, **kwargs)
+
+        app._rebuild_transcript_from_timeline = counted_rebuild  # type: ignore[assignment]
+
+        run_state = app._run_state_for_thread(thread_id)
+        run_state.worker = object()  # type: ignore[assignment]
+        app._refresh_active_run_state()
+        pending_turn_id = "pending:stream-start"
+        timeline.ensure_user_item(pending_turn_id, "new live prompt")
+        run_state.pending_user_turn_id = pending_turn_id
+        app._sync_transcript_from_timeline()
+        assert rebuild_calls == 0
+
+        turn_id = "turn_live"
+        await app._handle_thread_event(
+            thread_id,
+            "assistant.reasoning_delta",
+            {"type": "assistant.reasoning_delta", "thread_id": thread_id, "turn_id": turn_id, "text": " plan"},
+            run_state,
+        )
+        # The first model event promotes the pending prompt id. The mounted user
+        # cell should be rebound instead of forcing a history-sized rebuild.
+        assert app._can_patch_timeline_incrementally(timeline)
+        app._flush_stream_updates()
+        assert rebuild_calls == 0
+        assert f"user:{turn_id}" in app._timeline_cells
+        assert f"user:{pending_turn_id}" not in app._timeline_cells
+
+        for arguments in ('{"code":"print(1)"}', '{"code":"print(2)"}'):
+            await app._handle_thread_event(
+                thread_id,
+                "tool.delta",
+                {
+                    "type": "tool.delta",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "tool_call": ToolCallDelta(
+                        index=0,
+                        call_id="call_live",
+                        name="run_python",
+                        arguments=arguments,
+                    ),
+                },
+                run_state,
+            )
+            app._flush_stream_updates()
+
+        assert rebuild_calls == 0
+        assert app._can_patch_timeline_incrementally(timeline)
+        assert any("print" in plain_renderable(cell.summary) for cell in app.query(ExpandableTranscriptCell).nodes)
+
+
+@pytest.mark.asyncio
 async def test_tui_enter_refocuses_composer_when_transcript_has_focus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

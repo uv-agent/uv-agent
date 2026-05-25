@@ -847,6 +847,21 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             restore_view=restore_view,
         )
 
+    def _timeline_widget_is_live(self, widget: Widget | None) -> bool:
+        """Return whether a timeline widget can be patched in place.
+
+        Textual mounts children asynchronously: immediately after ``mount()`` a
+        widget can already have a parent, yet ``is_mounted`` remains false until
+        the next message-pump pass. Live stream events can arrive faster than
+        that, so treating parented widgets as absent makes the hot path rebuild
+        the whole transcript repeatedly.
+        """
+
+        return isinstance(widget, Widget) and (
+            widget.is_mounted
+            or (widget.parent is not None and not bool(getattr(widget, "_closing", False)))
+        )
+
     def _can_patch_timeline_incrementally(self, timeline: ThreadTimelineState) -> bool:
         if self._history_more_cell is not None:
             return False
@@ -863,7 +878,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return False
         for item_id in item_ids:
             cell = self._timeline_cells.get(item_id)
-            if not isinstance(cell, Widget) or not cell.is_mounted:
+            if not self._timeline_widget_is_live(cell):
                 return False
         return True
 
@@ -958,6 +973,7 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             if restore_view:
                 group.collapsed = fold_state.get(group.id, group.collapsed)
             self._mount_timeline_process_fold(timeline, group_id)
+        timeline.consume_changes()
         if timeline.items:
             self._mark_transcript_content()
         else:
@@ -1048,11 +1064,32 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         setattr(widget, "timeline_process_group", item.process_group)
         setattr(widget, "timeline_signature", self._timeline_item_signature(item))
 
+    def _rebind_timeline_widget_id(self, old_item_id: str, item: TimelineItem) -> None:
+        """Move mounted widget metadata after a timeline item id changes."""
+
+        if old_item_id == item.id or old_item_id not in self._timeline_cells:
+            return
+        widget = self._timeline_cells[old_item_id]
+        replaced = self._timeline_cells.get(item.id)
+        if isinstance(replaced, Widget) and replaced is not widget:
+            self._timeline_item_ids.pop(replaced, None)
+        rebound: dict[str, Widget] = {}
+        for key, value in self._timeline_cells.items():
+            if key == old_item_id:
+                rebound[item.id] = value
+            elif key != item.id:
+                rebound[key] = value
+        self._timeline_cells.clear()
+        self._timeline_cells.update(rebound)
+        self._timeline_item_ids[widget] = item.id
+        setattr(widget, "timeline_process_group", item.process_group)
+        setattr(widget, "timeline_signature", self._timeline_item_signature(item))
+
     def _sync_timeline_item_widget(self, item: TimelineItem, *, force_update: bool = False) -> str | None:
         existing = self._timeline_cells.get(item.id)
         old_group = getattr(existing, "timeline_process_group", None) if isinstance(existing, Widget) else None
         signature = None if force_update else self._timeline_item_signature(item)
-        if isinstance(existing, Widget) and existing.is_mounted:
+        if self._timeline_widget_is_live(existing):
             if not force_update and getattr(existing, "timeline_signature", None) == signature:
                 setattr(existing, "timeline_process_group", item.process_group)
                 return old_group if isinstance(old_group, str) else None
@@ -1281,11 +1318,11 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             self._timeline_cells.pop(key, None)
             return
         elapsed_label = self._process_elapsed_label(started_at=group.started_at, completed_at=group.completed_at)
-        if isinstance(existing, FoldedProcessCell) and existing.is_mounted:
+        if isinstance(existing, FoldedProcessCell) and self._timeline_widget_is_live(existing):
             existing.set_cells(process_cells)
             existing.set_elapsed_label(elapsed_label)
             first_cell = process_cells[0]
-            if first_cell.is_mounted:
+            if self._timeline_widget_is_live(first_cell):
                 children = list(first_cell.parent.children) if first_cell.parent is not None else []
                 fold_is_after_first_cell = (
                     existing in children
@@ -2251,7 +2288,12 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             run_state.turn_id = turn_id
             timeline = self._timeline_for_thread(run_state.thread_id)
             if timeline is not None:
-                timeline.promote_user_turn(run_state.pending_user_turn_id, turn_id)
+                old_pending_turn_id = run_state.pending_user_turn_id
+                timeline.promote_user_turn(old_pending_turn_id, turn_id)
+                if old_pending_turn_id and self._is_active_thread(run_state.thread_id):
+                    promoted = timeline.items_by_id.get(f"user:{turn_id}")
+                    if promoted is not None:
+                        self._rebind_timeline_widget_id(f"user:{old_pending_turn_id}", promoted)
             run_state.pending_user_turn_id = None
         started_at = str(item.get("turn_started_at") or item.get("started_at") or "").strip()
         if started_at:
