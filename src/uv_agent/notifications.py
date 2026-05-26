@@ -21,6 +21,13 @@ def play_completion_sound() -> bool:
     return ring_terminal_bell()
 
 
+def play_terminal_buzzer() -> bool:
+    """Play a short buzzer-like cue for terminal-native interfaces."""
+    if os.name == "nt" and _play_windows_terminal_buzzer():
+        return True
+    return ring_terminal_bell()
+
+
 def _play_windows_completion_sound() -> bool:
     try:
         import winsound
@@ -33,6 +40,16 @@ def _play_windows_completion_sound() -> bool:
             winsound.MessageBeep(winsound.MB_ICONASTERISK)
         except (ImportError, RuntimeError):
             return False
+    return True
+
+
+def _play_windows_terminal_buzzer() -> bool:
+    try:
+        import winsound
+
+        winsound.Beep(880, 80)
+    except (ImportError, RuntimeError, ValueError):
+        return False
     return True
 
 

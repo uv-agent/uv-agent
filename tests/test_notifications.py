@@ -52,3 +52,23 @@ def test_play_completion_sound_uses_terminal_bell_off_windows(monkeypatch) -> No
     assert notifications.play_completion_sound() is True
     assert calls == ["bell"]
 
+
+def test_play_terminal_buzzer_uses_windows_beep(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(notifications.os, "name", "nt")
+    monkeypatch.setattr(notifications, "_play_windows_terminal_buzzer", lambda: calls.append("win") or True)
+    monkeypatch.setattr(notifications, "ring_terminal_bell", lambda: calls.append("bell") or True)
+
+    assert notifications.play_terminal_buzzer() is True
+    assert calls == ["win"]
+
+
+def test_play_terminal_buzzer_falls_back_to_terminal_bell(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(notifications.os, "name", "nt")
+    monkeypatch.setattr(notifications, "_play_windows_terminal_buzzer", lambda: calls.append("win") or False)
+    monkeypatch.setattr(notifications, "ring_terminal_bell", lambda: calls.append("bell") or True)
+
+    assert notifications.play_terminal_buzzer() is True
+    assert calls == ["win", "bell"]
+

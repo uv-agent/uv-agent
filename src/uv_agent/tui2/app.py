@@ -11,6 +11,7 @@ from uv_agent.environment import detect_user_language
 from uv_agent.helper_calls import extract_runtime_helper_calls
 from uv_agent.i18n import tr
 from uv_agent.mcp_config import discover_mcp_servers
+from uv_agent.notifications import play_terminal_buzzer
 from uv_agent.paths import uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
@@ -1128,7 +1129,17 @@ class AnsiUvAgentApp:
             self._flush(TranscriptCell("event", text="turn interrupted"))
         elif event_type == "turn.completed":
             self._finish_live_cells()
+            self._notify_turn_completed()
             self._refresh_window_title()
+
+    def _notify_turn_completed(self) -> None:
+        notification_config = getattr(getattr(self.engine.config, "ui", None), "completion_notification", None)
+        if notification_config is not None:
+            if not getattr(notification_config, "enabled", True):
+                return
+            if not getattr(notification_config, "bell", True):
+                return
+        play_terminal_buzzer()
 
     def _current_thread_title(self) -> str:
         fallback = self.state.title if self.state.title != "New thread" else self._text("new_thread")

@@ -282,7 +282,7 @@ Completion notification options:
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Enable completion notifications. |
 | `terminal` | boolean | `true` | Add a short transcript event when a background thread finishes. |
-| `bell` | boolean | `true` | Play a completion sound when a turn finishes. Uses the Windows system notification sound on Windows, otherwise writes a terminal BEL. |
+| `bell` | boolean | `true` | Play a completion sound when a turn finishes. The Textual TUI uses the Windows system notification sound on Windows; `tui2` uses a short buzzer-like terminal cue. Other platforms write a terminal BEL. |
 
 The `/config` panel can edit `runtime.default_level`,
 `runtime.compression.enabled`, `ui.language`, and

@@ -435,6 +435,8 @@ class _DummyEngine:
         class runtime:
             default_level = "test"
 
+        ui = SimpleNamespace(completion_notification=SimpleNamespace(enabled=True, bell=True))
+
         levels = {"alpha": object(), "test": object()}
 
         @staticmethod
@@ -722,6 +724,27 @@ def test_tool_output_allows_next_response_reasoning_to_flush(monkeypatch) -> Non
 
     reasoning_cells = [cell for cell in app.state.flushed if cell.kind == "reasoning"]
     assert [cell.text for cell in reasoning_cells] == ["tool plan", "final plan"]
+
+
+def test_turn_completed_plays_terminal_buzzer(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr("uv_agent.tui2.app.play_terminal_buzzer", lambda: calls.append("buzzer") or True)
+
+    app._handle_event({"type": "turn.completed"})
+
+    assert calls == ["buzzer"]
+
+
+def test_turn_completed_respects_buzzer_config(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.config.ui = SimpleNamespace(completion_notification=SimpleNamespace(enabled=True, bell=False))
+    calls: list[str] = []
+    monkeypatch.setattr("uv_agent.tui2.app.play_terminal_buzzer", lambda: calls.append("buzzer") or True)
+
+    app._handle_event({"type": "turn.completed"})
+
+    assert calls == []
 
 
 def test_at_opens_file_mention_palette(monkeypatch) -> None:

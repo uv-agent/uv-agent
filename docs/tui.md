@@ -89,9 +89,10 @@ Language choices are:
 See [configuration](configuration.md) for config file locations and schema.
 
 Completion notifications can add a short transcript event for background
-threads and play a completion sound. Windows uses the system notification sound;
-other platforms use the terminal bell. The active thread does not add an extra
-terminal event when it finishes.
+threads and play a completion sound. Windows uses the system notification sound
+in the Textual TUI; the terminal-native `tui2` uses a short buzzer-like terminal
+cue. Other platforms use the terminal bell. The active thread does not add an
+extra terminal event when it finishes.
 
 ## Transcript Events
 
