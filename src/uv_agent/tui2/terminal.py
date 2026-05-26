@@ -8,6 +8,7 @@ from typing import TextIO
 
 
 PASTE_PREFIX = "\x00paste\x00"
+UNBRACKETED_PASTE_IDLE_S = 0.01
 
 
 class Terminal(AbstractContextManager["Terminal"]):
@@ -71,7 +72,7 @@ class Terminal(AbstractContextManager["Terminal"]):
                     return "<DOWN>"
                 return "<" + code + ">"
         if ch != "\x1b":
-            return ch
+            return self._coalesce_unbracketed_paste(ch)
         # Terminals report arrows, modified Enter and bracketed paste as CSI
         # sequences.  Bracketed paste must be returned as one key so pasted
         # newlines don't look like Enter presses to the app.
@@ -121,6 +122,68 @@ class Terminal(AbstractContextManager["Terminal"]):
         import select
 
         ready, _, _ = select.select([fd], [], [], 0.03)
+        if not ready:
+            return None
+        return self._read_char()
+
+    def _coalesce_unbracketed_paste(self, initial: str) -> str:
+        """Group a burst of plain terminal input into a synthetic paste key.
+
+        Bracketed paste is not universally delivered on Windows terminals even
+        after requesting VT input.  Without a fallback, pasted newlines arrive as
+        literal Enter bytes and submit each line.  If more input is immediately
+        buffered after a text-ish character, treat the whole burst as paste and
+        let the app insert it as one composer edit.
+        """
+
+        if not self._can_start_unbracketed_paste(initial):
+            return initial
+        suffix = self._read_pending_burst()
+        if not suffix:
+            return initial
+        return PASTE_PREFIX + self._normalize_paste_text(initial + suffix)
+
+    @staticmethod
+    def _can_start_unbracketed_paste(ch: str) -> bool:
+        # Keep standalone control shortcuts as keys.  Tabs/newlines may appear
+        # in pasted text, but only become paste if more bytes are already queued.
+        return ch in {"\t", "\r", "\n"} or ch >= " "
+
+    def _read_pending_burst(self) -> str:
+        chars: list[str] = []
+        deadline = monotonic() + UNBRACKETED_PASTE_IDLE_S
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            ch = self._read_available_char(timeout_s=remaining)
+            if ch is None:
+                break
+            chars.append(ch)
+            # Keep draining until the terminal input buffer has been idle for a
+            # short interval.  This captures larger pastes without forcing the
+            # app to repaint once per character.
+            deadline = monotonic() + UNBRACKETED_PASTE_IDLE_S
+        return "".join(chars)
+
+    def _read_available_char(self, *, timeout_s: float) -> str | None:
+        if self._windows:
+            import msvcrt
+
+            deadline = monotonic() + timeout_s
+            while monotonic() < deadline:
+                if msvcrt.kbhit():
+                    return self._read_char()
+                sleep(0.001)
+            return None
+
+        try:
+            fd = self.stdin.fileno()
+        except (AttributeError, OSError):
+            return None
+        import select
+
+        ready, _, _ = select.select([fd], [], [], max(0.0, timeout_s))
         if not ready:
             return None
         return self._read_char()

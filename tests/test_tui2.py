@@ -1016,6 +1016,44 @@ def test_bracketed_paste_inserts_multiline_text_without_submitting(monkeypatch) 
     assert app.engine.turns == []
 
 
+def test_plain_enter_shortly_after_typing_is_treated_as_paste_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+
+    asyncio.run(app.handle_key("a"))
+    asyncio.run(app.handle_key("\r"))
+    asyncio.run(app.handle_key("b"))
+
+    assert app.state.composer == "a\nb"
+    assert app.engine.turns == []
+
+
+def test_plain_crlf_shortly_after_typing_inserts_one_paste_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+
+    asyncio.run(app.handle_key("a"))
+    asyncio.run(app.handle_key("\r"))
+    asyncio.run(app.handle_key("\n"))
+    asyncio.run(app.handle_key("b"))
+
+    assert app.state.composer == "a\nb"
+    assert app.engine.turns == []
+
+
+def test_plain_enter_after_idle_still_submits(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "hello"
+    app._last_plain_input_at = None
+
+    async def run() -> None:
+        assert await app.handle_key("\r") is True
+        assert app._running_task is not None
+        await app._running_task
+
+    asyncio.run(run())
+
+    assert app.engine.turns[-1]["user_text"] == "hello"
+
+
 def test_terminal_reads_bracketed_paste_as_single_key() -> None:
     terminal = Terminal(stdin=io.StringIO("\x1b[200~one\r\ntwo\x1b[201~"))
     terminal._windows = False
@@ -1031,6 +1069,30 @@ def test_windows_terminal_reads_vt_paste_before_enter(monkeypatch) -> None:
 
     assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
     assert terminal.read_key() == "\r"
+
+
+def test_windows_terminal_coalesces_unbracketed_paste(monkeypatch) -> None:
+    terminal = Terminal()
+    terminal._windows = True
+    chars = iter("one\r\ntwo")
+    remaining = [True] * len("one\r\ntwo")
+
+    def fake_getwch() -> str:
+        remaining.pop(0)
+        return next(chars)
+
+    monkeypatch.setattr("msvcrt.getwch", fake_getwch)
+    monkeypatch.setattr("msvcrt.kbhit", lambda: bool(remaining))
+
+    assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
+
+
+def test_unbracketed_paste_fallback_does_not_swallow_stringio_input() -> None:
+    terminal = Terminal(stdin=io.StringIO("ab"))
+    terminal._windows = False
+
+    assert terminal.read_key() == "a"
+    assert terminal.read_key() == "b"
 
 
 def test_command_palette_render_shows_selection() -> None:

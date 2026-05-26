@@ -129,6 +129,7 @@ GOAL_COMMANDS: tuple[CommandSuggestion, ...] = (
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
+UNBRACKETED_PASTE_ENTER_S = 0.08
 
 
 def composer_history_path() -> Path:
@@ -199,6 +200,8 @@ class AnsiUvAgentApp:
         self._window_title_thread_title = ""
         self._last_window_title = ""
         self._ticker_task: asyncio.Task[None] | None = None
+        self._last_plain_input_at: float | None = None
+        self._skip_next_lf_after_plain_cr = False
         self._picker_mode: str = "command"
         self._mention_start: int | None = None
         self._mention_query: str = ""
@@ -277,6 +280,15 @@ class AnsiUvAgentApp:
             self._safe_repaint()
             return True
         if key == "\r":
+            if self._enter_looks_like_unbracketed_paste():
+                self._insert_composer_text("\n")
+                self._reset_history()
+                self._mark_plain_input()
+                self._skip_next_lf_after_plain_cr = True
+                self._after_composer_changed()
+                self._safe_repaint()
+                return True
+            self._skip_next_lf_after_plain_cr = False
             if self.state.command_palette_open:
                 completed = self._accept_command_palette_selection()
                 if self._picker_mode != "command":
@@ -288,37 +300,67 @@ class AnsiUvAgentApp:
             await self.submit()
             return True
         if key in {"\n", "\x0a", "<C-ENTER>"}:  # Ctrl+Enter/Ctrl+J inserts a newline.
+            if key != "<C-ENTER>" and self._skip_next_lf_after_plain_cr:
+                self._mark_plain_input()
+                self._safe_repaint()
+                return True
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._insert_composer_text("\n")
             self._after_composer_changed()
         elif key == "\x1b":
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._close_command_palette()
         if key == "\t":
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._handle_tab()
         elif key == "\x01":  # Ctrl+A: move to the start of the current logical line.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._move_composer_to_line_start()
         elif key == "\x05":  # Ctrl+E: move to the end of the current logical line.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._move_composer_to_line_end()
         elif key == "\x0b":  # Ctrl+K: delete from the cursor to the current line end.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._delete_composer_to_line_end()
             self._after_composer_changed()
         elif key == "\x02":  # Ctrl+B: readline-style cursor-left shortcut.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._move_composer_cursor(-1)
         elif key == "\x06":  # Ctrl+F: readline-style cursor-right shortcut.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._move_composer_cursor(1)
         elif key == "\x04":  # Ctrl+D: delete the character under the cursor.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._delete_composer_after_cursor()
             self._after_composer_changed()
         elif key in {"\x7f", "\b"}:
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._delete_composer_before_cursor()
             self._after_composer_changed()
         elif key == "\x17":  # Ctrl+W
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._delete_composer_word_before_cursor()
             self._after_composer_changed()
         elif key == "\x15":  # Ctrl+U
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._set_composer_text("", cursor=0)
             self._reset_history()
             self._after_composer_changed()
         elif key in {"<H>", "<UP>"}:  # Windows/POSIX up arrow
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             if self.state.command_palette_open:
                 self._move_command_palette(-1)
             else:
@@ -327,6 +369,8 @@ class AnsiUvAgentApp:
                 elif not self._move_composer_vertical(-1):
                     self._history_prev()
         elif key in {"<P>", "<DOWN>"}:  # Windows/POSIX down arrow
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             if self.state.command_palette_open:
                 self._move_command_palette(1)
             else:
@@ -335,12 +379,18 @@ class AnsiUvAgentApp:
                 elif not self._move_composer_vertical(1):
                     self._history_next()
         elif key in {"<K>", "<LEFT>"}:  # Windows/POSIX left arrow
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._move_composer_cursor(-1)
         elif key in {"<M>", "<RIGHT>"}:  # Windows/POSIX right arrow
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
             self._move_composer_cursor(1)
         elif key and key >= " " and not key.startswith("<"):
+            self._skip_next_lf_after_plain_cr = False
             self._insert_composer_text(key)
             self._reset_history()
+            self._mark_plain_input()
             self._after_composer_changed()
         self._safe_repaint()
         return True
@@ -372,10 +422,22 @@ class AnsiUvAgentApp:
         if not text:
             return
         self._quit_armed = False
+        self._last_plain_input_at = None
+        self._skip_next_lf_after_plain_cr = False
         self._insert_composer_text(text)
         self._reset_history()
         self._after_composer_changed()
         self._safe_repaint()
+
+    def _mark_plain_input(self) -> None:
+        self._last_plain_input_at = monotonic()
+
+    def _enter_looks_like_unbracketed_paste(self) -> bool:
+        """Protect against terminals that paste newlines as plain Enter keys."""
+
+        if self._last_plain_input_at is None:
+            return False
+        return monotonic() - self._last_plain_input_at <= UNBRACKETED_PASTE_ENTER_S
 
     def _delete_composer_before_cursor(self) -> None:
         cursor = self._composer_cursor()
