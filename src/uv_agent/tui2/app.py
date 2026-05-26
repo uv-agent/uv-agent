@@ -15,6 +15,7 @@ from uv_agent.notifications import play_terminal_buzzer
 from uv_agent.paths import uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
+from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.tui.formatting import short_thread
 from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
@@ -1057,7 +1058,12 @@ class AnsiUvAgentApp:
 
     def _handle_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
-        self.state.thread_id = event.get("thread_id") or self.state.thread_id
+        previous_thread_id = self.state.thread_id
+        event_thread_id = event.get("thread_id")
+        if event_thread_id:
+            self.state.thread_id = str(event_thread_id)
+            if self.state.thread_id != previous_thread_id:
+                self._refresh_window_title()
         if event_type == "thread.title":
             self.state.title = str(event.get("title") or self.state.title)
             self._refresh_window_title()
@@ -1142,7 +1148,7 @@ class AnsiUvAgentApp:
         play_terminal_buzzer()
 
     def _current_thread_title(self) -> str:
-        fallback = self.state.title if self.state.title != "New thread" else self._text("new_thread")
+        fallback = self.state.title if self.state.title not in DEFAULT_THREAD_TITLES else self._text("new_thread")
         if not self.state.thread_id:
             return fallback
         try:
@@ -1150,15 +1156,27 @@ class AnsiUvAgentApp:
         except Exception:
             return fallback
         title = str(digest.get("title") or "").strip()
-        if not title or title in {"New thread", "new thread", "新会话"}:
+        if not title or title in DEFAULT_THREAD_TITLES:
             return fallback
         return title
+
+    def _window_title_waiting_for_generated_title(self) -> bool:
+        if not self.state.thread_id:
+            return False
+        title = self._window_title_thread_title.strip()
+        return not title or title == self._text("new_thread") or title in DEFAULT_THREAD_TITLES
 
     def _refresh_window_title(self) -> None:
         self._window_title_thread_title = self._current_thread_title()
         self._apply_window_title()
 
     def _apply_window_title(self) -> None:
+        if self.state.busy and self._window_title_waiting_for_generated_title():
+            # Title generation writes thread metadata from a side task before the
+            # engine emits its final thread.title event. While the visible title
+            # is still a placeholder, re-read it on spinner ticks so the
+            # terminal title can switch as soon as metadata is available.
+            self._window_title_thread_title = self._current_thread_title()
         title = self._window_title_thread_title or self._current_thread_title()
         if self.state.busy:
             spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]

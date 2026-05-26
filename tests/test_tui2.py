@@ -893,6 +893,36 @@ def test_window_title_uses_thread_title_and_busy_spinner(monkeypatch) -> None:
     assert written[-1] == "⠙ Stored title"
 
 
+def test_window_title_refreshes_when_turn_assigns_thread_id(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    written: list[str] = []
+    monkeypatch.setattr("uv_agent.tui2.app.write_window_title", written.append)
+
+    app._refresh_window_title()
+    app._handle_event({"type": "turn.started", "thread_id": "T-test"})
+
+    assert written == [app._text("new_thread"), "Stored title"]
+
+
+def test_window_title_polls_pending_generated_title_while_busy(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    written: list[str] = []
+    titles = iter(["New thread", "Generated title"])
+    monkeypatch.setattr("uv_agent.tui2.app.write_window_title", written.append)
+    monkeypatch.setattr(
+        app.engine.thread_store,
+        "thread_digest",
+        lambda thread_id: {"title": next(titles)},
+    )
+    app.state.thread_id = "T-test"
+
+    app._refresh_window_title()
+    app.state.busy = True
+    app._apply_window_title()
+
+    assert written == [app._text("new_thread"), "⠋ Generated title"]
+
+
 def test_window_title_is_sanitized_and_deduplicated(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     written: list[str] = []
