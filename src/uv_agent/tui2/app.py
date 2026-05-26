@@ -98,7 +98,7 @@ HELP_TEXT = (
     "  /quit              exit the TUI\n"
     "\n"
     "Keys: Enter send/select · Ctrl+Enter newline · / command palette · @ mentions · ↑/↓ history\n"
-    "      Ctrl+L redraw · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt"
+    "      Ctrl+A/E line ends · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt"
 )
 
 
@@ -290,6 +290,20 @@ class AnsiUvAgentApp:
             self._close_command_palette()
         if key == "\t":
             self._handle_tab()
+        elif key == "\x01":  # Ctrl+A: move to the start of the current logical line.
+            self._move_composer_to_line_start()
+        elif key == "\x05":  # Ctrl+E: move to the end of the current logical line.
+            self._move_composer_to_line_end()
+        elif key == "\x0b":  # Ctrl+K: delete from the cursor to the current line end.
+            self._delete_composer_to_line_end()
+            self._after_composer_changed()
+        elif key == "\x02":  # Ctrl+B: readline-style cursor-left shortcut.
+            self._move_composer_cursor(-1)
+        elif key == "\x06":  # Ctrl+F: readline-style cursor-right shortcut.
+            self._move_composer_cursor(1)
+        elif key == "\x04":  # Ctrl+D: delete the character under the cursor.
+            self._delete_composer_after_cursor()
+            self._after_composer_changed()
         elif key in {"\x7f", "\b"}:
             self._delete_composer_before_cursor()
             self._after_composer_changed()
@@ -304,13 +318,17 @@ class AnsiUvAgentApp:
             if self.state.command_palette_open:
                 self._move_command_palette(-1)
             else:
-                if not self._move_composer_vertical(-1):
+                if self._history_cursor is not None:
+                    self._history_prev()
+                elif not self._move_composer_vertical(-1):
                     self._history_prev()
         elif key in {"<P>", "<DOWN>"}:  # Windows/POSIX down arrow
             if self.state.command_palette_open:
                 self._move_command_palette(1)
             else:
-                if not self._move_composer_vertical(1):
+                if self._history_cursor is not None:
+                    self._history_next()
+                elif not self._move_composer_vertical(1):
                     self._history_next()
         elif key in {"<K>", "<LEFT>"}:  # Windows/POSIX left arrow
             self._move_composer_cursor(-1)
@@ -353,6 +371,13 @@ class AnsiUvAgentApp:
         value = self.state.composer
         self._set_composer_text(value[: cursor - 1] + value[cursor:], cursor=cursor - 1)
 
+    def _delete_composer_after_cursor(self) -> None:
+        cursor = self._composer_cursor()
+        value = self.state.composer
+        if cursor >= len(value):
+            return
+        self._set_composer_text(value[:cursor] + value[cursor + 1 :], cursor=cursor)
+
     def _delete_composer_word_before_cursor(self) -> None:
         cursor = self._composer_cursor()
         before = self.state.composer[:cursor]
@@ -362,6 +387,27 @@ class AnsiUvAgentApp:
 
     def _move_composer_cursor(self, delta: int) -> None:
         self.state.composer_cursor = max(0, min(self._composer_cursor() + delta, len(self.state.composer)))
+
+    def _move_composer_to_line_start(self) -> None:
+        start, _end = self._composer_line_bounds()
+        self.state.composer_cursor = start
+
+    def _move_composer_to_line_end(self) -> None:
+        _start, end = self._composer_line_bounds()
+        self.state.composer_cursor = end
+
+    def _delete_composer_to_line_end(self) -> None:
+        cursor = self._composer_cursor()
+        value = self.state.composer
+        if cursor >= len(value):
+            return
+        _start, end = self._composer_line_bounds()
+        # Match common terminal editor behaviour: Ctrl+K removes text up to the
+        # line break first, and removes the line break itself when already at EOL.
+        delete_end = end + 1 if cursor == end and end < len(value) else end
+        if delete_end == cursor:
+            return
+        self._set_composer_text(value[:cursor] + value[delete_end:], cursor=cursor)
 
     def _composer_line_bounds(self) -> tuple[int, int]:
         cursor = self._composer_cursor()
@@ -374,21 +420,22 @@ class AnsiUvAgentApp:
 
     def _move_composer_vertical(self, delta: int) -> bool:
         value = self.state.composer
-        if "\n" not in value:
+        if not value:
             return False
         cursor = self._composer_cursor()
-        line_start, _line_end = self._composer_line_bounds()
+        line_start, line_end = self._composer_line_bounds()
         column = cursor - line_start
         if delta < 0:
             if line_start == 0:
-                return False
+                self.state.composer_cursor = line_start
+                return True
             prev_end = line_start - 1
             prev_start = value.rfind("\n", 0, prev_end) + 1
             self.state.composer_cursor = prev_start + min(column, prev_end - prev_start)
             return True
-        line_end = value.find("\n", cursor)
-        if line_end < 0:
-            return False
+        if line_end >= len(value):
+            self.state.composer_cursor = line_end
+            return True
         next_start = line_end + 1
         next_end = value.find("\n", next_start)
         if next_end < 0:

@@ -557,6 +557,32 @@ def test_ctrl_w_deletes_last_word(monkeypatch) -> None:
     assert app.state.composer == "hello "
 
 
+def test_ctrl_a_and_ctrl_e_move_to_logical_line_edges(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "ab\ncd\nef"
+    app.state.composer_cursor = len("ab\nc")
+
+    assert asyncio.run(app.handle_key("\x01")) is True
+    assert app.state.composer_cursor == len("ab\n")
+
+    assert asyncio.run(app.handle_key("\x05")) is True
+    assert app.state.composer_cursor == len("ab\ncd")
+
+
+def test_ctrl_k_deletes_to_line_end_then_line_break(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "ab\ncd\nef"
+    app.state.composer_cursor = len("ab\nc")
+
+    assert asyncio.run(app.handle_key("\x0b")) is True
+    assert app.state.composer == "ab\nc\nef"
+    assert app.state.composer_cursor == len("ab\nc")
+
+    assert asyncio.run(app.handle_key("\x0b")) is True
+    assert app.state.composer == "ab\ncef"
+    assert app.state.composer_cursor == len("ab\nc")
+
+
 def test_left_right_arrows_move_composer_cursor(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.state.composer = "abc"
@@ -617,6 +643,26 @@ def test_posix_arrow_keys_navigate_submissions(monkeypatch) -> None:
     assert app.state.composer == "second"
     asyncio.run(app.handle_key("<DOWN>"))
     assert app.state.composer == ""
+
+
+def test_up_down_arrows_move_to_edges_at_composer_boundaries(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+
+    app.state.composer = "abc"
+    app.state.composer_cursor = 1
+    asyncio.run(app.handle_key("<UP>"))
+    assert app.state.composer_cursor == 0
+    app.state.composer_cursor = 1
+    asyncio.run(app.handle_key("<DOWN>"))
+    assert app.state.composer_cursor == len("abc")
+
+    app.state.composer = "abc\ndef"
+    app.state.composer_cursor = len("ab")
+    asyncio.run(app.handle_key("<UP>"))
+    assert app.state.composer_cursor == 0
+    app.state.composer_cursor = len("abc\nde")
+    asyncio.run(app.handle_key("<DOWN>"))
+    assert app.state.composer_cursor == len("abc\ndef")
 
 
 def test_history_arrow_ignores_non_empty_composer(monkeypatch) -> None:
