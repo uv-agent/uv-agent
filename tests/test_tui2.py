@@ -18,6 +18,7 @@ from uv_agent.tui2.components import (
 from uv_agent.tui2.app import TOP_LEVEL_COMMANDS, load_composer_history, save_composer_history
 from uv_agent.tui2.events import CommandSuggestion, TranscriptCell, Tui2State
 from uv_agent.tui2.renderer import Renderer
+from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
 
 
 # ---------------------------------------------------------------------------
@@ -1003,6 +1004,33 @@ def test_ctrl_enter_inserts_newline(monkeypatch) -> None:
     asyncio.run(app.handle_key("<C-ENTER>"))
 
     assert app.state.composer == "hello\n"
+
+
+def test_bracketed_paste_inserts_multiline_text_without_submitting(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "prefix "
+
+    asyncio.run(app.handle_key(PASTE_PREFIX + "one\ntwo"))
+
+    assert app.state.composer == "prefix one\ntwo"
+    assert app.engine.turns == []
+
+
+def test_terminal_reads_bracketed_paste_as_single_key() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b[200~one\r\ntwo\x1b[201~"))
+    terminal._windows = False
+
+    assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
+
+
+def test_windows_terminal_reads_vt_paste_before_enter(monkeypatch) -> None:
+    terminal = Terminal()
+    terminal._windows = True
+    chars = iter("\x1b[200~one\r\ntwo\x1b[201~\r")
+    monkeypatch.setattr("msvcrt.getwch", lambda: next(chars))
+
+    assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
+    assert terminal.read_key() == "\r"
 
 
 def test_command_palette_render_shows_selection() -> None:

@@ -21,7 +21,7 @@ from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
 from uv_agent.tui2.events import CommandSuggestion, TranscriptCell, Tui2State, tool_payload_from_event
 from uv_agent.tui2.renderer import Renderer
-from uv_agent.tui2.terminal import Terminal
+from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
 
 CODE_FILE_SUFFIXES = {
     ".cfg",
@@ -264,6 +264,10 @@ class AnsiUvAgentApp:
             self._safe_repaint()
             return True
 
+        if key.startswith(PASTE_PREFIX):
+            self._insert_pasted_text(key[len(PASTE_PREFIX) :])
+            return True
+
         if key:
             self._quit_armed = False
         if key != "\t":
@@ -363,6 +367,15 @@ class AnsiUvAgentApp:
         cursor = self._composer_cursor()
         value = self.state.composer
         self._set_composer_text(value[:cursor] + text + value[cursor:], cursor=cursor + len(text))
+
+    def _insert_pasted_text(self, text: str) -> None:
+        if not text:
+            return
+        self._quit_armed = False
+        self._insert_composer_text(text)
+        self._reset_history()
+        self._after_composer_changed()
+        self._safe_repaint()
 
     def _delete_composer_before_cursor(self) -> None:
         cursor = self._composer_cursor()
