@@ -13,9 +13,9 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["tui", "ask"],
+        choices=["tui", "tui2", "ask"],
         default="tui",
-        help="Run the TUI or ask a single question.",
+        help="Run the TUI, experimental ANSI TUI, or ask a single question.",
     )
     parser.add_argument("--level", default=None, help="Model level to use for ask mode.")
     parser.add_argument("--thread", default=None, help="Thread id to resume in ask mode.")
@@ -36,6 +36,11 @@ def main() -> None:
     parser.add_argument("--no-stream", action="store_true", help="Only print the final answer in ask mode.")
     parser.add_argument("prompt", nargs="*", help="Prompt text for ask mode.")
     args = parser.parse_args()
+    if args.command == "tui2":
+        from uv_agent.tui2.app import AnsiUvAgentApp
+
+        AnsiUvAgentApp(project_root=Path.cwd()).run()
+        return
     if args.command == "ask":
         prompt = " ".join(args.prompt).strip()
         if not prompt:

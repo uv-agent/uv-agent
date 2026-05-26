@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from uv_agent.tui.formatting import parse_tool_payload
+from uv_agent.tui.formatting import parse_tool_payload, tool_call_helper_payload
 
 TimelineItemKind = Literal[
     "user",
@@ -551,12 +551,24 @@ class ThreadTimelineState:
         group.completed_at = self._history_completed_at(events)
         show_stream_retries = self._history_turn_ended_with_error(events)
         seen_user = False
+        calls_by_id: dict[str, dict[str, Any]] = {}
         for event in events:
             event_type = event.get("type")
             if event_type == "item.user":
                 if seen_user:
                     continue
                 seen_user = True
+            elif event_type == "item.model_response":
+                for output_item in event.get("output") or []:
+                    if not isinstance(output_item, dict) or output_item.get("type") != "function_call":
+                        continue
+                    call_id = _call_id(output_item)
+                    if call_id:
+                        calls_by_id[call_id] = dict(output_item)
+            elif event_type == "item.runner_result" and not event.get("call"):
+                call_id = str(event.get("call_id") or "")
+                if call_id in calls_by_id:
+                    event = {**event, "call": calls_by_id[call_id]}
             if event_type == "turn.stream_retry" and not show_stream_retries:
                 continue
             for item in self._history_items_for_event(event):
@@ -623,6 +635,9 @@ class ThreadTimelineState:
         elif event_type == "item.runner_result":
             result = event.get("result") if isinstance(event.get("result"), dict) else {}
             call_id = str(event.get("call_id") or "")
+            call = dict(event.get("call") or {}) if isinstance(event.get("call"), dict) else {}
+            if call and "helper_calls" not in result:
+                result = {**result, "helper_calls": tool_call_helper_payload(call)}
             items.append(TimelineItem(
                 id=_tool_result_id(result, call_id, turn_id or ""),
                 kind="tool_result",
@@ -812,6 +827,8 @@ class ThreadTimelineState:
         if payload is None:
             payload = {"returncode": None, "stdout": "", "stderr": "", "events": []}
         payload = dict(payload)
+        if call and "helper_calls" not in payload:
+            payload["helper_calls"] = tool_call_helper_payload(call)
         payload.pop("partial", None)
         payload.pop("partial_reason", None)
         payload.pop("call_id", None)
@@ -963,6 +980,8 @@ class ThreadTimelineState:
         if payload is None:
             payload = {"returncode": None, "stdout": "", "stderr": "", "events": []}
         payload = dict(payload)
+        if call and "helper_calls" not in payload:
+            payload["helper_calls"] = tool_call_helper_payload(call)
         payload.pop("partial", None)
         payload.pop("partial_reason", None)
         payload.pop("call_id", None)

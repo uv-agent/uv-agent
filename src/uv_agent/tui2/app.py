@@ -1,0 +1,1316 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from time import monotonic
+from typing import Any
+
+from uv_agent.atomic import atomic_replace
+from uv_agent.environment import detect_user_language
+from uv_agent.helper_calls import extract_runtime_helper_calls
+from uv_agent.i18n import tr
+from uv_agent.mcp_config import discover_mcp_servers
+from uv_agent.paths import uv_agent_home
+from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
+from uv_agent.skills import discover_skills
+from uv_agent.tui.formatting import short_thread
+from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
+from uv_agent.tui.window_title import sanitized_window_title, write_window_title
+from uv_agent.tui2.events import CommandSuggestion, TranscriptCell, Tui2State, tool_payload_from_event
+from uv_agent.tui2.renderer import Renderer
+from uv_agent.tui2.terminal import Terminal
+
+CODE_FILE_SUFFIXES = {
+    ".cfg",
+    ".css",
+    ".csv",
+    ".env",
+    ".gd",
+    ".go",
+    ".html",
+    ".ini",
+    ".js",
+    ".json",
+    ".jsonl",
+    ".jsx",
+    ".lock",
+    ".md",
+    ".mjs",
+    ".py",
+    ".rs",
+    ".scss",
+    ".toml",
+    ".tsx",
+    ".ts",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+IGNORED_MENTION_DIRS = {
+    ".code-search",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".uv-agent",
+    ".venv",
+    "__pycache__",
+    "__pypackages__",
+    "build",
+    "coverage",
+    "dist",
+    "env",
+    "htmlcov",
+    "node_modules",
+    "out",
+    "site-packages",
+    "target",
+    "tmp",
+    "vendor",
+    "venv",
+}
+MAX_MENTION_ITEMS = 300
+
+
+def create_engine(project_root: Path | None = None, *, data_dir: Path | None = None):
+    """Create the shared uv-agent engine lazily for the raw ANSI TUI."""
+
+    from uv_agent.app_factory import create_engine as _create_engine
+
+    return _create_engine(project_root, data_dir=data_dir)
+
+
+HELP_TEXT = (
+    "Commands:\n"
+    "  /help              show this help\n"
+    "  /clear             clear view and start a new thread\n"
+    "  /threads           choose a thread to resume\n"
+    "  /skills            list skills and insert @skill mentions\n"
+    "  /mcp               list MCP servers and insert @mcp mentions\n"
+    "  /level <name>      switch model level\n"
+    "  /title <text>      rename the current thread\n"
+    "  /goal <op>         enable | disable | reset | status\n"
+    "  /cancel            interrupt the running turn\n"
+    "  /quit              exit the TUI\n"
+    "\n"
+    "Keys: Enter send/select · Ctrl+Enter newline · / command palette · @ mentions · ↑/↓ history\n"
+    "      Ctrl+L redraw · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt"
+)
+
+
+# Values ending in a space accept more input; the command palette keeps them in
+# the composer instead of submitting immediately.
+TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
+    CommandSuggestion("/help", "show help"),
+    CommandSuggestion("/clear", "clear view and start a new thread"),
+    CommandSuggestion("/threads", "choose a thread to resume"),
+    CommandSuggestion("/status", "show model/context/thread status"),
+    CommandSuggestion("/skills", "list skills and insert @skill mentions"),
+    CommandSuggestion("/mcp", "list MCP servers and insert @mcp mentions"),
+    CommandSuggestion("/level ", "switch model level"),
+    CommandSuggestion("/model ", "alias for /level"),
+    CommandSuggestion("/title ", "rename current thread"),
+    CommandSuggestion("/goal ", "goal-mode subcommands"),
+    CommandSuggestion("/cancel", "interrupt the running turn"),
+    CommandSuggestion("/quit", "arm Ctrl+C quit confirmation"),
+)
+
+GOAL_COMMANDS: tuple[CommandSuggestion, ...] = (
+    CommandSuggestion("/goal enable ", "enable goal mode with optional objective"),
+    CommandSuggestion("/goal disable", "disable goal mode"),
+    CommandSuggestion("/goal reset ", "reset goal files with optional objective"),
+    CommandSuggestion("/goal status", "show goal state"),
+)
+
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+MAX_COMPOSER_HISTORY = 50
+COMPOSER_HISTORY_FILENAME = "composer_history.json"
+
+
+def composer_history_path() -> Path:
+    return uv_agent_home() / COMPOSER_HISTORY_FILENAME
+
+
+def load_composer_history() -> list[str]:
+    path = composer_history_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    raw_items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(raw_items, list):
+        return []
+    items: list[str] = []
+    for value in raw_items:
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if not text:
+            continue
+        if items and items[-1] == text:
+            continue
+        items.append(text)
+    return items[-MAX_COMPOSER_HISTORY:]
+
+
+def save_composer_history(items: list[str]) -> None:
+    path = composer_history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    payload = {"items": items[-MAX_COMPOSER_HISTORY:]}
+    tmp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    atomic_replace(tmp_path, path)
+
+
+class AnsiUvAgentApp:
+    """Terminal-native ANSI interface for :class:`uv_agent.agent.AgentEngine`."""
+
+    def __init__(self, project_root: Path | None = None, *, data_dir: Path | None = None) -> None:
+        self.project_root = (project_root or Path.cwd()).resolve()
+        self.engine = create_engine(self.project_root, data_dir=data_dir)
+        ui_config = getattr(self.engine.config, "ui", None)
+        self.language = detect_user_language(getattr(ui_config, "language", None))
+        self.state = Tui2State(
+            level=self.engine.config.runtime.default_level,
+            project_path=str(self.project_root),
+            language=self.language,
+        )
+        self.renderer = Renderer()
+        self.cancel_event: asyncio.Event | None = None
+        self._running_task: asyncio.Task[None] | None = None
+        self._assistant_cell: TranscriptCell | None = None
+        self._reasoning_cell: TranscriptCell | None = None
+        self._reasoning_flushed_for_current_response = False
+        self._tool_cells: dict[str, TranscriptCell] = {}
+        self._history: list[str] = load_composer_history()
+        self._history_cursor: int | None = None
+        self._draft: str = ""
+        self._tab_state: dict[str, Any] | None = None
+        self._turn_started_at: float | None = None
+        self._quit_armed = False
+        self._spinner_index = 0
+        self._window_title_thread_title = ""
+        self._last_window_title = ""
+        self._ticker_task: asyncio.Task[None] | None = None
+        self._picker_mode: str = "command"
+        self._mention_start: int | None = None
+        self._mention_query: str = ""
+
+    def run(self) -> None:
+        asyncio.run(self.run_async())
+
+    async def run_async(self) -> None:
+        with Terminal() as terminal:
+            self._ticker_task = asyncio.create_task(self._ticker())
+            self._refresh_window_title()
+            self._safe_repaint()
+            try:
+                while True:
+                    try:
+                        key = await asyncio.to_thread(terminal.read_key)
+                    except KeyboardInterrupt:
+                        key = "\x03"
+                    if not await self.handle_key(key):
+                        break
+                if self._running_task is not None and not self._running_task.done():
+                    if self.cancel_event is not None:
+                        self.cancel_event.set()
+                    await asyncio.gather(self._running_task, return_exceptions=True)
+            finally:
+                if self._ticker_task is not None:
+                    self._ticker_task.cancel()
+                    await asyncio.gather(self._ticker_task, return_exceptions=True)
+                    self._ticker_task = None
+                self._apply_window_title()
+                self.renderer.close()
+
+    async def _ticker(self) -> None:
+        # 12Hz tick: matches the breath animation's target frequency (12
+        # phase changes per second at 100 chars/sec of streamed output).
+        tick_interval = 1.0 / 12.0
+        while True:
+            await asyncio.sleep(tick_interval)
+            if self.state.busy:
+                self._spinner_index += 1
+                self.renderer.spinner_frame = self._spinner_index
+                self._apply_window_title()
+                self._safe_repaint()
+            else:
+                self._apply_window_title()
+
+    # ------------------------------------------------------------------
+    # Key handling
+    # ------------------------------------------------------------------
+
+    async def handle_key(self, key: str) -> bool:
+        if key == "\x03":  # Ctrl+C
+            if self._quit_armed:
+                return False
+            if self.cancel_event is not None:
+                self.cancel_event.set()
+                self._quit_armed = True
+                self.state.status_message = self._text("interrupt_again")
+                self._safe_repaint()
+                return True
+            self._quit_armed = True
+            self.state.status_message = self._text("quit_again")
+            self._safe_repaint()
+            return True
+
+        if key:
+            self._quit_armed = False
+        if key != "\t":
+            self._tab_state = None
+        if key == "\x0c":  # Ctrl+L: force a full redraw of the live region.
+            self.renderer._has_frame = False  # type: ignore[attr-defined]
+            self._safe_repaint()
+            return True
+        if key == "\r":
+            if self.state.command_palette_open:
+                completed = self._accept_command_palette_selection()
+                if self._picker_mode != "command":
+                    self._safe_repaint()
+                    return True
+                if completed and self.state.composer.endswith(" "):
+                    self._safe_repaint()
+                    return True
+            await self.submit()
+            return True
+        if key in {"\n", "\x0a", "<C-ENTER>"}:  # Ctrl+Enter/Ctrl+J inserts a newline.
+            self._insert_composer_text("\n")
+            self._after_composer_changed()
+        elif key == "\x1b":
+            self._close_command_palette()
+        if key == "\t":
+            self._handle_tab()
+        elif key in {"\x7f", "\b"}:
+            self._delete_composer_before_cursor()
+            self._after_composer_changed()
+        elif key == "\x17":  # Ctrl+W
+            self._delete_composer_word_before_cursor()
+            self._after_composer_changed()
+        elif key == "\x15":  # Ctrl+U
+            self._set_composer_text("", cursor=0)
+            self._reset_history()
+            self._after_composer_changed()
+        elif key in {"<H>", "<UP>"}:  # Windows/POSIX up arrow
+            if self.state.command_palette_open:
+                self._move_command_palette(-1)
+            else:
+                if not self._move_composer_vertical(-1):
+                    self._history_prev()
+        elif key in {"<P>", "<DOWN>"}:  # Windows/POSIX down arrow
+            if self.state.command_palette_open:
+                self._move_command_palette(1)
+            else:
+                if not self._move_composer_vertical(1):
+                    self._history_next()
+        elif key in {"<K>", "<LEFT>"}:  # Windows/POSIX left arrow
+            self._move_composer_cursor(-1)
+        elif key in {"<M>", "<RIGHT>"}:  # Windows/POSIX right arrow
+            self._move_composer_cursor(1)
+        elif key and key >= " " and not key.startswith("<"):
+            self._insert_composer_text(key)
+            self._reset_history()
+            self._after_composer_changed()
+        self._safe_repaint()
+        return True
+
+    @staticmethod
+    def _delete_word(text: str) -> str:
+        stripped = text.rstrip()
+        if not stripped:
+            return ""
+        idx = max(stripped.rfind(" "), stripped.rfind("\n"))
+        return stripped[: idx + 1] if idx >= 0 else ""
+
+    def _composer_cursor(self) -> int:
+        cursor = self.state.composer_cursor
+        if cursor is None:
+            return len(self.state.composer)
+        return max(0, min(cursor, len(self.state.composer)))
+
+    def _set_composer_text(self, text: str, *, cursor: int | None = None) -> None:
+        self.state.composer = text
+        self.state.composer_cursor = len(text) if cursor is None else max(0, min(cursor, len(text)))
+
+    def _insert_composer_text(self, text: str) -> None:
+        cursor = self._composer_cursor()
+        value = self.state.composer
+        self._set_composer_text(value[:cursor] + text + value[cursor:], cursor=cursor + len(text))
+
+    def _delete_composer_before_cursor(self) -> None:
+        cursor = self._composer_cursor()
+        if cursor <= 0:
+            return
+        value = self.state.composer
+        self._set_composer_text(value[: cursor - 1] + value[cursor:], cursor=cursor - 1)
+
+    def _delete_composer_word_before_cursor(self) -> None:
+        cursor = self._composer_cursor()
+        before = self.state.composer[:cursor]
+        after = self.state.composer[cursor:]
+        replacement = self._delete_word(before)
+        self._set_composer_text(replacement + after, cursor=len(replacement))
+
+    def _move_composer_cursor(self, delta: int) -> None:
+        self.state.composer_cursor = max(0, min(self._composer_cursor() + delta, len(self.state.composer)))
+
+    def _composer_line_bounds(self) -> tuple[int, int]:
+        cursor = self._composer_cursor()
+        value = self.state.composer
+        start = value.rfind("\n", 0, cursor) + 1
+        end = value.find("\n", cursor)
+        if end < 0:
+            end = len(value)
+        return start, end
+
+    def _move_composer_vertical(self, delta: int) -> bool:
+        value = self.state.composer
+        if "\n" not in value:
+            return False
+        cursor = self._composer_cursor()
+        line_start, _line_end = self._composer_line_bounds()
+        column = cursor - line_start
+        if delta < 0:
+            if line_start == 0:
+                return False
+            prev_end = line_start - 1
+            prev_start = value.rfind("\n", 0, prev_end) + 1
+            self.state.composer_cursor = prev_start + min(column, prev_end - prev_start)
+            return True
+        line_end = value.find("\n", cursor)
+        if line_end < 0:
+            return False
+        next_start = line_end + 1
+        next_end = value.find("\n", next_start)
+        if next_end < 0:
+            next_end = len(value)
+        self.state.composer_cursor = next_start + min(column, next_end - next_start)
+        return True
+
+    def _reset_history(self) -> None:
+        self._history_cursor = None
+        self._draft = ""
+
+    def _remember_composer_input(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        if self._history and self._history[-1] == text:
+            return
+        self._history.append(text)
+        overflow = len(self._history) - MAX_COMPOSER_HISTORY
+        if overflow > 0:
+            del self._history[:overflow]
+        try:
+            save_composer_history(self._history)
+        except OSError as exc:
+            self._flush(TranscriptCell("error", text=str(exc)))
+
+    def _after_composer_changed(self) -> None:
+        if self.state.composer.startswith("/") and "\n" not in self.state.composer:
+            self._refresh_command_palette()
+            return
+        mention = self._mention_query_at_cursor()
+        if mention is not None:
+            start, query = mention
+            self._open_mention_palette(query, start)
+            return
+        self._close_command_palette()
+
+    def _history_prev(self) -> None:
+        if not self._history:
+            return
+        if self._history_cursor is None:
+            # Match the Textual TUI: once the composer has user text, Up/Down
+            # belong to editing/navigation rather than replacing that draft with
+            # persisted history.  If the user edits a recalled entry we reset the
+            # cursor before calling this method, so navigation also stops there.
+            if self.state.composer:
+                return
+            self._draft = ""
+            self._history_cursor = len(self._history) - 1
+        else:
+            self._history_cursor = max(0, self._history_cursor - 1)
+        self._set_composer_text(self._history[self._history_cursor])
+
+    def _history_next(self) -> None:
+        if self._history_cursor is None:
+            return
+        if self._history_cursor >= len(self._history) - 1:
+            self._history_cursor = None
+            self._set_composer_text(self._draft)
+            return
+        self._history_cursor += 1
+        self._set_composer_text(self._history[self._history_cursor])
+
+    # ------------------------------------------------------------------
+    # Tab completion
+    # ------------------------------------------------------------------
+
+    def _handle_tab(self) -> None:
+        text = self.state.composer
+        if text.startswith("@") or self._mention_query_at_cursor() is not None:
+            mention = self._mention_query_at_cursor()
+            if mention is None:
+                mention = (0, text)
+            start, query = mention
+            matches = self._mention_suggestions(query)
+            if not matches:
+                return
+            cycling = (
+                self._tab_state is not None
+                and self._tab_state.get("kind") == "mention"
+                and query == self._tab_state.get("query")
+            )
+            if not cycling:
+                self._tab_state = {"kind": "mention", "matches": matches, "index": -1, "query": query, "start": start}
+            assert self._tab_state is not None
+            self._tab_state["index"] = (self._tab_state["index"] + 1) % len(self._tab_state["matches"])
+            item = self._tab_state["matches"][self._tab_state["index"]]
+            self._replace_composer_range(start, self._composer_cursor(), item.value)
+            self._close_command_palette()
+            return
+        if not text.startswith("/"):
+            return
+        cycling = self._tab_state is not None and text == self._tab_state.get("last")
+        if not cycling:
+            matches = self._command_suggestions(text)
+            if not matches:
+                return
+            self._tab_state = {"matches": matches, "index": -1, "last": ""}
+        assert self._tab_state is not None
+        self._tab_state["index"] = (self._tab_state["index"] + 1) % len(self._tab_state["matches"])
+        item = self._tab_state["matches"][self._tab_state["index"]]
+        self._tab_state["last"] = item.value
+        self._set_composer_text(item.value)
+        if item.value.endswith(" "):
+            self._refresh_command_palette()
+        else:
+            self._close_command_palette()
+
+    def _command_suggestions(self, text: str) -> list[CommandSuggestion]:
+        query = text.lower()
+        if query.startswith("/goal ") or query == "/goal":
+            pool = GOAL_COMMANDS if query != "/goal" else TOP_LEVEL_COMMANDS
+        elif query.startswith("/level ") or query == "/level":
+            pool = self._level_command_suggestions("/level") if query != "/level" else TOP_LEVEL_COMMANDS
+        elif query.startswith("/model ") or query == "/model":
+            pool = self._level_command_suggestions("/model") if query != "/model" else TOP_LEVEL_COMMANDS
+        else:
+            pool = TOP_LEVEL_COMMANDS
+        return [item for item in pool if item.value.lower().startswith(query)][:12]
+
+    def _level_command_suggestions(self, command: str) -> tuple[CommandSuggestion, ...]:
+        levels = sorted(getattr(self.engine.config, "levels", {}).keys())
+        return tuple(CommandSuggestion(f"{command} {name}", "model level") for name in levels)
+
+    def _refresh_command_palette(self) -> None:
+        self._picker_mode = "command"
+        self._mention_start = None
+        self._mention_query = ""
+        self.state.command_palette_open = True
+        self.state.command_palette_items = self._command_suggestions(self.state.composer)
+        if self.state.command_palette_items:
+            self.state.command_palette_index = min(
+                self.state.command_palette_index,
+                len(self.state.command_palette_items) - 1,
+            )
+        else:
+            self.state.command_palette_index = 0
+
+    def _open_picker(self, mode: str, items: list[CommandSuggestion]) -> None:
+        self._picker_mode = mode
+        self.state.command_palette_open = True
+        self.state.command_palette_items = items
+        self.state.command_palette_index = 0
+
+    def _close_command_palette(self) -> None:
+        self.state.command_palette_open = False
+        self.state.command_palette_items = []
+        self.state.command_palette_index = 0
+        self._picker_mode = "command"
+        self._mention_start = None
+        self._mention_query = ""
+
+    def _move_command_palette(self, delta: int) -> None:
+        if not self.state.command_palette_items:
+            return
+        count = len(self.state.command_palette_items)
+        self.state.command_palette_index = (self.state.command_palette_index + delta) % count
+
+    def _accept_command_palette_selection(self) -> bool:
+        if not self.state.command_palette_items:
+            return False
+        item = self.state.command_palette_items[self.state.command_palette_index]
+        mode = self._picker_mode
+        if mode == "thread":
+            self._close_command_palette()
+            self._resume_thread(item.id or item.value)
+            return True
+        if mode in {"skill", "mcp", "mention"}:
+            self._accept_mention_item(item)
+            self._close_command_palette()
+            return True
+        self._set_composer_text(item.value)
+        if item.value.endswith(" "):
+            self._refresh_command_palette()
+        else:
+            self._close_command_palette()
+        return True
+
+    def _replace_composer_range(self, start: int, end: int, replacement: str) -> None:
+        value = self.state.composer
+        start = max(0, min(start, len(value)))
+        end = max(start, min(end, len(value)))
+        self._set_composer_text(value[:start] + replacement + value[end:], cursor=start + len(replacement))
+
+    def _accept_mention_item(self, item: CommandSuggestion) -> None:
+        token = item.value
+        if item.kind == "thread-mention" and token.startswith("@@"):
+            token = "@thread:" + token[2:]
+        if not token.endswith(" "):
+            token += " "
+        if self._mention_start is not None:
+            self._replace_composer_range(self._mention_start, self._composer_cursor(), token)
+            return
+        if self.state.composer and not self.state.composer.endswith((" ", "\n")):
+            token = " " + token
+        self._insert_composer_text(token)
+
+    def _mention_query_at_cursor(self) -> tuple[int, str] | None:
+        cursor = self._composer_cursor()
+        prefix = self.state.composer[:cursor]
+        line_start = max(prefix.rfind("\n") + 1, 0)
+        token_start = max(prefix.rfind(" ") + 1, line_start)
+        token = prefix[token_start:]
+        if token == "@" or (token.startswith("@") and not token.startswith("@@") and ":" not in token):
+            return token_start, token
+        if token == "@@" or token.startswith("@@"):
+            return token_start, token
+        return None
+
+    def _open_mention_palette(self, query: str, start: int) -> None:
+        items = self._mention_suggestions(query)
+        self._mention_start = start
+        self._mention_query = query
+        self._open_picker("mention", items)
+
+    def _mention_suggestions(self, query: str) -> list[CommandSuggestion]:
+        query = query or "@"
+        if query.startswith("@@"):
+            return self._thread_mention_suggestions(query[2:].lower())
+        if query.startswith("@"):
+            return self._file_mention_suggestions(query[1:].lower())
+        return []
+
+    def _file_mention_suggestions(self, needle: str = "") -> list[CommandSuggestion]:
+        items: list[CommandSuggestion] = []
+        root = self.project_root.resolve()
+        stack = [root]
+        directories_seen = 0
+        while stack and len(items) < MAX_MENTION_ITEMS:
+            directory = stack.pop(0)
+            directories_seen += 1
+            if directories_seen > 20_000:
+                break
+            try:
+                entries = sorted(
+                    directory.iterdir(),
+                    key=lambda path: (not path.is_dir(), path.name.casefold()),
+                )
+            except OSError:
+                continue
+            for path in entries:
+                if len(items) >= MAX_MENTION_ITEMS:
+                    break
+                try:
+                    relative = path.relative_to(root)
+                except ValueError:
+                    continue
+                parts = relative.parts
+                if any(part in IGNORED_MENTION_DIRS for part in parts[:-1]):
+                    continue
+                title = relative.as_posix()
+                if path.is_dir():
+                    if path.name.startswith(".") or path.name in IGNORED_MENTION_DIRS:
+                        continue
+                    stack.append(path)
+                    value = f"@{title}/"
+                    if needle and needle not in title.lower():
+                        continue
+                    items.append(CommandSuggestion(value, "directory", id=title + "/", kind="file-mention"))
+                    continue
+                if not path.is_file() or path.suffix.lower() not in CODE_FILE_SUFFIXES:
+                    continue
+                if needle and needle not in title.lower():
+                    continue
+                items.append(CommandSuggestion(f"@{title}", "file", id=title, kind="file-mention"))
+        return items[:50]
+
+    def _thread_mention_suggestions(self, needle: str = "") -> list[CommandSuggestion]:
+        items: list[CommandSuggestion] = []
+        for thread in self.engine.thread_store.list_threads()[:50]:
+            thread_id = str(thread.get("thread_id") or "")
+            if not thread_id:
+                continue
+            title = str(thread.get("title") or "New thread")
+            last_text = str(thread.get("last_text") or "").replace("\n", " ")
+            haystack = f"{thread_id} {title} {last_text}".lower()
+            if needle and needle not in haystack:
+                continue
+            description = last_text[:100] if last_text else f"{thread.get('turn_count', 0)} turns"
+            items.append(
+                CommandSuggestion(
+                    f"@@{thread_id}",
+                    description,
+                    id=thread_id,
+                    kind="thread-mention",
+                    meta=short_thread(thread_id),
+                )
+            )
+        return items[:20]
+
+    def _skill_mention_suggestions(self, needle: str = "") -> list[CommandSuggestion]:
+        items: list[CommandSuggestion] = []
+        for skill in discover_skills(self.project_root):
+            haystack = f"{skill.name} {skill.description} {skill.scope}".lower()
+            if needle and needle not in haystack:
+                continue
+            items.append(
+                CommandSuggestion(
+                    f"@skill:{skill.name}",
+                    skill.description,
+                    id=skill.name,
+                    kind="skill-mention",
+                    meta=f"{skill.scope} · {skill.path}",
+                )
+            )
+        return items[:30]
+
+    def _mcp_mention_suggestions(self, needle: str = "") -> list[CommandSuggestion]:
+        items: list[CommandSuggestion] = []
+        for server in discover_mcp_servers(self.project_root):
+            haystack = f"{server.name} {server.description} {server.scope} {server.transport}".lower()
+            if needle and needle not in haystack:
+                continue
+            endpoint = f" · {server.endpoint}" if server.endpoint else ""
+            items.append(
+                CommandSuggestion(
+                    f"@mcp:{server.name}",
+                    server.description,
+                    id=server.name,
+                    kind="mcp-mention",
+                    meta=f"{server.scope} · {server.transport}{endpoint}",
+                )
+            )
+        return items[:30]
+
+    def _open_thread_picker(self) -> None:
+        threads = self.engine.thread_store.list_threads()
+        if not threads:
+            self._flush(TranscriptCell("event", text="(no previous threads)"))
+            return
+        items: list[CommandSuggestion] = []
+        for thread in threads[:50]:
+            thread_id = str(thread.get("thread_id") or "")
+            title = str(thread.get("title") or "New thread")
+            updated = str(thread.get("updated_at") or "")
+            last_text = str(thread.get("last_text") or "").replace("\n", " ")
+            description = last_text[:120] if last_text else "no messages"
+            marker = "current · " if thread_id == self.state.thread_id else ""
+            items.append(
+                CommandSuggestion(
+                    f"{marker}{title}",
+                    description,
+                    id=thread_id,
+                    kind="thread",
+                    meta=f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} turns · {updated}",
+                )
+            )
+        self._open_picker("thread", items)
+
+    def _open_skill_picker(self) -> None:
+        items = self._skill_mention_suggestions("")
+        if not items:
+            self._flush(TranscriptCell("event", text="(no skills discovered)"))
+            return
+        self._open_picker("skill", items)
+
+    def _open_mcp_picker(self) -> None:
+        items = self._mcp_mention_suggestions("")
+        if not items:
+            self._flush(TranscriptCell("event", text="(no MCP servers declared)"))
+            return
+        self._open_picker("mcp", items)
+
+    # ------------------------------------------------------------------
+    # Submit & commands
+    # ------------------------------------------------------------------
+
+    async def submit(self) -> None:
+        text = self.state.composer.strip()
+        if not text:
+            self._safe_repaint()
+            return
+        self._remember_composer_input(text)
+        self._reset_history()
+        self._close_command_palette()
+        if text.startswith("/"):
+            self._handle_command(text)
+            self._set_composer_text("", cursor=0)
+            self._safe_repaint()
+            return
+        if self._running_task is not None and not self._running_task.done():
+            self.state.pending_turns.append(text)
+            self._set_composer_text("", cursor=0)
+            self.state.status_message = self._text("queued")
+            self._safe_repaint()
+            return
+        self._set_composer_text("", cursor=0)
+        await self._start_turn(text)
+
+    def _handle_command(self, text: str) -> None:
+        command, _, arg = text.partition(" ")
+        arg = arg.strip()
+        if command == "/help":
+            self._flush(TranscriptCell("event", text=HELP_TEXT))
+        elif command in {"/level", "/model"} and arg:
+            self.state.level = arg
+            self._flush(TranscriptCell("event", text=f"model level set to {self.state.level}"))
+        elif command == "/threads":
+            self._open_thread_picker()
+        elif command == "/status":
+            self._show_status()
+        elif command == "/skills":
+            self._open_skill_picker()
+        elif command == "/mcp":
+            self._open_mcp_picker()
+        elif command == "/title" and arg:
+            self.state.title = arg
+            self._refresh_window_title()
+            self._flush(TranscriptCell("event", text=f"title set to {arg}"))
+        elif command == "/cancel":
+            if self.cancel_event is not None:
+                self.cancel_event.set()
+                self.state.status_message = self._text("interrupt_again")
+            else:
+                self._flush(TranscriptCell("event", text="no turn is running"))
+        elif command in {"/clear", "/new"}:
+            # /new is kept as an unadvertised compatibility alias; the palette
+            # exposes only /clear, matching the Textual TUI reset behavior.
+            self._clear_to_new_thread()
+        elif command == "/goal":
+            self._handle_goal(arg)
+        elif command == "/quit":
+            self._quit_armed = True
+            self.state.status_message = self._text("quit_again")
+        else:
+            self._flush(TranscriptCell("error", text=f"unknown command: {command}  (try /help)"))
+
+    def _clear_to_new_thread(self) -> None:
+        old_thread_id = self.state.thread_id
+        self._finish_live_cells()
+        self.state.thread_id = None
+        self.state.title = "New thread"
+        self.state.goal_enabled = False
+        self.state.goal_objective = ""
+        self.state.level = self.engine.config.runtime.default_level
+        self.state.flushed.clear()
+        self.state.live.clear()
+        self.state.pending_turns.clear()
+        self.state.last_error = None
+        self._tool_cells.clear()
+        self._assistant_cell = None
+        self._reasoning_cell = None
+        self._reasoning_flushed_for_current_response = False
+        self._refresh_window_title()
+        rule = "─" * max(8, getattr(self.renderer, "width", 80))
+        if hasattr(self.renderer, "clear_screen"):
+            self.renderer.clear_screen(rule=rule)
+        else:
+            self.renderer.output.write("\x1b[2J\x1b[H" + rule + "\n\n")
+            self.renderer.output.flush()
+        self.state.status_message = self._text("new_thread")
+        if old_thread_id:
+            self._flush(TranscriptCell("event", text=f"cleared view · new thread (was {short_thread(old_thread_id)})"))
+        else:
+            self._flush(TranscriptCell("event", text="cleared view · new thread"))
+
+    def _status_text(self) -> str:
+        level_name = self.state.level or self.engine.config.runtime.default_level
+        lines = [f"level: {level_name}"]
+        try:
+            model = self.engine.config.model_for_level(self.state.level)
+            lines.append(f"model: {model.name} -> {model.model}")
+        except Exception as exc:
+            lines.append(f"model: not configured ({exc})")
+        try:
+            stats = self.engine.context_stats(self.state.thread_id, self.state.level)
+            lines.append(
+                "context: "
+                f"{stats.percent}% ({stats.used_tokens} / {stats.context_window_tokens}, {stats.source})"
+            )
+            lines.append(f"compression: trigger {stats.threshold_tokens} · headroom {stats.headroom_tokens}")
+        except Exception as exc:
+            lines.append(f"context: unavailable ({exc})")
+        lines.append(f"thread: {short_thread(self.state.thread_id)}")
+        if self.state.title:
+            lines.append(f"title: {self.state.title}")
+        if self.state.project_path:
+            lines.append(f"project: {self.state.project_path}")
+        return "\n".join(lines)
+
+    def _show_status(self) -> None:
+        self._refresh_context_percent()
+        self._flush(TranscriptCell("event", text=self._status_text()))
+
+    def _thread_metadata(self, thread_id: str) -> dict[str, Any]:
+        for item in self.engine.thread_store.list_threads():
+            if str(item.get("thread_id") or "") == thread_id:
+                return dict(item)
+        try:
+            return dict(self.engine.thread_store.snapshot(thread_id).metadata)
+        except Exception:
+            return {}
+
+    def _resume_thread(self, thread_id: str) -> None:
+        if not thread_id:
+            return
+        self._finish_live_cells()
+        metadata = self._thread_metadata(thread_id)
+        self.state.thread_id = thread_id
+        self.state.title = str(metadata.get("title") or "New thread")
+        self.state.level = str(metadata.get("active_level") or self.engine.config.runtime.default_level)
+        goal = metadata.get("goal_mode") if isinstance(metadata.get("goal_mode"), dict) else {}
+        self.state.goal_enabled = bool(goal.get("enabled")) if isinstance(goal, dict) else False
+        self.state.goal_objective = str(goal.get("objective") or "") if isinstance(goal, dict) else ""
+        self.state.flushed.clear()
+        self.state.live.clear()
+        self._tool_cells.clear()
+        self._assistant_cell = None
+        self._reasoning_cell = None
+        self._reasoning_flushed_for_current_response = False
+        self.state.last_error = None
+        self._refresh_window_title()
+        cells = self._history_cells_for_thread(thread_id)
+        self.state.flushed.extend(cells)
+        if hasattr(self.renderer, "clear_screen"):
+            self.renderer.clear_screen()
+        else:
+            self.renderer._has_frame = False  # type: ignore[attr-defined]
+            self.renderer.output.write("[2J[H")
+            self.renderer.output.flush()
+        self.renderer.flush_cells(cells)
+        self.state.status_message = f"{self._text('resumed')} {short_thread(thread_id)}"
+        self._safe_repaint()
+
+    def _history_cells_for_thread(self, thread_id: str) -> list[TranscriptCell]:
+        segment = self.engine.thread_store.read_history_segment(
+            thread_id,
+            event_types=VISIBLE_HISTORY_EVENT_TYPES | {"turn.started", "turn.completed"},
+        )
+        timeline = ThreadTimelineState(thread_id)
+        timeline.load_history_segment(
+            segment.events,
+            start_event_id=segment.start_event_id,
+            end_event_id=segment.end_event_id,
+            has_older=segment.has_more,
+        )
+        cells = [cell for item in timeline.items if (cell := self._timeline_item_cell(item)) is not None]
+        latest = self._thread_metadata(thread_id).get("latest_compaction")
+        if segment.has_more and isinstance(latest, dict):
+            summary = str(latest.get("text") or "").strip()
+            text = "history since last compaction" + (f"\n{summary}" if summary else "")
+            cells.insert(0, TranscriptCell("event", text=text))
+        return cells
+
+    def _timeline_item_cell(self, item: TimelineItem) -> TranscriptCell | None:
+        content = item.content or {}
+        if item.kind in {"user", "assistant", "reasoning"}:
+            text_value = content.get("text")
+            if isinstance(text_value, list):
+                text = "".join(str(part) for part in text_value)
+            else:
+                text = str(text_value or "")
+            return TranscriptCell(item.kind, text=text) if text else None
+        if item.kind == "tool_result":
+            payload = content.get("payload") if isinstance(content.get("payload"), dict) else {}
+            return TranscriptCell("tool", payload=dict(payload))
+        if item.kind == "tool_call":
+            call = content.get("call") if isinstance(content.get("call"), dict) else {}
+            status = str(content.get("status") or "done")
+            return TranscriptCell("tool", status="running" if status == "running" else "done", call=dict(call))
+        if item.kind == "image":
+            attachment = content.get("attachment") if isinstance(content.get("attachment"), dict) else {}
+            path = attachment.get("path") or attachment.get("original_path") or attachment.get("source_path") or "image"
+            return TranscriptCell("image", text=f"image attached: {path}")
+        if item.kind == "compaction":
+            text = str(content.get("text") or "").strip()
+            return TranscriptCell("event", text="conversation compacted" + (f"\n{text}" if text else ""))
+        if item.kind == "warning":
+            event = content.get("event") if isinstance(content.get("event"), dict) else {}
+            message = str(event.get("message") or event.get("text") or "warning")
+            return TranscriptCell("event", text=message)
+        if item.kind == "stream_retry":
+            event = content.get("event") if isinstance(content.get("event"), dict) else {}
+            attempt = event.get("attempt") or "?"
+            message = str(event.get("message") or "model stream retry")
+            return TranscriptCell("event", text=f"retry {attempt}: {message}")
+        if item.kind == "error":
+            event = content.get("event") if isinstance(content.get("event"), dict) else {}
+            message = str(event.get("message") or event.get("error") or "turn error")
+            return TranscriptCell("error", text=message)
+        return None
+
+    def _handle_goal(self, arg: str) -> None:
+        sub = arg.split(None, 1)
+        op = (sub[0] if sub else "status").lower()
+        rest = sub[1] if len(sub) > 1 else ""
+        if op not in {"enable", "disable", "reset", "status"}:
+            self._flush(
+                TranscriptCell("error", text="usage: /goal enable [objective] | disable | reset | status")
+            )
+            return
+        if not self.state.thread_id:
+            self._flush(
+                TranscriptCell(
+                    "error",
+                    text="/goal requires an active thread — send a message first, then toggle goal mode",
+                )
+            )
+            return
+        try:
+            if op == "enable":
+                state = self.engine.enable_goal_mode(self.state.thread_id, objective=rest)
+                self.state.goal_enabled = True
+                self.state.goal_objective = state.objective or ""
+                obj = state.objective or "—"
+                self._flush(TranscriptCell("event", text=f"goal mode enabled · objective: {obj}"))
+            elif op == "disable":
+                self.engine.disable_goal_mode(self.state.thread_id)
+                self.state.goal_enabled = False
+                self._flush(TranscriptCell("event", text="goal mode disabled"))
+            elif op == "reset":
+                state = self.engine.reset_goal_files(self.state.thread_id, objective=rest)
+                self.state.goal_objective = state.objective or ""
+                self._flush(TranscriptCell("event", text="goal files reset"))
+            else:  # status
+                state = self.engine.goal_state(self.state.thread_id)
+                if state is None:
+                    self._flush(TranscriptCell("event", text="goal mode: disabled (no state yet)"))
+                else:
+                    status = "enabled" if state.status == "enabled" else "disabled"
+                    obj = state.objective or "—"
+                    self._flush(TranscriptCell("event", text=f"goal mode: {status}\nobjective: {obj}"))
+        except Exception as exc:
+            self._flush(TranscriptCell("error", text=f"/goal {op} failed: {exc}"))
+
+    # ------------------------------------------------------------------
+    # Turn lifecycle
+    # ------------------------------------------------------------------
+
+    async def _start_turn(self, text: str) -> None:
+        self._flush(TranscriptCell("user", text=text))
+        self.cancel_event = asyncio.Event()
+        self.state.busy = True
+        self.state.status_message = "running"
+        self.state.last_error = None
+        self._reasoning_flushed_for_current_response = False
+        self._turn_started_at = monotonic()
+        self._apply_window_title()
+        self._running_task = asyncio.create_task(self._run_turn(text))
+        self._safe_repaint()
+
+    async def _run_turn(self, text: str) -> None:
+        try:
+            async for event in self.engine.run_turn(
+                user_text=text,
+                thread_id=self.state.thread_id,
+                level=self.state.level,
+                cancel_event=self.cancel_event,
+            ):
+                self._handle_event(event)
+                self._safe_repaint()
+        except Exception as exc:
+            self.state.last_error = str(exc) or repr(exc)
+            self._flush(TranscriptCell("error", text=self.state.last_error))
+        finally:
+            self._finish_live_cells()
+            self.state.busy = False
+            self.state.status_message = "ready"
+            self.state.turn_elapsed_s = None
+            self._turn_started_at = None
+            self.cancel_event = None
+            self._apply_window_title()
+            self._safe_repaint()
+            if self.state.pending_turns:
+                next_text = self.state.pending_turns.pop(0)
+                await self._start_turn(next_text)
+
+    def _handle_event(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        self.state.thread_id = event.get("thread_id") or self.state.thread_id
+        if event_type == "thread.title":
+            self.state.title = str(event.get("title") or self.state.title)
+            self._refresh_window_title()
+        elif event_type == "thread.goal_mode_updated":
+            self.state.goal_enabled = bool(event.get("enabled"))
+            self.state.goal_objective = str(event.get("objective") or self.state.goal_objective)
+        elif event_type == "assistant.delta":
+            self.state.status_message = self._text("writing_answer")
+            # As soon as the assistant starts writing, flush any in-flight
+            # reasoning cell into scrollback so its breath animation stops
+            # immediately instead of waiting for a later reasoning_completed
+            # or model.response event (which may arrive much later).
+            if self._reasoning_cell is not None:
+                self._finish_reasoning_cell("")
+            self._append_assistant(str(event.get("text") or ""))
+        elif event_type == "assistant.reasoning_delta":
+            self.state.status_message = self._text("thinking_status")
+            self._append_reasoning(str(event.get("text") or ""))
+        elif event_type == "assistant.reasoning_completed":
+            self.state.status_message = self._text("reading")
+            self._finish_reasoning_cell(str(event.get("text") or ""))
+        elif event_type == "assistant.reasoning_absent":
+            self.state.status_message = self._text("reading")
+            self._drop_reasoning_cell()
+        elif event_type in {"assistant.final_response_started", "assistant.response_with_tools"}:
+            self.state.status_message = self._text("writing_answer")
+            self._finish_reasoning_cell("")
+            assistant_text = str(event.get("assistant_text") or "")
+            if assistant_text:
+                self._finish_assistant_cell(assistant_text)
+        elif event_type == "model.response":
+            self.state.status_message = self._text("reading")
+            self._handle_model_response_event(event)
+        elif event_type == "tool.delta":
+            self.state.status_message = self._text("writing_script")
+        elif event_type == "tool.started":
+            self.state.status_message = self._text("running_python")
+            self._finish_text_cells()
+            call = event.get("call") if isinstance(event.get("call"), dict) else {}
+            key = str(call.get("call_id") or event.get("tool_call_index") or len(self._tool_cells))
+            cell = TranscriptCell("tool", status="running", call=call)
+            self._tool_cells[key] = cell
+            self.state.live.append(cell)
+        elif event_type == "tool.partial":
+            self.state.status_message = self._text("running_python")
+            self._update_tool(event, running=True)
+        elif event_type == "tool.output":
+            self.state.status_message = self._text("working")
+            self._update_tool(event, running=False)
+            # A completed tool output is followed by a fresh model response, so
+            # provider-only reasoning in that next response must still render.
+            self._reasoning_flushed_for_current_response = False
+        elif event_type == "image.attachment":
+            attachment = event.get("attachment") or {}
+            path = attachment.get("path") or attachment.get("original_path") or "image"
+            self._flush(TranscriptCell("image", text=f"image attached: {path}"))
+        elif event_type == "compaction.started":
+            self.state.status_message = self._text("compacting")
+            self._flush(TranscriptCell("event", text="compaction started"))
+        elif event_type == "compaction.completed":
+            self.state.status_message = self._text("working")
+            summary = str(event.get("text") or "").strip()
+            payload = "conversation compacted" + (f"\n{summary}" if summary else "")
+            self._flush(TranscriptCell("event", text=payload))
+        elif event_type == "turn.error":
+            self.state.last_error = str(event.get("message") or "turn error")
+            self._flush(TranscriptCell("error", text=self.state.last_error))
+        elif event_type == "turn.interrupted":
+            self._flush(TranscriptCell("event", text="turn interrupted"))
+        elif event_type == "turn.completed":
+            self._finish_live_cells()
+            self._refresh_window_title()
+
+    def _current_thread_title(self) -> str:
+        fallback = self.state.title if self.state.title != "New thread" else self._text("new_thread")
+        if not self.state.thread_id:
+            return fallback
+        try:
+            digest = self.engine.thread_store.thread_digest(self.state.thread_id)
+        except Exception:
+            return fallback
+        title = str(digest.get("title") or "").strip()
+        if not title or title in {"New thread", "new thread", "新会话"}:
+            return fallback
+        return title
+
+    def _refresh_window_title(self) -> None:
+        self._window_title_thread_title = self._current_thread_title()
+        self._apply_window_title()
+
+    def _apply_window_title(self) -> None:
+        title = self._window_title_thread_title or self._current_thread_title()
+        if self.state.busy:
+            spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
+            title = f"{spinner} {title}"
+        title = sanitized_window_title(title)
+        if title == self._last_window_title:
+            return
+        self._last_window_title = title
+        write_window_title(title)
+
+    def _text(self, key: str) -> str:
+        return tr(self.language, key)
+
+    # ------------------------------------------------------------------
+    # Cell bookkeeping
+    # ------------------------------------------------------------------
+
+    def _append_assistant(self, text: str) -> None:
+        if not text:
+            return
+        if self._assistant_cell is None or self._assistant_cell.done:
+            self._assistant_cell = TranscriptCell("assistant", status="streaming")
+            self.state.live.append(self._assistant_cell)
+        self._assistant_cell.text += text
+        self._assistant_cell.chars_streamed += len(text)
+
+    def _append_reasoning(self, text: str) -> None:
+        if not text:
+            return
+        if self._reasoning_cell is None or self._reasoning_cell.done:
+            self._reasoning_cell = TranscriptCell("reasoning", status="streaming")
+            self.state.live.append(self._reasoning_cell)
+            self._reasoning_flushed_for_current_response = False
+        self._reasoning_cell.text += text
+        self._reasoning_cell.chars_streamed += len(text)
+
+    def _update_tool(self, event: dict[str, Any], *, running: bool) -> None:
+        call = event.get("call") if isinstance(event.get("call"), dict) else {}
+        key = str(call.get("call_id") or event.get("tool_call_index") or "0")
+        cell = self._tool_cells.get(key)
+        if cell is None:
+            cell = TranscriptCell("tool", status="running", call=call)
+            self._tool_cells[key] = cell
+            self.state.live.append(cell)
+        elif call and not cell.call:
+            cell.call = call
+        payload = tool_payload_from_event(event)
+        if payload is not None:
+            if "helper_calls" not in payload:
+                payload["helper_calls"] = extract_runtime_helper_calls(self._tool_call_code(cell.call))
+            cell.payload = payload
+        if not running:
+            cell.status = "done"
+            cell.finished_at = monotonic()
+            self._flush(cell)
+            self._tool_cells.pop(key, None)
+
+    @staticmethod
+    def _tool_call_code(call: dict[str, Any] | None) -> str:
+        if not isinstance(call, dict):
+            return ""
+        try:
+            import json
+
+            args = json.loads(str(call.get("arguments") or "{}"))
+        except Exception:
+            return ""
+        return str(args.get("code") or "")
+
+    def _finish_reasoning_cell(self, text: str = "") -> None:
+        cell = self._reasoning_cell
+        if cell is None:
+            if text.strip() and not self._reasoning_flushed_for_current_response:
+                self._flush(TranscriptCell("reasoning", text=text.strip()))
+                self._reasoning_flushed_for_current_response = True
+            return
+        if text.strip():
+            cell.text = text.strip()
+        if not cell.text.strip():
+            self._drop_reasoning_cell()
+            return
+        if not cell.done:
+            cell.status = "done"
+            cell.finished_at = monotonic()
+        self._flush(cell)
+        self._reasoning_flushed_for_current_response = True
+        self._reasoning_cell = None
+
+    def _drop_reasoning_cell(self) -> None:
+        cell = self._reasoning_cell
+        if cell is not None and cell in self.state.live:
+            self.state.live.remove(cell)
+        self._reasoning_cell = None
+
+    def _finish_assistant_cell(self, text: str = "") -> None:
+        cell = self._assistant_cell
+        if cell is None:
+            if text:
+                self._flush(TranscriptCell("assistant", text=text))
+            return
+        if text:
+            cell.text = text
+        if not cell.done:
+            cell.status = "done"
+            cell.finished_at = monotonic()
+        self._flush(cell)
+        self._assistant_cell = None
+
+    def _handle_model_response_event(self, event: dict[str, Any]) -> None:
+        reasoning_text = str(event.get("reasoning_text") or "")
+        if reasoning_text:
+            self._finish_reasoning_cell(reasoning_text)
+        else:
+            self._drop_reasoning_cell()
+        response = event.get("response")
+        output = list(getattr(response, "output", []) or [])
+        has_tool_call = any(isinstance(item, dict) and item.get("type") == "function_call" for item in output)
+        if not has_tool_call:
+            self._finish_assistant_cell()
+
+    def _finish_text_cells(self) -> None:
+        self._finish_reasoning_cell("")
+        self._finish_assistant_cell("")
+
+    def _finish_live_cells(self) -> None:
+        self._finish_text_cells()
+        for key, cell in list(self._tool_cells.items()):
+            if not cell.done:
+                cell.status = "done"
+                cell.finished_at = monotonic()
+                self._flush(cell)
+            self._tool_cells.pop(key, None)
+
+    def _flush(self, cell: TranscriptCell) -> None:
+        if cell in self.state.live:
+            self.state.live.remove(cell)
+        cell.status = "done" if cell.status in {"running", "streaming"} else cell.status
+        cell.finished_at = cell.finished_at or monotonic()
+        self.state.flushed.append(cell)
+        self.renderer.flush_cell(cell)
+
+    # ------------------------------------------------------------------
+    # Render guard
+    # ------------------------------------------------------------------
+
+    def _refresh_context_percent(self) -> None:
+        try:
+            stats = self.engine.context_stats(self.state.thread_id, self.state.level)
+        except Exception:
+            self.state.context_percent = None
+            return
+        self.state.context_percent = stats.percent
+
+    def _safe_repaint(self) -> None:
+        """Repaint without letting UI bugs unwind the engine async generator."""
+
+        if self._turn_started_at is not None and self.state.busy:
+            self.state.turn_elapsed_s = monotonic() - self._turn_started_at
+        else:
+            self.state.turn_elapsed_s = None
+        self._refresh_context_percent()
+        try:
+            self.renderer.repaint(self.state)
+        except Exception as exc:
+            self.state.last_error = f"tui2 render error: {exc}"
+            self.state.status_message = "render error"

@@ -40,6 +40,7 @@ from uv_agent.tui.formatting import (
     markup,
     renderable_plain,
     short_thread,
+    tool_call_detail_highlight_markup,
     tool_detail_markup,
 )
 from uv_agent.tui.app import (
@@ -1939,7 +1940,8 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
             for index, child in enumerate(children)
             if (
                 isinstance(child, ExpandableTranscriptCell)
-                and "run_1" in plain_renderable(child.details)
+                and isinstance(child.tool_payload, dict)
+                and child.tool_payload.get("run_id") == "run_1"
                 and index > assistant_index
             )
         )
@@ -1961,8 +1963,8 @@ async def test_tui_thread_resume_renders_mixed_text_tool_history(
         )
         assert any(
             isinstance(cell, ExpandableTranscriptCell)
-            and "print(" in strip_markup(plain_renderable(cell.details))
-            and "'ok'" in strip_markup(plain_renderable(cell.details))
+            and "print(" not in strip_markup(plain_renderable(cell.details))
+            and "(no uv_agent_runtime helpers)" in plain_renderable(cell.details)
             for cell in fold_cell.cells
         )
         assert any(
@@ -2038,7 +2040,7 @@ async def test_tui_live_tool_partial_updates_existing_result_cell(
 
         cells = app.query(ExpandableTranscriptCell).nodes
         assert len(cells) == 2
-        assert "updated" in plain_renderable(cells[1].details)
+        assert "updated" in plain_renderable(cells[1].summary)
 
         app._append_tool_output(
             {
@@ -2055,10 +2057,11 @@ async def test_tui_live_tool_partial_updates_existing_result_cell(
         assert "exit 0" in final_summary
         assert "still running; output is partial" not in final_summary
         final_details = plain_renderable(cells[-1].details)
-        assert "run_live" in final_details
-        assert "second" in final_details
+        assert "run_live" in final_summary
+        assert "second" in final_summary
         assert "updated" not in final_details
         assert "still running; output is partial" not in final_details
+        assert "(no uv_agent_runtime helpers)" in final_details
         assert cells[-1].tool_payload is not None
         assert "partial" not in cells[-1].tool_payload
 
@@ -2111,9 +2114,10 @@ async def test_tui_live_tool_call_and_result_are_separate_cells(
 
         call_cell, result_cell = app.query(ExpandableTranscriptCell).nodes
         assert "print(42)" in strip_markup(str(call_cell.render()))
-        assert "print(43)" in strip_markup(plain_renderable(call_cell.details))
-        assert "run_live" in plain_renderable(result_cell.details)
-        assert "ok" in plain_renderable(result_cell.details)
+        assert "print(43)" not in strip_markup(plain_renderable(call_cell.details))
+        assert "(no uv_agent_runtime helpers)" in plain_renderable(call_cell.details)
+        assert "run_live" in plain_renderable(result_cell.summary)
+        assert "ok" in plain_renderable(result_cell.summary)
         assert "print(42)" not in str(result_cell.render())
         assert "print(43)" not in plain_renderable(result_cell.details)
 
@@ -2160,11 +2164,11 @@ async def test_tui_live_multiple_tool_calls_keep_call_result_boundaries(
 
         cells = app.query(ExpandableTranscriptCell).nodes
         assert len(cells) == 4
-        assert "print(0)" in strip_markup(plain_renderable(cells[0].details))
-        assert "run_0" in plain_renderable(cells[1].details)
+        assert "print(0)" not in strip_markup(plain_renderable(cells[0].details))
+        assert "run_0" in plain_renderable(cells[1].summary)
         assert "print(0)" not in strip_markup(plain_renderable(cells[1].details))
-        assert "print(1)" in strip_markup(plain_renderable(cells[2].details))
-        assert "run_1" in plain_renderable(cells[3].details)
+        assert "print(1)" not in strip_markup(plain_renderable(cells[2].details))
+        assert "run_1" in plain_renderable(cells[3].summary)
         assert "print(1)" not in strip_markup(plain_renderable(cells[3].details))
 
 
@@ -2266,7 +2270,8 @@ async def test_tui_process_fold_expands_original_cells(
         )
         assert any(
             isinstance(cell, ExpandableTranscriptCell)
-            and "run_1" in plain_renderable(cell.details)
+            and isinstance(cell.tool_payload, dict)
+            and cell.tool_payload.get("run_id") == "run_1"
             for cell in fold_cell.cells
         )
         assert any(
@@ -2939,7 +2944,8 @@ async def test_tui_renders_tool_delta_before_tool_started(
 
         assert len(app.query(".tool_pending").nodes) == 1
         cell = app.query_one(ExpandableTranscriptCell)
-        assert "print(1)" in strip_markup(plain_renderable(cell.details))
+        assert "print(1)" not in strip_markup(plain_renderable(cell.details))
+        assert "(no uv_agent_runtime helpers)" in plain_renderable(cell.details)
 
 
 @pytest.mark.asyncio
@@ -5416,7 +5422,8 @@ async def test_tui_resume_running_thread_rebinds_live_cells(
         assert assistant.copy_text == "I will run more"
         assert len(app.query(".tool_pending").nodes) == 1
         cell = app.query_one(ExpandableTranscriptCell)
-        assert "print(1)" in strip_markup(plain_renderable(cell.details))
+        assert "print(1)" not in strip_markup(plain_renderable(cell.details))
+        assert "(no uv_agent_runtime helpers)" in plain_renderable(cell.details)
 
 
 @pytest.mark.asyncio
@@ -5615,7 +5622,11 @@ async def test_tui_resume_after_background_tool_output_does_not_duplicate_histor
         result_cells = [
             child
             for child in transcript.children
-            if isinstance(child, ExpandableTranscriptCell) and "run_stepped" in plain_renderable(child.details)
+            if (
+                isinstance(child, ExpandableTranscriptCell)
+                and isinstance(child.tool_payload, dict)
+                and child.tool_payload.get("run_id") == "run_stepped"
+            )
         ]
         assistant_cells = [
             child
@@ -5676,7 +5687,8 @@ async def test_tui_tool_result_details_expand_on_click(
         shell = panel.query_one("#panel-shell")
         assert shell.region.x == (app.size.width - shell.region.width) // 2
         assert shell.region.y == (app.size.height - shell.region.height) // 2
-        assert "hidden tail" in str(panel.query_one("#panel-body-content", Static).render())
+        assert "hidden tail" not in str(panel.query_one("#panel-body-content", Static).render())
+        assert "(no uv_agent_runtime helpers)" in str(panel.query_one("#panel-body-content", Static).render())
 
         await pilot.click(panel, offset=(0, 0))
         await pilot.pause()
@@ -5723,12 +5735,13 @@ async def test_tui_tool_result_details_escape_literal_brackets(
         panel = app.screen_stack[-1]
         assert isinstance(panel, ToolDetailsPanel)
         rendered = str(panel.query_one("#panel-body-content", Static).render())
-        assert "# dependencies = [" in rendered
-        assert "level=\"small\"" in rendered
+        assert "# dependencies = [" not in rendered
+        assert "level=\"small\"" not in rendered
+        assert "(no uv_agent_runtime helpers)" in rendered
 
 
 @pytest.mark.asyncio
-async def test_tui_tool_call_details_highlight_python_source(
+async def test_tui_tool_call_details_show_runtime_helpers_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5739,7 +5752,12 @@ async def test_tui_tool_call_details_highlight_python_source(
         lambda root: fake_engine(root, tmp_path / "state"),
     )
     app = UvAgentApp(project_root=project_root)
-    code = "for item in ['alpha', 'beta']:\n    print(item)\n"
+    code = (
+        "from uv_agent_runtime import run_process_text, replace_text\n"
+        "run_process_text(['git', 'status'], timeout_s=5)\n"
+        "replace_text('a.txt', 'old', 'new')\n"
+        "print('hidden source')\n"
+    )
     call = {
         "call_id": "call_1",
         "name": "run_python",
@@ -5758,14 +5776,11 @@ async def test_tui_tool_call_details_highlight_python_source(
         assert isinstance(panel, ToolDetailsPanel)
         content = panel.query_one("#panel-body-content", Static)
         rendered = str(content.render())
-        assert "for item in ['alpha', 'beta'" in rendered
-        assert "print(item)" in rendered
-        assert "for item in ['alpha', 'beta']" in plain_renderable(panel.body)
-        assert "'alpha'" in plain_renderable(panel.body)
-        # Pygments-based highlighter additionally colors builtins and the
-        # ``in`` operator word, which the prior tokenize-based pass missed.
-        assert "print" in plain_renderable(panel.body)
-        assert " in " in plain_renderable(panel.body)
+        plain = plain_renderable(panel.body)
+        assert "run_process_text(['git', 'status'], timeout_s=5)" in plain
+        assert "replace_text('a.txt', 'old', 'new')" in plain
+        assert "print('hidden source')" not in plain
+        assert "from uv_agent_runtime" not in rendered
 
 
 @pytest.mark.asyncio
@@ -5808,19 +5823,22 @@ async def test_tui_tool_result_details_support_keyboard_navigation(
         panel = app.screen_stack[-1]
         assert isinstance(panel, ToolDetailsPanel)
         assert panel.current_cell is second
-        assert "full tail 1" in str(panel.query_one("#panel-body-content", Static).render())
+        assert "full tail 1" not in str(panel.query_one("#panel-body-content", Static).render())
+        assert "(no uv_agent_runtime helpers)" in str(panel.query_one("#panel-body-content", Static).render())
 
         await pilot.press("k")
         await pilot.pause()
 
         assert panel.current_cell is first
-        assert "full tail 0" in str(panel.query_one("#panel-body-content", Static).render())
+        assert "full tail 0" not in str(panel.query_one("#panel-body-content", Static).render())
+        assert "(no uv_agent_runtime helpers)" in str(panel.query_one("#panel-body-content", Static).render())
 
         await pilot.press("j")
         await pilot.pause()
 
         assert panel.current_cell is second
-        assert "full tail 1" in str(panel.query_one("#panel-body-content", Static).render())
+        assert "full tail 1" not in str(panel.query_one("#panel-body-content", Static).render())
+        assert "(no uv_agent_runtime helpers)" in str(panel.query_one("#panel-body-content", Static).render())
 
         await pilot.press("ctrl+d")
         await pilot.pause()
@@ -6286,7 +6304,7 @@ async def test_tui_final_response_is_not_folded_into_process(
         assert any(group.collapsed for group in timeline.process_groups.values())
 
 
-def test_tool_detail_markup_strips_runtime_event_lines_from_stdout() -> None:
+def test_tool_detail_markup_shows_helper_calls_only() -> None:
     event = {
         "kind": "progress",
         "message": "halfway",
@@ -6299,18 +6317,14 @@ def test_tool_detail_markup_strips_runtime_event_lines_from_stdout() -> None:
         "stdout": "visible line 1\n" + json.dumps(event) + "\nvisible line 2\n",
         "stderr": "",
         "events": [event],
+        "helper_calls": [{"name": "run_process_text", "args": "['git', 'status']"}],
     }
     markup = tool_detail_markup(payload)
-    assert "visible line 1" in markup
-    assert "visible line 2" in markup
-    # The structured event JSON line must not appear in stdout output.
+    assert "run_process_text(['git', 'status'])" in markup
+    assert "visible line 1" not in markup
+    assert "visible line 2" not in markup
+    assert "halfway" not in markup
     assert RUNTIME_EVENT_EVENT_ID_KEY not in markup
-    # Events are rendered via structured_event_markup, so JSON-dump backslash
-    # escapes (e.g. "\\n", "\\\"") never reach the rendered body.
-    assert "\\n" not in markup
-    assert '\\"' not in markup
-    # Event content still surfaces in the events section.
-    assert "halfway" in markup
 
 
 def test_tool_detail_markup_collapses_events_when_requested() -> None:
@@ -6319,6 +6333,7 @@ def test_tool_detail_markup_collapses_events_when_requested() -> None:
         "returncode": 0,
         "stdout": "stdout line\n",
         "stderr": "",
+        "helper_calls": [{"name": "replace_text", "args": "'a', 'b', 'c'"}],
         "events": [
             {"kind": "progress", "message": "step one"},
             {"kind": "progress", "message": "step two"},
@@ -6326,20 +6341,25 @@ def test_tool_detail_markup_collapses_events_when_requested() -> None:
     }
     expanded = tool_detail_markup(payload, events_collapsed=False)
     collapsed = tool_detail_markup(payload, events_collapsed=True)
-    # Stdout is always visible.
-    assert "stdout line" in expanded
-    assert "stdout line" in collapsed
-    # Events visible when expanded, hidden when collapsed.
-    assert "step one" in expanded and "step two" in expanded
-    assert "collapse" in expanded
+    assert "replace_text('a', 'b', 'c')" in expanded
+    assert "replace_text('a', 'b', 'c')" in collapsed
+    assert "stdout line" not in expanded
+    assert "stdout line" not in collapsed
+    assert "step one" not in expanded and "step two" not in expanded
     assert "step one" not in collapsed
     assert "step two" not in collapsed
-    assert "expand" in collapsed
-    assert "2 events" in collapsed
+
+
+def test_tool_call_detail_markup_shows_no_helper_placeholder() -> None:
+    call = {"name": "run_python", "arguments": json.dumps({"code": "print('plain')"})}
+    detail = tool_call_detail_highlight_markup(call)
+
+    assert "(no uv_agent_runtime helpers)" in detail
+    assert "print('plain')" not in detail
 
 
 @pytest.mark.asyncio
-async def test_tui_tool_details_panel_toggles_events_with_e_key(
+async def test_tui_tool_details_panel_keeps_helper_list_when_e_pressed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6355,6 +6375,7 @@ async def test_tui_tool_details_panel_toggles_events_with_e_key(
         "returncode": 0,
         "stdout": "alpha line\nbravo line\ncharlie line",
         "stderr": "",
+        "helper_calls": [{"name": "run_process_text", "args": "['git', 'status']"}],
         "events": [
             {"kind": "progress", "message": "halfway"},
             {"kind": "progress", "message": "done"},
@@ -6377,10 +6398,10 @@ async def test_tui_tool_details_panel_toggles_events_with_e_key(
         panel = app.screen_stack[-1]
         assert isinstance(panel, ToolDetailsPanel)
         assert panel.events_collapsed is False
-        assert "halfway" in plain_renderable(panel.body)
-        assert "done" in plain_renderable(panel.body)
-        # stdout remains visible regardless of events fold state
-        assert "alpha line" in plain_renderable(panel.body)
+        assert "run_process_text(['git', 'status'])" in plain_renderable(panel.body)
+        assert "halfway" not in plain_renderable(panel.body)
+        assert "done" not in plain_renderable(panel.body)
+        assert "alpha line" not in plain_renderable(panel.body)
 
         await pilot.press("e")
         await pilot.pause()
@@ -6388,15 +6409,15 @@ async def test_tui_tool_details_panel_toggles_events_with_e_key(
         assert panel.events_collapsed is True
         assert "halfway" not in plain_renderable(panel.body)
         assert "done" not in plain_renderable(panel.body)
-        assert "2 events" in plain_renderable(panel.body)
-        assert "alpha line" in plain_renderable(panel.body)
+        assert "2 events" not in plain_renderable(panel.body)
+        assert "run_process_text(['git', 'status'])" in plain_renderable(panel.body)
 
         await pilot.press("e")
         await pilot.pause()
 
         assert panel.events_collapsed is False
-        assert "halfway" in plain_renderable(panel.body)
-        assert "done" in plain_renderable(panel.body)
+        assert "halfway" not in plain_renderable(panel.body)
+        assert "done" not in plain_renderable(panel.body)
 
 
 def _transcript_snapshot(app: UvAgentApp) -> list[dict[str, object]]:

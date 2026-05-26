@@ -8,6 +8,8 @@ from typing import Any
 from rich.console import Group, RenderableType
 from rich.text import Text
 
+from uv_agent.helper_calls import extract_runtime_helper_calls, format_helper_call
+
 
 # Runtime event sentinel keys. These mirror values in
 # ``uv_agent_runtime.events`` and ``uv_agent.agent`` so the TUI can detect and
@@ -177,7 +179,8 @@ def tool_call_summary_markup(call: dict[str, Any]) -> Text:
 
 
 def tool_call_detail_markup(call: dict[str, Any]) -> Text:
-    """Render hidden details for a run_python call, including full source."""
+    """Render hidden details for a run_python call without dumping full source."""
+
     args = tool_call_args(call)
     lines: list[Text] = [markup("[dim]call[/dim]"), line("name: ", str(call.get("name") or "python"))]
     call_id = str(call.get("call_id") or "")
@@ -185,8 +188,12 @@ def tool_call_detail_markup(call: dict[str, Any]) -> Text:
         lines.append(line("call_id: ", call_id))
     code = str(args.get("code") or "").strip()
     if code:
-        lines.append(markup("[dim]script[/dim]"))
-        lines.append(plain(code))
+        lines.append(markup("[dim]helpers[/dim]"))
+        helper_calls = extract_runtime_helper_calls(code)
+        if helper_calls:
+            lines.extend(plain(format_helper_call(helper)) for helper in helper_calls)
+        else:
+            lines.append(plain("(no uv_agent_runtime helpers)", style="dim"))
     if args:
         remainder = {key: value for key, value in args.items() if key != "code"}
         if remainder:
@@ -201,27 +208,15 @@ def tool_call_detail_markup(call: dict[str, Any]) -> Text:
 
 
 def tool_call_detail_highlight_markup(call: dict[str, Any]) -> Text:
-    """Render hidden details with Python syntax highlighting for script source."""
-    args = tool_call_args(call)
-    lines: list[Text] = [markup("[dim]call[/dim]"), line("name: ", str(call.get("name") or "python"))]
-    call_id = str(call.get("call_id") or "")
-    if call_id:
-        lines.append(line("call_id: ", call_id))
-    code = str(args.get("code") or "").strip()
-    if code:
-        lines.append(markup("[dim]script[/dim]"))
-        lines.append(python_syntax_markup(code))
-    if args:
-        remainder = {key: value for key, value in args.items() if key != "code"}
-        if remainder:
-            lines.append(markup("[dim]arguments[/dim]"))
-            lines.append(json_markup(remainder))
-    else:
-        raw_args = str(call.get("arguments") or "").strip()
-        if raw_args:
-            lines.append(markup("[dim]arguments[/dim]"))
-            lines.append(plain(raw_args))
-    return join_lines(lines)  # type: ignore[return-value]
+    """Render hidden details for a run_python call without dumping full source."""
+
+    return tool_call_detail_markup(call)
+
+
+def tool_call_helper_payload(call: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract helper-call details from a run_python call for result payloads."""
+
+    return extract_runtime_helper_calls(tool_call_code(call))
 
 
 # Mapping from Pygments token types to Rich styles. The list is ordered
@@ -490,30 +485,15 @@ def tool_timeline_markup(payload: dict[str, Any]) -> Text:
 
 
 def tool_detail_markup(payload: dict[str, Any], *, events_collapsed: bool = False) -> Text:
-    """Render complete hidden details for an expandable tool cell."""
-    lines: list[Text] = [markup("[dim]details[/dim]"), line("run_id: ", str(payload.get("run_id") or "-"))]
-    elapsed = _payload_elapsed(payload)
-    if elapsed:
-        lines.append(line("elapsed: ", elapsed))
-    events = payload.get("events")
-    if not isinstance(events, list):
-        events = []
-    valid_events = [event for event in events if isinstance(event, dict)]
-    if valid_events:
-        if events_collapsed:
-            lines.append(plain(f"events (collapsed · {len(valid_events)} events · press e to expand)", style="dim"))
-        else:
-            lines.append(markup("[dim]events (press e to collapse)[/dim]"))
-            lines.extend(structured_event_markup(event) for event in valid_events)
-    run_id = str(payload.get("run_id") or "")
-    stdout = strip_runtime_event_lines(str(payload.get("stdout") or ""), run_id=run_id).strip()
-    stderr = str(payload.get("stderr") or "").strip()
-    if stdout:
-        lines.append(markup("[dim]stdout[/dim]"))
-        lines.append(plain(stdout))
-    if stderr:
-        lines.append(markup("[dim]stderr[/dim]"))
-        lines.append(plain(stderr))
+    """Render hidden tool details as helper calls only."""
+
+    lines: list[Text] = [markup("[dim]helpers[/dim]")]
+    helpers = payload.get("helper_calls")
+    valid_helpers = [helper for helper in helpers if isinstance(helper, dict)] if isinstance(helpers, list) else []
+    if valid_helpers:
+        lines.extend(plain(format_helper_call(helper)) for helper in valid_helpers)
+    else:
+        lines.append(plain("(no uv_agent_runtime helpers)", style="dim"))
     return join_lines(lines)  # type: ignore[return-value]
 
 
