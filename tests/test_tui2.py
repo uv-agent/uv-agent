@@ -431,6 +431,9 @@ def test_idempotent_repaint_wraps_in_sync_output() -> None:
 
 
 class _DummyEngine:
+    def __init__(self) -> None:
+        self.turns: list[dict[str, object]] = []
+
     class config:
         class runtime:
             default_level = "test"
@@ -440,10 +443,17 @@ class _DummyEngine:
         levels = {"alpha": object(), "test": object()}
 
         @staticmethod
+        def level(level):
+            class Level:
+                model = f"{level or 'test'}-model"
+
+            return Level()
+
+        @staticmethod
         def model_for_level(level):
             class Model:
-                name = "test-model"
-                model = "provider-model"
+                name = f"{level or 'test'}-model"
+                model = f"{level or 'test'}-provider-model"
                 context_window_tokens = 1000
 
             return Model()
@@ -464,9 +474,32 @@ class _DummyEngine:
 
     class thread_store:
         threads: list[dict] = []
+        events: list[dict] = []
+        snapshots: dict[str, dict] = {}
+
+        @classmethod
+        def create_thread(cls, title="New thread"):
+            thread_id = f"thr_{len(cls.threads) + 1}"
+            cls.threads.append({"thread_id": thread_id, "title": title})
+            return thread_id
+
+        @classmethod
+        def append(cls, thread_id, event_type, **data):
+            event = {"type": event_type, "thread_id": thread_id, **data}
+            cls.events.append(event)
+            if event_type == "thread.level_updated":
+                for thread in cls.threads:
+                    if thread.get("thread_id") == thread_id:
+                        thread["active_level"] = data.get("level")
+                        thread["active_model"] = data.get("model")
+                        break
+            return event
 
         @classmethod
         def thread_digest(cls, thread_id):
+            for thread in cls.threads:
+                if thread.get("thread_id") == thread_id:
+                    return {"title": "Stored title", **thread}
             return {"title": "Stored title"}
 
         @classmethod
@@ -482,9 +515,21 @@ class _DummyEngine:
         @classmethod
         def snapshot(cls, thread_id):
             class Snapshot:
-                metadata = {}
+                metadata = dict(
+                    cls.snapshots.get(thread_id)
+                    or next(
+                        (dict(thread) for thread in cls.threads if thread.get("thread_id") == thread_id),
+                        {},
+                    )
+                )
 
             return Snapshot()
+
+    async def run_turn(self, *, user_text, thread_id=None, level=None, cancel_event=None):
+        thread_id = thread_id or self.thread_store.create_thread("New thread")
+        self.turns.append({"user_text": user_text, "thread_id": thread_id, "level": level})
+        yield {"type": "turn.started", "thread_id": thread_id, "turn_id": f"turn_{len(self.turns)}"}
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": f"turn_{len(self.turns)}"}
 
 
 class _DummyRenderer:
@@ -512,7 +557,11 @@ class _DummyRenderer:
 def _make_app(monkeypatch):
     from uv_agent.tui2.app import AnsiUvAgentApp
 
-    monkeypatch.setattr("uv_agent.tui2.app.create_engine", lambda *a, **k: _DummyEngine())
+    engine = _DummyEngine()
+    engine.thread_store.threads = []
+    engine.thread_store.events = []
+    engine.thread_store.snapshots = {}
+    monkeypatch.setattr("uv_agent.tui2.app.create_engine", lambda *a, **k: engine)
     app = AnsiUvAgentApp()
     app.renderer = _DummyRenderer()
     return app
@@ -849,6 +898,82 @@ def test_command_palette_supports_level_names(monkeypatch) -> None:
     values = [item.value for item in app.state.command_palette_items]
     assert "/level alpha" in values
     assert "/level test" in values
+
+
+def test_start_turn_persists_selected_level_for_new_thread(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+
+    app._handle_command("/level alpha")
+
+    async def run_turn() -> None:
+        await app._start_turn("first")
+        assert app._running_task is not None
+        await app._running_task
+
+    asyncio.run(run_turn())
+
+    assert app.state.thread_id == "thr_1"
+    assert app.engine.turns[-1]["level"] == "alpha"
+    assert app.engine.thread_store.threads[0]["active_level"] == "alpha"
+    assert app.engine.thread_store.threads[0]["active_model"] == "alpha-model"
+
+
+def test_resuming_thread_restores_persisted_level(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.level = "test"
+    app.engine.thread_store.threads = [
+        {
+            "thread_id": "thr_alpha",
+            "title": "Alpha work",
+            "active_level": "alpha",
+            "active_model": "alpha-model",
+        },
+        {
+            "thread_id": "thr_test",
+            "title": "Test work",
+            "active_level": "test",
+            "active_model": "test-model",
+        },
+    ]
+
+    app._resume_thread("thr_alpha")
+
+    assert app.state.level == "alpha"
+
+    async def run_turn() -> None:
+        await app._start_turn("continue")
+        assert app._running_task is not None
+        await app._running_task
+
+    asyncio.run(run_turn())
+
+    assert app.engine.turns[-1]["thread_id"] == "thr_alpha"
+    assert app.engine.turns[-1]["level"] == "alpha"
+
+
+def test_resume_thread_prefers_snapshot_level_over_picker_listing(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.level = "test"
+    app.engine.thread_store.threads = [
+        {
+            "thread_id": "thr_alpha",
+            "title": "Alpha work",
+            "active_level": "test",
+            "active_model": "test-model",
+        }
+    ]
+    app.engine.thread_store.snapshots = {
+        "thr_alpha": {
+            "thread_id": "thr_alpha",
+            "title": "Alpha work",
+            "active_level": "alpha",
+            "active_model": "alpha-model",
+        }
+    }
+
+    app._resume_thread("thr_alpha")
+
+    assert app.state.level == "alpha"
 
 
 def test_tab_completes_unique_command_prefix(monkeypatch) -> None:

@@ -832,6 +832,8 @@ class AnsiUvAgentApp:
             self._flush(TranscriptCell("event", text=HELP_TEXT))
         elif command in {"/level", "/model"} and arg:
             self.state.level = arg
+            if self.state.thread_id and not self.state.busy:
+                self._persist_thread_level(self.state.thread_id, self.state.level)
             self._flush(TranscriptCell("event", text=f"model level set to {self.state.level}"))
         elif command == "/threads":
             self._open_thread_picker()
@@ -921,13 +923,63 @@ class AnsiUvAgentApp:
         self._flush(TranscriptCell("event", text=self._status_text()))
 
     def _thread_metadata(self, thread_id: str) -> dict[str, Any]:
+        listed: dict[str, Any] = {}
         for item in self.engine.thread_store.list_threads():
             if str(item.get("thread_id") or "") == thread_id:
-                return dict(item)
+                listed = dict(item)
+                break
         try:
-            return dict(self.engine.thread_store.snapshot(thread_id).metadata)
+            metadata = dict(self.engine.thread_store.snapshot(thread_id).metadata)
         except Exception:
-            return {}
+            metadata = {}
+        return {**listed, **metadata}
+
+    def _thread_metadata_level(self, thread_id: str) -> str | None:
+        level = str(self._thread_metadata(thread_id).get("active_level") or "").strip()
+        return level or None
+
+    def _level_model_name(self, level: str | None) -> str:
+        try:
+            config_level = getattr(self.engine.config, "level", None)
+            if callable(config_level):
+                model_name = getattr(config_level(level), "model", "")
+                if model_name:
+                    return str(model_name)
+            return str(getattr(self.engine.config.model_for_level(level), "name", "") or "")
+        except Exception:
+            return ""
+
+    def _persist_thread_level(self, thread_id: str, level: str | None) -> None:
+        if not thread_id or not level:
+            return
+        append = getattr(self.engine.thread_store, "append", None)
+        if not callable(append):
+            return
+        metadata = self._thread_metadata(thread_id)
+        model = self._level_model_name(level)
+        if metadata.get("active_level") == level and metadata.get("active_model") == model:
+            return
+        append(
+            thread_id,
+            "thread.level_updated",
+            level=level,
+            model=model,
+            previous_level=metadata.get("active_level"),
+            previous_model=metadata.get("active_model"),
+        )
+
+    def _current_level_for_thread(self, thread_id: str | None = None) -> str | None:
+        if thread_id and thread_id != self.state.thread_id:
+            metadata_level = self._thread_metadata_level(thread_id)
+            if metadata_level:
+                return metadata_level
+        return self.state.level or self.engine.config.runtime.default_level
+
+    def _ensure_active_thread(self) -> str:
+        if self.state.thread_id is None:
+            self.state.thread_id = self.engine.thread_store.create_thread("New thread")
+            self._refresh_window_title()
+        return self.state.thread_id
 
     def _resume_thread(self, thread_id: str) -> None:
         if not thread_id:
@@ -936,7 +988,7 @@ class AnsiUvAgentApp:
         metadata = self._thread_metadata(thread_id)
         self.state.thread_id = thread_id
         self.state.title = str(metadata.get("title") or "New thread")
-        self.state.level = str(metadata.get("active_level") or self.engine.config.runtime.default_level)
+        self.state.level = self._thread_metadata_level(thread_id) or self.engine.config.runtime.default_level
         goal = metadata.get("goal_mode") if isinstance(metadata.get("goal_mode"), dict) else {}
         self.state.goal_enabled = bool(goal.get("enabled")) if isinstance(goal, dict) else False
         self.state.goal_objective = str(goal.get("objective") or "") if isinstance(goal, dict) else ""
@@ -1066,6 +1118,10 @@ class AnsiUvAgentApp:
     # ------------------------------------------------------------------
 
     async def _start_turn(self, text: str) -> None:
+        thread_id = self._ensure_active_thread()
+        level = self._current_level_for_thread(thread_id)
+        self.state.level = level
+        self._persist_thread_level(thread_id, level)
         self._flush(TranscriptCell("user", text=text))
         self.cancel_event = asyncio.Event()
         self.state.busy = True
