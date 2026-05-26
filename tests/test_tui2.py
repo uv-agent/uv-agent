@@ -249,6 +249,18 @@ def test_cjk_input_width_and_cursor_position() -> None:
     assert all(visible_len(line) <= 50 for line in lines)
 
 
+def test_long_cjk_composer_soft_wraps_without_ellipsis() -> None:
+    text = "这是一个测试" * 6
+    lines, row, col = render_live_with_cursor(Tui2State(composer=text), 30)
+
+    plain = [strip_ansi(line) for line in lines]
+    assert len(lines) > 3
+    assert not any("…" in line for line in plain)
+    assert all(visible_len(line) <= 30 for line in lines)
+    assert row == len(lines) - 2
+    assert 4 <= col <= 30
+
+
 # ---------------------------------------------------------------------------
 # Status lines: two-row context strip above the composer
 # ---------------------------------------------------------------------------

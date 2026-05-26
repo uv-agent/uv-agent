@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import shutil
-import textwrap
 import unicodedata
 from collections.abc import Iterable
 
@@ -76,22 +75,37 @@ def truncate_visible(text: str, width: int, suffix: str = "…") -> str:
 
 
 def wrap_plain(text: str, width: int, *, subsequent_indent: str = "") -> list[str]:
-    """Wrap plain text while preserving blank lines."""
+    """Wrap plain text by terminal cell width while preserving blank lines.
+
+    ``textwrap.wrap`` counts Python code points, which means full-width CJK
+    input can overflow the composer and get clipped by the renderer's final
+    safety truncation.  Counting display cells here keeps the produced rows
+    within the same width model used by ``visible_len`` and cursor placement.
+    """
 
     width = max(1, width)
     lines: list[str] = []
+    indent_width = display_width(subsequent_indent)
+    # A too-wide indent would otherwise leave no room for content and could
+    # loop forever.  This path is not used by tui2 today, but keeping it safe
+    # makes the helper predictable for future callers.
+    safe_indent = subsequent_indent if indent_width < width else ""
+    safe_indent_width = indent_width if safe_indent else 0
     for raw_line in text.splitlines() or [""]:
         if not raw_line:
             lines.append("")
             continue
-        wrapped = textwrap.wrap(
-            raw_line,
-            width=width,
-            replace_whitespace=False,
-            drop_whitespace=False,
-            subsequent_indent=subsequent_indent,
-        )
-        lines.extend(wrapped or [""])
+        current: list[str] = []
+        current_width = 0
+        for char in raw_line:
+            char_cells = char_width(char)
+            if current and current_width + char_cells > width:
+                lines.append("".join(current))
+                current = [safe_indent] if safe_indent else []
+                current_width = safe_indent_width
+            current.append(char)
+            current_width += char_cells
+        lines.append("".join(current))
     return lines
 
 
