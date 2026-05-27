@@ -268,7 +268,9 @@ TEXT = {
         "agent_view_status_completed": "COMPLETED",
         "agent_view_status_failed": "FAILED",
         "agent_view_status_interrupted": "INTERRUPTED",
-        "agent_view_open_status": "Agent View · /agents from a thread adds it · i new task · m model · r reply · ? help",
+        "agent_view_open_status": "Agent View · /bg adds current thread · i new task · m model · r reply · ? help",
+        "agent_view_bg_added": "added {thread} to Agent View",
+        "agent_view_bg_present": "{thread} is already in Agent View",
         "agent_view_no_sessions": "No agent sessions yet",
         "agent_view_empty_hint": "Press i, type a task, then Enter to dispatch it.",
         "agent_view_normal_hint": "normal: j/k move · i input · m model · r reply · Enter attach · ? help · Esc close",
@@ -570,7 +572,9 @@ TEXT = {
         "agent_view_status_completed": "已完成",
         "agent_view_status_failed": "失败",
         "agent_view_status_interrupted": "已中断",
-        "agent_view_open_status": "Agent View · 在线程内用 /agents 可加入面板 · i 新任务 · m 模型 · r 回复 · ? 帮助",
+        "agent_view_open_status": "Agent View · /bg 加入当前线程 · i 新任务 · m 模型 · r 回复 · ? 帮助",
+        "agent_view_bg_added": "已将 {thread} 加入 Agent View",
+        "agent_view_bg_present": "{thread} 已在 Agent View 中",
         "agent_view_no_sessions": "还没有 Agent 会话",
         "agent_view_empty_hint": "按 i 输入任务，再按 Enter 分发。",
         "agent_view_normal_hint": "普通：j/k 移动 · i 输入 · m 模型 · r 回复 · Enter 进入线程 · ? 帮助 · Esc 关闭",
@@ -626,6 +630,7 @@ COMMAND_DESCRIPTIONS = {
         "/quit": "quit immediately",
         "/help": "show all commands",
         "/agents": "open Agent View dashboard",
+        "/bg": "add the current thread to Agent View",
     },
     "zh": {
         "/threads": "查看最近线程",
@@ -641,6 +646,7 @@ COMMAND_DESCRIPTIONS = {
         "/quit": "立即退出",
         "/help": "查看所有命令",
         "/agents": "打开 Agent View 仪表盘",
+        "/bg": "将当前线程加入 Agent View",
     },
 }
 
