@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import sqlite3
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
@@ -12,6 +13,7 @@ from typing import Any
 from uv_agent.atomic import atomic_replace
 from uv_agent.environment import detect_user_language
 from uv_agent.helper_calls import extract_runtime_helper_calls
+from uv_agent.ids import new_id
 from uv_agent.i18n import tr
 from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.notifications import play_terminal_buzzer
@@ -32,6 +34,7 @@ from uv_agent.tui2.events import (
 )
 from uv_agent.tui2.renderer import Renderer
 from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
+from uv_agent.worktree import CommandResult, WorktreeError, create_worktree, validate_worktree_branch_name
 
 CODE_FILE_SUFFIXES = {
     ".cfg",
@@ -157,6 +160,7 @@ CTRL_C_CONFIRMATION_S = 3.0
 UNBRACKETED_PASTE_ENTER_S = 0.08
 COMPACTION_SUMMARY_PREVIEW_LINES = 4
 COMPACTION_SUMMARY_PREVIEW_CHARS = 800
+BRANCH_SLUG_TIMEOUT_S = 3.0
 
 
 @dataclass
@@ -623,9 +627,10 @@ class AnsiUvAgentApp:
             return True
         if key == "\r":
             if self.state.agent_view.composer.strip():
-                # Dispatch is implemented in a later Agent View commit; keep the
-                # first dashboard commit read-only and make the pending action visible.
-                self.state.agent_view.status_message = "dispatch will be enabled after per-thread runs"
+                prompt = self.state.agent_view.composer.strip()
+                self._set_agent_view_text("", cursor=0)
+                asyncio.create_task(self._dispatch_agent_view_prompt(prompt))
+                self.state.agent_view.status_message = "dispatching background worktree..."
             elif self.state.agent_view.selected_row() is not None:
                 self._resume_thread(self.state.agent_view.selected_row().thread_id)  # type: ignore[union-attr]
                 self.state.mode = "transcript"
@@ -741,6 +746,8 @@ class AnsiUvAgentApp:
 
     def _agent_view_thread_status(self, thread_id: str, thread: dict[str, Any]) -> str:
         run_state = self._thread_runs.get(thread_id)
+        if run_state is not None and run_state.terminal_status == "dispatching":
+            return "dispatching"
         if run_state is not None and run_state.running:
             return "working"
         if run_state is not None and run_state.pending_turns:
@@ -767,6 +774,81 @@ class AnsiUvAgentApp:
         except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
             return ""
         return str(events[0].get("type") or "") if events else ""
+
+    async def _dispatch_agent_view_prompt(self, prompt: str) -> None:
+        prompt = prompt.strip()
+        if not prompt:
+            return
+        thread_id = self.engine.thread_store.create_thread(self._agent_view_thread_title(prompt))
+        run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
+        run_state.terminal_status = "dispatching"
+        run_state.status_message = "dispatching worktree"
+        self._refresh_agent_view_rows()
+        self._safe_repaint()
+        try:
+            branch = await self._agent_view_branch_name(thread_id, prompt)
+            info = await asyncio.to_thread(
+                create_worktree,
+                self.project_root,
+                branch,
+                run=self._run_worktree_command,
+            )
+            self.engine.thread_store.append(thread_id, "thread.worktree_created", **info.metadata())
+            self.engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(info.path))
+            level = self.state.level or self.engine.config.runtime.default_level
+            self._persist_thread_level(thread_id, level)
+            self.state.level = level
+            run_state.terminal_status = "working"
+            run_state.status_message = "running"
+            await self._start_turn_for_thread(thread_id, prompt, image_paths=[])
+            self.state.agent_view.status_message = f"dispatched {short_thread(thread_id)} · {info.branch}"
+        except Exception as exc:
+            run_state.terminal_status = "failed"
+            run_state.last_error = str(exc) or repr(exc)
+            self.state.agent_view.status_message = f"dispatch failed: {run_state.last_error}"
+        finally:
+            self._refresh_agent_view_rows()
+            self._safe_repaint()
+
+    def _agent_view_thread_title(self, prompt: str) -> str:
+        first = " ".join(prompt.strip().split())
+        if not first:
+            return "Agent task"
+        return first[:77].rstrip() + "..." if len(first) > 80 else first
+
+    async def _agent_view_branch_name(self, thread_id: str, prompt: str) -> str:
+        short_id = thread_id.replace("thr_", "")[:8] or new_id("agent").replace("agent_", "")[:8]
+        slug: str | None = None
+        generate = getattr(self.engine, "generate_branch_slug", None)
+        if callable(generate):
+            try:
+                slug = await asyncio.wait_for(
+                    generate(thread_id, prompt, level=self.state.level),
+                    timeout=BRANCH_SLUG_TIMEOUT_S,
+                )
+            except Exception:
+                slug = None
+        branch = f"agent-{slug}-{short_id}" if slug else f"agent-{short_id}"
+        return validate_worktree_branch_name(branch)
+
+    def _run_worktree_command(self, args: list[str], *, cwd: Path, timeout_s: float | None = None) -> CommandResult:
+        completed = subprocess.run(
+            args,
+            cwd=str(cwd),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_s,
+            check=False,
+        )
+        return CommandResult(
+            args=list(args),
+            returncode=completed.returncode,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+        )
 
     def _composer_cursor(self) -> int:
         cursor = self.state.composer_cursor

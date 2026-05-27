@@ -697,6 +697,9 @@ class _DummyEngine:
         yield {"type": "turn.started", "thread_id": thread_id, "turn_id": f"turn_{len(self.turns)}"}
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": f"turn_{len(self.turns)}"}
 
+    async def generate_branch_slug(self, thread_id, user_text, *, level=None):
+        return self.branch_slug
+
     def enable_goal_mode(self, thread_id, *, objective=""):
         state = SimpleNamespace(enabled=True, status="enabled", objective=objective)
         self.goal_states[thread_id] = state
@@ -1244,6 +1247,48 @@ def test_agent_view_navigation_and_attach(monkeypatch) -> None:
     assert app.state.mode == "transcript"
     assert app.state.thread_id == "thr_2"
     assert app.state.title == "Beta"
+
+
+
+def test_agent_view_dispatch_creates_worktree_thread_and_runs(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+    created = SimpleNamespace(
+        branch="agent-test-task-1",
+        path=app.project_root / ".uv-agent" / "worktrees" / "agent-test-task-1",
+        origin_root=app.project_root,
+        metadata=lambda: {
+            "worktree_status": "active",
+            "worktree_branch": "agent-test-task-1",
+            "worktree_path": str(app.project_root / ".uv-agent" / "worktrees" / "agent-test-task-1"),
+            "worktree_base_ref": "HEAD",
+            "worktree_origin_root": str(app.project_root),
+        },
+    )
+    monkeypatch.setattr(tui2_app, "create_worktree", lambda project_root, branch, *, run: created)
+
+    async def run() -> None:
+        await app._dispatch_agent_view_prompt("fix login")
+        task = app._thread_runs.get("thr_1").task
+        assert task is not None
+        await task
+
+    asyncio.run(run())
+
+    assert app.engine.thread_store.threads[0]["title"] == "fix login"
+    assert app.engine.thread_store.threads[0]["worktree_branch"] == "agent-test-task-1"
+    assert app.engine.thread_store.threads[0]["latest_cwd"] == str(created.path)
+    assert app.engine.turns[-1]["thread_id"] == "thr_1"
+    assert app.engine.turns[-1]["user_text"] == "fix login"
+
+
+def test_agent_view_branch_name_falls_back_to_thread_id(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.branch_slug = ""
+
+    branch = asyncio.run(app._agent_view_branch_name("thr_abcdef123456", "prompt"))
+
+    assert branch == "agent-abcdef12"
 
 
 def test_agent_view_composer_is_separate_from_transcript(monkeypatch) -> None:
