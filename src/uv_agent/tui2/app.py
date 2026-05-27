@@ -511,6 +511,7 @@ class AnsiUvAgentApp:
         number = self._image_sequence_next
         self._image_sequence_next += 1
         self._image_paths_by_number[number] = Path(image.path)
+        self.state.image_token_numbers.add(number)
         token = f"[Image #{number}]"
         if self.state.composer:
             cursor = self._composer_cursor()
@@ -792,6 +793,7 @@ class AnsiUvAgentApp:
     def _release_image_numbers(self, numbers: set[int]) -> None:
         for number in numbers:
             self._image_paths_by_number.pop(number, None)
+            self.state.image_token_numbers.discard(number)
 
     def _clear_image_status_tracking(self) -> None:
         self._image_status_token = None
@@ -1223,6 +1225,7 @@ class AnsiUvAgentApp:
         self._pending_goal_enable = False
         self._pending_goal_objective = ""
         self._image_paths_by_number.clear()
+        self.state.image_token_numbers.clear()
         self._clear_image_status_tracking()
         self.state.level = self.engine.config.runtime.default_level
         self.state.flushed.clear()

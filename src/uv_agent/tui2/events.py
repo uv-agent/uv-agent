@@ -83,6 +83,7 @@ class Tui2State:
     context_percent: int | None = None
     goal_enabled: bool = False
     goal_objective: str = ""
+    image_token_numbers: set[int] = field(default_factory=set)
     turn_elapsed_s: float | None = None
     command_palette_open: bool = False
     command_palette_items: list[CommandSuggestion] = field(default_factory=list)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from io import StringIO
 from pathlib import Path
 
@@ -279,6 +280,7 @@ def render_cell(
 # ---------------------------------------------------------------------------
 
 GOAL_OBJECTIVE_STATUS_MAX_CELLS = 24
+IMAGE_TOKEN_RE = re.compile(r"\[Image #(\d+)\]")
 
 
 def _goal_objective_status_text(objective: str) -> str:
@@ -288,6 +290,21 @@ def _goal_objective_status_text(objective: str) -> str:
     if not text:
         return ""
     return truncate_visible(text, GOAL_OBJECTIVE_STATUS_MAX_CELLS)
+
+
+def _style_composer_image_tokens(text: str, token_numbers: set[int], theme: AnsiTheme) -> str:
+    if not token_numbers or "[Image #" not in text:
+        return text
+    parts: list[str] = []
+    last = 0
+    for match in IMAGE_TOKEN_RE.finditer(text):
+        number = int(match.group(1))
+        parts.append(text[last : match.start()])
+        token = match.group(0)
+        parts.append(sgr(theme.image_token, token) if number in token_numbers else token)
+        last = match.end()
+    parts.append(text[last:])
+    return "".join(parts)
 
 
 def render_status_lines(
@@ -450,6 +467,7 @@ def render_composer_with_cursor(
     max_input_rows: int = 8,
     cursor_index: int | None = None,
     language: UserLanguage | str | None = "en",
+    image_token_numbers: set[int] | None = None,
 ) -> tuple[list[str], int, int]:
     """Render the boxed composer and the cursor position inside it.
 
@@ -463,6 +481,7 @@ def render_composer_with_cursor(
     inner = max(8, width - 4)  # space between "│ " and " │"
     body_inner = inner - 2  # leave room for "› " or "  "
     cursor_index = len(text) if cursor_index is None else max(0, min(cursor_index, len(text)))
+    image_token_numbers = image_token_numbers or set()
 
     if not text:
         hint = sgr(theme.muted, tr(_resolve_language(language), "placeholder"))
@@ -523,6 +542,7 @@ def render_composer_with_cursor(
     for idx, body in enumerate(clipped):
         absolute_row = clipped_start + idx
         prefix = sgr(theme.accent, "› ") if absolute_row == 0 else "  "
+        body = _style_composer_image_tokens(body, image_token_numbers, theme)
         line = prefix + body
         pad = " " * max(0, inner - visible_len(line))
         input_rows.append(sgr(theme.border, "│ ") + line + pad + sgr(theme.border, " │"))
@@ -596,6 +616,7 @@ def render_live_with_cursor(
         theme,
         cursor_index=state.composer_cursor,
         language=state.language,
+        image_token_numbers=state.image_token_numbers,
     )
     palette_lines = (
         render_command_palette(

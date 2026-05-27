@@ -321,6 +321,18 @@ def test_long_cjk_composer_soft_wraps_without_ellipsis() -> None:
     assert 4 <= col <= 30
 
 
+def test_composer_highlights_active_image_tokens_only() -> None:
+    text = "look [Image #1] and [Image #99]"
+    lines, _, _ = render_composer_with_cursor(text, 80, image_token_numbers={1})
+    rendered = "\n".join(lines)
+    plain = strip_ansi(rendered)
+
+    assert "[Image #1]" in plain
+    assert "[Image #99]" in plain
+    assert sgr(DEFAULT_THEME.image_token, "[Image #1]") in rendered
+    assert sgr(DEFAULT_THEME.image_token, "[Image #99]") not in rendered
+
+
 # ---------------------------------------------------------------------------
 # Status lines: two-row context strip above the composer
 # ---------------------------------------------------------------------------
@@ -1340,6 +1352,7 @@ def test_image_command_attaches_clipboard_image_token(monkeypatch, tmp_path) -> 
 
     assert app.state.composer == "[Image #1]"
     assert app._image_paths_by_number == {1: image}
+    assert app.state.image_token_numbers == {1}
     assert "[Image #1]" in app.state.status_message
 
 
@@ -1359,6 +1372,7 @@ def test_image_status_clears_after_token_deleted(monkeypatch, tmp_path) -> None:
     assert app.state.composer == ""
     assert app.state.status_message == "ready"
     assert app._image_paths_by_number == {}
+    assert app.state.image_token_numbers == set()
 
 
 def test_removed_image_token_is_not_attached_if_retyped(monkeypatch, tmp_path) -> None:
@@ -1401,6 +1415,7 @@ def test_image_tokens_send_matching_paths_once(monkeypatch, tmp_path) -> None:
     assert app.engine.turns[-1]["user_text"] == "look [Image #1] and again [Image #1] [Image #99]"
     assert app.engine.turns[-1]["image_paths"] == [image]
     assert app._image_paths_by_number == {}
+    assert app.state.image_token_numbers == set()
 
 
 def test_image_only_message_uses_default_prompt(monkeypatch, tmp_path) -> None:
@@ -1440,6 +1455,7 @@ def test_queued_turn_captures_image_paths_at_submit_time(monkeypatch, tmp_path) 
     assert queued.text == "queued [Image #1]"
     assert queued.image_paths == [image]
     assert app._image_paths_by_number == {}
+    assert app.state.image_token_numbers == set()
 
 
 def test_terminal_reads_bracketed_paste_as_single_key() -> None:
