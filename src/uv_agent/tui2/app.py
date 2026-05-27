@@ -35,7 +35,7 @@ from uv_agent.tui2.events import (
     tool_payload_from_event,
 )
 from uv_agent.tui2.renderer import Renderer
-from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
+from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal, TerminalKeyReader
 from uv_agent.time import utc_now_iso
 from uv_agent.worktree import (
     CommandResult,
@@ -412,13 +412,17 @@ class AnsiUvAgentApp:
             self._refresh_window_title()
             self._safe_repaint()
             try:
-                while True:
-                    try:
-                        key = await asyncio.to_thread(terminal.read_key)
-                    except KeyboardInterrupt:
-                        key = "\x03"
-                    if not await self.handle_key(key):
-                        break
+                with TerminalKeyReader(terminal) as keys:
+                    while True:
+                        try:
+                            key = await keys.read_key()
+                        except KeyboardInterrupt:
+                            # Fallback for platforms/embeddings where SIGINT is
+                            # still raised into the event loop.  The dedicated
+                            # reader means this no longer leaks executor workers.
+                            key = "\x03"
+                        if not await self.handle_key(key):
+                            break
                 running_states = [run_state for run_state in self._thread_runs.values() if run_state.running]
                 for run_state in running_states:
                     run_state.cancel_event.set()

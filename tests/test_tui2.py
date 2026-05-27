@@ -4,6 +4,7 @@ import asyncio
 import json
 import io
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +25,7 @@ import uv_agent.tui2.app as tui2_app
 from uv_agent.tui2.app import TOP_LEVEL_COMMANDS, load_composer_history, save_composer_history
 from uv_agent.tui2.events import AgentViewRow, CommandSuggestion, TranscriptCell, Tui2State
 from uv_agent.tui2.renderer import Renderer
-from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
+from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal, TerminalKeyReader
 from uv_agent.tui2.theme import DEFAULT_THEME, sgr
 
 
@@ -2183,6 +2184,61 @@ def test_unbracketed_paste_fallback_does_not_swallow_stringio_input() -> None:
 
     assert terminal.read_key() == "a"
     assert terminal.read_key() == "b"
+
+
+def test_terminal_key_reader_uses_one_thread_for_repeated_keyboardinterrupt(monkeypatch) -> None:
+    class InterruptingTerminal:
+        _windows = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_key(self) -> str:
+            self.calls += 1
+            if self.calls <= 3:
+                raise KeyboardInterrupt
+            return "q"
+
+    started_threads: list[threading.Thread] = []
+    original_thread = threading.Thread
+
+    class RecordingThread(original_thread):
+        def start(self) -> None:
+            started_threads.append(self)
+            super().start()
+
+    monkeypatch.setattr(threading, "Thread", RecordingThread)
+    terminal = InterruptingTerminal()
+
+    async def collect_keys() -> list[str]:
+        with TerminalKeyReader(terminal, capture_sigint=False) as reader:
+            return [await reader.read_key() for _ in range(4)]
+
+    assert asyncio.run(collect_keys()) == ["\x03", "\x03", "\x03", "q"]
+    assert len(started_threads) == 1
+
+
+def test_terminal_key_reader_turns_sigint_signal_into_ctrl_c(monkeypatch) -> None:
+    import signal
+
+    installed = {}
+    previous_handler = object()
+
+    monkeypatch.setattr(signal, "getsignal", lambda signum: previous_handler)
+
+    def fake_signal(signum, handler):
+        installed[signum] = handler
+
+    monkeypatch.setattr(signal, "signal", fake_signal)
+
+    async def wait_for_sigint_key() -> str:
+        terminal = SimpleNamespace(_windows=True, read_key=lambda: "")
+        with TerminalKeyReader(terminal) as reader:
+            installed[signal.SIGINT](signal.SIGINT, None)
+            return await reader.read_key()
+
+    assert asyncio.run(wait_for_sigint_key()) == "\x03"
+    assert installed[signal.SIGINT] is previous_handler
 
 
 def test_command_palette_render_shows_selection() -> None:

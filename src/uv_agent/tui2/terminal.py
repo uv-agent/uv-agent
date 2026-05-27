@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
+import threading
 from contextlib import AbstractContextManager
 from time import monotonic, sleep
 from typing import TextIO
@@ -250,18 +252,10 @@ class Terminal(AbstractContextManager["Terminal"]):
                 # Clear ENABLE_PROCESSED_INPUT (0x0001) so Ctrl+C is delivered
                 # as a raw ETX byte ("\x03") by ``msvcrt.getwch`` instead of
                 # being translated by the console driver into a SIGINT signal.
-                # The SIGINT path lets each Ctrl+C raise KeyboardInterrupt in
-                # the asyncio main thread *while the to_thread worker stays
-                # blocked on getwch*, leaking one executor thread per press.
-                # Once the default ThreadPoolExecutor (≈ cpu+4 workers) fills
-                # up, subsequent ``read_key`` submissions queue forever and the
-                # whole TUI stops receiving keystrokes — Ctrl+C "stops working".
-                #
-                # TODO(tui2): the more thorough fix is option A — replace the
-                # per-loop ``asyncio.to_thread(read_key)`` with a long-lived
-                # reader thread that pushes keys into an ``asyncio.Queue``.
-                # That would also defend against subprocess children re-enabling
-                # ENABLE_PROCESSED_INPUT in the shared console mid-session.
+                # The TUI also uses ``TerminalKeyReader`` to tolerate consoles
+                # or child processes that re-enable processed input later, but
+                # preferring raw ETX here avoids routing Ctrl+C through Python's
+                # SIGINT machinery in the normal case.
                 new_input = (mode.value | 0x0200) & ~0x0001
                 kernel32.SetConsoleMode(input_handle, new_input)
 
@@ -283,3 +277,125 @@ class Terminal(AbstractContextManager["Terminal"]):
                 kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), self._old_output_mode)
         except Exception:
             return
+
+
+class TerminalKeyReader(AbstractContextManager["TerminalKeyReader"]):
+    """Read terminal keys on one persistent background thread.
+
+    ``Terminal.read_key`` is intentionally blocking.  Calling it through
+    ``asyncio.to_thread`` once per key is fragile on Windows: when the console
+    driver turns Ctrl+C into SIGINT, the awaiter can be interrupted while the
+    worker thread remains stuck in ``msvcrt.getwch``.  Repeating that leaks one
+    default-executor worker per Ctrl+C.  A single daemon reader thread bounds the
+    damage to one blocked read and keeps unrelated ``asyncio.to_thread`` users
+    from starving.
+    """
+
+    def __init__(
+        self,
+        terminal: Terminal,
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
+        capture_sigint: bool | None = None,
+    ) -> None:
+        self.terminal = terminal
+        self.loop = loop
+        self.capture_sigint = terminal._windows if capture_sigint is None else capture_sigint
+        self._queue: asyncio.Queue[str | Exception] | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._old_sigint_handler = None
+        self._sigint_installed = False
+
+    def __enter__(self) -> "TerminalKeyReader":
+        self.loop = self.loop or asyncio.get_running_loop()
+        self._queue = asyncio.Queue()
+        self._install_sigint_handler()
+        self._thread = threading.Thread(
+            target=self._read_loop,
+            name="uv-agent-tui2-key-reader",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._stop.set()
+        self._restore_sigint_handler()
+        # The OS-level terminal read may remain blocked until the next key.  The
+        # thread is daemonized so shutdown is not held hostage by that read, but
+        # join briefly for tests and EOF/error cases that can finish promptly.
+        if self._thread is not None:
+            self._thread.join(timeout=0.1)
+
+    async def read_key(self) -> str:
+        """Return the next key, re-raising reader failures in the event loop."""
+
+        if self._queue is None:
+            raise RuntimeError("TerminalKeyReader must be entered before reading")
+        item = await self._queue.get()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def _read_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                key = self.terminal.read_key()
+            except KeyboardInterrupt:
+                self._put_key("\x03")
+                continue
+            except Exception as exc:
+                if not self._stop.is_set():
+                    self._put_key(exc)
+                return
+            if not key:
+                # In-memory streams can return EOF immediately.  Avoid a tight
+                # loop if a test or redirected stdin reaches the end.
+                sleep(0.01)
+                continue
+            self._put_key(key)
+
+    def _put_key(self, key: str | Exception) -> None:
+        loop = self.loop
+        queue = self._queue
+        if loop is None or queue is None or self._stop.is_set():
+            return
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, key)
+        except RuntimeError:
+            # The loop may already be closing during interpreter shutdown.
+            return
+
+    def _install_sigint_handler(self) -> None:
+        if not self.capture_sigint:
+            return
+        try:
+            import signal
+
+            self._old_sigint_handler = signal.getsignal(signal.SIGINT)
+
+            def _handle_sigint(signum, frame) -> None:  # noqa: ANN001 - signal handler API
+                self._put_key("\x03")
+
+            signal.signal(signal.SIGINT, _handle_sigint)
+            self._sigint_installed = True
+        except (OSError, RuntimeError, ValueError):
+            # ``signal.signal`` only works in the main thread.  If tui2 is ever
+            # embedded elsewhere, the reader thread still prevents executor
+            # starvation and raw ETX input still works when the console permits.
+            self._old_sigint_handler = None
+            self._sigint_installed = False
+
+    def _restore_sigint_handler(self) -> None:
+        if not self._sigint_installed:
+            return
+        try:
+            import signal
+
+            signal.signal(signal.SIGINT, self._old_sigint_handler)
+        except (OSError, RuntimeError, ValueError):
+            return
+        finally:
+            self._sigint_installed = False
+            self._old_sigint_handler = None
