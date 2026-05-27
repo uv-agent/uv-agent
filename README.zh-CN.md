@@ -165,6 +165,10 @@ model 和一个 level。
     "title_generation": {
       "enabled": true,
       "model_level": "deepseek-flash"
+    },
+    "branch_name_generation": {
+      "enabled": true,
+      "model_level": "deepseek-flash"
     }
   },
   "runner": {
@@ -214,16 +218,28 @@ model 和一个 level。
 - `/level <name>`（或 `/model <name>`）切换 model level；选择会按 thread 记住。
 - `/goal enable [objective]` 开启持久 checklist/notes；可以在第一条消息前启用，
   thread 开始时再初始化。
-- `/agents` 打开 Agent View，用独立 worktree 分发后台任务。它使用很轻量的
-  vim-like 区分：普通模式浏览会话（`j/k`、`Enter`、`Space`、`c`、`d`、`D`、`?`），
-  并可用 `m` 选择新任务模型；输入模式（`i` 新任务、`r` 回复）编辑底部输入框，
-  并用 `Enter` 发送（`Ctrl+Enter` 换行）。普通线程默认不进入 Agent View；只有在该线程里
-  执行 `/agents` 才加入面板，Agent View 自己分发的 worktree 任务会自动加入。
+- 需要把工作分发到后台 worktree 会话时使用 Agent View；它在工作流里的定位见
+  [Agent View](#agent-view)。
 - `/status`、`/mcp`、`/skills` 可查看 runtime 状态和可用能力。
 - 如果需要 `/config`、`/models`、Worktree 管理或剪贴板图片快捷键等原 Textual 专属面板，
   使用 `uv-agent tui` 启动旧界面。
 
 完整命令和快捷键见 [TUI and slash commands](docs/tui.md)。
+
+## Agent View
+
+Agent View 是 uv-agent 用来管理多条后台 agent 会话的仪表盘。它适合把不会立即阻塞当前
+对话的工作拆出去并行处理，例如定位 bug、尝试实现方案、修测试、做代码审阅，或运行较长的
+验证任务。
+
+从 Agent View 派发的任务会作为后台会话运行在独立 Git worktree 和自动生成的分支里。
+这样每个任务的改动都和当前 checkout 隔离，之后可以更容易地查看、比较、合并或
+丢弃。面板会把这些会话集中到一处，方便跟踪状态、浏览最新输出、继续某个会话，或在需要时
+把它接回主对话深入处理。
+
+Agent View 更像一个有边界的后台工作队列，而不是全局历史线程列表。普通线程只有明确加入后
+才会显示；从 Agent View 创建的 worktree 任务会自动纳入。这样面板会聚焦于被委派出去的工作，
+不会混入项目里的每一次对话。
 
 ## TUI 界面
 

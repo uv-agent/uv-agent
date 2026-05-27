@@ -173,6 +173,10 @@ Supported model API formats:
     "title_generation": {
       "enabled": true,
       "model_level": "deepseek-flash"
+    },
+    "branch_name_generation": {
+      "enabled": true,
+      "model_level": "deepseek-flash"
     }
   },
   "runner": {
@@ -228,19 +232,34 @@ language, completion notification, and automatic compression. See
   level is remembered per thread.
 - Use `/goal enable [objective]` for durable checklist/notes. It can be enabled
   before the first message and will initialize when the thread starts.
-- Use `/agents` to open Agent View for background worktree tasks. It has a small
-  vim-like split: normal mode navigates sessions (`j/k`, `Enter`, `Space`, `c`,
-  `d`, `D`, `?`) and `m` picks the model level for new tasks, while input mode
-  (`i` for a new task, `r` for a reply) edits the bottom composer and sends with
-  `Enter` (`Ctrl+Enter` inserts a newline). Ordinary threads stay out of Agent
-  View unless you run `/agents` from inside that thread; Agent View-dispatched
-  worktree tasks are added automatically.
+- Use Agent View when you want to delegate work into background worktree
+  sessions; see [Agent View](#agent-view) for how it fits into the workflow.
 - Use `/status`, `/mcp`, and `/skills` to inspect runtime state and available
   capabilities.
 - To use the original Textual-only panels such as `/config`, `/models`, Worktree
   management, or clipboard image shortcuts, start the old UI with `uv-agent tui`.
 
 See [TUI and slash commands](docs/tui.md) for the full command and shortcut list.
+
+## Agent View
+
+Agent View is uv-agent's dashboard for supervising multiple agent sessions that
+run beside your main transcript. It is meant for work you want to delegate or
+parallelize without blocking the current conversation: bug investigations,
+implementation experiments, test fixes, review passes, or longer validation
+tasks.
+
+Tasks dispatched from Agent View run as background sessions in isolated Git
+worktrees with generated branches. That keeps each task's edits away
+from your current checkout while still making the result easy to inspect,
+compare, merge, or discard. The dashboard keeps those sessions in one place so
+you can track status, skim the latest output, continue a specific session, or
+bring it back into the main transcript when it needs direct attention.
+
+Agent View is a scoped work queue rather than a global thread list. Normal
+threads only appear there after they are explicitly joined, while worktree tasks
+created from Agent View are tracked automatically. This keeps the view focused on
+delegated work instead of every conversation in the project.
 
 ## TUI Interfaces
 
