@@ -247,7 +247,23 @@ class Terminal(AbstractContextManager["Terminal"]):
             input_handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
             if kernel32.GetConsoleMode(input_handle, ctypes.byref(mode)):
                 self._old_input_mode = int(mode.value)
-                kernel32.SetConsoleMode(input_handle, mode.value | 0x0200)  # ENABLE_VIRTUAL_TERMINAL_INPUT
+                # Clear ENABLE_PROCESSED_INPUT (0x0001) so Ctrl+C is delivered
+                # as a raw ETX byte ("\x03") by ``msvcrt.getwch`` instead of
+                # being translated by the console driver into a SIGINT signal.
+                # The SIGINT path lets each Ctrl+C raise KeyboardInterrupt in
+                # the asyncio main thread *while the to_thread worker stays
+                # blocked on getwch*, leaking one executor thread per press.
+                # Once the default ThreadPoolExecutor (≈ cpu+4 workers) fills
+                # up, subsequent ``read_key`` submissions queue forever and the
+                # whole TUI stops receiving keystrokes — Ctrl+C "stops working".
+                #
+                # TODO(tui2): the more thorough fix is option A — replace the
+                # per-loop ``asyncio.to_thread(read_key)`` with a long-lived
+                # reader thread that pushes keys into an ``asyncio.Queue``.
+                # That would also defend against subprocess children re-enabling
+                # ENABLE_PROCESSED_INPUT in the shared console mid-session.
+                new_input = (mode.value | 0x0200) & ~0x0001
+                kernel32.SetConsoleMode(input_handle, new_input)
 
             output_handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
             if kernel32.GetConsoleMode(output_handle, ctypes.byref(mode)):
