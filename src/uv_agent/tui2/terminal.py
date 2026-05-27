@@ -9,7 +9,6 @@ from typing import TextIO
 
 PASTE_PREFIX = "\x00paste\x00"
 UNBRACKETED_PASTE_IDLE_S = 0.01
-CTRL_I_KEY = "<C-I>"
 
 
 class Terminal(AbstractContextManager["Terminal"]):
@@ -38,16 +37,11 @@ class Terminal(AbstractContextManager["Terminal"]):
             fd = self.stdin.fileno()
             self._old_termios = termios.tcgetattr(fd)
             tty.setraw(fd)
-        # Kitty keyboard protocol lets terminals report Ctrl+I distinctly from
-        # Tab.  Without it both keys arrive as ``\t`` on many terminals, making
-        # the image-attach shortcut collide with completion.  Terminals that do
-        # not support the protocol ignore this request and keep normal Tab
-        # behavior.
-        self.write("\x1b[>1u\x1b[?2004h")
+        self.write("\x1b[?2004h")
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.write("\x1b[?2004l\x1b[<u\x1b[0m\n")
+        self.write("\x1b[?2004l\x1b[0m\n")
         if not self._windows and self._old_termios is not None:
             import termios
 
@@ -214,73 +208,9 @@ class Terminal(AbstractContextManager["Terminal"]):
             return "<LEFT>"
         if sequence == "\x1b[27;5;13~":
             return "<C-ENTER>"
-        if sequence == "\x1b[13;5u":
-            return "<C-ENTER>"
-        kitty_key = self._decode_kitty_keyboard_key(sequence)
-        if kitty_key is not None:
-            return kitty_key
-        if sequence == "\x1b[27;5;9~":
-            return CTRL_I_KEY
         if sequence == "\x1b[200~":
             return PASTE_PREFIX + self._read_bracketed_paste()
         return "\x1b"
-
-    @staticmethod
-    def _decode_kitty_keyboard_key(sequence: str) -> str | None:
-        """Decode CSI-u keys emitted after enabling keyboard disambiguation."""
-
-        if not (sequence.startswith("\x1b[") and sequence.endswith("u")):
-            return None
-        body = sequence[2:-1]
-        parts = body.split(";")
-        try:
-            codepoint = int(parts[0])
-            modifiers = int(parts[1]) if len(parts) > 1 and parts[1] else 1
-        except (TypeError, ValueError):
-            return None
-
-        ctrl = bool((modifiers - 1) & 4)
-        if not ctrl:
-            if codepoint == 9:
-                return "\t"
-            if codepoint == 13:
-                return "\r"
-            if codepoint == 27:
-                return "\x1b"
-            if 32 <= codepoint <= 0x10FFFF:
-                try:
-                    return chr(codepoint)
-                except ValueError:
-                    return None
-            return None
-
-        # Ctrl+I is intentionally reserved for image attach.  Some terminals
-        # encode it by the letter key (i/I), others by the historical Tab code.
-        if codepoint in {9, ord("I"), ord("i")}:
-            return CTRL_I_KEY
-        if codepoint == 13:
-            return "<C-ENTER>"
-        try:
-            key = chr(codepoint).lower()
-        except ValueError:
-            return None
-        control_map = {
-            "a": "\x01",
-            "b": "\x02",
-            "c": "\x03",
-            "d": "\x04",
-            "e": "\x05",
-            "f": "\x06",
-            "h": "\b",
-            "j": "\n",
-            "k": "\x0b",
-            "l": "\x0c",
-            "m": "\r",
-            "u": "\x15",
-            "w": "\x17",
-            "[": "\x1b",
-        }
-        return control_map.get(key)
 
     def _read_bracketed_paste(self) -> str:
         terminator = "\x1b[201~"

@@ -22,7 +22,7 @@ from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
 from uv_agent.tui2.events import CommandSuggestion, PendingTurn, TranscriptCell, Tui2State, tool_payload_from_event
 from uv_agent.tui2.renderer import Renderer
-from uv_agent.tui2.terminal import CTRL_I_KEY, PASTE_PREFIX, Terminal
+from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
 
 CODE_FILE_SUFFIXES = {
     ".cfg",
@@ -107,7 +107,7 @@ HELP_TEXT = (
     "  /cancel            interrupt the running turn\n"
     "  /quit              exit the TUI\n"
     "\n"
-    "Keys: Enter send/select · Ctrl+Enter newline · Ctrl+I image · / command palette · @ mentions · ↑/↓ history\n"
+    "Keys: Enter send/select · Ctrl+Enter newline · / command palette · @ mentions · ↑/↓ history\n"
     "      Ctrl+A/E line ends · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt"
 )
 
@@ -253,6 +253,8 @@ class AnsiUvAgentApp:
         self._pending_goal_objective = ""
         self._image_sequence_next = 1
         self._image_paths_by_number: dict[int, Path] = {}
+        self._image_status_token: str | None = None
+        self._image_status_message: str | None = None
 
     def run(self) -> None:
         asyncio.run(self.run_async())
@@ -336,9 +338,6 @@ class AnsiUvAgentApp:
         if key == "\x0c":  # Ctrl+L: force a full redraw of the live region.
             self.renderer._has_frame = False  # type: ignore[attr-defined]
             self._safe_repaint()
-            return True
-        if key == CTRL_I_KEY:
-            self._attach_clipboard_image_to_composer()
             return True
         if key == "\r":
             if self._enter_looks_like_unbracketed_paste():
@@ -527,7 +526,10 @@ class AnsiUvAgentApp:
         self._insert_composer_text(insert)
         self._reset_history()
         self._after_composer_changed()
-        self.state.status_message = f"{self._text('image_queued')} {token} · {image.width}x{image.height}"
+        message = f"{self._text('image_queued')} {token} · {image.width}x{image.height}"
+        self._image_status_token = token
+        self._image_status_message = message
+        self.state.status_message = message
         self._safe_repaint()
 
     def _mark_plain_input(self) -> None:
@@ -750,6 +752,7 @@ class AnsiUvAgentApp:
             self._flush(TranscriptCell("error", text=str(exc)))
 
     def _after_composer_changed(self) -> None:
+        self._sync_image_status_with_composer()
         if self.state.composer.startswith("/") and "\n" not in self.state.composer:
             self._refresh_command_palette()
             return
@@ -759,6 +762,17 @@ class AnsiUvAgentApp:
             self._open_mention_palette(query, start)
             return
         self._close_command_palette()
+
+    def _sync_image_status_with_composer(self) -> None:
+        if not self._image_status_token or not self._image_status_message:
+            return
+        if self.state.status_message != self._image_status_message:
+            return
+        if self._image_status_token in self.state.composer:
+            return
+        self._image_status_token = None
+        self._image_status_message = None
+        self.state.status_message = "ready"
 
     def _history_prev(self) -> None:
         if not self._history:
@@ -1099,7 +1113,7 @@ class AnsiUvAgentApp:
         self._reset_history()
         self._close_command_palette()
         if text.startswith("/"):
-            if text.partition(" ")[0] in {"/image", "/paste-image"}:
+            if text.partition(" ")[0] == "/image":
                 self._set_composer_text("", cursor=0)
                 self._handle_command(text)
                 self._safe_repaint()
@@ -1151,7 +1165,7 @@ class AnsiUvAgentApp:
             self._open_skill_picker()
         elif command == "/mcp":
             self._open_mcp_picker()
-        elif command in {"/image", "/paste-image"}:
+        elif command == "/image":
             self._attach_clipboard_image_to_composer()
         elif command == "/title" and arg:
             self.state.title = arg
@@ -1181,6 +1195,8 @@ class AnsiUvAgentApp:
         self.state.goal_objective = ""
         self._pending_goal_enable = False
         self._pending_goal_objective = ""
+        self._image_status_token = None
+        self._image_status_message = None
         self.state.level = self.engine.config.runtime.default_level
         self.state.flushed.clear()
         self.state.live.clear()

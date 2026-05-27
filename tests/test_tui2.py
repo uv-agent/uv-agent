@@ -1327,7 +1327,7 @@ def test_plain_enter_after_idle_still_submits(monkeypatch) -> None:
     assert app.engine.turns[-1]["user_text"] == "hello"
 
 
-def test_ctrl_i_attaches_clipboard_image_token(monkeypatch, tmp_path) -> None:
+def test_image_command_attaches_clipboard_image_token(monkeypatch, tmp_path) -> None:
     app = _make_app(monkeypatch)
     image = tmp_path / "clip.png"
     image.write_bytes(b"fake-png")
@@ -1336,11 +1336,28 @@ def test_ctrl_i_attaches_clipboard_image_token(monkeypatch, tmp_path) -> None:
         lambda target_dir: SimpleNamespace(path=image, width=20, height=10),
     )
 
-    asyncio.run(app.handle_key("<C-I>"))
+    assert app._handle_command("/image") is True
 
     assert app.state.composer == "[Image #1]"
     assert app._image_paths_by_number == {1: image}
     assert "[Image #1]" in app.state.status_message
+
+
+def test_image_status_clears_after_token_deleted(monkeypatch, tmp_path) -> None:
+    app = _make_app(monkeypatch)
+    image = tmp_path / "clip.png"
+    image.write_bytes(b"fake-png")
+    monkeypatch.setattr(
+        "uv_agent.tui2.app.save_clipboard_image",
+        lambda target_dir: SimpleNamespace(path=image, width=20, height=10),
+    )
+    app._handle_command("/image")
+    assert "[Image #1]" in app.state.status_message
+
+    asyncio.run(app.handle_key("\b"))
+
+    assert app.state.composer == ""
+    assert app.state.status_message == "ready"
 
 
 def test_image_tokens_send_matching_paths_once(monkeypatch, tmp_path) -> None:
@@ -1404,13 +1421,6 @@ def test_terminal_reads_bracketed_paste_as_single_key() -> None:
     terminal._windows = False
 
     assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
-
-
-def test_terminal_reads_kitty_ctrl_i_as_distinct_shortcut() -> None:
-    terminal = Terminal(stdin=io.StringIO("\x1b[105;5u"))
-    terminal._windows = False
-
-    assert terminal.read_key() == "<C-I>"
 
 
 def _install_fake_msvcrt(monkeypatch, text: str) -> None:
