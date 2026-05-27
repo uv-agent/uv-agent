@@ -16,7 +16,7 @@ from uv_agent.paths import uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
-from uv_agent.tui.formatting import short_thread
+from uv_agent.tui.formatting import short_block, short_thread
 from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
 from uv_agent.tui2.events import CommandSuggestion, TranscriptCell, Tui2State, tool_payload_from_event
@@ -131,6 +131,28 @@ MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
 CTRL_C_CONFIRMATION_S = 3.0
 UNBRACKETED_PASTE_ENTER_S = 0.08
+COMPACTION_SUMMARY_PREVIEW_LINES = 4
+COMPACTION_SUMMARY_PREVIEW_CHARS = 800
+
+
+def _compaction_summary_preview(text: str) -> str:
+    """Keep compaction checkpoints compact in tui2 scrollback.
+
+    The full summary remains persisted in the thread store for future model
+    context; tui2 only needs a small visual checkpoint so long automatic
+    compactions do not flood the terminal.
+    """
+
+    return short_block(
+        text.strip(),
+        max_lines=COMPACTION_SUMMARY_PREVIEW_LINES,
+        max_chars=COMPACTION_SUMMARY_PREVIEW_CHARS,
+    )
+
+
+def _compaction_event_text(label: str, summary: object) -> str:
+    preview = _compaction_summary_preview(str(summary or ""))
+    return label + (f"\n{preview}" if preview else "")
 
 
 def composer_history_path() -> Path:
@@ -1148,9 +1170,13 @@ class AnsiUvAgentApp:
         cells = [cell for item in timeline.items if (cell := self._timeline_item_cell(item)) is not None]
         latest = self._thread_metadata(thread_id).get("latest_compaction")
         if segment.has_more and isinstance(latest, dict):
-            summary = str(latest.get("text") or "").strip()
-            text = "history since last compaction" + (f"\n{summary}" if summary else "")
-            cells.insert(0, TranscriptCell("event", text=text))
+            cells.insert(
+                0,
+                TranscriptCell(
+                    "event",
+                    text=_compaction_event_text("history since last compaction", latest.get("text")),
+                ),
+            )
         return cells
 
     def _timeline_item_cell(self, item: TimelineItem) -> TranscriptCell | None:
@@ -1174,8 +1200,7 @@ class AnsiUvAgentApp:
             path = attachment.get("path") or attachment.get("original_path") or attachment.get("source_path") or "image"
             return TranscriptCell("image", text=f"image attached: {path}")
         if item.kind == "compaction":
-            text = str(content.get("text") or "").strip()
-            return TranscriptCell("event", text="conversation compacted" + (f"\n{text}" if text else ""))
+            return TranscriptCell("event", text=_compaction_event_text("conversation compacted", content.get("text")))
         if item.kind == "warning":
             event = content.get("event") if isinstance(content.get("event"), dict) else {}
             message = str(event.get("message") or event.get("text") or "warning")
@@ -1370,9 +1395,7 @@ class AnsiUvAgentApp:
             self._flush(TranscriptCell("event", text="compaction started"))
         elif event_type == "compaction.completed":
             self.state.status_message = self._text("working")
-            summary = str(event.get("text") or "").strip()
-            payload = "conversation compacted" + (f"\n{summary}" if summary else "")
-            self._flush(TranscriptCell("event", text=payload))
+            self._flush(TranscriptCell("event", text=_compaction_event_text("conversation compacted", event.get("text"))))
         elif event_type == "turn.error":
             self.state.last_error = str(event.get("message") or "turn error")
             self._flush(TranscriptCell("error", text=self.state.last_error))

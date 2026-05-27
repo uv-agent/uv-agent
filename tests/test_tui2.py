@@ -165,6 +165,40 @@ def test_tool_cell_uses_payload_helper_calls_without_source() -> None:
     assert "print(1)" not in plain
 
 
+def test_tui2_compaction_event_shows_preview_only(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    summary = "\n".join(f"summary line {i}" for i in range(8))
+
+    app._handle_event({"type": "compaction.completed", "text": summary})
+
+    last = app.state.flushed[-1]
+    assert last.kind == "event"
+    assert "conversation compacted" in last.text
+    assert "summary line 0" in last.text
+    assert "summary line 3" in last.text
+    assert "summary line 4" not in last.text
+    assert "... 4 more lines" in last.text
+
+
+def test_tui2_history_compaction_cell_shows_preview_only(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    summary = "\n".join(f"history line {i}" for i in range(6))
+    item = tui2_app.TimelineItem(
+        id="compaction:1",
+        kind="compaction",
+        content={"text": summary},
+    )
+
+    cell = app._timeline_item_cell(item)
+
+    assert cell is not None
+    assert cell.kind == "event"
+    assert "conversation compacted" in cell.text
+    assert "history line 3" in cell.text
+    assert "history line 4" not in cell.text
+    assert "... 2 more lines" in cell.text
+
+
 def test_running_tool_cell_uses_spinner_glyph() -> None:
     call = {"name": "run_python", "call_id": "x", "arguments": "{}"}
     cell = TranscriptCell("tool", status="running", call=call)
