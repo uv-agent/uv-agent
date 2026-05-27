@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import sqlite3
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -158,6 +159,28 @@ COMPACTION_SUMMARY_PREVIEW_LINES = 4
 COMPACTION_SUMMARY_PREVIEW_CHARS = 800
 
 
+@dataclass
+class ThreadRunState:
+    """In-process execution state for one thread in tui2."""
+
+    thread_id: str
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    task: asyncio.Task[None] | None = None
+    pending_turns: list[PendingTurn] = field(default_factory=list)
+    started_at: float | None = None
+    status_message: str = "running"
+    last_error: str | None = None
+    terminal_status: str = "working"
+    assistant_cell: TranscriptCell | None = None
+    reasoning_cell: TranscriptCell | None = None
+    reasoning_flushed_for_current_response: bool = False
+    tool_cells: dict[str, TranscriptCell] = field(default_factory=dict)
+
+    @property
+    def running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+
 def _compaction_summary_preview(text: str) -> str:
     """Keep compaction checkpoints compact in tui2 scrollback.
 
@@ -230,8 +253,7 @@ class AnsiUvAgentApp:
             language=self.language,
         )
         self.renderer = Renderer()
-        self.cancel_event: asyncio.Event | None = None
-        self._running_task: asyncio.Task[None] | None = None
+        self._thread_runs: dict[str, ThreadRunState] = {}
         self._assistant_cell: TranscriptCell | None = None
         self._reasoning_cell: TranscriptCell | None = None
         self._reasoning_flushed_for_current_response = False
@@ -240,7 +262,6 @@ class AnsiUvAgentApp:
         self._history_cursor: int | None = None
         self._draft: str = ""
         self._tab_state: dict[str, Any] | None = None
-        self._turn_started_at: float | None = None
         self._quit_armed = False
         self._quit_armed_until: float | None = None
         self._quit_confirmation_status: str | None = None
@@ -266,6 +287,106 @@ class AnsiUvAgentApp:
         self._image_status_token: str | None = None
         self._image_status_message: str | None = None
 
+    @property
+    def _running_task(self) -> asyncio.Task[None] | None:
+        """Compatibility view of the attached thread's running task."""
+
+        thread_id = self.state.thread_id
+        if not thread_id:
+            return None
+        run_state = self._thread_runs.get(thread_id)
+        return run_state.task if run_state is not None else None
+
+    @_running_task.setter
+    def _running_task(self, task: asyncio.Task[None] | None) -> None:
+        """Compatibility setter used by older tests to simulate a busy turn."""
+
+        thread_id = self.state.thread_id or "__draft__"
+        if task is None:
+            self._thread_runs.pop(thread_id, None)
+            return
+        run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
+        run_state.task = task
+        if self.state.thread_id is None:
+            self.state.thread_id = thread_id
+
+    @property
+    def cancel_event(self) -> asyncio.Event | None:
+        """Compatibility view of the attached thread's cancel event."""
+
+        thread_id = self.state.thread_id
+        if not thread_id:
+            return None
+        run_state = self._thread_runs.get(thread_id)
+        return run_state.cancel_event if run_state is not None else None
+
+    @cancel_event.setter
+    def cancel_event(self, event: asyncio.Event | None) -> None:
+        thread_id = self.state.thread_id or "__draft__"
+        if event is None:
+            run_state = self._thread_runs.get(thread_id)
+            if run_state is not None and not run_state.running:
+                self._thread_runs.pop(thread_id, None)
+            return
+        run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
+        run_state.cancel_event = event
+        if self.state.thread_id is None:
+            self.state.thread_id = thread_id
+
+    def _run_state(self, thread_id: str | None = None) -> ThreadRunState | None:
+        resolved = thread_id or self.state.thread_id
+        if not resolved:
+            return None
+        return self._thread_runs.get(resolved)
+
+    def _run_state_for_event(self, event: dict[str, Any]) -> ThreadRunState | None:
+        event_thread_id = str(event.get("thread_id") or self.state.thread_id or "")
+        return self._thread_runs.get(event_thread_id) if event_thread_id else None
+
+    def _is_attached_thread(self, thread_id: str | None) -> bool:
+        return bool(thread_id and thread_id == self.state.thread_id)
+
+    def _sync_attached_run_state(self, run_state: ThreadRunState | None = None) -> None:
+        run_state = run_state or self._run_state()
+        if run_state is None:
+            self.state.busy = False
+            self.state.pending_turns.clear()
+            self.state.turn_elapsed_s = None
+            return
+        self.state.busy = run_state.running
+        self.state.pending_turns = run_state.pending_turns
+        self.state.status_message = run_state.status_message if run_state.running else "ready"
+        self.state.last_error = run_state.last_error
+        self._assistant_cell = run_state.assistant_cell
+        self._reasoning_cell = run_state.reasoning_cell
+        self._reasoning_flushed_for_current_response = run_state.reasoning_flushed_for_current_response
+        self._tool_cells = run_state.tool_cells
+        if run_state.running and run_state.started_at is not None:
+            self.state.turn_elapsed_s = monotonic() - run_state.started_at
+        else:
+            self.state.turn_elapsed_s = None
+
+    def _detach_live_run_state(self) -> None:
+        run_state = self._run_state()
+        if run_state is not None:
+            self._capture_attached_run_state(run_state)
+        self._assistant_cell = None
+        self._reasoning_cell = None
+        self._reasoning_flushed_for_current_response = False
+        self._tool_cells = {}
+        self.state.live.clear()
+
+    def _capture_attached_run_state(self, run_state: ThreadRunState | None = None) -> None:
+        run_state = run_state or self._run_state()
+        if run_state is None:
+            return
+        run_state.assistant_cell = self._assistant_cell
+        run_state.reasoning_cell = self._reasoning_cell
+        run_state.reasoning_flushed_for_current_response = self._reasoning_flushed_for_current_response
+        run_state.tool_cells = self._tool_cells
+        run_state.status_message = self.state.status_message
+        run_state.last_error = self.state.last_error
+
     def run(self) -> None:
         asyncio.run(self.run_async())
 
@@ -282,10 +403,13 @@ class AnsiUvAgentApp:
                         key = "\x03"
                     if not await self.handle_key(key):
                         break
-                if self._running_task is not None and not self._running_task.done():
-                    if self.cancel_event is not None:
-                        self.cancel_event.set()
-                    await asyncio.gather(self._running_task, return_exceptions=True)
+                running_states = [run_state for run_state in self._thread_runs.values() if run_state.running]
+                for run_state in running_states:
+                    run_state.cancel_event.set()
+                await asyncio.gather(
+                    *(run_state.task for run_state in running_states if run_state.task is not None),
+                    return_exceptions=True,
+                )
             finally:
                 if self._ticker_task is not None:
                     self._ticker_task.cancel()
@@ -602,6 +726,7 @@ class AnsiUvAgentApp:
 
     def _agent_view_row_for_thread(self, thread_id: str, thread: dict[str, Any]) -> AgentViewRow:
         status = self._agent_view_thread_status(thread_id, thread)
+        run_state = self._thread_runs.get(thread_id)
         return AgentViewRow(
             thread_id=thread_id,
             title=str(thread.get("title") or "New thread"),
@@ -610,15 +735,18 @@ class AnsiUvAgentApp:
             updated_at=str(thread.get("updated_at") or ""),
             worktree_branch=str(thread.get("worktree_branch") or ""),
             worktree_path=str(thread.get("worktree_path") or ""),
-            elapsed_seconds=monotonic() - self._turn_started_at if thread_id == self.state.thread_id and self.state.busy and self._turn_started_at else 0.0,
-            queued_turns=len(self.state.pending_turns) if thread_id == self.state.thread_id else 0,
+            elapsed_seconds=monotonic() - run_state.started_at if run_state and run_state.started_at else 0.0,
+            queued_turns=len(run_state.pending_turns) if run_state is not None else 0,
         )
 
     def _agent_view_thread_status(self, thread_id: str, thread: dict[str, Any]) -> str:
-        if thread_id == self.state.thread_id and self.state.busy:
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is not None and run_state.running:
             return "working"
-        if thread_id == self.state.thread_id and self.state.pending_turns:
+        if run_state is not None and run_state.pending_turns:
             return "queued"
+        if run_state is not None and run_state.terminal_status in {"failed", "interrupted", "completed"}:
+            return run_state.terminal_status
         event_type = self._latest_thread_terminal_event_type(thread_id)
         if event_type == "turn.error":
             return "failed"
@@ -768,11 +896,14 @@ class AnsiUvAgentApp:
         return self._clear_interrupt_confirmation()
 
     def _interrupt_running_turn(self) -> bool:
-        if self.cancel_event is None:
+        run_state = self._run_state()
+        if run_state is None:
             return False
-        self.cancel_event.set()
+        run_state.cancel_event.set()
         self._clear_interrupt_confirmation()
         self._clear_quit_confirmation()
+        run_state.status_message = self._text("interrupted")
+        run_state.terminal_status = "interrupted"
         self.state.status_message = self._text("interrupted")
         return True
 
@@ -1326,8 +1457,10 @@ class AnsiUvAgentApp:
             self._safe_repaint()
             return should_continue
         prompt, image_paths, image_numbers = self._message_payload_from_composer(text)
-        if self._running_task is not None and not self._running_task.done():
-            self.state.pending_turns.append(PendingTurn(prompt, image_paths))
+        run_state = self._run_state()
+        if run_state is not None and run_state.running:
+            run_state.pending_turns.append(PendingTurn(prompt, image_paths))
+            self._sync_attached_run_state(run_state)
             self._release_image_numbers(image_numbers)
             self._clear_image_status_tracking()
             self._set_composer_text("", cursor=0)
@@ -1398,6 +1531,9 @@ class AnsiUvAgentApp:
     def _clear_to_new_thread(self) -> None:
         old_thread_id = self.state.thread_id
         self._finish_live_cells()
+        old_run_state = self._run_state(old_thread_id)
+        if old_run_state is not None:
+            old_run_state.pending_turns.clear()
         self.state.thread_id = None
         self.state.title = "New thread"
         self.state.goal_enabled = False
@@ -1410,7 +1546,7 @@ class AnsiUvAgentApp:
         self.state.level = self.engine.config.runtime.default_level
         self.state.flushed.clear()
         self.state.live.clear()
-        self.state.pending_turns.clear()
+        self.state.pending_turns = []
         self.state.last_error = None
         self._tool_cells.clear()
         self._assistant_cell = None
@@ -1528,7 +1664,10 @@ class AnsiUvAgentApp:
     def _resume_thread(self, thread_id: str) -> None:
         if not thread_id:
             return
-        self._finish_live_cells()
+        if thread_id != self.state.thread_id:
+            self._detach_live_run_state()
+        else:
+            self._finish_live_cells()
         metadata = self._thread_metadata(thread_id)
         self.state.thread_id = thread_id
         self.state.title = str(metadata.get("title") or "New thread")
@@ -1540,10 +1679,22 @@ class AnsiUvAgentApp:
         self._pending_goal_objective = ""
         self.state.flushed.clear()
         self.state.live.clear()
-        self._tool_cells.clear()
-        self._assistant_cell = None
-        self._reasoning_cell = None
-        self._reasoning_flushed_for_current_response = False
+        run_state = self._run_state(thread_id)
+        if run_state is not None and run_state.running:
+            self._assistant_cell = run_state.assistant_cell
+            self._reasoning_cell = run_state.reasoning_cell
+            self._reasoning_flushed_for_current_response = run_state.reasoning_flushed_for_current_response
+            self._tool_cells = run_state.tool_cells
+            self.state.live = [
+                cell
+                for cell in [self._reasoning_cell, self._assistant_cell, *self._tool_cells.values()]
+                if cell is not None and not cell.done
+            ]
+        else:
+            self._tool_cells.clear()
+            self._assistant_cell = None
+            self._reasoning_cell = None
+            self._reasoning_flushed_for_current_response = False
         self.state.last_error = None
         self._refresh_window_title()
         cells = self._history_cells_for_thread(thread_id)
@@ -1556,6 +1707,9 @@ class AnsiUvAgentApp:
             self.renderer.output.flush()
         self.renderer.flush_cells(cells)
         self.state.status_message = f"{self._text('resumed')} {short_thread(thread_id)}"
+        self._sync_attached_run_state(run_state)
+        if run_state is None or not run_state.running:
+            self.state.status_message = f"{self._text('resumed')} {short_thread(thread_id)}"
         self._safe_repaint()
 
     def _history_cells_for_thread(self, thread_id: str) -> list[TranscriptCell]:
@@ -1691,46 +1845,109 @@ class AnsiUvAgentApp:
         self.state.level = level
         self._persist_thread_level(thread_id, level)
         self._flush(TranscriptCell("user", text=text))
-        self.cancel_event = asyncio.Event()
+        run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
+        run_state.cancel_event = asyncio.Event()
+        run_state.started_at = monotonic()
+        run_state.status_message = "running"
+        run_state.last_error = None
+        run_state.terminal_status = "working"
+        run_state.assistant_cell = None
+        run_state.reasoning_cell = None
+        run_state.reasoning_flushed_for_current_response = False
+        run_state.tool_cells = {}
         self._clear_quit_confirmation()
         self._clear_interrupt_confirmation()
         self.state.busy = True
         self.state.status_message = "running"
         self.state.last_error = None
         self._reasoning_flushed_for_current_response = False
-        self._turn_started_at = monotonic()
+        self._assistant_cell = None
+        self._reasoning_cell = None
+        self._tool_cells = run_state.tool_cells
         self._apply_window_title()
-        self._running_task = asyncio.create_task(self._run_turn(text, image_paths=list(image_paths or [])))
+        run_state.task = asyncio.create_task(
+            self._run_turn(thread_id, text, image_paths=list(image_paths or []))
+        )
         self._safe_repaint()
 
-    async def _run_turn(self, text: str, *, image_paths: list[Path]) -> None:
+    async def _run_turn(self, thread_id: str, text: str, *, image_paths: list[Path]) -> None:
+        run_state = self._thread_runs[thread_id]
         try:
-            if self.state.thread_id:
-                self._materialize_pending_goal_enable(self.state.thread_id)
+            if self._is_attached_thread(thread_id):
+                self._sync_attached_run_state(run_state)
+            self._materialize_pending_goal_enable(thread_id)
             async for event in self.engine.run_turn(
                 user_text=text,
-                thread_id=self.state.thread_id,
-                level=self.state.level,
+                thread_id=thread_id,
+                level=self._current_level_for_thread(thread_id),
                 image_paths=image_paths,
-                cancel_event=self.cancel_event,
+                cancel_event=run_state.cancel_event,
             ):
-                self._handle_event(event)
-                self._safe_repaint()
+                if self._is_attached_thread(thread_id):
+                    self._handle_event(event)
+                    self._capture_attached_run_state(run_state)
+                    self._safe_repaint()
+                else:
+                    self._handle_background_event(run_state, event)
         except Exception as exc:
-            self.state.last_error = str(exc) or repr(exc)
-            self._flush(TranscriptCell("error", text=self.state.last_error))
+            run_state.last_error = str(exc) or repr(exc)
+            run_state.terminal_status = "failed"
+            if self._is_attached_thread(thread_id):
+                self.state.last_error = run_state.last_error
+                self._flush(TranscriptCell("error", text=run_state.last_error))
         finally:
-            self._finish_live_cells()
-            self.state.busy = False
-            self.state.status_message = "ready"
-            self.state.turn_elapsed_s = None
-            self._turn_started_at = None
-            self.cancel_event = None
-            self._apply_window_title()
-            self._safe_repaint()
-            if self.state.pending_turns:
-                next_turn = self.state.pending_turns.pop(0)
-                await self._start_turn(next_turn.text, image_paths=next_turn.image_paths)
+            if self._is_attached_thread(thread_id):
+                self._sync_attached_run_state(run_state)
+                self._finish_live_cells()
+                self._capture_attached_run_state(run_state)
+            run_state.started_at = None
+            run_state.status_message = "ready"
+            if self._is_attached_thread(thread_id):
+                self.state.busy = False
+                self.state.status_message = "ready"
+                self.state.turn_elapsed_s = None
+                self._apply_window_title()
+                self._safe_repaint()
+            if run_state.pending_turns:
+                next_turn = run_state.pending_turns.pop(0)
+                await self._start_turn_for_thread(thread_id, next_turn.text, image_paths=next_turn.image_paths)
+            elif not run_state.running:
+                self._thread_runs.pop(thread_id, None)
+
+    async def _start_turn_for_thread(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        image_paths: list[Path] | None = None,
+    ) -> None:
+        if self._is_attached_thread(thread_id):
+            await self._start_turn(text, image_paths=image_paths)
+            return
+        run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
+        run_state.cancel_event = asyncio.Event()
+        run_state.started_at = monotonic()
+        run_state.status_message = "running"
+        run_state.last_error = None
+        run_state.terminal_status = "working"
+        run_state.assistant_cell = None
+        run_state.reasoning_cell = None
+        run_state.reasoning_flushed_for_current_response = False
+        run_state.tool_cells = {}
+        run_state.task = asyncio.create_task(self._run_turn(thread_id, text, image_paths=list(image_paths or [])))
+
+    def _run_state_for_cell(self, cell: TranscriptCell | None = None) -> ThreadRunState | None:
+        attached = self._run_state()
+        if cell is None:
+            return attached
+        for run_state in self._thread_runs.values():
+            if (
+                cell is run_state.assistant_cell
+                or cell is run_state.reasoning_cell
+                or cell in run_state.tool_cells.values()
+            ):
+                return run_state
+        return attached
 
     def _handle_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
@@ -1812,6 +2029,19 @@ class AnsiUvAgentApp:
             self._notify_turn_completed()
             self._refresh_window_title()
 
+    def _handle_background_event(self, run_state: ThreadRunState, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type == "thread.title":
+            self._refresh_agent_view_rows()
+        elif event_type == "turn.error":
+            run_state.last_error = str(event.get("message") or "turn error")
+            run_state.terminal_status = "failed"
+        elif event_type == "turn.interrupted":
+            run_state.terminal_status = "interrupted"
+        elif event_type == "turn.completed":
+            run_state.terminal_status = "completed"
+            self._notify_turn_completed()
+
     def _notify_turn_completed(self) -> None:
         notification_config = getattr(getattr(self.engine.config, "ui", None), "completion_notification", None)
         if notification_config is not None:
@@ -1876,6 +2106,9 @@ class AnsiUvAgentApp:
             self.state.live.append(self._assistant_cell)
         self._assistant_cell.text += text
         self._assistant_cell.chars_streamed += len(text)
+        run_state = self._run_state()
+        if run_state is not None:
+            run_state.assistant_cell = self._assistant_cell
 
     def _append_reasoning(self, text: str) -> None:
         if not text:
@@ -1886,6 +2119,10 @@ class AnsiUvAgentApp:
             self._reasoning_flushed_for_current_response = False
         self._reasoning_cell.text += text
         self._reasoning_cell.chars_streamed += len(text)
+        run_state = self._run_state()
+        if run_state is not None:
+            run_state.reasoning_cell = self._reasoning_cell
+            run_state.reasoning_flushed_for_current_response = self._reasoning_flushed_for_current_response
 
     def _update_tool(self, event: dict[str, Any], *, running: bool) -> None:
         call = event.get("call") if isinstance(event.get("call"), dict) else {}
@@ -1895,6 +2132,9 @@ class AnsiUvAgentApp:
             cell = TranscriptCell("tool", status="running", call=call)
             self._tool_cells[key] = cell
             self.state.live.append(cell)
+            run_state = self._run_state()
+            if run_state is not None:
+                run_state.tool_cells = self._tool_cells
         elif call and not cell.call:
             cell.call = call
         payload = tool_payload_from_event(event)
@@ -2007,10 +2247,7 @@ class AnsiUvAgentApp:
     def _safe_repaint(self) -> None:
         """Repaint without letting UI bugs unwind the engine async generator."""
 
-        if self._turn_started_at is not None and self.state.busy:
-            self.state.turn_elapsed_s = monotonic() - self._turn_started_at
-        else:
-            self.state.turn_elapsed_s = None
+        self._sync_attached_run_state()
         self._refresh_context_percent()
         try:
             self.renderer.repaint(self.state)

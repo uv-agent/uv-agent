@@ -1560,6 +1560,46 @@ def test_queued_turn_captures_image_paths_at_submit_time(monkeypatch, tmp_path) 
     assert app.state.image_token_numbers == set()
 
 
+
+def test_thread_run_state_tracks_queues_per_thread(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "thr_attached"
+    app.engine.thread_store.threads = [
+        {"thread_id": "thr_attached", "title": "Attached"},
+        {"thread_id": "thr_bg", "title": "Background"},
+    ]
+    attached = tui2_app.ThreadRunState(thread_id="thr_attached")
+    attached.pending_turns.append(tui2_app.PendingTurn("attached queued"))
+    background = tui2_app.ThreadRunState(thread_id="thr_bg")
+    background.pending_turns.append(tui2_app.PendingTurn("background queued"))
+    app._thread_runs = {"thr_attached": attached, "thr_bg": background}
+
+    app._sync_attached_run_state(attached)
+
+    assert app.state.pending_turns is attached.pending_turns
+    rows = {row.thread_id: row for row in [app._agent_view_row_for_thread("thr_attached", app.engine.thread_store.threads[0]), app._agent_view_row_for_thread("thr_bg", app.engine.thread_store.threads[1])]}
+    assert rows["thr_attached"].queued_turns == 1
+    assert rows["thr_bg"].queued_turns == 1
+
+
+def test_resuming_thread_preserves_running_state_for_previous_thread(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "thr_1"
+    app.state.live = [TranscriptCell("assistant", text="streaming", status="streaming")]
+    run_state = tui2_app.ThreadRunState(thread_id="thr_1")
+    app._thread_runs["thr_1"] = run_state
+    app.engine.thread_store.threads = [
+        {"thread_id": "thr_1", "title": "One"},
+        {"thread_id": "thr_2", "title": "Two"},
+    ]
+
+    app._resume_thread("thr_2")
+
+    assert app.state.thread_id == "thr_2"
+    assert app.state.live == []
+    assert "thr_1" in app._thread_runs
+
+
 def test_terminal_reads_bracketed_paste_as_single_key() -> None:
     terminal = Terminal(stdin=io.StringIO("\x1b[200~one\r\ntwo\x1b[201~"))
     terminal._windows = False
