@@ -488,48 +488,161 @@ def render_agent_view_with_cursor(
 ) -> tuple[list[str], int, int]:
     """Render the full-screen Agent View dashboard and input row."""
 
-    view = state.agent_view
     width = max(20, width)
-    inner = max(8, width - 4)
-    rows: list[str] = [sgr(theme.border_accent, "╭─ Agent View " + "─" * max(0, width - 16) + "╮")]
+    max_rows = max_height if max_height is None else max(1, max_height)
+    header = _agent_header_line(width, theme)
 
-    body_budget = max(1, (max_height or 30) - 6)
+    if max_rows is not None and max_rows <= 4:
+        return _render_compact_agent_view(state, width, theme, max_rows)
+
+    # Render the bottom chrome first so the session list can consume only the
+    # remaining rows.  The previous fixed ``- 6`` estimate missed the optional
+    # hidden-row marker, peek/status rows, and multi-line composer, which could
+    # push the panel past the viewport and make the terminal scroll away rows
+    # that the renderer later tried to erase.
+    composer_max_rows = 3
+    if max_rows is not None:
+        composer_max_rows = max(1, min(3, max_rows - 5))
+    composer_lines, composer_cursor_row, cursor_col = _render_agent_composer_with_cursor(
+        state,
+        width,
+        theme,
+        max_input_rows=composer_max_rows,
+    )
+    peek_lines = _agent_peek_lines(state, width, theme)
+    if max_rows is not None:
+        # Prefer keeping the status/confirmation line when vertical space is
+        # tight; the detailed peek can be restored with a taller terminal.
+        while len(peek_lines) > 1 and _agent_chrome_height(peek_lines, composer_lines) > max_rows:
+            peek_lines = peek_lines[:1]
+        if _agent_chrome_height(peek_lines, composer_lines) > max_rows:
+            peek_lines = []
+
+    body_budget = max(0, (max_rows or 30) - _agent_chrome_height(peek_lines, composer_lines))
+    body_lines = _agent_body_lines(state, width, spinner_frame, theme, max_lines=body_budget)
+
+    rows: list[str] = [header]
+    rows.extend(body_lines)
+    rows.append(_agent_separator(width, theme))
+    rows.extend(peek_lines)
+    rows.append(_agent_separator(width, theme))
+    cursor_row = len(rows) + composer_cursor_row
+    rows.extend(composer_lines)
+    rows.append(sgr(theme.border_accent, "╰" + "─" * (width - 2) + "╯"))
+
+    if max_rows is not None and len(rows) > max_rows:
+        rows, cursor_row = _trim_agent_rows_to_height(rows, cursor_row, max_rows)
+
+    return [truncate_visible(line, width) for line in rows], min(cursor_row, len(rows) - 1), cursor_col
+
+
+def _agent_header_line(width: int, theme: AnsiTheme) -> str:
+    title = "─ Agent View "
+    fill = "─" * max(0, width - visible_len("╭" + title + "╮"))
+    return sgr(theme.border_accent, "╭" + title + fill + "╮")
+
+
+def _render_compact_agent_view(
+    state: Tui2State,
+    width: int,
+    theme: AnsiTheme,
+    max_rows: int,
+) -> tuple[list[str], int, int]:
+    """Fallback for very short terminals where the full dashboard cannot fit."""
+
+    composer_lines, composer_cursor_row, cursor_col = _render_agent_composer_with_cursor(
+        state,
+        width,
+        theme,
+        max_input_rows=1,
+    )
+    if max_rows <= 1:
+        return [truncate_visible(composer_lines[0], width)], 0, cursor_col
+    if max_rows == 2:
+        lines = [_agent_header_line(width, theme), composer_lines[0]]
+        return [truncate_visible(line, width) for line in lines], 1, cursor_col
+    lines = [
+        _agent_header_line(width, theme),
+        composer_lines[min(composer_cursor_row, len(composer_lines) - 1)],
+        sgr(theme.border_accent, "╰" + "─" * (width - 2) + "╯"),
+    ]
+    return [truncate_visible(line, width) for line in lines[:max_rows]], 1, cursor_col
+
+
+def _agent_chrome_height(peek_lines: list[str], composer_lines: list[str]) -> int:
+    # Header, body/peek separator, peek, composer separator, composer, footer.
+    return 1 + 1 + len(peek_lines) + 1 + len(composer_lines) + 1
+
+
+def _agent_body_lines(
+    state: Tui2State,
+    width: int,
+    spinner_frame: int,
+    theme: AnsiTheme,
+    *,
+    max_lines: int,
+) -> list[str]:
+    view = state.agent_view
     grouped: dict[str, list[tuple[int, AgentViewRow]]] = {status: [] for status in _AGENT_STATUS_ORDER}
     for index, row in enumerate(view.rows):
         grouped.setdefault(row.status, []).append((index, row))
 
-    used = 0
+    if not view.rows:
+        empty = [
+            _agent_box_line(sgr(theme.muted, "No agent sessions yet"), width, theme),
+            _agent_box_line(sgr(theme.dim, "Type a task below and press Enter to dispatch it."), width, theme),
+        ]
+        return empty[:max(0, max_lines)]
+
+    if max_lines <= 0:
+        return []
+
+    items: list[str] = []
+    selected_item_index = 0
     for status in _AGENT_STATUS_ORDER:
         entries = grouped.get(status) or []
         if not entries:
             continue
-        if used < body_budget:
-            label = f"{_AGENT_STATUS_LABELS.get(status, status.upper())} ({len(entries)})"
-            rows.append(_agent_box_line(sgr(theme.muted, label), width, theme))
-            used += 1
+        label = f"{_AGENT_STATUS_LABELS.get(status, status.upper())} ({len(entries)})"
+        items.append(_agent_box_line(sgr(theme.muted, label), width, theme))
         for absolute, row in entries:
-            if used >= body_budget:
-                continue
-            rows.append(_agent_row_line(row, absolute == view.selected, width, spinner_frame, theme))
-            used += 1
+            if absolute == view.selected:
+                selected_item_index = len(items)
+            items.append(_agent_row_line(row, absolute == view.selected, width, spinner_frame, theme))
 
-    if not view.rows and used < body_budget:
-        rows.append(_agent_box_line(sgr(theme.muted, "No agent sessions yet"), width, theme))
-        rows.append(_agent_box_line(sgr(theme.dim, "Type a task below and press Enter to dispatch it."), width, theme))
-        used += 2
-    hidden = max(0, sum(len(items) for items in grouped.values()) + sum(1 for items in grouped.values() if items) - used)
-    if hidden:
-        rows.append(_agent_box_line(sgr(theme.muted, f"… {hidden} rows hidden"), width, theme))
+    if len(items) <= max_lines:
+        return items
+    if max_lines == 1:
+        return [_agent_hidden_marker(width, theme, hidden_before=0, hidden_after=len(items))]
 
-    rows.append(_agent_separator(width, theme))
-    rows.extend(_agent_peek_lines(state, width, theme))
-    rows.append(_agent_separator(width, theme))
-    composer_lines, cursor_row, cursor_col = _render_agent_composer_with_cursor(state, width, theme)
-    cursor_row += len(rows)
-    rows.extend(composer_lines)
-    rows.append(sgr(theme.border_accent, "╰" + "─" * (width - 2) + "╯"))
+    window = max_lines - 1
+    start = min(max(0, selected_item_index - window // 2), max(0, len(items) - window))
+    visible = items[start : start + window]
+    hidden_before = start
+    hidden_after = max(0, len(items) - (start + len(visible)))
+    marker = _agent_hidden_marker(width, theme, hidden_before=hidden_before, hidden_after=hidden_after)
+    if hidden_before and not hidden_after:
+        return [marker] + visible
+    return visible + [marker]
 
-    return [truncate_visible(line, width) for line in rows], cursor_row, cursor_col
+
+def _agent_hidden_marker(width: int, theme: AnsiTheme, *, hidden_before: int, hidden_after: int) -> str:
+    parts: list[str] = []
+    if hidden_before:
+        parts.append(f"↑ {hidden_before}")
+    if hidden_after:
+        parts.append(f"↓ {hidden_after}")
+    detail = " · ".join(parts) if parts else "0"
+    return _agent_box_line(sgr(theme.muted, f"… {detail} rows hidden"), width, theme)
+
+
+def _trim_agent_rows_to_height(rows: list[str], cursor_row: int, max_rows: int) -> tuple[list[str], int]:
+    """Last-resort guard: never let Agent View exceed the renderer budget."""
+
+    if len(rows) <= max_rows:
+        return rows, cursor_row
+    keep_from = max(0, len(rows) - max_rows)
+    return rows[keep_from:], max(0, cursor_row - keep_from)
 
 
 def render_agent_view(
@@ -611,6 +724,8 @@ def _render_agent_composer_with_cursor(
     state: Tui2State,
     width: int,
     theme: AnsiTheme,
+    *,
+    max_input_rows: int = 3,
 ) -> tuple[list[str], int, int]:
     view = state.agent_view
     inner = max(8, width - 4)
@@ -641,8 +756,9 @@ def _render_agent_composer_with_cursor(
                 remaining -= len(part)
         wrapped.extend(parts)
         consumed = end + 1
-    visible_rows = wrapped[-3:]
-    hidden = len(wrapped) - len(visible_rows)
+    visible_count = max(1, min(max_input_rows, len(wrapped)))
+    hidden = 0 if cursor_row < visible_count else cursor_row - visible_count + 1
+    visible_rows = wrapped[hidden : hidden + visible_count]
     rendered: list[str] = []
     for idx, body in enumerate(visible_rows):
         absolute = hidden + idx

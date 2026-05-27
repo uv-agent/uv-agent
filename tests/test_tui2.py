@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from uv_agent.tui2.ansi import strip_ansi, visible_len
 from uv_agent.tui2.components import (
     render_agent_view,
+    render_agent_view_with_cursor,
     render_cell,
     render_composer_with_cursor,
     render_live_with_cursor,
@@ -550,6 +551,24 @@ def test_renderer_reserves_last_column_to_avoid_terminal_autowrap(monkeypatch) -
         for line in strip_ansi(output.getvalue()).splitlines()
         if line
     )
+
+
+def test_renderer_caps_agent_view_to_terminal_height(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 10))
+    state = Tui2State(mode="agent_view")
+    state.agent_view.rows = [
+        AgentViewRow(thread_id=f"thr_{index}", title=f"Task {index}", status="working")
+        for index in range(30)
+    ]
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+
+    renderer.repaint(state)
+
+    # The renderer reserves one terminal row, so the Agent View frame must not
+    # write more than 9 physical rows into a 10-row terminal.
+    painted = strip_ansi(output.getvalue()).replace("\x1b[?2026h", "").replace("\x1b[?2026l", "")
+    assert len([line for line in painted.splitlines() if line]) <= 9
 
 
 def test_idempotent_repaint_wraps_in_sync_output() -> None:
@@ -1209,6 +1228,54 @@ def test_agent_view_renderer_groups_rows_and_shows_peek() -> None:
     assert "agent-fix-login-abc12345" in plain
     assert "peek:" in plain
     assert "running tests" in plain
+
+
+def test_agent_view_renderer_respects_max_height_with_many_rows() -> None:
+    state = Tui2State(mode="agent_view")
+    state.agent_view.rows = [
+        AgentViewRow(
+            thread_id=f"thr_{index}",
+            title=f"Task {index}",
+            status="working" if index % 2 else "completed",
+            summary="summary",
+            worktree_branch=f"agent-task-{index}",
+        )
+        for index in range(24)
+    ]
+    state.agent_view.selected = 15
+
+    lines, cursor_row, _ = render_agent_view_with_cursor(state, 88, 0, max_height=12)
+    plain = "\n".join(strip_ansi(line) for line in lines)
+
+    assert len(lines) <= 12
+    assert 0 <= cursor_row < len(lines)
+    assert "rows hidden" in plain
+    assert "Task 15" in plain
+
+
+def test_agent_view_renderer_accounts_for_multiline_composer_height() -> None:
+    state = Tui2State(mode="agent_view")
+    state.agent_view.rows = [
+        AgentViewRow(thread_id=f"thr_{index}", title=f"Task {index}", status="completed")
+        for index in range(12)
+    ]
+    state.agent_view.composer = "\n".join(f"line {index}" for index in range(6))
+    state.agent_view.composer_cursor = len(state.agent_view.composer)
+
+    lines, cursor_row, _ = render_agent_view_with_cursor(state, 60, 0, max_height=10)
+
+    assert len(lines) <= 10
+    assert 0 <= cursor_row < len(lines)
+
+
+def test_agent_view_renderer_has_compact_layout_for_tiny_viewports() -> None:
+    state = Tui2State(mode="agent_view")
+    state.agent_view.composer = "tiny terminal prompt"
+
+    lines, cursor_row, _ = render_agent_view_with_cursor(state, 40, 0, max_height=3)
+
+    assert len(lines) <= 3
+    assert 0 <= cursor_row < len(lines)
 
 
 
