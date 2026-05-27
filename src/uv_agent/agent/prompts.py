@@ -51,6 +51,12 @@ TITLE_GENERATION_PROMPT = (
     "Return only the title, without quotes or punctuation. Prefer the user's language. "
     "Keep it under 8 words or 24 CJK characters."
 )
+BRANCH_NAME_GENERATION_PROMPT = (
+    "Create a short git branch slug from the user's task. Capture the concrete action and object. "
+    "Return only the slug: ASCII lowercase letters, digits, and hyphens. No spaces, slashes, quotes, "
+    "punctuation, explanations, or prefixes. Keep it at 30 characters or fewer. Prefer verb-object "
+    "phrases such as fix-login-redirect, add-dark-mode, or refactor-parser."
+)
 COMPACTED_CONTEXT_CONTINUATION = (
     "The retained-history messages above may include earlier user or assistant messages preserved for continuity. "
     "Continue from this compacted context and resume any unfinished task. "

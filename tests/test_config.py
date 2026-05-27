@@ -61,6 +61,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                 },
                 "runtime": {
                     "title_generation": {"model_level": "quick"},
+                    "branch_name_generation": {"model_level": "branch"},
                     "stream_retry": {
                         "max_retries": 3,
                         "base": 0.5,
@@ -92,6 +93,8 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert model.reasoning_display.unknown_text_delta_as_reasoning is True
     assert config.runtime.title_generation.enabled is True
     assert config.runtime.title_generation.model_level == "quick"
+    assert config.runtime.branch_name_generation.enabled is True
+    assert config.runtime.branch_name_generation.model_level == "branch"
     assert config.runtime.compression.enabled is True
     assert config.runtime.stream_retry.max_retries == 3
     assert config.runtime.stream_retry.base == 0.5
@@ -295,6 +298,7 @@ def test_default_title_and_compression_levels_do_not_assume_small(tmp_path: Path
     assert list(config.levels) == ["fast", "deep"]
     assert config.runtime.default_level == "fast"
     assert config.runtime.title_generation.model_level is None
+    assert config.runtime.branch_name_generation.model_level is None
     assert config.runtime.compression.model_level is None
     assert config.runtime.compression.enabled is True
 
@@ -307,6 +311,7 @@ def test_compression_and_title_prompt_are_not_config_fields(tmp_path: Path) -> N
                 "runtime": {
                     "compression": {"enabled": False, "prompt": "custom", "target_ratio": 0.1},
                     "title_generation": {"prompt": "custom"},
+                    "branch_name_generation": {"prompt": "custom"},
                 },
             }
         ),

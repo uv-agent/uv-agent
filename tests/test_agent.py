@@ -12,6 +12,7 @@ import openai
 from uv_agent.agent import (
     AgentEngine,
     PYTHON_TOOL,
+    clean_branch_slug,
     message_item,
     message_item_text,
     model_tool_payload,
@@ -19,7 +20,7 @@ from uv_agent.agent import (
     usage_token_count,
 )
 from uv_agent.agent.compaction import compaction_response_summary_text, retain_item_after_compaction
-from uv_agent.agent.prompts import POST_TOOL_COMPACTION_BRIDGE
+from uv_agent.agent.prompts import BRANCH_NAME_GENERATION_PROMPT, POST_TOOL_COMPACTION_BRIDGE
 from uv_agent.billing import billing_charge_for_usage, billing_token_breakdown, format_billing_total
 from uv_agent.config import (
     AppConfig,
@@ -32,6 +33,7 @@ from uv_agent.config import (
     RunnerConfig,
     RuntimeConfig,
     StreamRetryConfig,
+    BranchNameGenerationConfig,
     TitleGenerationConfig,
     load_config,
 )
@@ -381,6 +383,7 @@ def make_test_config(
     context_window_tokens: int = 100_000,
     compression: CompressionConfig | None = None,
     title_generation: TitleGenerationConfig | None = None,
+    branch_name_generation: BranchNameGenerationConfig | None = None,
     default_level: str = "medium",
     stream_retry: StreamRetryConfig | None = None,
     pricing: PricingConfig | None = None,
@@ -405,6 +408,7 @@ def make_test_config(
             default_level=default_level,
             compression=compression or CompressionConfig(enabled=compression_enabled),
             title_generation=title_generation or TitleGenerationConfig(enabled=False),
+            branch_name_generation=branch_name_generation or BranchNameGenerationConfig(enabled=False),
             stream_retry=stream_retry or StreamRetryConfig(),
         ),
         runner=RunnerConfig(
@@ -1346,6 +1350,84 @@ async def test_agent_does_not_replace_manual_thread_title(tmp_path: Path) -> Non
     assert not any(event["type"] == "thread.title" for event in events)
     assert engine.thread_store.thread_digest(thread_id)["title"] == "Manual title"
     assert len(client.requests) == 1
+
+
+
+def test_clean_branch_slug_normalizes_model_output() -> None:
+    assert clean_branch_slug('"Fix Login Redirect!"') == "fix-login-redirect"
+    assert clean_branch_slug("feature/foo <> bad") == "feature-foo-bad"
+    assert clean_branch_slug("!!!") is None
+    assert clean_branch_slug("x" * 40) == "x" * 30
+
+
+@pytest.mark.asyncio
+async def test_agent_generates_branch_slug_with_configured_level_and_billing(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        branch_name_generation=BranchNameGenerationConfig(enabled=True, model_level="small"),
+        pricing=PricingConfig(
+            models={
+                "default": ModelPricingConfig(input=1.0, output=2.0),
+            }
+        ),
+    )
+    client = RoutedModelClient(
+        main={
+            "id": "resp_branch",
+            "output_text": "Fix Login Redirect!",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Fix Login Redirect!"}],
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        },
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread("Agent View dispatch")
+
+    slug = await engine.generate_branch_slug(thread_id, "Fix the login redirect bug", level="medium")
+
+    assert slug == "fix-login-redirect"
+    request = client.requests[-1]
+    assert request["level"] == "small"
+    assert "Generate a short git branch slug" in str(request["instructions"])
+    assert BRANCH_NAME_GENERATION_PROMPT in str(request["input"])
+    billing = engine.thread_store.latest_event(thread_id, "thread.billing_accumulated")
+    assert billing is not None
+    assert billing["source"] == "branch_name_generation"
+
+
+@pytest.mark.asyncio
+async def test_agent_branch_slug_generation_can_be_disabled(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        branch_name_generation=BranchNameGenerationConfig(enabled=False),
+    )
+    client = FakeModelClient([])
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread("Agent View dispatch")
+
+    assert await engine.generate_branch_slug(thread_id, "anything", level="medium") is None
+    assert client.requests == []
 
 
 @pytest.mark.asyncio

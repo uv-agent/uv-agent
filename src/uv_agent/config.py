@@ -126,6 +126,12 @@ class TitleGenerationConfig:
 
 
 @dataclass(frozen=True)
+class BranchNameGenerationConfig:
+    enabled: bool = True
+    model_level: str | None = None
+
+
+@dataclass(frozen=True)
 class StreamRetryConfig:
     max_retries: int = 5
     base: float = 1.0
@@ -142,6 +148,7 @@ class RuntimeConfig:
     max_agent_rounds: int = 100
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     title_generation: TitleGenerationConfig = field(default_factory=TitleGenerationConfig)
+    branch_name_generation: BranchNameGenerationConfig = field(default_factory=BranchNameGenerationConfig)
     stream_retry: StreamRetryConfig = field(default_factory=StreamRetryConfig)
 
 
@@ -236,6 +243,9 @@ def default_config(project_root: Path) -> dict[str, Any]:
                 "min_tokens": 5_000,
             },
             "title_generation": {
+                "enabled": True,
+            },
+            "branch_name_generation": {
                 "enabled": True,
             },
             "stream_retry": {
@@ -394,6 +404,9 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
     runtime_raw = _object_dict(raw.get("runtime", {}))
     compression = CompressionConfig(**_object_dict(runtime_raw.get("compression", {})))
     title_generation = TitleGenerationConfig(**_object_dict(runtime_raw.get("title_generation", {})))
+    branch_name_generation = BranchNameGenerationConfig(
+        **_object_dict(runtime_raw.get("branch_name_generation", {}))
+    )
     stream_retry = StreamRetryConfig(**_object_dict(runtime_raw.get("stream_retry", {})))
     default_level = runtime_raw.get("default_level", "medium")
     if default_level not in levels and levels:
@@ -411,6 +424,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         max_agent_rounds=runtime_raw.get("max_agent_rounds", 100),
         compression=compression,
         title_generation=title_generation,
+        branch_name_generation=branch_name_generation,
         stream_retry=stream_retry,
     )
     runner_raw = _object_dict(raw.get("runner", {}))

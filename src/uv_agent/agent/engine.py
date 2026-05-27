@@ -51,6 +51,7 @@ from uv_agent.paths import uv_agent_home
 from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn
 from uv_agent.plugins.helpers import RuntimeHelperRegistry
 from uv_agent.agent.prompts import (
+    BRANCH_NAME_GENERATION_PROMPT,
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
     INTERRUPTED_TOOL_CONTEXT_BRIDGE,
     POST_TOOL_COMPACTION_BRIDGE,
@@ -1122,6 +1123,45 @@ class AgentEngine:
             source="title_generation",
         )
         return clean_thread_title(response.output_text)
+
+    async def generate_branch_slug(
+        self,
+        thread_id: str,
+        user_text: str,
+        *,
+        level: str | None = None,
+    ) -> str | None:
+        """Generate a safe semantic branch slug for Agent View worktrees.
+
+        This mirrors title generation but is explicitly optional: callers should
+        always be prepared to fall back to an id-only branch when model output is
+        unavailable or cleans down to an empty string.
+        """
+
+        if not self.config.runtime.branch_name_generation.enabled:
+            return None
+        branch_level = self.config.runtime.branch_name_generation.model_level or level
+        response = await self.model_client.create_response(
+            input_items=[
+                message_item(
+                    "user",
+                    BRANCH_NAME_GENERATION_PROMPT
+                    + "\n\nUser message:\n"
+                    + user_text.strip(),
+                )
+            ],
+            level=branch_level,
+            tools=[],
+            instructions="Generate a short git branch slug. Return only the slug.",
+        )
+        self._record_billing_charge(
+            thread_id,
+            None,
+            response.usage,
+            level=branch_level,
+            source="branch_name_generation",
+        )
+        return clean_branch_slug(response.output_text)
 
     async def _maybe_compact(
         self,
@@ -3469,6 +3509,20 @@ def clean_thread_title(text: str) -> str | None:
     if len(title) > 80:
         title = title[:77].rstrip() + "..."
     return title
+
+
+def clean_branch_slug(text: str, *, max_length: int = 30) -> str | None:
+    """Return a flat ASCII branch slug or ``None`` if nothing usable remains."""
+
+    slug = text.strip().splitlines()[0].strip().lower()
+    slug = slug.strip(" \t\r\n\"'`“”‘’")
+    slug = re.sub(r"[^a-z0-9-]+", "-", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    if not slug:
+        return None
+    if len(slug) > max_length:
+        slug = slug[:max_length].rstrip("-")
+    return slug or None
 
 
 def completion_text_delta(output_text: str, emitted_text: str) -> str:
