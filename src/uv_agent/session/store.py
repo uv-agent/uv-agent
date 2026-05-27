@@ -356,7 +356,7 @@ class ThreadStore:
         return events[0] if events else None
 
     def list_threads(self) -> list[dict[str, Any]]:
-        return [thread for thread in self._list_threads(kind="thread") if not thread.get("agent_view_deleted")]
+        return self._list_threads(kind="thread")
 
     def list_subthreads(self, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
         return self._list_threads(kind="subagent", parent_thread_id=parent_thread_id)

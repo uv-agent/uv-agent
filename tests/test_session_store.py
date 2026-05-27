@@ -134,14 +134,14 @@ def test_thread_worktree_events_update_metadata(tmp_path: Path) -> None:
     assert deleted["worktree_deleted_status"] == " M file.py"
 
 
-def test_agent_view_deleted_threads_are_hidden_from_lists(tmp_path: Path) -> None:
+def test_agent_view_deleted_threads_remain_in_general_thread_lists(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     keep = store.create_thread("Keep")
     hidden = store.create_thread("Hide")
 
     store.append(hidden, "thread.agent_view_deleted")
 
-    assert [thread["thread_id"] for thread in store.list_threads()] == [keep]
+    assert [thread["thread_id"] for thread in store.list_threads()] == [hidden, keep]
     digest = store.thread_digest(hidden)
     assert digest["agent_view_deleted"] is True
     assert digest["agent_view_deleted_at"]
