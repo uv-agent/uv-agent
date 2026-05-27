@@ -3,6 +3,9 @@ from __future__ import annotations
 import pytest
 
 
+LEGACY_TUI_TEST_FILE = "test_tui.py"
+LEGACY_TUI_SKIP_REASON = "legacy Textual TUI tests are disabled by default; pass --run-legacy-tui to run them"
+
 HOST_RUN_ENV_VARS = (
     "UV_AGENT_RUNTIME_STATE_DIR",
     "UV_AGENT_RUNTIME_THREAD_ID",
@@ -16,6 +19,24 @@ HOST_RUN_ENV_VARS = (
 )
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-legacy-tui",
+        action="store_true",
+        default=False,
+        help="Run deprecated Textual TUI tests in tests/test_tui.py.",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("run_legacy_tui"):
+        return
+    skip_legacy_tui = pytest.mark.skip(reason=LEGACY_TUI_SKIP_REASON)
+    for item in items:
+        if item.path.name == LEGACY_TUI_TEST_FILE:
+            item.add_marker(skip_legacy_tui)
+
+
 @pytest.fixture(autouse=True)
 def isolate_host_run_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests independent from an outer uv-agent run_python process."""
@@ -24,7 +45,7 @@ def isolate_host_run_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 
-def pytest_configure() -> None:
+def pytest_configure(config: pytest.Config) -> None:
     """Avoid textual-image terminal probing under pytest capture.
 
     ``textual_image.renderable`` asks the terminal about Sixel/TGP support at
