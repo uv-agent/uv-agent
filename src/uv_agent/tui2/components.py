@@ -12,7 +12,7 @@ from uv_agent.helper_calls import extract_runtime_helper_calls, format_helper_ca
 from uv_agent.i18n import tr
 from uv_agent.tui.formatting import format_elapsed, short_block, short_thread
 from uv_agent.tui2.ansi import strip_ansi, truncate_visible, visible_len, wrap_plain
-from uv_agent.tui2.events import CommandSuggestion, TranscriptCell, Tui2State, tool_title
+from uv_agent.tui2.events import AgentViewRow, CommandSuggestion, TranscriptCell, Tui2State, tool_title
 from uv_agent.tui2.theme import AnsiTheme, DEFAULT_THEME, sgr
 
 
@@ -455,6 +455,204 @@ def render_command_palette(
 
 
 # ---------------------------------------------------------------------------
+# Agent View dashboard
+# ---------------------------------------------------------------------------
+
+
+_AGENT_STATUS_ORDER = ("dispatching", "working", "queued", "failed", "interrupted", "completed")
+_AGENT_STATUS_LABELS = {
+    "dispatching": "DISPATCHING",
+    "working": "WORKING",
+    "queued": "QUEUED",
+    "completed": "COMPLETED",
+    "failed": "FAILED",
+    "interrupted": "INTERRUPTED",
+}
+_AGENT_STATUS_GLYPHS = {
+    "dispatching": "…",
+    "working": "⠿",
+    "queued": "↕",
+    "completed": "✓",
+    "failed": "✗",
+    "interrupted": "■",
+}
+
+
+def render_agent_view_with_cursor(
+    state: Tui2State,
+    width: int,
+    spinner_frame: int = 0,
+    theme: AnsiTheme = DEFAULT_THEME,
+    *,
+    max_height: int | None = None,
+) -> tuple[list[str], int, int]:
+    """Render the full-screen Agent View dashboard and input row."""
+
+    view = state.agent_view
+    width = max(20, width)
+    inner = max(8, width - 4)
+    rows: list[str] = [sgr(theme.border_accent, "╭─ Agent View " + "─" * max(0, width - 16) + "╮")]
+
+    body_budget = max(1, (max_height or 30) - 6)
+    grouped: dict[str, list[tuple[int, AgentViewRow]]] = {status: [] for status in _AGENT_STATUS_ORDER}
+    for index, row in enumerate(view.rows):
+        grouped.setdefault(row.status, []).append((index, row))
+
+    used = 0
+    for status in _AGENT_STATUS_ORDER:
+        entries = grouped.get(status) or []
+        if not entries:
+            continue
+        if used < body_budget:
+            label = f"{_AGENT_STATUS_LABELS.get(status, status.upper())} ({len(entries)})"
+            rows.append(_agent_box_line(sgr(theme.muted, label), width, theme))
+            used += 1
+        for absolute, row in entries:
+            if used >= body_budget:
+                continue
+            rows.append(_agent_row_line(row, absolute == view.selected, width, spinner_frame, theme))
+            used += 1
+
+    if not view.rows and used < body_budget:
+        rows.append(_agent_box_line(sgr(theme.muted, "No agent sessions yet"), width, theme))
+        rows.append(_agent_box_line(sgr(theme.dim, "Type a task below and press Enter to dispatch it."), width, theme))
+        used += 2
+    hidden = max(0, sum(len(items) for items in grouped.values()) + sum(1 for items in grouped.values() if items) - used)
+    if hidden:
+        rows.append(_agent_box_line(sgr(theme.muted, f"… {hidden} rows hidden"), width, theme))
+
+    rows.append(_agent_separator(width, theme))
+    rows.extend(_agent_peek_lines(state, width, theme))
+    rows.append(_agent_separator(width, theme))
+    composer_lines, cursor_row, cursor_col = _render_agent_composer_with_cursor(state, width, theme)
+    cursor_row += len(rows)
+    rows.extend(composer_lines)
+    rows.append(sgr(theme.border_accent, "╰" + "─" * (width - 2) + "╯"))
+
+    return [truncate_visible(line, width) for line in rows], cursor_row, cursor_col
+
+
+def render_agent_view(
+    state: Tui2State,
+    width: int,
+    spinner_frame: int = 0,
+) -> list[str]:
+    return render_agent_view_with_cursor(state, width, spinner_frame)[0]
+
+
+def _agent_box_line(content: str, width: int, theme: AnsiTheme) -> str:
+    inner = max(1, width - 4)
+    clipped = truncate_visible(content, inner)
+    pad = " " * max(0, inner - visible_len(clipped))
+    return sgr(theme.border_accent, "│ ") + clipped + pad + sgr(theme.border_accent, " │")
+
+
+def _agent_separator(width: int, theme: AnsiTheme) -> str:
+    return sgr(theme.border_accent, "│") + sgr(theme.border_faint, "─" * max(1, width - 2)) + sgr(theme.border_accent, "│")
+
+
+def _agent_row_line(
+    row: AgentViewRow,
+    selected: bool,
+    width: int,
+    spinner_frame: int,
+    theme: AnsiTheme,
+) -> str:
+    marker = sgr(theme.accent, "▸") if selected else " "
+    glyph = _AGENT_STATUS_GLYPHS.get(row.status, "·")
+    if row.status in {"working", "dispatching"}:
+        glyph = theme.spinner_frames[spinner_frame % len(theme.spinner_frames)]
+    glyph_style = {
+        "completed": theme.success,
+        "failed": theme.error,
+        "interrupted": theme.warning,
+        "queued": theme.warning,
+    }.get(row.status, theme.accent)
+    short_id = short_thread(row.thread_id)
+    title = row.title or "New thread"
+    elapsed = format_elapsed(row.elapsed_seconds) if row.elapsed_seconds else ""
+    queue = f"q{row.queued_turns}" if row.queued_turns else ""
+    branch = row.worktree_branch or ""
+    suffix_parts = [part for part in (elapsed, queue, branch) if part]
+    suffix = " · ".join(suffix_parts)
+    prefix = f"{marker} {short_id} "
+    right = f" {glyph}"
+    if suffix:
+        right += f" {suffix}"
+    available = max(1, width - 4 - visible_len(prefix) - visible_len(right) - 1)
+    title_text = truncate_visible(title.replace("\n", " "), available)
+    line = prefix + title_text + " " + sgr(glyph_style, right.strip())
+    return _agent_box_line(line, width, theme)
+
+
+def _agent_peek_lines(state: Tui2State, width: int, theme: AnsiTheme) -> list[str]:
+    view = state.agent_view
+    selected = view.selected_row()
+    lines: list[str] = []
+    if view.pending_confirmation:
+        lines.append(_agent_box_line(sgr(theme.warning, view.pending_confirmation), width, theme))
+        return lines
+    if view.status_message:
+        lines.append(_agent_box_line(sgr(theme.muted, view.status_message), width, theme))
+    if selected is None:
+        return lines or [_agent_box_line("", width, theme)]
+    if not view.peek_expanded:
+        lines.append(_agent_box_line(sgr(theme.dim, "peek collapsed · Space to expand"), width, theme))
+        return lines
+    summary = selected.summary.strip().replace("\n", " ")
+    if not summary:
+        summary = selected.worktree_path or "no transcript yet"
+    label = sgr(theme.muted, "peek: ") + truncate_visible(summary, max(1, width - 10))
+    lines.append(_agent_box_line(label, width, theme))
+    return lines
+
+
+def _render_agent_composer_with_cursor(
+    state: Tui2State,
+    width: int,
+    theme: AnsiTheme,
+) -> tuple[list[str], int, int]:
+    view = state.agent_view
+    inner = max(8, width - 4)
+    body_width = max(1, inner - 2)
+    text = view.composer
+    cursor = len(text) if view.composer_cursor is None else max(0, min(view.composer_cursor, len(text)))
+    if not text:
+        hint = sgr(theme.muted, "dispatch new background task")
+        body = sgr(theme.accent, "> ") + hint
+        pad = " " * max(0, inner - visible_len(body))
+        return [_agent_box_line(body + pad, width, theme)], 0, 4
+
+    wrapped: list[str] = []
+    cursor_row = 0
+    cursor_col = 0
+    consumed = 0
+    for raw in text.split("\n"):
+        start = consumed
+        end = start + len(raw)
+        parts = wrap_plain(raw, body_width) or [""]
+        if start <= cursor <= end:
+            remaining = cursor - start
+            for part_index, part in enumerate(parts):
+                if remaining <= len(part) or part_index == len(parts) - 1:
+                    cursor_row = len(wrapped) + part_index
+                    cursor_col = visible_len(part[:remaining])
+                    break
+                remaining -= len(part)
+        wrapped.extend(parts)
+        consumed = end + 1
+    visible_rows = wrapped[-3:]
+    hidden = len(wrapped) - len(visible_rows)
+    rendered: list[str] = []
+    for idx, body in enumerate(visible_rows):
+        absolute = hidden + idx
+        prefix = sgr(theme.accent, "> ") if absolute == 0 else "  "
+        line = prefix + body
+        rendered.append(_agent_box_line(line, width, theme))
+    return rendered, max(0, cursor_row - hidden), 4 + cursor_col
+
+
+# ---------------------------------------------------------------------------
 # Composer: rounded-corner box, single-row when empty, grows with input.
 # ---------------------------------------------------------------------------
 
@@ -605,6 +803,15 @@ def render_live_with_cursor(
     "duplicate scrollback" artefact, since once the live region scrolls
     out from under us our erase math can no longer reach the top.
     """
+
+    if state.mode == "agent_view":
+        return render_agent_view_with_cursor(
+            state,
+            width,
+            spinner_frame,
+            theme,
+            max_height=max_height,
+        )
 
     cell_lines: list[str] = []
     for cell in state.live:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sqlite3
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -20,7 +21,14 @@ from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.tui.formatting import short_block, short_thread
 from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
-from uv_agent.tui2.events import CommandSuggestion, PendingTurn, TranscriptCell, Tui2State, tool_payload_from_event
+from uv_agent.tui2.events import (
+    AgentViewRow,
+    CommandSuggestion,
+    PendingTurn,
+    TranscriptCell,
+    Tui2State,
+    tool_payload_from_event,
+)
 from uv_agent.tui2.renderer import Renderer
 from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
 
@@ -96,6 +104,7 @@ def save_clipboard_image(target_dir: Path):
 HELP_TEXT = (
     "Commands:\n"
     "  /help              show this help\n"
+    "  /agents            open Agent View dashboard\n"
     "  /clear             clear view and start a new thread\n"
     "  /threads           choose a thread to resume\n"
     "  /skills            list skills and insert @skill mentions\n"
@@ -108,7 +117,7 @@ HELP_TEXT = (
     "  /quit              exit the TUI\n"
     "\n"
     "Keys: Enter send/select · Ctrl+Enter newline · / command palette · @ mentions · ↑/↓ history\n"
-    "      Ctrl+A/E line ends · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt"
+    "      Ctrl+A Agent View · Ctrl+E line end · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt"
 )
 
 
@@ -116,6 +125,7 @@ HELP_TEXT = (
 # the composer instead of submitting immediately.
 TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
     CommandSuggestion("/help", "show help"),
+    CommandSuggestion("/agents", "open Agent View dashboard"),
     CommandSuggestion("/clear", "clear view and start a new thread"),
     CommandSuggestion("/threads", "choose a thread to resume"),
     CommandSuggestion("/status", "show model/context/thread status"),
@@ -292,6 +302,12 @@ class AnsiUvAgentApp:
             await asyncio.sleep(tick_interval)
             confirmation_expired = self._expire_quit_confirmation()
             confirmation_expired = self._expire_interrupt_confirmation() or confirmation_expired
+            if self.state.mode == "agent_view":
+                self._spinner_index += 1
+                self.renderer.spinner_frame = self._spinner_index
+                self._refresh_agent_view_rows()
+                self._safe_repaint()
+                continue
             if self.state.busy:
                 self._spinner_index += 1
                 self.renderer.spinner_frame = self._spinner_index
@@ -307,6 +323,9 @@ class AnsiUvAgentApp:
     # ------------------------------------------------------------------
 
     async def handle_key(self, key: str) -> bool:
+        if self.state.mode == "agent_view":
+            return await self._handle_agent_view_key(key)
+
         if key == "\x03":  # Ctrl+C
             if self.cancel_event is not None:
                 self._expire_interrupt_confirmation()
@@ -375,10 +394,13 @@ class AnsiUvAgentApp:
             self._skip_next_lf_after_plain_cr = False
             self._last_plain_input_at = None
             self._handle_tab()
-        elif key == "\x01":  # Ctrl+A: move to the start of the current logical line.
+        elif key == "\x01":  # Ctrl+A: line start in a draft, Agent View when the composer is empty.
             self._skip_next_lf_after_plain_cr = False
             self._last_plain_input_at = None
-            self._move_composer_to_line_start()
+            if self.state.composer:
+                self._move_composer_to_line_start()
+            else:
+                self._open_agent_view()
         elif key == "\x05":  # Ctrl+E: move to the end of the current logical line.
             self._skip_next_lf_after_plain_cr = False
             self._last_plain_input_at = None
@@ -461,6 +483,162 @@ class AnsiUvAgentApp:
             return ""
         idx = max(stripped.rfind(" "), stripped.rfind("\n"))
         return stripped[: idx + 1] if idx >= 0 else ""
+
+    async def _handle_agent_view_key(self, key: str) -> bool:
+        if key == "\x03":  # Ctrl+C exits the dashboard; later commits use it to cancel selected runs.
+            self._close_agent_view()
+            self._safe_repaint()
+            return True
+        if key in {"\x1b", "\x01"}:  # Esc or Ctrl+A toggles back to transcript mode.
+            self._close_agent_view()
+            self._safe_repaint()
+            return True
+        if key.startswith(PASTE_PREFIX):
+            self._insert_agent_view_text(key[len(PASTE_PREFIX) :])
+            self._safe_repaint()
+            return True
+        if key == "\r":
+            if self.state.agent_view.composer.strip():
+                # Dispatch is implemented in a later Agent View commit; keep the
+                # first dashboard commit read-only and make the pending action visible.
+                self.state.agent_view.status_message = "dispatch will be enabled after per-thread runs"
+            elif self.state.agent_view.selected_row() is not None:
+                self._resume_thread(self.state.agent_view.selected_row().thread_id)  # type: ignore[union-attr]
+                self.state.mode = "transcript"
+            self._safe_repaint()
+            return True
+        if key in {"\n", "\x0a", "<C-ENTER>"}:
+            self._insert_agent_view_text("\n")
+        elif key in {"<H>", "<UP>", "k"}:
+            self._move_agent_view_selection(-1)
+        elif key in {"<P>", "<DOWN>", "j"}:
+            self._move_agent_view_selection(1)
+        elif key in {"<I>", "<PAGEUP>"}:
+            self._move_agent_view_selection(-5)
+        elif key in {"<Q>", "<PAGEDOWN>"}:
+            self._move_agent_view_selection(5)
+        elif key == " ":
+            self.state.agent_view.peek_expanded = not self.state.agent_view.peek_expanded
+        elif key in {"\x7f", "\b"}:
+            self._delete_agent_view_before_cursor()
+        elif key == "\x15":
+            self._set_agent_view_text("", cursor=0)
+        elif key == "\x02" or key in {"<K>", "<LEFT>"}:
+            self._move_agent_view_cursor(-1)
+        elif key == "\x06" or key in {"<M>", "<RIGHT>"}:
+            self._move_agent_view_cursor(1)
+        elif key and key >= " " and not key.startswith("<"):
+            self._insert_agent_view_text(key)
+        self._safe_repaint()
+        return True
+
+    def _open_agent_view(self) -> None:
+        self._close_command_palette()
+        self._refresh_agent_view_rows()
+        self.state.mode = "agent_view"
+        if self.state.agent_view.selected >= len(self.state.agent_view.rows):
+            self.state.agent_view.selected = max(0, len(self.state.agent_view.rows) - 1)
+        self.state.agent_view.status_message = "Agent View · Enter attach · Space peek · Esc close"
+
+    def _close_agent_view(self) -> None:
+        self.state.mode = "transcript"
+        self.state.agent_view.pending_confirmation = None
+
+    def _move_agent_view_selection(self, delta: int) -> None:
+        rows = self.state.agent_view.rows
+        if not rows:
+            self.state.agent_view.selected = 0
+            return
+        self.state.agent_view.selected = max(0, min(len(rows) - 1, self.state.agent_view.selected + delta))
+
+    def _agent_view_cursor(self) -> int:
+        cursor = self.state.agent_view.composer_cursor
+        text = self.state.agent_view.composer
+        if cursor is None:
+            return len(text)
+        return max(0, min(cursor, len(text)))
+
+    def _set_agent_view_text(self, text: str, *, cursor: int | None = None) -> None:
+        self.state.agent_view.composer = text
+        self.state.agent_view.composer_cursor = len(text) if cursor is None else max(0, min(cursor, len(text)))
+
+    def _insert_agent_view_text(self, text: str) -> None:
+        cursor = self._agent_view_cursor()
+        value = self.state.agent_view.composer
+        self._set_agent_view_text(value[:cursor] + text + value[cursor:], cursor=cursor + len(text))
+
+    def _delete_agent_view_before_cursor(self) -> None:
+        cursor = self._agent_view_cursor()
+        if cursor <= 0:
+            return
+        value = self.state.agent_view.composer
+        self._set_agent_view_text(value[: cursor - 1] + value[cursor:], cursor=cursor - 1)
+
+    def _move_agent_view_cursor(self, delta: int) -> None:
+        self.state.agent_view.composer_cursor = max(
+            0,
+            min(self._agent_view_cursor() + delta, len(self.state.agent_view.composer)),
+        )
+
+    def _refresh_agent_view_rows(self) -> None:
+        previous = self.state.agent_view.selected_row()
+        previous_id = previous.thread_id if previous is not None else None
+        rows: list[AgentViewRow] = []
+        for thread in self.engine.thread_store.list_threads()[:100]:
+            thread_id = str(thread.get("thread_id") or "")
+            if not thread_id:
+                continue
+            rows.append(self._agent_view_row_for_thread(thread_id, thread))
+        self.state.agent_view.rows = rows
+        if previous_id:
+            for index, row in enumerate(rows):
+                if row.thread_id == previous_id:
+                    self.state.agent_view.selected = index
+                    break
+            else:
+                self.state.agent_view.selected = min(self.state.agent_view.selected, max(0, len(rows) - 1))
+        else:
+            self.state.agent_view.selected = min(self.state.agent_view.selected, max(0, len(rows) - 1))
+
+    def _agent_view_row_for_thread(self, thread_id: str, thread: dict[str, Any]) -> AgentViewRow:
+        status = self._agent_view_thread_status(thread_id, thread)
+        return AgentViewRow(
+            thread_id=thread_id,
+            title=str(thread.get("title") or "New thread"),
+            status=status,
+            summary=str(thread.get("last_text") or ""),
+            updated_at=str(thread.get("updated_at") or ""),
+            worktree_branch=str(thread.get("worktree_branch") or ""),
+            worktree_path=str(thread.get("worktree_path") or ""),
+            elapsed_seconds=monotonic() - self._turn_started_at if thread_id == self.state.thread_id and self.state.busy and self._turn_started_at else 0.0,
+            queued_turns=len(self.state.pending_turns) if thread_id == self.state.thread_id else 0,
+        )
+
+    def _agent_view_thread_status(self, thread_id: str, thread: dict[str, Any]) -> str:
+        if thread_id == self.state.thread_id and self.state.busy:
+            return "working"
+        if thread_id == self.state.thread_id and self.state.pending_turns:
+            return "queued"
+        event_type = self._latest_thread_terminal_event_type(thread_id)
+        if event_type == "turn.error":
+            return "failed"
+        if event_type == "turn.interrupted":
+            return "interrupted"
+        return "completed"
+
+    def _latest_thread_terminal_event_type(self, thread_id: str) -> str:
+        read_recent = getattr(self.engine.thread_store, "read_recent_events", None)
+        if not callable(read_recent):
+            return ""
+        try:
+            events, _has_more = read_recent(
+                thread_id,
+                limit=1,
+                event_types={"turn.completed", "turn.error", "turn.interrupted"},
+            )
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+            return ""
+        return str(events[0].get("type") or "") if events else ""
 
     def _composer_cursor(self) -> int:
         cursor = self.state.composer_cursor
@@ -1181,6 +1359,8 @@ class AnsiUvAgentApp:
         arg = arg.strip()
         if command == "/help":
             self._flush(TranscriptCell("event", text=HELP_TEXT))
+        elif command == "/agents":
+            self._open_agent_view()
         elif command in {"/level", "/model"} and arg:
             self.state.level = arg
             if self.state.thread_id and not self.state.busy:

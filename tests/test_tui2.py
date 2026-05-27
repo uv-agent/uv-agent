@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from uv_agent.tui2.ansi import strip_ansi, visible_len
 from uv_agent.tui2.components import (
+    render_agent_view,
     render_cell,
     render_composer_with_cursor,
     render_live_with_cursor,
@@ -19,7 +20,7 @@ from uv_agent.tui2.components import (
 import uv_agent.tui2.app as tui2_app
 
 from uv_agent.tui2.app import TOP_LEVEL_COMMANDS, load_composer_history, save_composer_history
-from uv_agent.tui2.events import CommandSuggestion, TranscriptCell, Tui2State
+from uv_agent.tui2.events import AgentViewRow, CommandSuggestion, TranscriptCell, Tui2State
 from uv_agent.tui2.renderer import Renderer
 from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
 from uv_agent.tui2.theme import DEFAULT_THEME, sgr
@@ -627,13 +628,31 @@ class _DummyEngine:
         def append(cls, thread_id, event_type, **data):
             event = {"type": event_type, "thread_id": thread_id, **data}
             cls.events.append(event)
-            if event_type == "thread.level_updated":
-                for thread in cls.threads:
-                    if thread.get("thread_id") == thread_id:
-                        thread["active_level"] = data.get("level")
-                        thread["active_model"] = data.get("model")
-                        break
+            for thread in cls.threads:
+                if thread.get("thread_id") != thread_id:
+                    continue
+                thread["latest_event_type"] = event_type
+                if event_type == "thread.level_updated":
+                    thread["active_level"] = data.get("level")
+                    thread["active_model"] = data.get("model")
+                elif event_type == "thread.worktree_created":
+                    thread.update(data)
+                elif event_type == "thread.cwd_updated":
+                    thread["latest_cwd"] = data.get("cwd")
+                elif event_type in {"turn.completed", "turn.error", "turn.interrupted"}:
+                    thread["terminal_event_type"] = event_type
+                break
             return event
+
+        @classmethod
+        def read_recent_events(cls, thread_id, *, limit=1, event_types=None):
+            matches = [
+                event
+                for event in reversed(cls.events)
+                if event.get("thread_id") == thread_id
+                and (event_types is None or event.get("type") in event_types)
+            ]
+            return matches[:limit], len(matches) > limit
 
         @classmethod
         def thread_digest(cls, thread_id):
@@ -1154,6 +1173,89 @@ def test_threads_command_opens_interactive_picker(monkeypatch) -> None:
     assert app.state.command_palette_open
     assert app._picker_mode == "thread"
     assert app.state.command_palette_items[0].id == "thr_1"
+
+
+
+def test_agent_view_renderer_groups_rows_and_shows_peek() -> None:
+    state = Tui2State(mode="agent_view")
+    state.agent_view.rows = [
+        AgentViewRow(
+            thread_id="thr_working",
+            title="Fix login redirect",
+            status="working",
+            summary="running tests",
+            worktree_branch="agent-fix-login-abc12345",
+            elapsed_seconds=12,
+        ),
+        AgentViewRow(
+            thread_id="thr_done",
+            title="Bump deps",
+            status="completed",
+            summary="updated lockfile",
+        ),
+    ]
+
+    plain = "\n".join(strip_ansi(line) for line in render_agent_view(state, 88, 0))
+
+    assert "Agent View" in plain
+    assert "WORKING (1)" in plain
+    assert "COMPLETED (1)" in plain
+    assert "Fix login redirect" in plain
+    assert "agent-fix-login-abc12345" in plain
+    assert "peek:" in plain
+    assert "running tests" in plain
+
+
+
+def test_ctrl_a_opens_agent_view_from_empty_composer(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+
+    assert asyncio.run(app.handle_key("\x01")) is True
+
+    assert app.state.mode == "agent_view"
+
+
+def test_agents_command_opens_agent_view(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [
+        {"thread_id": "thr_1", "title": "Alpha", "last_text": "hello"},
+    ]
+
+    app._handle_command("/agents")
+
+    assert app.state.mode == "agent_view"
+    assert app.state.agent_view.rows[0].thread_id == "thr_1"
+
+
+def test_agent_view_navigation_and_attach(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [
+        {"thread_id": "thr_1", "title": "Alpha"},
+        {"thread_id": "thr_2", "title": "Beta"},
+    ]
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("j"))
+    assert app.state.agent_view.selected == 1
+    asyncio.run(app.handle_key(" "))
+    assert not app.state.agent_view.peek_expanded
+    asyncio.run(app.handle_key("\r"))
+
+    assert app.state.mode == "transcript"
+    assert app.state.thread_id == "thr_2"
+    assert app.state.title == "Beta"
+
+
+def test_agent_view_composer_is_separate_from_transcript(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "transcript draft"
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("a"))
+    asyncio.run(app.handle_key("b"))
+
+    assert app.state.composer == "transcript draft"
+    assert app.state.agent_view.composer == "ab"
 
 
 def test_command_palette_supports_goal_subcommands(monkeypatch) -> None:

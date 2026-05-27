@@ -14,6 +14,15 @@ def _default_language() -> UserLanguage:
     return normalize_language("en")
 
 CellKind = Literal["user", "assistant", "reasoning", "tool", "event", "error", "image"]
+Tui2Mode = Literal["transcript", "agent_view"]
+AgentViewRowStatus = Literal[
+    "dispatching",
+    "working",
+    "queued",
+    "completed",
+    "failed",
+    "interrupted",
+]
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,40 @@ class PendingTurn:
     image_paths: list[Path] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class AgentViewRow:
+    """One session row in the Agent View dashboard."""
+
+    thread_id: str
+    title: str
+    status: AgentViewRowStatus
+    summary: str = ""
+    updated_at: str = ""
+    worktree_branch: str = ""
+    worktree_path: str = ""
+    elapsed_seconds: float = 0.0
+    queued_turns: int = 0
+
+
+@dataclass
+class AgentViewState:
+    """UI-only state for the Agent View full-screen mode."""
+
+    rows: list[AgentViewRow] = field(default_factory=list)
+    selected: int = 0
+    peek_expanded: bool = True
+    composer: str = ""
+    composer_cursor: int | None = None
+    status_message: str = "Enter dispatches a background worktree task"
+    pending_confirmation: str | None = None
+
+    def selected_row(self) -> AgentViewRow | None:
+        if not self.rows:
+            return None
+        self.selected = max(0, min(self.selected, len(self.rows) - 1))
+        return self.rows[self.selected]
+
+
 @dataclass
 class Tui2State:
     """Mutable render state shared by the app and renderer."""
@@ -89,6 +132,8 @@ class Tui2State:
     command_palette_items: list[CommandSuggestion] = field(default_factory=list)
     command_palette_index: int = 0
     language: UserLanguage = field(default_factory=_default_language)
+    mode: Tui2Mode = "transcript"
+    agent_view: AgentViewState = field(default_factory=AgentViewState)
 
     def status_label(self) -> str:
         parts = [f"thread {short_thread(self.thread_id)}"]
