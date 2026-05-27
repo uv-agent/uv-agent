@@ -241,6 +241,27 @@ def test_long_composer_caps_visible_rows_and_summarizes_hidden() -> None:
     assert all(visible_len(line) <= 50 for line in lines)
 
 
+def test_long_composer_hidden_marker_does_not_replace_first_visible_input_row() -> None:
+    text = "\n".join(f"line {i}" for i in range(12))
+    lines, _, _ = render_composer_with_cursor(text, 60, max_input_rows=6)
+    plain = [strip_ansi(line) for line in lines]
+
+    assert "earlier lines hidden" in plain[0]
+    assert plain[1].startswith("│   line 6")
+    assert all("earlier lines hidden" not in line for line in plain[1:-1])
+
+
+def test_multiline_composer_keeps_first_lines_visible_until_window_fills() -> None:
+    text = "\n".join(f"line {i}" for i in range(6))
+    lines, row, _ = render_composer_with_cursor(text, 60, max_input_rows=6)
+    plain = [strip_ansi(line) for line in lines]
+
+    assert plain[1].startswith("│ › line 0")
+    assert plain[6].startswith("│   line 5")
+    assert not any("hidden" in line for line in plain)
+    assert row == 6
+
+
 def test_cjk_input_width_and_cursor_position() -> None:
     assert visible_len("你好") == 4
     lines, row, col = render_composer_with_cursor("你好", 50)

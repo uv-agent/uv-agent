@@ -494,28 +494,59 @@ def render_composer_with_cursor(
     if not wrapped:
         wrapped = [""]
     visible_rows = max(1, min(max_input_rows, len(wrapped)))
-    clipped_start = max(0, min(cursor_wrapped_row, len(wrapped) - visible_rows))
+    # Keep the head of multi-line input visible while the composer still has
+    # room.  The previous cursor-following window replaced the first visible row
+    # with an "earlier lines hidden" marker as soon as the cursor moved beyond
+    # the small box, which made the start of a pasted prompt disappear.  Only
+    # tail the cursor once we need to scroll beyond the initial visible window.
+    clipped_start = 0 if cursor_wrapped_row < visible_rows else cursor_wrapped_row - visible_rows + 1
     clipped = wrapped[clipped_start : clipped_start + visible_rows]
-    hidden = len(wrapped) - len(clipped)
+    hidden_before = clipped_start
+    hidden_after = max(0, len(wrapped) - (clipped_start + len(clipped)))
 
     input_rows: list[str] = []
     for idx, body in enumerate(clipped):
-        prefix = sgr(theme.accent, "› ") if (idx == 0 and hidden == 0) else "  "
+        absolute_row = clipped_start + idx
+        prefix = sgr(theme.accent, "› ") if absolute_row == 0 else "  "
         line = prefix + body
         pad = " " * max(0, inner - visible_len(line))
         input_rows.append(sgr(theme.border, "│ ") + line + pad + sgr(theme.border, " │"))
-    if hidden > 0:
-        marker = sgr(theme.muted, f"…  {hidden} earlier lines hidden")
-        pad = " " * max(0, inner - visible_len(marker))
-        input_rows[0] = sgr(theme.border, "│ ") + marker + pad + sgr(theme.border, " │")
 
-    rows = [sgr(theme.border, "╭" + "─" * (width - 2) + "╮")]
+    rows = [_composer_top_border(width, theme, hidden_before=hidden_before, hidden_after=hidden_after)]
     rows.extend(input_rows)
     rows.append(sgr(theme.border, "╰" + "─" * (width - 2) + "╯"))
 
     cursor_row = 1 + max(0, min(cursor_wrapped_row - clipped_start, len(clipped) - 1))
     cursor_col = 2 + 2 + cursor_wrapped_col  # "│ " + line prefix + cursor text
     return rows, cursor_row, cursor_col
+
+
+def _composer_top_border(
+    width: int,
+    theme: AnsiTheme,
+    *,
+    hidden_before: int = 0,
+    hidden_after: int = 0,
+) -> str:
+    """Render the top composer border, including clipping status if needed.
+
+    The hidden-line status lives in the border rather than in an input row so it
+    never hides the first visible line of a multi-line paste.
+    """
+
+    inner_width = max(0, width - 2)
+    if hidden_before <= 0 and hidden_after <= 0:
+        return sgr(theme.border, "╭" + "─" * inner_width + "╮")
+
+    if hidden_before > 0 and hidden_after > 0:
+        label = f"… {hidden_before} earlier · {hidden_after} later lines hidden"
+    elif hidden_before > 0:
+        label = f"… {hidden_before} earlier lines hidden"
+    else:
+        label = f"… {hidden_after} later lines hidden"
+    content = truncate_visible(f"─ {label} ", inner_width)
+    content += "─" * max(0, inner_width - visible_len(content))
+    return sgr(theme.border, "╭" + content + "╮")
 
 
 def render_composer(text: str, width: int, theme: AnsiTheme = DEFAULT_THEME) -> list[str]:
