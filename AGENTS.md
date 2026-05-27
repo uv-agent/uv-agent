@@ -30,6 +30,10 @@ This repository builds `uv-agent`, an experimental coding agent with a Textual T
 
 ## TUI Rules
 
+- New TUI development should target `src/uv_agent/tui2/` by default. The legacy
+  Textual implementation under `src/uv_agent/tui/` is deprecated and retained
+  only for compatibility; avoid extending or changing it unless the user
+  explicitly asks for `tui`/Textual work or a compatibility fix requires it.
 - TUI uses Textual and should remain a Codex-style single transcript with a bottom composer.
 - Composer is multi-line: Enter inserts a newline; Ctrl+Enter or Ctrl+J sends.
 - Typing `/` from an empty composer opens the full-screen command picker. Editing or deleting an existing slash command must not reopen it.
