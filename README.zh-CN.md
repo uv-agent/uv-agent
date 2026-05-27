@@ -208,13 +208,15 @@ model 和一个 level。
 
 ## 日常工作流
 
-- `Ctrl+Enter` 或 `Ctrl+J` 发送；`Enter` 插入换行。
-- 空输入框按 `/` 或按 `Ctrl+O` 打开命令面板。
+- 正常输入后按 `Enter` 发送；需要在输入框里换行时按 `Ctrl+Enter` 或 `Ctrl+J`。
+- 空输入框按 `/` 打开 tui2 命令面板，继续输入即可过滤命令。
 - `@` 插入文件 mention，`@@` 插入 thread mention，`/threads` 恢复历史任务。
-- `/goal` 为当前 thread 开关持久 checklist/notes。
-- 命令面板里的 **Worktree** 可在 `.uv-agent/worktrees/` 下创建或管理任务 worktree。
-- `F2` 附加剪贴板图片，`F3` 预览待发送图片。
-- `/status`、`/models`、`/level`、`/mcp`、`/skills` 可查看 runtime 状态和可用能力。
+- `/level <name>`（或 `/model <name>`）切换 model level；选择会按 thread 记住。
+- `/goal enable [objective]` 开启持久 checklist/notes；可以在第一条消息前启用，
+  thread 开始时再初始化。
+- `/status`、`/mcp`、`/skills` 可查看 runtime 状态和可用能力。
+- 如果需要 `/config`、`/models`、Worktree 管理或剪贴板图片快捷键等原 Textual 专属面板，
+  使用 `uv-agent tui` 启动旧界面。
 
 完整命令和快捷键见 [TUI and slash commands](docs/tui.md)。
 

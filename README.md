@@ -217,16 +217,20 @@ language, completion notification, and automatic compression. See
 
 ## Everyday Workflow
 
-- `Ctrl+Enter` or `Ctrl+J` sends the composer; `Enter` inserts a newline.
-- `/` from an empty composer or `Ctrl+O` opens the command palette.
-- `@` inserts file mentions, `@@` inserts thread mentions, and `/threads` resumes
+- Type normally and press `Enter` to send. Use `Ctrl+Enter` or `Ctrl+J` when you
+  want to insert a newline in the composer.
+- Type `/` from an empty composer to open the tui2 command palette; continue
+  typing to filter commands.
+- Use `@` for file mentions, `@@` for thread mentions, and `/threads` to resume
   past work.
-- `/goal` toggles durable checklist/notes for the current thread.
-- **Worktree** in the command palette creates or manages a task worktree under
-  `.uv-agent/worktrees/`.
-- `F2` attaches a clipboard image; `F3` previews pending images.
-- `/status`, `/models`, `/level`, `/mcp`, and `/skills` inspect runtime state and
-  available capabilities.
+- Use `/level <name>` (or `/model <name>`) to switch model level; the selected
+  level is remembered per thread.
+- Use `/goal enable [objective]` for durable checklist/notes. It can be enabled
+  before the first message and will initialize when the thread starts.
+- Use `/status`, `/mcp`, and `/skills` to inspect runtime state and available
+  capabilities.
+- To use the original Textual-only panels such as `/config`, `/models`, Worktree
+  management, or clipboard image shortcuts, start the old UI with `uv-agent tui`.
 
 See [TUI and slash commands](docs/tui.md) for the full command and shortcut list.
 
