@@ -34,7 +34,14 @@ from uv_agent.tui2.events import (
 )
 from uv_agent.tui2.renderer import Renderer
 from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
-from uv_agent.worktree import CommandResult, WorktreeError, create_worktree, validate_worktree_branch_name
+from uv_agent.time import utc_now_iso
+from uv_agent.worktree import (
+    CommandResult,
+    WorktreeError,
+    cleanup_worktree,
+    create_worktree,
+    validate_worktree_branch_name,
+)
 
 CODE_FILE_SUFFIXES = {
     ".cfg",
@@ -613,8 +620,29 @@ class AnsiUvAgentApp:
         return stripped[: idx + 1] if idx >= 0 else ""
 
     async def _handle_agent_view_key(self, key: str) -> bool:
+        confirmation = self.state.agent_view.pending_confirmation
+        if confirmation:
+            if key in {"y", "Y"}:
+                action, _, thread_id = confirmation.partition(":")
+                self.state.agent_view.pending_confirmation = None
+                if action == "delete_worktree":
+                    asyncio.create_task(self._delete_agent_view_worktree(thread_id))
+                elif action == "delete_thread":
+                    self._delete_agent_view_thread(thread_id)
+                self._safe_repaint()
+                return True
+            if key in {"n", "N", "\x1b", "\x03"}:
+                self.state.agent_view.pending_confirmation = None
+                self.state.agent_view.status_message = "delete cancelled"
+                self._safe_repaint()
+                return True
+
         if key == "\x03":  # Ctrl+C exits the dashboard; later commits use it to cancel selected runs.
-            self._close_agent_view()
+            selected = self.state.agent_view.selected_row()
+            if selected is not None and self._cancel_agent_view_thread(selected.thread_id):
+                self.state.agent_view.status_message = f"cancelled {short_thread(selected.thread_id)}"
+            else:
+                self._close_agent_view()
             self._safe_repaint()
             return True
         if key in {"\x1b", "\x01"}:  # Esc or Ctrl+A toggles back to transcript mode.
@@ -648,6 +676,12 @@ class AnsiUvAgentApp:
             self._move_agent_view_selection(5)
         elif key == " ":
             self.state.agent_view.peek_expanded = not self.state.agent_view.peek_expanded
+        elif key == "r":
+            self._reply_to_agent_view_selection()
+        elif key == "d":
+            self._confirm_agent_view_delete(include_worktree=False)
+        elif key == "D":
+            self._confirm_agent_view_delete(include_worktree=True)
         elif key in {"\x7f", "\b"}:
             self._delete_agent_view_before_cursor()
         elif key == "\x15":
@@ -717,6 +751,8 @@ class AnsiUvAgentApp:
             thread_id = str(thread.get("thread_id") or "")
             if not thread_id:
                 continue
+            if thread.get("agent_view_deleted"):
+                continue
             rows.append(self._agent_view_row_for_thread(thread_id, thread))
         self.state.agent_view.rows = rows
         if previous_id:
@@ -774,6 +810,98 @@ class AnsiUvAgentApp:
         except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
             return ""
         return str(events[0].get("type") or "") if events else ""
+
+    def _reply_to_agent_view_selection(self) -> None:
+        selected = self.state.agent_view.selected_row()
+        text = self.state.agent_view.composer.strip()
+        if selected is None:
+            self.state.agent_view.status_message = "select a session before reply"
+            return
+        if not text:
+            self.state.agent_view.status_message = "type a reply first"
+            return
+        self._set_agent_view_text("", cursor=0)
+        run_state = self._thread_runs.get(selected.thread_id)
+        if run_state is not None and run_state.running:
+            run_state.pending_turns.append(PendingTurn(text, []))
+            self.state.agent_view.status_message = f"queued reply for {short_thread(selected.thread_id)}"
+            self._refresh_agent_view_rows()
+            return
+        asyncio.create_task(self._start_turn_for_thread(selected.thread_id, text, image_paths=[]))
+        self.state.agent_view.status_message = f"reply sent to {short_thread(selected.thread_id)}"
+
+    def _cancel_agent_view_thread(self, thread_id: str) -> bool:
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is None or not run_state.running:
+            return False
+        run_state.cancel_event.set()
+        run_state.terminal_status = "interrupted"
+        run_state.status_message = "interrupted"
+        self._refresh_agent_view_rows()
+        return True
+
+    def _confirm_agent_view_delete(self, *, include_worktree: bool) -> None:
+        selected = self.state.agent_view.selected_row()
+        if selected is None:
+            self.state.agent_view.status_message = "select a session before delete"
+            return
+        action = "delete_worktree" if include_worktree else "delete_thread"
+        target = selected.worktree_branch if include_worktree else short_thread(selected.thread_id)
+        self.state.agent_view.pending_confirmation = f"{action}:{selected.thread_id}"
+        if include_worktree:
+            self.state.agent_view.status_message = f"Delete worktree {target}? [y/N]"
+        else:
+            self.state.agent_view.status_message = f"Hide session {target} from Agent View? [y/N]"
+
+    def _delete_agent_view_thread(self, thread_id: str) -> None:
+        self._cancel_agent_view_thread(thread_id)
+        self.engine.thread_store.append(thread_id, "thread.agent_view_deleted")
+        self._thread_runs.pop(thread_id, None)
+        if thread_id == self.state.thread_id:
+            self._clear_to_new_thread()
+        self.state.agent_view.status_message = f"hidden {short_thread(thread_id)}"
+        self._refresh_agent_view_rows()
+
+    async def _delete_agent_view_worktree(self, thread_id: str) -> None:
+        self._cancel_agent_view_thread(thread_id)
+        metadata = self._thread_metadata(thread_id)
+        branch = str(metadata.get("worktree_branch") or "")
+        path_text = str(metadata.get("worktree_path") or "")
+        if not branch or not path_text:
+            self.state.agent_view.status_message = "selected session has no worktree"
+            self._safe_repaint()
+            return
+        try:
+            result = await asyncio.to_thread(
+                cleanup_worktree,
+                self.project_root,
+                branch,
+                Path(path_text),
+                run=self._run_worktree_command,
+            )
+        except (WorktreeError, OSError, subprocess.SubprocessError) as exc:
+            self.state.agent_view.status_message = f"worktree delete failed: {exc}"
+            self._safe_repaint()
+            return
+        self.engine.thread_store.append(
+            thread_id,
+            "thread.worktree_deleted",
+            worktree_branch=result.branch,
+            worktree_path=str(result.path),
+            worktree_origin_root=str(result.origin_root),
+            worktree_deleted_at=utc_now_iso(),
+            worktree_deleted_head=result.head,
+            worktree_deleted_status=result.status,
+            worktree_removed=result.worktree_removed,
+            branch_deleted=result.branch_deleted,
+        )
+        self.engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(self.project_root.resolve()))
+        rule_states = getattr(self.engine, "_rule_states", None)
+        if isinstance(rule_states, dict):
+            rule_states.pop(thread_id, None)
+        self.state.agent_view.status_message = f"deleted worktree {result.branch}"
+        self._refresh_agent_view_rows()
+        self._safe_repaint()
 
     async def _dispatch_agent_view_prompt(self, prompt: str) -> None:
         prompt = prompt.strip()

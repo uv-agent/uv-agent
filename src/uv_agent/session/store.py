@@ -356,7 +356,7 @@ class ThreadStore:
         return events[0] if events else None
 
     def list_threads(self) -> list[dict[str, Any]]:
-        return self._list_threads(kind="thread")
+        return [thread for thread in self._list_threads(kind="thread") if not thread.get("agent_view_deleted")]
 
     def list_subthreads(self, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
         return self._list_threads(kind="subagent", parent_thread_id=parent_thread_id)
@@ -405,6 +405,8 @@ class ThreadStore:
             "worktree_deleted_at",
             "worktree_deleted_head",
             "worktree_deleted_status",
+            "agent_view_deleted",
+            "agent_view_deleted_at",
         ):
             if metadata.get(key) is not None:
                 digest[key] = metadata.get(key)
@@ -880,6 +882,11 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
             "message": event.get("message") or "",
             "_event_id": event.get("_event_id"),
         }
+        return
+
+    if event_type == "thread.agent_view_deleted":
+        metadata["agent_view_deleted"] = True
+        metadata["agent_view_deleted_at"] = event.get("created_at")
         return
 
     if event_type == "thread.goal_mode_updated":

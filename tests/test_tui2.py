@@ -641,6 +641,8 @@ class _DummyEngine:
                     thread["latest_cwd"] = data.get("cwd")
                 elif event_type in {"turn.completed", "turn.error", "turn.interrupted"}:
                     thread["terminal_event_type"] = event_type
+                elif event_type == "thread.agent_view_deleted":
+                    thread["agent_view_deleted"] = True
                 break
             return event
 
@@ -1289,6 +1291,95 @@ def test_agent_view_branch_name_falls_back_to_thread_id(monkeypatch) -> None:
     branch = asyncio.run(app._agent_view_branch_name("thr_abcdef123456", "prompt"))
 
     assert branch == "agent-abcdef12"
+
+
+def test_agent_view_reply_queues_for_running_thread(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One"}]
+    app._open_agent_view()
+    run_state = tui2_app.ThreadRunState(thread_id="thr_1")
+
+    class RunningTask:
+        def done(self):
+            return False
+
+    run_state.task = RunningTask()  # type: ignore[assignment]
+    app._thread_runs["thr_1"] = run_state
+    app.state.agent_view.composer = "follow up"
+
+    asyncio.run(app.handle_key("r"))
+
+    assert [turn.text for turn in run_state.pending_turns] == ["follow up"]
+    assert app.state.agent_view.composer == ""
+
+
+def test_agent_view_ctrl_c_cancels_selected_running_thread(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One"}]
+    app._open_agent_view()
+    run_state = tui2_app.ThreadRunState(thread_id="thr_1")
+
+    class RunningTask:
+        def done(self):
+            return False
+
+    run_state.task = RunningTask()  # type: ignore[assignment]
+    app._thread_runs["thr_1"] = run_state
+
+    asyncio.run(app.handle_key("\x03"))
+
+    assert run_state.cancel_event.is_set()
+    assert app.state.mode == "agent_view"
+
+
+def test_agent_view_delete_hides_thread_after_confirmation(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One"}]
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("d"))
+    assert app.state.agent_view.pending_confirmation == "delete_thread:thr_1"
+    asyncio.run(app.handle_key("y"))
+
+    assert app.engine.thread_store.threads[0]["agent_view_deleted"] is True
+    assert app.state.agent_view.rows == []
+
+
+def test_agent_view_delete_worktree_records_metadata(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    path = app.project_root / ".uv-agent" / "worktrees" / "agent-test-task-1"
+    app.engine.thread_store.threads = [
+        {
+            "thread_id": "thr_1",
+            "title": "One",
+            "worktree_branch": "agent-test-task-1",
+            "worktree_path": str(path),
+            "worktree_origin_root": str(app.project_root),
+        }
+    ]
+    app._open_agent_view()
+    result = SimpleNamespace(
+        branch="agent-test-task-1",
+        path=path,
+        origin_root=app.project_root,
+        head="abc123",
+        status=" M file.py",
+        worktree_removed=True,
+        branch_deleted=True,
+    )
+    monkeypatch.setattr(tui2_app, "cleanup_worktree", lambda project_root, branch, path, *, run: result)
+
+    async def run() -> None:
+        await app.handle_key("D")
+        await app.handle_key("y")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    events = app.engine.thread_store.events
+    assert any(event["type"] == "thread.worktree_deleted" for event in events)
+    assert app.engine.thread_store.threads[0]["latest_cwd"] == str(app.project_root.resolve())
 
 
 def test_agent_view_composer_is_separate_from_transcript(monkeypatch) -> None:
