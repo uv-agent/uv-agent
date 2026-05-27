@@ -126,7 +126,11 @@ class Renderer:
         self.width = self._paint_width(terminal_size()[0])
         self._write("\x1b[?2026h")
         self._erase_frame()
-        self._write("\x1b[2J\x1b[H")
+        # CSI 2J clears the visible viewport; CSI 3J also discards scrollback
+        # on terminals that support it.  /clear is an explicit destructive UI
+        # reset, so matching the user's expectation of a real terminal clear is
+        # preferable to leaving old transcript lines in scrollback.
+        self._write("\x1b[2J\x1b[3J\x1b[H")
         if rule:
             self._write(truncate_visible(rule, self.width) + "\r\n\r\n")
         self._write("\x1b[?2026l")

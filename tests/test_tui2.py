@@ -526,6 +526,17 @@ def test_flush_cell_only_uses_crlf_separators() -> None:
     assert bare_lf == []
 
 
+def test_renderer_clear_screen_clears_scrollback_and_omits_rule_by_default() -> None:
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+
+    renderer.clear_screen()
+    rendered = output.getvalue()
+
+    assert "\x1b[2J\x1b[3J\x1b[H" in rendered
+    assert "────────" not in strip_ansi(rendered)
+
+
 def test_renderer_reserves_last_column_to_avoid_terminal_autowrap(monkeypatch) -> None:
     monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (40, 10))
     output = io.StringIO()
@@ -768,6 +779,7 @@ class _DummyRenderer:
         self._has_frame = False
         self.width = 80
         self.flushed: list[TranscriptCell] = []
+        self.clear_calls: list[str | None] = []
 
     def repaint(self, state) -> None:
         pass
@@ -780,6 +792,7 @@ class _DummyRenderer:
             self.flush_cell(cell)
 
     def clear_screen(self, *, rule=None) -> None:
+        self.clear_calls.append(rule)
         if rule:
             self.output.write(rule + "\n")
 
@@ -868,6 +881,20 @@ def test_cancel_command_interrupts_without_confirmation(monkeypatch) -> None:
     assert not app._interrupt_armed
     assert app.cancel_event.is_set()
     assert app.state.status_message == app._text("interrupted")
+
+
+def test_clear_command_uses_plain_clear_screen_without_separator(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.flushed = [TranscriptCell("user", text="old")]
+    app.state.live = [TranscriptCell("assistant", text="streaming", status="streaming")]
+    app.state.thread_id = "thr_old"
+
+    assert app._handle_command("/clear") is True
+
+    assert app.renderer.clear_calls == [None]
+    assert "─" not in app.renderer.output.getvalue()
+    assert app.state.flushed[-1].kind == "event"
+    assert "cleared view" in app.state.flushed[-1].text
 
 
 def test_regular_key_cancels_ctrl_c_quit_confirmation(monkeypatch) -> None:

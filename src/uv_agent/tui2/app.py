@@ -1763,11 +1763,10 @@ class AnsiUvAgentApp:
         self._reasoning_cell = None
         self._reasoning_flushed_for_current_response = False
         self._refresh_window_title()
-        rule = "─" * max(8, getattr(self.renderer, "width", 80))
         if hasattr(self.renderer, "clear_screen"):
-            self.renderer.clear_screen(rule=rule)
+            self.renderer.clear_screen()
         else:
-            self.renderer.output.write("\x1b[2J\x1b[H" + rule + "\n\n")
+            self.renderer.output.write("\x1b[2J\x1b[3J\x1b[H")
             self.renderer.output.flush()
         self.state.status_message = self._text("new_thread")
         if old_thread_id:
