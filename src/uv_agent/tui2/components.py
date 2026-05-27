@@ -492,6 +492,8 @@ def render_agent_view_with_cursor(
     lang = _resolve_language(state.language)
     if view.interaction_mode == "help":
         return _render_agent_help_view(state, width, theme, max_rows)
+    if view.interaction_mode == "model":
+        return _render_agent_model_view(state, width, theme, max_rows)
 
     header = _agent_header_line(width, theme, lang=lang, mode=view.interaction_mode)
 
@@ -605,6 +607,47 @@ def _render_agent_help_view(
     return [truncate_visible(line, width) for line in rows], min(max(0, len(rows) - 1), len(rows) - 1), 0
 
 
+def _render_agent_model_view(
+    state: Tui2State,
+    width: int,
+    theme: AnsiTheme,
+    max_rows: int | None,
+) -> tuple[list[str], int, int]:
+    """Render the Agent View model picker as a bounded full-screen panel."""
+
+    lang = _resolve_language(state.language)
+    view = state.agent_view
+    budget = max_rows or 30
+    content_budget = max(0, budget - 2)
+    rows: list[str] = [_agent_header_line(width, theme, lang=lang, mode="model")]
+    options = view.model_options
+    if not options:
+        rows.append(_agent_box_line(sgr(theme.muted, tr(lang, "agent_view_no_models")), width, theme))
+    else:
+        selected = max(0, min(view.model_selected, len(options) - 1))
+        max_option_rows = max(1, content_budget - 2)
+        start = min(max(0, selected - max_option_rows // 2), max(0, len(options) - max_option_rows))
+        visible = options[start : start + max_option_rows]
+        hidden_before = start
+        hidden_after = max(0, len(options) - (start + len(visible)))
+        rows.append(_agent_box_line(sgr(theme.muted, tr(lang, "agent_view_model_hint")), width, theme))
+        for offset, option in enumerate(visible):
+            absolute = start + offset
+            active = absolute == selected
+            marker = sgr(theme.accent, "▸") if active else " "
+            value_style = theme.accent if option.id == view.dispatch_level else theme.command_palette
+            model = f" — {option.description}" if option.description else ""
+            current = f" · {tr(lang, 'current')}" if option.id == view.dispatch_level else ""
+            line = f"{marker} " + sgr(value_style, option.value) + sgr(theme.muted, model + current)
+            rows.append(_agent_box_line(line, width, theme))
+        if hidden_before or hidden_after:
+            rows.append(_agent_hidden_marker(width, theme, hidden_before=hidden_before, hidden_after=hidden_after))
+    if budget > 1:
+        rows.append(sgr(theme.border_accent, "╰" + "─" * (width - 2) + "╯"))
+    rows = rows[:budget]
+    return [truncate_visible(line, width) for line in rows], min(max(0, len(rows) - 1), len(rows) - 1), 0
+
+
 def _agent_help_lines(lang: UserLanguage, width: int, theme: AnsiTheme) -> list[str]:
     rows: list[str] = []
     for line in tr(lang, "agent_view_help_body").split("\n"):
@@ -620,6 +663,8 @@ def _agent_mode_label(mode: str, lang: UserLanguage) -> str:
         return tr(lang, "agent_view_mode_input")
     if mode == "help":
         return tr(lang, "agent_view_mode_help")
+    if mode == "model":
+        return tr(lang, "agent_view_mode_model")
     return tr(lang, "agent_view_mode_normal")
 
 
@@ -717,7 +762,11 @@ def _agent_box_line(content: str, width: int, theme: AnsiTheme) -> str:
 
 
 def _agent_separator(width: int, theme: AnsiTheme) -> str:
-    return sgr(theme.border_accent, "│") + sgr(theme.border_faint, "─" * max(1, width - 2)) + sgr(theme.border_accent, "│")
+    return (
+        sgr(theme.border_accent, "│")
+        + sgr(theme.border_faint, "─" * max(1, width - 2))
+        + sgr(theme.border_accent, "│")
+    )
 
 
 def _agent_row_line(
@@ -764,6 +813,9 @@ def _agent_peek_lines(state: Tui2State, width: int, theme: AnsiTheme) -> list[st
         return lines
     if view.status_message:
         lines.append(_agent_box_line(sgr(theme.muted, view.status_message), width, theme))
+    if view.dispatch_level:
+        model_label = tr(lang, "agent_view_dispatch_model").format(level=view.dispatch_level)
+        lines.append(_agent_box_line(sgr(theme.muted, model_label), width, theme))
     if selected is None:
         return lines or [_agent_box_line("", width, theme)]
     if not view.peek_expanded:

@@ -542,6 +542,18 @@ def test_renderer_clear_screen_clears_scrollback_and_omits_rule_by_default() -> 
     assert "────────" not in strip_ansi(rendered)
 
 
+def test_renderer_can_pad_live_region_to_viewport_bottom(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 12))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+
+    renderer.pad_live_region_to_bottom(Tui2State(composer=""), preceding_rows=0)
+
+    # A 12-row terminal reserves one row; the empty composer is 3 rows, so the
+    # next repaint can start after 8 blank rows and place the composer at bottom.
+    assert output.getvalue() == "\r\n" * 8
+
+
 def test_renderer_reserves_last_column_to_avoid_terminal_autowrap(monkeypatch) -> None:
     monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (40, 10))
     output = io.StringIO()
@@ -642,6 +654,8 @@ class _DummyEngine:
         self.turns: list[dict[str, object]] = []
         self.goal_updates: list[dict[str, object]] = []
         self.goal_states: dict[str, SimpleNamespace] = {}
+        self.branch_slug = "test-task"
+        self.branch_slug_requests: list[dict[str, object]] = []
 
     class config:
         class runtime:
@@ -768,6 +782,7 @@ class _DummyEngine:
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": f"turn_{len(self.turns)}"}
 
     async def generate_branch_slug(self, thread_id, user_text, *, level=None):
+        self.branch_slug_requests.append({"thread_id": thread_id, "user_text": user_text, "level": level})
         return self.branch_slug
 
     def enable_goal_mode(self, thread_id, *, objective=""):
@@ -1318,6 +1333,33 @@ def test_agent_view_renderer_uses_chinese_labels() -> None:
     assert "已完成 (1)" in plain
 
 
+def test_agent_view_renderer_shows_dispatch_model_level() -> None:
+    state = Tui2State(mode="agent_view")
+    state.agent_view.dispatch_level = "alpha"
+
+    plain = "\n".join(strip_ansi(line) for line in render_agent_view(state, 88, 0))
+
+    assert "new task model: alpha" in plain
+
+
+def test_agent_view_renderer_shows_model_picker() -> None:
+    state = Tui2State(mode="agent_view")
+    state.agent_view.interaction_mode = "model"
+    state.agent_view.dispatch_level = "alpha"
+    state.agent_view.model_options = [
+        CommandSuggestion("alpha", "alpha-model", id="alpha"),
+        CommandSuggestion("test", "test-model", id="test"),
+    ]
+    state.agent_view.model_selected = 1
+
+    plain = "\n".join(strip_ansi(line) for line in render_agent_view(state, 88, 0))
+
+    assert "MODEL" in plain
+    assert "Choose the model level" in plain
+    assert "alpha — alpha-model" in plain
+    assert "test — test-model" in plain
+
+
 def test_agent_view_renderer_respects_max_height_with_many_rows() -> None:
     state = Tui2State(mode="agent_view")
     state.agent_view.rows = [
@@ -1457,6 +1499,64 @@ def test_agent_view_dispatch_creates_worktree_thread_and_runs(monkeypatch) -> No
     assert app.engine.thread_store.threads[0]["latest_cwd"] == str(created.path)
     assert app.engine.turns[-1]["thread_id"] == "thr_1"
     assert app.engine.turns[-1]["user_text"] == "fix login"
+
+
+def test_agent_view_model_picker_sets_dispatch_level(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("m"))
+    assert app.state.agent_view.interaction_mode == "model"
+    assert [item.id for item in app.state.agent_view.model_options] == ["alpha", "test"]
+
+    asyncio.run(app.handle_key("k"))
+    asyncio.run(app.handle_key("\r"))
+
+    assert app.state.agent_view.interaction_mode == "normal"
+    assert app.state.agent_view.dispatch_level == "alpha"
+    assert app.state.level == "test"
+
+
+def test_agent_view_dispatch_uses_selected_model_level(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+    app.state.agent_view.dispatch_level = "alpha"
+    app.state.agent_view.dispatch_level_explicit = True
+    created = SimpleNamespace(
+        branch="agent-test-task-1",
+        path=app.project_root / ".uv-agent" / "worktrees" / "agent-test-task-1",
+        origin_root=app.project_root,
+        metadata=lambda: {
+            "worktree_status": "active",
+            "worktree_branch": "agent-test-task-1",
+            "worktree_path": str(app.project_root / ".uv-agent" / "worktrees" / "agent-test-task-1"),
+            "worktree_base_ref": "HEAD",
+            "worktree_origin_root": str(app.project_root),
+        },
+    )
+    monkeypatch.setattr(tui2_app, "create_worktree", lambda project_root, branch, *, run: created)
+
+    async def run() -> None:
+        await app._dispatch_agent_view_prompt("fix login")
+        task = app._thread_runs.get("thr_1").task
+        assert task is not None
+        await task
+
+    asyncio.run(run())
+
+    assert app.engine.turns[-1]["level"] == "alpha"
+    assert app.engine.thread_store.threads[0]["active_level"] == "alpha"
+    assert app.engine.branch_slug_requests[-1]["level"] == "alpha"
+
+
+def test_agent_view_default_dispatch_level_tracks_current_thread(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.level = "alpha"
+
+    app._open_agent_view()
+
+    assert app.state.agent_view.dispatch_level == "alpha"
+    assert app._agent_view_dispatch_level() == "alpha"
 
 
 def test_agent_view_input_mode_dispatches_on_enter(monkeypatch) -> None:

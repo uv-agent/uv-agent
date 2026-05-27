@@ -126,6 +126,44 @@ class Renderer:
         for cell in cells:
             self.flush_cell(cell)
 
+    def flushed_cell_rows(self, cells: Iterable[TranscriptCell]) -> int:
+        """Return how many terminal rows ``flush_cells`` will advance.
+
+        ``flush_cell`` prints rendered cell lines followed by one blank visual
+        row.  The app uses this after loading thread history so the first live
+        composer repaint can be padded down to the bottom of a mostly-empty
+        viewport instead of appearing directly under a short transcript.
+        """
+
+        self.width = self._paint_width(terminal_size()[0])
+        total = 0
+        for cell in cells:
+            lines = render_cell(cell, self.width, spinner_frame=self.spinner_frame)
+            if lines:
+                total += len(lines) + 1
+        return total
+
+    def pad_live_region_to_bottom(self, state: Tui2State, *, preceding_rows: int = 0) -> None:
+        """Insert blank rows so the next repaint starts near the viewport bottom.
+
+        This is intentionally a one-shot helper for history loads after a clear:
+        no live frame is active, and ``preceding_rows`` describes transcript rows
+        printed since the clear.  If the history already fills the viewport, no
+        padding is emitted and normal terminal scrolling keeps the latest rows in
+        view.
+        """
+
+        cols, rows = terminal_size()
+        self.width = self._paint_width(cols)
+        max_height = max(3, rows - 1)
+        live_lines, _, _ = render_live_with_cursor(
+            state, self.width, self.spinner_frame, max_height=max_height
+        )
+        target_top = max(0, max_height - len(live_lines))
+        pad_rows = max(0, target_top - max(0, preceding_rows))
+        if pad_rows:
+            self._write("\r\n" * pad_rows)
+
     def clear_screen(self, *, rule: str | None = None) -> None:
         """Clear the visible terminal and optionally leave a top separator.
 

@@ -216,7 +216,8 @@ model 和一个 level。
   thread 开始时再初始化。
 - `/agents` 打开 Agent View，用独立 worktree 分发后台任务。它使用很轻量的
   vim-like 区分：普通模式浏览会话（`j/k`、`Enter`、`Space`、`c`、`d`、`D`、`?`），
-  输入模式（`i` 新任务、`r` 回复）编辑底部输入框，并用 `Enter` 发送（`Ctrl+Enter` 换行）。
+  并可用 `m` 选择新任务模型；输入模式（`i` 新任务、`r` 回复）编辑底部输入框，
+  并用 `Enter` 发送（`Ctrl+Enter` 换行）。
 - `/status`、`/mcp`、`/skills` 可查看 runtime 状态和可用能力。
 - 如果需要 `/config`、`/models`、Worktree 管理或剪贴板图片快捷键等原 Textual 专属面板，
   使用 `uv-agent tui` 启动旧界面。

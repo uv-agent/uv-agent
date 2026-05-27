@@ -15,7 +15,7 @@ def _default_language() -> UserLanguage:
 
 CellKind = Literal["user", "assistant", "reasoning", "tool", "event", "error", "image"]
 Tui2Mode = Literal["transcript", "agent_view"]
-AgentViewInteractionMode = Literal["normal", "input", "help"]
+AgentViewInteractionMode = Literal["normal", "input", "help", "model"]
 AgentViewInputTarget = Literal["dispatch", "reply"]
 AgentViewRowStatus = Literal[
     "dispatching",
@@ -105,6 +105,10 @@ class AgentViewState:
     rows: list[AgentViewRow] = field(default_factory=list)
     selected: int = 0
     peek_expanded: bool = True
+    dispatch_level: str | None = None
+    dispatch_level_explicit: bool = False
+    model_options: list[CommandSuggestion] = field(default_factory=list)
+    model_selected: int = 0
     composer: str = ""
     composer_cursor: int | None = None
     status_message: str = "Enter dispatches a background worktree task"

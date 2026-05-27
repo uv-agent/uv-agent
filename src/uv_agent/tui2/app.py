@@ -131,7 +131,7 @@ HELP_TEXT = (
     "\n"
     "Keys: Enter send/select · Ctrl+Enter newline · / command palette · @ mentions · ↑/↓ history\n"
     "      Ctrl+A Agent View · Ctrl+E line end · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt\n"
-    "Agent View: normal mode uses j/k/Enter/Space/c/d/D; i starts a task, r replies, ? opens Agent View help."
+    "Agent View: normal mode uses j/k/Enter/Space/c/d/D; i starts a task, m chooses its model, r replies, ? opens help."
 )
 
 
@@ -267,6 +267,7 @@ class AnsiUvAgentApp:
             project_path=str(self.project_root),
             language=self.language,
         )
+        self.state.agent_view.dispatch_level = self.state.level
         self.renderer = Renderer()
         self._thread_runs: dict[str, ThreadRunState] = {}
         self._assistant_cell: TranscriptCell | None = None
@@ -651,6 +652,9 @@ class AnsiUvAgentApp:
             self._safe_repaint()
             return True
 
+        if view.interaction_mode == "model":
+            return await self._handle_agent_view_model_key(key)
+
         if view.interaction_mode == "input":
             return await self._handle_agent_view_input_key(key)
         return await self._handle_agent_view_normal_key(key)
@@ -674,6 +678,8 @@ class AnsiUvAgentApp:
             view.status_message = self._text("agent_view_help_status")
         elif key in {"i", "a", "A"}:
             self._enter_agent_view_input_mode(target="dispatch")
+        elif key in {"m", "M"}:
+            self._open_agent_view_model_picker()
         elif key == "r":
             selected = view.selected_row()
             if selected is None:
@@ -705,6 +711,24 @@ class AnsiUvAgentApp:
             self._confirm_agent_view_delete(include_worktree=False)
         elif key == "D":
             self._confirm_agent_view_delete(include_worktree=True)
+        self._safe_repaint()
+        return True
+
+    async def _handle_agent_view_model_key(self, key: str) -> bool:
+        view = self.state.agent_view
+        if key in {"\x03", "\x1b", "m", "M"}:
+            view.interaction_mode = "normal"
+            view.status_message = self._text("agent_view_normal_hint")
+        elif key in {"<H>", "<UP>", "k"}:
+            self._move_agent_view_model_selection(-1)
+        elif key in {"<P>", "<DOWN>", "j"}:
+            self._move_agent_view_model_selection(1)
+        elif key in {"<I>", "<PAGEUP>"}:
+            self._move_agent_view_model_selection(-5)
+        elif key in {"<Q>", "<PAGEDOWN>"}:
+            self._move_agent_view_model_selection(5)
+        elif key == "\r":
+            self._accept_agent_view_model_selection()
         self._safe_repaint()
         return True
 
@@ -783,6 +807,52 @@ class AnsiUvAgentApp:
         view.input_target_thread_id = None
         view.status_message = self._text("agent_view_normal_hint")
 
+    def _open_agent_view_model_picker(self) -> None:
+        view = self.state.agent_view
+        view.model_options = list(self._agent_view_model_options())
+        current = self._agent_view_dispatch_level()
+        view.model_selected = 0
+        for index, option in enumerate(view.model_options):
+            if option.id == current:
+                view.model_selected = index
+                break
+        view.interaction_mode = "model"
+        view.status_message = self._text("agent_view_model_status")
+
+    def _agent_view_model_options(self) -> tuple[CommandSuggestion, ...]:
+        levels = sorted(getattr(self.engine.config, "levels", {}).keys())
+        return tuple(
+            CommandSuggestion(name, self._level_model_name(name), id=name, kind="model")
+            for name in levels
+        )
+
+    def _agent_view_dispatch_level(self) -> str:
+        view = self.state.agent_view
+        source_level = view.dispatch_level if view.dispatch_level_explicit else self.state.level
+        level = source_level or self.engine.config.runtime.default_level
+        if level in getattr(self.engine.config, "levels", {}):
+            return level
+        return self.engine.config.runtime.default_level
+
+    def _move_agent_view_model_selection(self, delta: int) -> None:
+        view = self.state.agent_view
+        if not view.model_options:
+            view.model_selected = 0
+            return
+        view.model_selected = max(0, min(len(view.model_options) - 1, view.model_selected + delta))
+
+    def _accept_agent_view_model_selection(self) -> None:
+        view = self.state.agent_view
+        if not view.model_options:
+            view.status_message = self._text("agent_view_no_models")
+            return
+        option = view.model_options[max(0, min(view.model_selected, len(view.model_options) - 1))]
+        level = option.id or option.value
+        view.dispatch_level = level
+        view.dispatch_level_explicit = True
+        view.interaction_mode = "normal"
+        view.status_message = self._fmt("agent_view_model_set", level=level)
+
     def _open_agent_view(self) -> None:
         self._close_command_palette()
         self._refresh_agent_view_rows()
@@ -790,6 +860,7 @@ class AnsiUvAgentApp:
         self.state.agent_view.interaction_mode = "normal"
         self.state.agent_view.input_target = "dispatch"
         self.state.agent_view.input_target_thread_id = None
+        self.state.agent_view.dispatch_level = self._agent_view_dispatch_level()
         if self.state.agent_view.selected >= len(self.state.agent_view.rows):
             self.state.agent_view.selected = max(0, len(self.state.agent_view.rows) - 1)
         self.state.agent_view.status_message = self._text("agent_view_open_status")
@@ -1064,7 +1135,8 @@ class AnsiUvAgentApp:
         self._refresh_agent_view_rows()
         self._safe_repaint()
         try:
-            branch = await self._agent_view_branch_name(thread_id, prompt)
+            level = self._agent_view_dispatch_level()
+            branch = await self._agent_view_branch_name(thread_id, prompt, level=level)
             info = await asyncio.to_thread(
                 create_worktree,
                 self.project_root,
@@ -1073,9 +1145,7 @@ class AnsiUvAgentApp:
             )
             self.engine.thread_store.append(thread_id, "thread.worktree_created", **info.metadata())
             self.engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(info.path))
-            level = self.state.level or self.engine.config.runtime.default_level
             self._persist_thread_level(thread_id, level)
-            self.state.level = level
             run_state.terminal_status = "working"
             run_state.status_message = "running"
             await self._start_turn_for_thread(thread_id, prompt, image_paths=[])
@@ -1098,14 +1168,14 @@ class AnsiUvAgentApp:
             return "Agent task"
         return first[:77].rstrip() + "..." if len(first) > 80 else first
 
-    async def _agent_view_branch_name(self, thread_id: str, prompt: str) -> str:
+    async def _agent_view_branch_name(self, thread_id: str, prompt: str, *, level: str | None = None) -> str:
         short_id = thread_id.replace("thr_", "")[:8] or new_id("agent").replace("agent_", "")[:8]
         slug: str | None = None
         generate = getattr(self.engine, "generate_branch_slug", None)
         if callable(generate):
             try:
                 slug = await asyncio.wait_for(
-                    generate(thread_id, prompt, level=self.state.level),
+                    generate(thread_id, prompt, level=level or self._agent_view_dispatch_level()),
                     timeout=BRANCH_SLUG_TIMEOUT_S,
                 )
             except Exception:
@@ -2068,11 +2138,14 @@ class AnsiUvAgentApp:
             self.renderer._has_frame = False  # type: ignore[attr-defined]
             self.renderer.output.write("[2J[H")
             self.renderer.output.flush()
+        flushed_rows = self.renderer.flushed_cell_rows(cells) if hasattr(self.renderer, "flushed_cell_rows") else 0
         self.renderer.flush_cells(cells)
         self.state.status_message = f"{self._text('resumed')} {short_thread(thread_id)}"
         self._sync_attached_run_state(run_state)
         if run_state is None or not run_state.running:
             self.state.status_message = f"{self._text('resumed')} {short_thread(thread_id)}"
+        if hasattr(self.renderer, "pad_live_region_to_bottom"):
+            self.renderer.pad_live_region_to_bottom(self.state, preceding_rows=flushed_rows)
         self._safe_repaint()
 
     def _history_cells_for_thread(self, thread_id: str) -> list[TranscriptCell]:

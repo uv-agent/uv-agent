@@ -80,8 +80,9 @@ fight with text editing:
 
 | Mode | Keys |
 | --- | --- |
-| Normal | `j/k` or arrows move; `PageUp/PageDown` jump; `Enter` attaches the selected session; `Space` toggles peek; `c` cancels the selected running session; `d` hides a row; `D` deletes its worktree and branch after confirmation; `?` opens Agent View help; `Esc` or `Ctrl+A` returns to the transcript. |
+| Normal | `j/k` or arrows move; `PageUp/PageDown` jump; `Enter` attaches the selected session; `Space` toggles peek; `m` chooses the model level for new tasks; `c` cancels the selected running session; `d` hides a row; `D` deletes its worktree and branch after confirmation; `?` opens Agent View help; `Esc` or `Ctrl+A` returns to the transcript. |
 | Input | Entered with `i` for a new background task or `r` to reply to the selected session. `Enter` sends, `Ctrl+Enter`/`Ctrl+J` inserts a newline, and `Esc` returns to normal mode. |
+| Model | Entered with `m` from normal mode. `j/k` or arrows move, `Enter` selects the level for future Agent View tasks, and `Esc` or `m` returns to normal mode. |
 
 ## Config Panel
 
