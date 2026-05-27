@@ -350,7 +350,7 @@ def test_busy_state_uses_status_message_as_primary_label() -> None:
 
 def test_context_row_includes_goal_model_project_but_not_thread_title() -> None:
     # The thread title is shown in the terminal title and the /status output;
-    # the bottom status row keeps only goal + model + project so the row stays
+    # the bottom status row keeps only model + Goal + project so the row stays
     # scannable.
     state = Tui2State(
         thread_id="t-abc",
@@ -363,11 +363,21 @@ def test_context_row_includes_goal_model_project_but_not_thread_title() -> None:
     lines = render_status_lines(state, 120, 0)
     plain = "\n".join(strip_ansi(line) for line in lines)
 
-    assert "⊕ goal" in plain
+    assert "gpt-5-codex · Goal" in plain
+    assert "⊕" not in plain
+    assert "ship it" not in plain
     assert "my thread" not in plain
     assert "t-abc" not in plain
     assert "gpt-5-codex" in plain
     assert "/home/user/proj" in plain
+
+
+def test_context_row_styles_goal_as_orange_red_badge() -> None:
+    state = Tui2State(level="test", goal_enabled=True)
+
+    line = render_status_lines(state, 80, 0)[0]
+
+    assert sgr(DEFAULT_THEME.goal, "Goal") in line
 
 
 def test_context_row_shrinks_home_path(monkeypatch) -> None:

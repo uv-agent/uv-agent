@@ -288,7 +288,7 @@ def render_status_lines(
     """Up to two muted status rows.
 
     Row 1 — activity: spinner + elapsed, queued count, last error.
-    Row 2 — context: thread title, model level, goal badge, project path.
+    Row 2 — context: thread title, model level, Goal badge, project path.
 
     Empty rows are dropped so a fresh idle session collapses to nothing.
     """
@@ -312,19 +312,17 @@ def render_status_lines(
         activity.append(sgr(theme.error, f"✗ {state.last_error}"))
 
     context: list[str] = []
-    if state.goal_enabled:
-        label = "⊕ " + tr(lang, "goal").lower()
-        if state.goal_objective:
-            obj = state.goal_objective.splitlines()[0]
-            label = f"{label}: {obj[:40]}"
-        context.append(sgr(theme.success, label))
     # Thread title is intentionally omitted: the terminal title already shows
     # it, and the /status command surfaces the full metadata.  The bottom row
     # only needs model + project context to stay scannable.
     if state.level:
         context.append(sgr(theme.muted, state.level))
+        if state.goal_enabled:
+            context.append(sgr(theme.goal, "Goal"))
         if state.context_percent is not None:
             context.append(sgr(theme.muted, f"{state.context_percent}%"))
+    elif state.goal_enabled:
+        context.append(sgr(theme.goal, "Goal"))
     if state.project_path:
         context.append(sgr(theme.muted, _shorten_path(state.project_path, max_len=48)))
 

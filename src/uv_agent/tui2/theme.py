@@ -23,6 +23,7 @@ class AnsiTheme:
     reasoning: str = "38;5;141"
     success: str = "38;5;114"
     warning: str = "38;5;221"
+    goal: str = "1;38;5;202"
     error: str = "38;5;203"
     border: str = "38;5;240"
     border_faint: str = "38;5;237"
