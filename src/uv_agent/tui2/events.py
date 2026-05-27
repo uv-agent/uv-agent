@@ -25,6 +25,14 @@ AgentViewRowStatus = Literal[
     "failed",
     "interrupted",
 ]
+AGENT_VIEW_STATUS_ORDER: tuple[AgentViewRowStatus, ...] = (
+    "dispatching",
+    "working",
+    "queued",
+    "failed",
+    "interrupted",
+    "completed",
+)
 
 
 @dataclass(frozen=True)

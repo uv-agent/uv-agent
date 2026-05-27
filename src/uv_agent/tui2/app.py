@@ -25,6 +25,7 @@ from uv_agent.tui.formatting import short_block, short_thread
 from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
 from uv_agent.tui2.events import (
+    AGENT_VIEW_STATUS_ORDER,
     AgentViewRow,
     CommandSuggestion,
     PendingTurn,
@@ -169,6 +170,7 @@ UNBRACKETED_PASTE_ENTER_S = 0.08
 COMPACTION_SUMMARY_PREVIEW_LINES = 4
 COMPACTION_SUMMARY_PREVIEW_CHARS = 800
 BRANCH_SLUG_TIMEOUT_S = 3.0
+_AGENT_VIEW_STATUS_RANK = {status: index for index, status in enumerate(AGENT_VIEW_STATUS_ORDER)}
 
 
 @dataclass
@@ -803,6 +805,23 @@ class AnsiUvAgentApp:
             return
         self.state.agent_view.selected = max(0, min(len(rows) - 1, self.state.agent_view.selected + delta))
 
+    def _ordered_agent_view_rows(self) -> list[AgentViewRow]:
+        indexed_threads = {row.thread_id: index for index, row in enumerate(self.state.agent_view.rows)}
+        rows: list[AgentViewRow] = []
+        for thread in self.engine.thread_store.list_threads()[:100]:
+            thread_id = str(thread.get("thread_id") or "")
+            if not thread_id or thread.get("agent_view_deleted"):
+                continue
+            rows.append(self._agent_view_row_for_thread(thread_id, thread))
+
+        def sort_key(row: AgentViewRow) -> tuple[int, int]:
+            return (
+                _AGENT_VIEW_STATUS_RANK.get(row.status, len(_AGENT_VIEW_STATUS_RANK)),
+                indexed_threads.get(row.thread_id, len(indexed_threads)),
+            )
+
+        return sorted(rows, key=sort_key)
+
     def _agent_view_cursor(self) -> int:
         cursor = self.state.agent_view.composer_cursor
         text = self.state.agent_view.composer
@@ -864,14 +883,7 @@ class AnsiUvAgentApp:
     def _refresh_agent_view_rows(self) -> None:
         previous = self.state.agent_view.selected_row()
         previous_id = previous.thread_id if previous is not None else None
-        rows: list[AgentViewRow] = []
-        for thread in self.engine.thread_store.list_threads()[:100]:
-            thread_id = str(thread.get("thread_id") or "")
-            if not thread_id:
-                continue
-            if thread.get("agent_view_deleted"):
-                continue
-            rows.append(self._agent_view_row_for_thread(thread_id, thread))
+        rows = self._ordered_agent_view_rows()
         self.state.agent_view.rows = rows
         if previous_id:
             for index, row in enumerate(rows):

@@ -1309,11 +1309,12 @@ def test_agent_view_renderer_uses_chinese_labels() -> None:
     from uv_agent.environment import normalize_language
 
     state = Tui2State(mode="agent_view", language=normalize_language("zh-CN"))
+    state.agent_view.rows = [AgentViewRow(thread_id="thr_done", title="完成", status="completed")]
 
     plain = "\n".join(strip_ansi(line) for line in render_agent_view(state, 88, 0))
 
     assert "普通" in plain
-    assert "还没有 Agent 会话" in plain
+    assert "已完成 (1)" in plain
 
 
 def test_agent_view_renderer_respects_max_height_with_many_rows() -> None:
@@ -1383,6 +1384,26 @@ def test_agents_command_opens_agent_view(monkeypatch) -> None:
 
     assert app.state.mode == "agent_view"
     assert app.state.agent_view.rows[0].thread_id == "thr_1"
+
+
+def test_agent_view_selection_order_is_stable_across_status_changes(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [
+        {"thread_id": "thr_completed", "title": "Done"},
+        {"thread_id": "thr_interrupted", "title": "Stopped"},
+    ]
+    app.engine.thread_store.events = [
+        {"type": "turn.completed", "thread_id": "thr_completed"},
+        {"type": "turn.interrupted", "thread_id": "thr_interrupted"},
+    ]
+    app._open_agent_view()
+
+    assert [row.thread_id for row in app.state.agent_view.rows] == ["thr_interrupted", "thr_completed"]
+    app.state.agent_view.selected = 1
+    app._refresh_agent_view_rows()
+
+    assert [row.thread_id for row in app.state.agent_view.rows] == ["thr_interrupted", "thr_completed"]
+    assert app.state.agent_view.selected_row().thread_id == "thr_completed"
 
 
 def test_agent_view_navigation_and_attach(monkeypatch) -> None:

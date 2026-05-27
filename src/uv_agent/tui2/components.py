@@ -12,7 +12,14 @@ from uv_agent.helper_calls import extract_runtime_helper_calls, format_helper_ca
 from uv_agent.i18n import tr
 from uv_agent.tui.formatting import format_elapsed, short_block, short_thread
 from uv_agent.tui2.ansi import strip_ansi, truncate_visible, visible_len, wrap_plain
-from uv_agent.tui2.events import AgentViewRow, CommandSuggestion, TranscriptCell, Tui2State, tool_title
+from uv_agent.tui2.events import (
+    AGENT_VIEW_STATUS_ORDER,
+    AgentViewRow,
+    CommandSuggestion,
+    TranscriptCell,
+    Tui2State,
+    tool_title,
+)
 from uv_agent.tui2.theme import AnsiTheme, DEFAULT_THEME, sgr
 
 
@@ -459,15 +466,6 @@ def render_command_palette(
 # ---------------------------------------------------------------------------
 
 
-_AGENT_STATUS_ORDER = ("dispatching", "working", "queued", "failed", "interrupted", "completed")
-_AGENT_STATUS_LABELS = {
-    "dispatching": "DISPATCHING",
-    "working": "WORKING",
-    "queued": "QUEUED",
-    "completed": "COMPLETED",
-    "failed": "FAILED",
-    "interrupted": "INTERRUPTED",
-}
 _AGENT_STATUS_GLYPHS = {
     "dispatching": "…",
     "working": "⠿",
@@ -639,7 +637,7 @@ def _agent_body_lines(
     max_lines: int,
 ) -> list[str]:
     view = state.agent_view
-    grouped: dict[str, list[tuple[int, AgentViewRow]]] = {status: [] for status in _AGENT_STATUS_ORDER}
+    grouped: dict[str, list[tuple[int, AgentViewRow]]] = {status: [] for status in AGENT_VIEW_STATUS_ORDER}
     for index, row in enumerate(view.rows):
         grouped.setdefault(row.status, []).append((index, row))
 
@@ -656,11 +654,12 @@ def _agent_body_lines(
 
     items: list[str] = []
     selected_item_index = 0
-    for status in _AGENT_STATUS_ORDER:
+    lang = _resolve_language(state.language)
+    for status in AGENT_VIEW_STATUS_ORDER:
         entries = grouped.get(status) or []
         if not entries:
             continue
-        label = f"{_AGENT_STATUS_LABELS.get(status, status.upper())} ({len(entries)})"
+        label = f"{tr(lang, f'agent_view_status_{status}')} ({len(entries)})"
         items.append(_agent_box_line(sgr(theme.muted, label), width, theme))
         for absolute, row in entries:
             if absolute == view.selected:
