@@ -1257,6 +1257,28 @@ def test_agent_view_renderer_groups_rows_and_shows_peek() -> None:
     assert "running tests" in plain
 
 
+def test_agent_view_renderer_shows_help_mode() -> None:
+    state = Tui2State(mode="agent_view")
+    state.agent_view.interaction_mode = "help"
+
+    plain = "\n".join(strip_ansi(line) for line in render_agent_view(state, 88, 0))
+
+    assert "HELP" in plain
+    assert "Normal mode keys" in plain
+    assert "Input mode keys" in plain
+
+
+def test_agent_view_renderer_uses_chinese_labels() -> None:
+    from uv_agent.environment import normalize_language
+
+    state = Tui2State(mode="agent_view", language=normalize_language("zh-CN"))
+
+    plain = "\n".join(strip_ansi(line) for line in render_agent_view(state, 88, 0))
+
+    assert "普通" in plain
+    assert "还没有 Agent 会话" in plain
+
+
 def test_agent_view_renderer_respects_max_height_with_many_rows() -> None:
     state = Tui2State(mode="agent_view")
     state.agent_view.rows = [
@@ -1378,6 +1400,42 @@ def test_agent_view_dispatch_creates_worktree_thread_and_runs(monkeypatch) -> No
     assert app.engine.turns[-1]["user_text"] == "fix login"
 
 
+def test_agent_view_input_mode_dispatches_on_ctrl_enter(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+    created = SimpleNamespace(
+        branch="agent-test-task-1",
+        path=app.project_root / ".uv-agent" / "worktrees" / "agent-test-task-1",
+        origin_root=app.project_root,
+        metadata=lambda: {
+            "worktree_status": "active",
+            "worktree_branch": "agent-test-task-1",
+            "worktree_path": str(app.project_root / ".uv-agent" / "worktrees" / "agent-test-task-1"),
+            "worktree_base_ref": "HEAD",
+            "worktree_origin_root": str(app.project_root),
+        },
+    )
+    monkeypatch.setattr(tui2_app, "create_worktree", lambda project_root, branch, *, run: created)
+
+    async def run() -> None:
+        await app.handle_key("i")
+        await app.handle_key("f")
+        await app.handle_key("i")
+        await app.handle_key("x")
+        await app.handle_key("<C-ENTER>")
+        for _ in range(5):
+            await asyncio.sleep(0)
+        task = app._thread_runs.get("thr_1").task
+        assert task is not None
+        await task
+
+    asyncio.run(run())
+
+    assert app.state.agent_view.interaction_mode == "normal"
+    assert app.state.agent_view.composer == ""
+    assert app.engine.turns[-1]["user_text"] == "fix"
+
+
 def test_agent_view_branch_name_falls_back_to_thread_id(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.engine.branch_slug = ""
@@ -1399,12 +1457,22 @@ def test_agent_view_reply_queues_for_running_thread(monkeypatch) -> None:
 
     run_state.task = RunningTask()  # type: ignore[assignment]
     app._thread_runs["thr_1"] = run_state
-    app.state.agent_view.composer = "follow up"
-
     asyncio.run(app.handle_key("r"))
+    assert app.state.agent_view.interaction_mode == "input"
+    asyncio.run(app.handle_key("f"))
+    asyncio.run(app.handle_key("o"))
+    asyncio.run(app.handle_key("l"))
+    asyncio.run(app.handle_key("l"))
+    asyncio.run(app.handle_key("o"))
+    asyncio.run(app.handle_key("w"))
+    asyncio.run(app.handle_key(" "))
+    asyncio.run(app.handle_key("u"))
+    asyncio.run(app.handle_key("p"))
+    asyncio.run(app.handle_key("<C-ENTER>"))
 
     assert [turn.text for turn in run_state.pending_turns] == ["follow up"]
     assert app.state.agent_view.composer == ""
+    assert app.state.agent_view.interaction_mode == "normal"
 
 
 def test_agent_view_ctrl_c_cancels_selected_running_thread(monkeypatch) -> None:
@@ -1481,10 +1549,34 @@ def test_agent_view_composer_is_separate_from_transcript(monkeypatch) -> None:
     app.state.composer = "transcript draft"
     app._open_agent_view()
 
+    asyncio.run(app.handle_key("i"))
     asyncio.run(app.handle_key("a"))
     asyncio.run(app.handle_key("b"))
 
     assert app.state.composer == "transcript draft"
+    assert app.state.agent_view.composer == "ab"
+
+
+def test_agent_view_normal_mode_letters_do_not_edit_composer(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("x"))
+
+    assert app.state.agent_view.composer == ""
+
+
+def test_agent_view_input_escape_returns_to_normal_without_cursor_jumps(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("i"))
+    asyncio.run(app.handle_key("a"))
+    asyncio.run(app.handle_key("b"))
+    asyncio.run(app.handle_key("\x1b"))
+    asyncio.run(app.handle_key("j"))
+
+    assert app.state.agent_view.interaction_mode == "normal"
     assert app.state.agent_view.composer == "ab"
 
 

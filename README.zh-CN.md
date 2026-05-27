@@ -214,6 +214,9 @@ model 和一个 level。
 - `/level <name>`（或 `/model <name>`）切换 model level；选择会按 thread 记住。
 - `/goal enable [objective]` 开启持久 checklist/notes；可以在第一条消息前启用，
   thread 开始时再初始化。
+- `/agents` 打开 Agent View，用独立 worktree 分发后台任务。它使用很轻量的
+  vim-like 区分：普通模式浏览会话（`j/k`、`Enter`、`Space`、`c`、`d`、`D`、`?`），
+  输入模式（`i` 新任务、`r` 回复）编辑底部输入框，并用 `Ctrl+Enter` 发送。
 - `/status`、`/mcp`、`/skills` 可查看 runtime 状态和可用能力。
 - 如果需要 `/config`、`/models`、Worktree 管理或剪贴板图片快捷键等原 Textual 专属面板，
   使用 `uv-agent tui` 启动旧界面。

@@ -490,7 +490,12 @@ def render_agent_view_with_cursor(
 
     width = max(20, width)
     max_rows = max_height if max_height is None else max(1, max_height)
-    header = _agent_header_line(width, theme)
+    view = state.agent_view
+    lang = _resolve_language(state.language)
+    if view.interaction_mode == "help":
+        return _render_agent_help_view(state, width, theme, max_rows)
+
+    header = _agent_header_line(width, theme, lang=lang, mode=view.interaction_mode)
 
     if max_rows is not None and max_rows <= 4:
         return _render_compact_agent_view(state, width, theme, max_rows)
@@ -536,8 +541,18 @@ def render_agent_view_with_cursor(
     return [truncate_visible(line, width) for line in rows], min(cursor_row, len(rows) - 1), cursor_col
 
 
-def _agent_header_line(width: int, theme: AnsiTheme) -> str:
-    title = "─ Agent View "
+def _agent_header_line(
+    width: int,
+    theme: AnsiTheme,
+    *,
+    lang: UserLanguage | None = None,
+    mode: str | None = None,
+) -> str:
+    lang = lang or normalize_language("en")
+    suffix = ""
+    if mode:
+        suffix = f" · {_agent_mode_label(mode, lang)}"
+    title = f"─ {tr(lang, 'agent_view_title')}{suffix} "
     fill = "─" * max(0, width - visible_len("╭" + title + "╮"))
     return sgr(theme.border_accent, "╭" + title + fill + "╮")
 
@@ -550,6 +565,7 @@ def _render_compact_agent_view(
 ) -> tuple[list[str], int, int]:
     """Fallback for very short terminals where the full dashboard cannot fit."""
 
+    lang = _resolve_language(state.language)
     composer_lines, composer_cursor_row, cursor_col = _render_agent_composer_with_cursor(
         state,
         width,
@@ -559,14 +575,54 @@ def _render_compact_agent_view(
     if max_rows <= 1:
         return [truncate_visible(composer_lines[0], width)], 0, cursor_col
     if max_rows == 2:
-        lines = [_agent_header_line(width, theme), composer_lines[0]]
+        lines = [_agent_header_line(width, theme, lang=lang, mode=state.agent_view.interaction_mode), composer_lines[0]]
         return [truncate_visible(line, width) for line in lines], 1, cursor_col
     lines = [
-        _agent_header_line(width, theme),
+        _agent_header_line(width, theme, lang=lang, mode=state.agent_view.interaction_mode),
         composer_lines[min(composer_cursor_row, len(composer_lines) - 1)],
         sgr(theme.border_accent, "╰" + "─" * (width - 2) + "╯"),
     ]
     return [truncate_visible(line, width) for line in lines[:max_rows]], 1, cursor_col
+
+
+def _render_agent_help_view(
+    state: Tui2State,
+    width: int,
+    theme: AnsiTheme,
+    max_rows: int | None,
+) -> tuple[list[str], int, int]:
+    lang = _resolve_language(state.language)
+    budget = max_rows or 30
+    content_budget = max(0, budget - 2)
+    content = _agent_help_lines(lang, width, theme)
+    if len(content) > content_budget:
+        hidden = len(content) - content_budget + 1
+        content = content[: max(0, content_budget - 1)] + [
+            _agent_box_line(sgr(theme.muted, tr(lang, "agent_view_help_more").format(count=hidden)), width, theme)
+        ]
+    rows = [_agent_header_line(width, theme, lang=lang, mode="help"), *content]
+    if budget > 1:
+        rows.append(sgr(theme.border_accent, "╰" + "─" * (width - 2) + "╯"))
+    rows = rows[:budget]
+    return [truncate_visible(line, width) for line in rows], min(max(0, len(rows) - 1), len(rows) - 1), 0
+
+
+def _agent_help_lines(lang: UserLanguage, width: int, theme: AnsiTheme) -> list[str]:
+    rows: list[str] = []
+    for line in tr(lang, "agent_view_help_body").split("\n"):
+        if not line:
+            rows.append(_agent_box_line("", width, theme))
+            continue
+        rows.append(_agent_box_line(line, width, theme))
+    return rows
+
+
+def _agent_mode_label(mode: str, lang: UserLanguage) -> str:
+    if mode == "input":
+        return tr(lang, "agent_view_mode_input")
+    if mode == "help":
+        return tr(lang, "agent_view_mode_help")
+    return tr(lang, "agent_view_mode_normal")
 
 
 def _agent_chrome_height(peek_lines: list[str], composer_lines: list[str]) -> int:
@@ -588,9 +644,10 @@ def _agent_body_lines(
         grouped.setdefault(row.status, []).append((index, row))
 
     if not view.rows:
+        lang = _resolve_language(state.language)
         empty = [
-            _agent_box_line(sgr(theme.muted, "No agent sessions yet"), width, theme),
-            _agent_box_line(sgr(theme.dim, "Type a task below and press Enter to dispatch it."), width, theme),
+            _agent_box_line(sgr(theme.muted, tr(lang, "agent_view_no_sessions")), width, theme),
+            _agent_box_line(sgr(theme.dim, tr(lang, "agent_view_empty_hint")), width, theme),
         ]
         return empty[:max(0, max_lines)]
 
@@ -700,6 +757,7 @@ def _agent_row_line(
 
 def _agent_peek_lines(state: Tui2State, width: int, theme: AnsiTheme) -> list[str]:
     view = state.agent_view
+    lang = _resolve_language(state.language)
     selected = view.selected_row()
     lines: list[str] = []
     if view.pending_confirmation:
@@ -710,12 +768,12 @@ def _agent_peek_lines(state: Tui2State, width: int, theme: AnsiTheme) -> list[st
     if selected is None:
         return lines or [_agent_box_line("", width, theme)]
     if not view.peek_expanded:
-        lines.append(_agent_box_line(sgr(theme.dim, "peek collapsed · Space to expand"), width, theme))
+        lines.append(_agent_box_line(sgr(theme.dim, tr(lang, "agent_view_peek_collapsed")), width, theme))
         return lines
     summary = selected.summary.strip().replace("\n", " ")
     if not summary:
-        summary = selected.worktree_path or "no transcript yet"
-    label = sgr(theme.muted, "peek: ") + truncate_visible(summary, max(1, width - 10))
+        summary = selected.worktree_path or tr(lang, "agent_view_no_transcript")
+    label = sgr(theme.muted, tr(lang, "agent_view_peek_prefix")) + truncate_visible(summary, max(1, width - 10))
     lines.append(_agent_box_line(label, width, theme))
     return lines
 
@@ -728,12 +786,14 @@ def _render_agent_composer_with_cursor(
     max_input_rows: int = 3,
 ) -> tuple[list[str], int, int]:
     view = state.agent_view
+    lang = _resolve_language(state.language)
     inner = max(8, width - 4)
     body_width = max(1, inner - 2)
     text = view.composer
     cursor = len(text) if view.composer_cursor is None else max(0, min(view.composer_cursor, len(text)))
     if not text:
-        hint = sgr(theme.muted, "dispatch new background task")
+        hint_key = "agent_view_reply_placeholder" if view.input_target == "reply" else "agent_view_dispatch_placeholder"
+        hint = sgr(theme.muted, tr(lang, hint_key))
         body = sgr(theme.accent, "> ") + hint
         pad = " " * max(0, inner - visible_len(body))
         return [_agent_box_line(body + pad, width, theme)], 0, 4

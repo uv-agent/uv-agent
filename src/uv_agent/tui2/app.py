@@ -115,7 +115,7 @@ def save_clipboard_image(target_dir: Path):
 HELP_TEXT = (
     "Commands:\n"
     "  /help              show this help\n"
-    "  /agents            open Agent View dashboard\n"
+    "  /agents            open Agent View dashboard (normal/input/help modes)\n"
     "  /clear             clear view and start a new thread\n"
     "  /threads           choose a thread to resume\n"
     "  /skills            list skills and insert @skill mentions\n"
@@ -128,7 +128,8 @@ HELP_TEXT = (
     "  /quit              exit the TUI\n"
     "\n"
     "Keys: Enter send/select · Ctrl+Enter newline · / command palette · @ mentions · ↑/↓ history\n"
-    "      Ctrl+A Agent View · Ctrl+E line end · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt"
+    "      Ctrl+A Agent View · Ctrl+E line end · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt\n"
+    "Agent View: normal mode uses j/k/Enter/Space/c/d/D; i starts a task, r replies, ? opens Agent View help."
 )
 
 
@@ -620,11 +621,12 @@ class AnsiUvAgentApp:
         return stripped[: idx + 1] if idx >= 0 else ""
 
     async def _handle_agent_view_key(self, key: str) -> bool:
-        confirmation = self.state.agent_view.pending_confirmation
+        view = self.state.agent_view
+        confirmation = view.pending_confirmation
         if confirmation:
             if key in {"y", "Y"}:
                 action, _, thread_id = confirmation.partition(":")
-                self.state.agent_view.pending_confirmation = None
+                view.pending_confirmation = None
                 if action == "delete_worktree":
                     asyncio.create_task(self._delete_agent_view_worktree(thread_id))
                 elif action == "delete_thread":
@@ -632,15 +634,30 @@ class AnsiUvAgentApp:
                 self._safe_repaint()
                 return True
             if key in {"n", "N", "\x1b", "\x03"}:
-                self.state.agent_view.pending_confirmation = None
-                self.state.agent_view.status_message = "delete cancelled"
+                view.pending_confirmation = None
+                view.status_message = self._text("agent_view_delete_cancelled")
                 self._safe_repaint()
                 return True
 
-        if key == "\x03":  # Ctrl+C exits the dashboard; later commits use it to cancel selected runs.
-            selected = self.state.agent_view.selected_row()
+        if view.interaction_mode == "help":
+            if key in {"?", "h", "H", "\x1b"}:
+                view.interaction_mode = "normal"
+                view.status_message = self._text("agent_view_normal_hint")
+            elif key == "\x03":
+                self._close_agent_view()
+            self._safe_repaint()
+            return True
+
+        if view.interaction_mode == "input":
+            return await self._handle_agent_view_input_key(key)
+        return await self._handle_agent_view_normal_key(key)
+
+    async def _handle_agent_view_normal_key(self, key: str) -> bool:
+        view = self.state.agent_view
+        if key == "\x03":
+            selected = view.selected_row()
             if selected is not None and self._cancel_agent_view_thread(selected.thread_id):
-                self.state.agent_view.status_message = f"cancelled {short_thread(selected.thread_id)}"
+                view.status_message = self._fmt("agent_view_cancelled", thread=short_thread(selected.thread_id))
             else:
                 self._close_agent_view()
             self._safe_repaint()
@@ -649,23 +666,22 @@ class AnsiUvAgentApp:
             self._close_agent_view()
             self._safe_repaint()
             return True
-        if key.startswith(PASTE_PREFIX):
-            self._insert_agent_view_text(key[len(PASTE_PREFIX) :])
-            self._safe_repaint()
-            return True
-        if key == "\r":
-            if self.state.agent_view.composer.strip():
-                prompt = self.state.agent_view.composer.strip()
-                self._set_agent_view_text("", cursor=0)
-                asyncio.create_task(self._dispatch_agent_view_prompt(prompt))
-                self.state.agent_view.status_message = "dispatching background worktree..."
-            elif self.state.agent_view.selected_row() is not None:
-                self._resume_thread(self.state.agent_view.selected_row().thread_id)  # type: ignore[union-attr]
+        if key in {"?", "h", "H"}:
+            view.interaction_mode = "help"
+            view.status_message = self._text("agent_view_help_status")
+        elif key in {"i", "a", "A"}:
+            self._enter_agent_view_input_mode(target="dispatch")
+        elif key == "r":
+            selected = view.selected_row()
+            if selected is None:
+                view.status_message = self._text("agent_view_select_reply")
+            else:
+                self._enter_agent_view_input_mode(target="reply", thread_id=selected.thread_id)
+        elif key == "\r":
+            selected = view.selected_row()
+            if selected is not None:
+                self._resume_thread(selected.thread_id)
                 self.state.mode = "transcript"
-            self._safe_repaint()
-            return True
-        if key in {"\n", "\x0a", "<C-ENTER>"}:
-            self._insert_agent_view_text("\n")
         elif key in {"<H>", "<UP>", "k"}:
             self._move_agent_view_selection(-1)
         elif key in {"<P>", "<DOWN>", "j"}:
@@ -675,15 +691,51 @@ class AnsiUvAgentApp:
         elif key in {"<Q>", "<PAGEDOWN>"}:
             self._move_agent_view_selection(5)
         elif key == " ":
-            self.state.agent_view.peek_expanded = not self.state.agent_view.peek_expanded
-        elif key == "r":
-            self._reply_to_agent_view_selection()
+            view.peek_expanded = not view.peek_expanded
+        elif key == "c":
+            selected = view.selected_row()
+            if selected is not None and self._cancel_agent_view_thread(selected.thread_id):
+                view.status_message = self._fmt("agent_view_cancelled", thread=short_thread(selected.thread_id))
+            else:
+                view.status_message = self._text("no_running_turn")
         elif key == "d":
             self._confirm_agent_view_delete(include_worktree=False)
         elif key == "D":
             self._confirm_agent_view_delete(include_worktree=True)
+        self._safe_repaint()
+        return True
+
+    async def _handle_agent_view_input_key(self, key: str) -> bool:
+        if key == "\x03":  # Ctrl+C cancels editing in Agent View input mode.
+            self._leave_agent_view_input_mode(clear=True)
+            self._safe_repaint()
+            return True
+        if key == "\x1b":
+            self._leave_agent_view_input_mode(clear=False)
+            self._safe_repaint()
+            return True
+        if key.startswith(PASTE_PREFIX):
+            self._insert_agent_view_text(key[len(PASTE_PREFIX) :])
+            self._safe_repaint()
+            return True
+        if key in {"\n", "\x0a", "<C-ENTER>"}:
+            await self._submit_agent_view_input()
+            self._safe_repaint()
+            return True
+        if key == "\r":
+            self._insert_agent_view_text("\n")
+        elif key == "\x01":
+            self._move_agent_view_to_line_start()
+        elif key == "\x05":
+            self._move_agent_view_to_line_end()
+        elif key == "\x0b":
+            self._delete_agent_view_to_line_end()
         elif key in {"\x7f", "\b"}:
             self._delete_agent_view_before_cursor()
+        elif key == "\x04":
+            self._delete_agent_view_after_cursor()
+        elif key == "\x17":
+            self._delete_agent_view_word_before_cursor()
         elif key == "\x15":
             self._set_agent_view_text("", cursor=0)
         elif key == "\x02" or key in {"<K>", "<LEFT>"}:
@@ -695,17 +747,54 @@ class AnsiUvAgentApp:
         self._safe_repaint()
         return True
 
+    async def _submit_agent_view_input(self) -> None:
+        view = self.state.agent_view
+        text = view.composer.strip()
+        if not text:
+            view.status_message = self._text("agent_view_input_status")
+            return
+        target = view.input_target
+        target_thread_id = view.input_target_thread_id
+        self._set_agent_view_text("", cursor=0)
+        self._leave_agent_view_input_mode(clear=False)
+        if target == "reply":
+            self._reply_to_agent_view_thread(target_thread_id, text)
+            return
+        asyncio.create_task(self._dispatch_agent_view_prompt(text))
+        view.status_message = self._text("agent_view_dispatching")
+
+    def _enter_agent_view_input_mode(self, *, target: str, thread_id: str | None = None) -> None:
+        view = self.state.agent_view
+        view.interaction_mode = "input"
+        view.input_target = "reply" if target == "reply" else "dispatch"
+        view.input_target_thread_id = thread_id
+        view.status_message = self._text("agent_view_reply_status" if view.input_target == "reply" else "agent_view_input_status")
+        view.composer_cursor = self._agent_view_cursor()
+
+    def _leave_agent_view_input_mode(self, *, clear: bool) -> None:
+        view = self.state.agent_view
+        if clear:
+            self._set_agent_view_text("", cursor=0)
+        view.interaction_mode = "normal"
+        view.input_target = "dispatch"
+        view.input_target_thread_id = None
+        view.status_message = self._text("agent_view_normal_hint")
+
     def _open_agent_view(self) -> None:
         self._close_command_palette()
         self._refresh_agent_view_rows()
         self.state.mode = "agent_view"
+        self.state.agent_view.interaction_mode = "normal"
+        self.state.agent_view.input_target = "dispatch"
+        self.state.agent_view.input_target_thread_id = None
         if self.state.agent_view.selected >= len(self.state.agent_view.rows):
             self.state.agent_view.selected = max(0, len(self.state.agent_view.rows) - 1)
-        self.state.agent_view.status_message = "Agent View · Enter attach · Space peek · Esc close"
+        self.state.agent_view.status_message = self._text("agent_view_open_status")
 
     def _close_agent_view(self) -> None:
         self.state.mode = "transcript"
         self.state.agent_view.pending_confirmation = None
+        self.state.agent_view.interaction_mode = "normal"
 
     def _move_agent_view_selection(self, delta: int) -> None:
         rows = self.state.agent_view.rows
@@ -737,11 +826,40 @@ class AnsiUvAgentApp:
         value = self.state.agent_view.composer
         self._set_agent_view_text(value[: cursor - 1] + value[cursor:], cursor=cursor - 1)
 
+    def _delete_agent_view_after_cursor(self) -> None:
+        cursor = self._agent_view_cursor()
+        value = self.state.agent_view.composer
+        if cursor >= len(value):
+            return
+        self._set_agent_view_text(value[:cursor] + value[cursor + 1 :], cursor=cursor)
+
+    def _delete_agent_view_word_before_cursor(self) -> None:
+        cursor = self._agent_view_cursor()
+        value = self.state.agent_view.composer
+        before = self._delete_word(value[:cursor])
+        self._set_agent_view_text(before + value[cursor:], cursor=len(before))
+
+    def _delete_agent_view_to_line_end(self) -> None:
+        cursor = self._agent_view_cursor()
+        value = self.state.agent_view.composer
+        end = value.find("\n", cursor)
+        end = len(value) if end < 0 else end
+        self._set_agent_view_text(value[:cursor] + value[end:], cursor=cursor)
+
     def _move_agent_view_cursor(self, delta: int) -> None:
         self.state.agent_view.composer_cursor = max(
             0,
             min(self._agent_view_cursor() + delta, len(self.state.agent_view.composer)),
         )
+
+    def _move_agent_view_to_line_start(self) -> None:
+        cursor = self._agent_view_cursor()
+        self.state.agent_view.composer_cursor = self.state.agent_view.composer.rfind("\n", 0, cursor) + 1
+
+    def _move_agent_view_to_line_end(self) -> None:
+        cursor = self._agent_view_cursor()
+        end = self.state.agent_view.composer.find("\n", cursor)
+        self.state.agent_view.composer_cursor = len(self.state.agent_view.composer) if end < 0 else end
 
     def _refresh_agent_view_rows(self) -> None:
         previous = self.state.agent_view.selected_row()
@@ -811,24 +929,28 @@ class AnsiUvAgentApp:
             return ""
         return str(events[0].get("type") or "") if events else ""
 
+    def _reply_to_agent_view_thread(self, thread_id: str | None, text: str) -> None:
+        view = self.state.agent_view
+        if not thread_id:
+            view.status_message = self._text("agent_view_select_reply")
+            return
+        if not text:
+            view.status_message = self._text("agent_view_type_reply")
+            return
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is not None and run_state.running:
+            run_state.pending_turns.append(PendingTurn(text, []))
+            view.status_message = self._fmt("agent_view_reply_queued", thread=short_thread(thread_id))
+            self._refresh_agent_view_rows()
+            return
+        asyncio.create_task(self._start_turn_for_thread(thread_id, text, image_paths=[]))
+        view.status_message = self._fmt("agent_view_reply_sent", thread=short_thread(thread_id))
+
     def _reply_to_agent_view_selection(self) -> None:
         selected = self.state.agent_view.selected_row()
         text = self.state.agent_view.composer.strip()
-        if selected is None:
-            self.state.agent_view.status_message = "select a session before reply"
-            return
-        if not text:
-            self.state.agent_view.status_message = "type a reply first"
-            return
         self._set_agent_view_text("", cursor=0)
-        run_state = self._thread_runs.get(selected.thread_id)
-        if run_state is not None and run_state.running:
-            run_state.pending_turns.append(PendingTurn(text, []))
-            self.state.agent_view.status_message = f"queued reply for {short_thread(selected.thread_id)}"
-            self._refresh_agent_view_rows()
-            return
-        asyncio.create_task(self._start_turn_for_thread(selected.thread_id, text, image_paths=[]))
-        self.state.agent_view.status_message = f"reply sent to {short_thread(selected.thread_id)}"
+        self._reply_to_agent_view_thread(selected.thread_id if selected else None, text)
 
     def _cancel_agent_view_thread(self, thread_id: str) -> bool:
         run_state = self._thread_runs.get(thread_id)
@@ -836,22 +958,22 @@ class AnsiUvAgentApp:
             return False
         run_state.cancel_event.set()
         run_state.terminal_status = "interrupted"
-        run_state.status_message = "interrupted"
+        run_state.status_message = self._text("interrupted")
         self._refresh_agent_view_rows()
         return True
 
     def _confirm_agent_view_delete(self, *, include_worktree: bool) -> None:
         selected = self.state.agent_view.selected_row()
         if selected is None:
-            self.state.agent_view.status_message = "select a session before delete"
+            self.state.agent_view.status_message = self._text("agent_view_delete_select")
             return
         action = "delete_worktree" if include_worktree else "delete_thread"
         target = selected.worktree_branch if include_worktree else short_thread(selected.thread_id)
         self.state.agent_view.pending_confirmation = f"{action}:{selected.thread_id}"
         if include_worktree:
-            self.state.agent_view.status_message = f"Delete worktree {target}? [y/N]"
+            self.state.agent_view.status_message = self._fmt("agent_view_delete_worktree_status", target=target)
         else:
-            self.state.agent_view.status_message = f"Hide session {target} from Agent View? [y/N]"
+            self.state.agent_view.status_message = self._fmt("agent_view_delete_thread_status", target=target)
 
     def _delete_agent_view_thread(self, thread_id: str) -> None:
         self._cancel_agent_view_thread(thread_id)
@@ -859,7 +981,7 @@ class AnsiUvAgentApp:
         self._thread_runs.pop(thread_id, None)
         if thread_id == self.state.thread_id:
             self._clear_to_new_thread()
-        self.state.agent_view.status_message = f"hidden {short_thread(thread_id)}"
+        self.state.agent_view.status_message = self._fmt("agent_view_hidden", thread=short_thread(thread_id))
         self._refresh_agent_view_rows()
 
     async def _delete_agent_view_worktree(self, thread_id: str) -> None:
@@ -868,7 +990,7 @@ class AnsiUvAgentApp:
         branch = str(metadata.get("worktree_branch") or "")
         path_text = str(metadata.get("worktree_path") or "")
         if not branch or not path_text:
-            self.state.agent_view.status_message = "selected session has no worktree"
+            self.state.agent_view.status_message = self._text("agent_view_no_worktree")
             self._safe_repaint()
             return
         try:
@@ -880,7 +1002,7 @@ class AnsiUvAgentApp:
                 run=self._run_worktree_command,
             )
         except (WorktreeError, OSError, subprocess.SubprocessError) as exc:
-            self.state.agent_view.status_message = f"worktree delete failed: {exc}"
+            self.state.agent_view.status_message = self._fmt("agent_view_worktree_delete_failed", error=exc)
             self._safe_repaint()
             return
         self.engine.thread_store.append(
@@ -899,7 +1021,7 @@ class AnsiUvAgentApp:
         rule_states = getattr(self.engine, "_rule_states", None)
         if isinstance(rule_states, dict):
             rule_states.pop(thread_id, None)
-        self.state.agent_view.status_message = f"deleted worktree {result.branch}"
+        self.state.agent_view.status_message = self._fmt("agent_view_worktree_deleted", branch=result.branch)
         self._refresh_agent_view_rows()
         self._safe_repaint()
 
@@ -929,11 +1051,15 @@ class AnsiUvAgentApp:
             run_state.terminal_status = "working"
             run_state.status_message = "running"
             await self._start_turn_for_thread(thread_id, prompt, image_paths=[])
-            self.state.agent_view.status_message = f"dispatched {short_thread(thread_id)} · {info.branch}"
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_dispatched",
+                thread=short_thread(thread_id),
+                branch=info.branch,
+            )
         except Exception as exc:
             run_state.terminal_status = "failed"
             run_state.last_error = str(exc) or repr(exc)
-            self.state.agent_view.status_message = f"dispatch failed: {run_state.last_error}"
+            self.state.agent_view.status_message = self._fmt("agent_view_dispatch_failed", error=run_state.last_error)
         finally:
             self._refresh_agent_view_rows()
             self._safe_repaint()
@@ -2302,6 +2428,9 @@ class AnsiUvAgentApp:
 
     def _text(self, key: str) -> str:
         return tr(self.language, key)
+
+    def _fmt(self, key: str, **values: object) -> str:
+        return self._text(key).format(**values)
 
     # ------------------------------------------------------------------
     # Cell bookkeeping

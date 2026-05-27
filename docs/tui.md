@@ -39,6 +39,7 @@ Use `Ctrl+O` when you want to open the command palette explicitly.
 | --- | --- |
 | `F1` | Open help. |
 | `Ctrl+O` | Open command palette. |
+| `Ctrl+A` from an empty composer | Open Agent View. |
 | `Ctrl+S` | Open runtime status. |
 | `Ctrl+G` | Collapse or expand the most recent process fold. |
 | `Ctrl+D` | Toggle Python/tool detail display. |
@@ -61,9 +62,26 @@ and Esc to close.
 | `/level [name]` | Switch the active model level for the current thread. |
 | `/mcp` | Show MCP declarations and insert MCP mentions. |
 | `/skills` | Show discovered skills and insert skill mentions. |
+| `/agents` | Open Agent View for background worktree sessions. |
 | `/clear` | Clear the current transcript view and active thread selection. |
 | `/quit` | Quit after confirmation. |
 | `/help` or `?` | Show local commands and shortcuts. |
+
+## Agent View
+
+Agent View (`/agents`, or `Ctrl+A` from an empty composer) is a full-screen
+dashboard for running multiple background agent sessions. New tasks are launched
+in isolated Git worktrees with generated `agent-*` branch names. Existing rows
+can be attached back into the main transcript when you want to inspect or
+continue them directly.
+
+Agent View deliberately uses two lightweight modes so navigation keys do not
+fight with text editing:
+
+| Mode | Keys |
+| --- | --- |
+| Normal | `j/k` or arrows move; `PageUp/PageDown` jump; `Enter` attaches the selected session; `Space` toggles peek; `c` cancels the selected running session; `d` hides a row; `D` deletes its worktree and branch after confirmation; `?` opens Agent View help; `Esc` or `Ctrl+A` returns to the transcript. |
+| Input | Entered with `i` for a new background task or `r` to reply to the selected session. `Enter` inserts a newline, `Ctrl+Enter`/`Ctrl+J` sends, and `Esc` returns to normal mode. |
 
 ## Config Panel
 

@@ -15,6 +15,8 @@ def _default_language() -> UserLanguage:
 
 CellKind = Literal["user", "assistant", "reasoning", "tool", "event", "error", "image"]
 Tui2Mode = Literal["transcript", "agent_view"]
+AgentViewInteractionMode = Literal["normal", "input", "help"]
+AgentViewInputTarget = Literal["dispatch", "reply"]
 AgentViewRowStatus = Literal[
     "dispatching",
     "working",
@@ -99,6 +101,9 @@ class AgentViewState:
     composer_cursor: int | None = None
     status_message: str = "Enter dispatches a background worktree task"
     pending_confirmation: str | None = None
+    interaction_mode: AgentViewInteractionMode = "normal"
+    input_target: AgentViewInputTarget = "dispatch"
+    input_target_thread_id: str | None = None
 
     def selected_row(self) -> AgentViewRow | None:
         if not self.rows:
