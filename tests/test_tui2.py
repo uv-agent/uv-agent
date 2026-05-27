@@ -348,6 +348,22 @@ def test_busy_state_uses_status_message_as_primary_label() -> None:
     assert "working" not in plain
 
 
+def test_busy_goal_state_renders_truncated_objective_after_elapsed() -> None:
+    state = Tui2State(
+        busy=True,
+        turn_elapsed_s=12.0,
+        goal_enabled=True,
+        goal_objective="推进中文目标状态刷新并观察工具完成后的变化",
+    )
+
+    line = render_status_lines(state, 120, 0)[0]
+    plain = strip_ansi(line)
+
+    assert "Working · 12s · 推进中文目标状态刷新并…" in plain
+    assert "推进中文目标状态刷新并观察" not in plain
+    assert sgr(DEFAULT_THEME.goal, "推进中文目标状态刷新并…") in line
+
+
 def test_context_row_includes_goal_model_project_but_not_thread_title() -> None:
     # The thread title is shown in the terminal title and the /status output;
     # the bottom status row keeps only model + Goal + project so the row stays

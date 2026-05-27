@@ -278,6 +278,17 @@ def render_cell(
 # Status lines: a verbose two-row context strip above the composer.
 # ---------------------------------------------------------------------------
 
+GOAL_OBJECTIVE_STATUS_MAX_CELLS = 24
+
+
+def _goal_objective_status_text(objective: str) -> str:
+    """Return a compact one-line Goal objective for the activity row."""
+
+    text = " ".join(objective.split())
+    if not text:
+        return ""
+    return truncate_visible(text, GOAL_OBJECTIVE_STATUS_MAX_CELLS)
+
 
 def render_status_lines(
     state: Tui2State,
@@ -303,7 +314,11 @@ def render_status_lines(
         elapsed = format_elapsed(state.turn_elapsed_s) if state.turn_elapsed_s is not None else ""
         status = state.status_message if state.status_message not in {"", "ready", "running"} else busy_fallback
         text = f"{frame} {status}" + (f" · {elapsed}" if elapsed else "")
-        activity.append(sgr(theme.accent, text))
+        rendered_text = sgr(theme.accent, text)
+        objective = _goal_objective_status_text(state.goal_objective) if state.goal_enabled else ""
+        if objective:
+            rendered_text += sgr(theme.muted, " · ") + sgr(theme.goal, objective)
+        activity.append(rendered_text)
     if state.pending_turns:
         activity.append(sgr(theme.warning, f"↕ {len(state.pending_turns)} {queued_label}"))
     if not state.busy and state.status_message and state.status_message not in {"ready", "running", ""}:
