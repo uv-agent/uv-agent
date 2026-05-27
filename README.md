@@ -1,10 +1,11 @@
 # uv-agent
 
-<img align="right" src="docs/t1.png" alt="uv-agent TUI screenshot" width="300">
+<img align="right" src="docs/t2.png" alt="uv-agent tui2 screenshot" width="300">
 
 [简体中文](README.zh-CN.md)
 
-`uv-agent` is a Windows-first coding agent with a Textual TUI. It is designed
+`uv-agent` is a Windows-first coding agent with an ANSI-first terminal TUI.
+It is designed
 around one external action surface: `run_python`. The model writes managed Python
 scripts, uv-agent runs them through `uv run`, and the runtime exposes focused
 helpers for editing files, running commands, searching code, using MCP, launching
@@ -17,8 +18,8 @@ config fields, and runtime behavior may change.
 
 ## Why uv-agent?
 
-- **Windows-first coding UI.** A Textual transcript with a multi-line composer,
-  command palette, model/tool timeline, file and thread mentions, image
+- **Windows-first coding UI.** A terminal-native transcript with a multi-line
+  composer, command palette, model/tool timeline, file and thread mentions, image
   attachments, and English or Chinese UI.
 - **One action boundary.** No direct shell, filesystem, browser, or MCP model
   tools; external work flows through managed Python runs and one persistent event
@@ -228,6 +229,18 @@ language, completion notification, and automatic compression. See
   available capabilities.
 
 See [TUI and slash commands](docs/tui.md) for the full command and shortcut list.
+
+## TUI Interfaces
+
+uv-agent ships two interactive interfaces:
+
+- **tui2** — the default (`uv-agent` or `uv-agent tui2`). A lightweight ANSI TUI
+  that renders directly in the terminal, with compact status rows, command and
+  mention palettes, streaming model/tool events, Goal mode, Worktree mode, and
+  image attachments.
+- **Textual TUI** — the original widget-based interface (`uv-agent tui`). It keeps
+  the richer Textual layout and remains available when you prefer that UI. Its
+  screenshot is linked here: [docs/t1.png](docs/t1.png).
 
 ## Plugins
 
