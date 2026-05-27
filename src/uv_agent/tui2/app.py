@@ -129,6 +129,7 @@ GOAL_COMMANDS: tuple[CommandSuggestion, ...] = (
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
+CTRL_C_CONFIRMATION_S = 3.0
 UNBRACKETED_PASTE_ENTER_S = 0.08
 
 
@@ -196,6 +197,8 @@ class AnsiUvAgentApp:
         self._tab_state: dict[str, Any] | None = None
         self._turn_started_at: float | None = None
         self._quit_armed = False
+        self._quit_armed_until: float | None = None
+        self._quit_confirmation_status: str | None = None
         self._spinner_index = 0
         self._window_title_thread_title = ""
         self._last_window_title = ""
@@ -240,6 +243,7 @@ class AnsiUvAgentApp:
         tick_interval = 1.0 / 12.0
         while True:
             await asyncio.sleep(tick_interval)
+            confirmation_expired = self._expire_quit_confirmation()
             if self.state.busy:
                 self._spinner_index += 1
                 self.renderer.spinner_frame = self._spinner_index
@@ -247,6 +251,8 @@ class AnsiUvAgentApp:
                 self._safe_repaint()
             else:
                 self._apply_window_title()
+                if confirmation_expired:
+                    self._safe_repaint()
 
     # ------------------------------------------------------------------
     # Key handling
@@ -254,16 +260,15 @@ class AnsiUvAgentApp:
 
     async def handle_key(self, key: str) -> bool:
         if key == "\x03":  # Ctrl+C
+            self._expire_quit_confirmation()
             if self._quit_armed:
                 return False
             if self.cancel_event is not None:
                 self.cancel_event.set()
-                self._quit_armed = True
-                self.state.status_message = self._text("interrupt_again")
+                self._arm_quit_confirmation(self._text("interrupt_again"))
                 self._safe_repaint()
                 return True
-            self._quit_armed = True
-            self.state.status_message = self._text("quit_again")
+            self._arm_quit_confirmation(self._text("quit_again"))
             self._safe_repaint()
             return True
 
@@ -272,7 +277,7 @@ class AnsiUvAgentApp:
             return True
 
         if key:
-            self._quit_armed = False
+            self._clear_quit_confirmation()
         if key != "\t":
             self._tab_state = None
         if key == "\x0c":  # Ctrl+L: force a full redraw of the live region.
@@ -421,7 +426,7 @@ class AnsiUvAgentApp:
     def _insert_pasted_text(self, text: str) -> None:
         if not text:
             return
-        self._quit_armed = False
+        self._clear_quit_confirmation()
         self._last_plain_input_at = None
         self._skip_next_lf_after_plain_cr = False
         self._insert_composer_text(text)
@@ -438,6 +443,29 @@ class AnsiUvAgentApp:
         if self._last_plain_input_at is None:
             return False
         return monotonic() - self._last_plain_input_at <= UNBRACKETED_PASTE_ENTER_S
+
+    def _arm_quit_confirmation(self, message: str) -> None:
+        self._quit_armed = True
+        self._quit_armed_until = monotonic() + CTRL_C_CONFIRMATION_S
+        self._quit_confirmation_status = message
+        self.state.status_message = message
+
+    def _clear_quit_confirmation(self) -> bool:
+        was_armed = self._quit_armed
+        message = self._quit_confirmation_status
+        self._quit_armed = False
+        self._quit_armed_until = None
+        self._quit_confirmation_status = None
+        if message and self.state.status_message == message:
+            self.state.status_message = "running" if self.state.busy else "ready"
+        return was_armed
+
+    def _expire_quit_confirmation(self) -> bool:
+        if not self._quit_armed:
+            return False
+        if self._quit_armed_until is None or monotonic() < self._quit_armed_until:
+            return False
+        return self._clear_quit_confirmation()
 
     def _delete_composer_before_cursor(self) -> None:
         cursor = self._composer_cursor()
@@ -935,8 +963,7 @@ class AnsiUvAgentApp:
         elif command == "/goal":
             self._handle_goal(arg)
         elif command == "/quit":
-            self._quit_armed = True
-            self.state.status_message = self._text("quit_again")
+            self._arm_quit_confirmation(self._text("quit_again"))
         else:
             self._flush(TranscriptCell("error", text=f"unknown command: {command}  (try /help)"))
 

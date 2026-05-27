@@ -15,6 +15,8 @@ from uv_agent.tui2.components import (
     render_status_lines,
     render_tool_cell,
 )
+import uv_agent.tui2.app as tui2_app
+
 from uv_agent.tui2.app import TOP_LEVEL_COMMANDS, load_composer_history, save_composer_history
 from uv_agent.tui2.events import CommandSuggestion, TranscriptCell, Tui2State
 from uv_agent.tui2.renderer import Renderer
@@ -597,6 +599,36 @@ def test_ctrl_c_requires_second_press_to_exit_when_idle(monkeypatch) -> None:
     assert app._quit_armed
     assert app.state.status_message  # localised hint is present
     assert asyncio.run(app.handle_key("\x03")) is False
+
+
+def test_ctrl_c_quit_confirmation_expires_after_timeout(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    times = iter([10.0, 10.0 + tui2_app.CTRL_C_CONFIRMATION_S + 0.01])
+    monkeypatch.setattr(tui2_app, "monotonic", lambda: next(times))
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+    assert app._quit_armed
+    assert app._expire_quit_confirmation() is True
+
+    assert not app._quit_armed
+    assert app.state.status_message == "ready"
+
+
+def test_second_ctrl_c_after_confirmation_timeout_rearms_instead_of_exiting(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    now = 20.0
+
+    def fake_monotonic() -> float:
+        return now
+
+    monkeypatch.setattr(tui2_app, "monotonic", fake_monotonic)
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+    now += tui2_app.CTRL_C_CONFIRMATION_S + 0.01
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+
+    assert app._quit_armed
 
 
 def test_ctrl_c_preserves_composer_while_arming_quit(monkeypatch) -> None:
