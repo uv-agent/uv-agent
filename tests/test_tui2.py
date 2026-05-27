@@ -1358,6 +1358,30 @@ def test_image_status_clears_after_token_deleted(monkeypatch, tmp_path) -> None:
 
     assert app.state.composer == ""
     assert app.state.status_message == "ready"
+    assert app._image_paths_by_number == {}
+
+
+def test_removed_image_token_is_not_attached_if_retyped(monkeypatch, tmp_path) -> None:
+    app = _make_app(monkeypatch)
+    image = tmp_path / "clip.png"
+    image.write_bytes(b"fake-png")
+    monkeypatch.setattr(
+        "uv_agent.tui2.app.save_clipboard_image",
+        lambda target_dir: SimpleNamespace(path=image, width=20, height=10),
+    )
+    app._handle_command("/image")
+    asyncio.run(app.handle_key("\b"))
+    app.state.composer = "literal [Image #1]"
+
+    async def run() -> None:
+        await app.submit()
+        assert app._running_task is not None
+        await app._running_task
+
+    asyncio.run(run())
+
+    assert app.engine.turns[-1]["user_text"] == "literal [Image #1]"
+    assert app.engine.turns[-1]["image_paths"] == []
 
 
 def test_image_tokens_send_matching_paths_once(monkeypatch, tmp_path) -> None:
@@ -1376,6 +1400,7 @@ def test_image_tokens_send_matching_paths_once(monkeypatch, tmp_path) -> None:
 
     assert app.engine.turns[-1]["user_text"] == "look [Image #1] and again [Image #1] [Image #99]"
     assert app.engine.turns[-1]["image_paths"] == [image]
+    assert app._image_paths_by_number == {}
 
 
 def test_image_only_message_uses_default_prompt(monkeypatch, tmp_path) -> None:
@@ -1414,6 +1439,7 @@ def test_queued_turn_captures_image_paths_at_submit_time(monkeypatch, tmp_path) 
     queued = app.state.pending_turns[0]
     assert queued.text == "queued [Image #1]"
     assert queued.image_paths == [image]
+    assert app._image_paths_by_number == {}
 
 
 def test_terminal_reads_bracketed_paste_as_single_key() -> None:

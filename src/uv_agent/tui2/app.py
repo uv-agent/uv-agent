@@ -764,15 +764,38 @@ class AnsiUvAgentApp:
         self._close_command_palette()
 
     def _sync_image_status_with_composer(self) -> None:
+        self._release_images_missing_from_composer()
         if not self._image_status_token or not self._image_status_message:
             return
         if self.state.status_message != self._image_status_message:
             return
         if self._image_status_token in self.state.composer:
             return
+        self._clear_image_status_tracking()
+        self.state.status_message = "ready"
+
+    def _release_images_missing_from_composer(self) -> None:
+        if not self._image_paths_by_number:
+            return
+        present_numbers = self._image_numbers_in_text(self.state.composer)
+        stale_numbers = set(self._image_paths_by_number).difference(present_numbers)
+        if stale_numbers:
+            self._release_image_numbers(stale_numbers)
+
+    @staticmethod
+    def _image_numbers_in_text(text: str) -> set[int]:
+        numbers: set[int] = set()
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            numbers.add(int(match.group(1)))
+        return numbers
+
+    def _release_image_numbers(self, numbers: set[int]) -> None:
+        for number in numbers:
+            self._image_paths_by_number.pop(number, None)
+
+    def _clear_image_status_tracking(self) -> None:
         self._image_status_token = None
         self._image_status_message = None
-        self.state.status_message = "ready"
 
     def _history_prev(self) -> None:
         if not self._history:
@@ -1122,18 +1145,22 @@ class AnsiUvAgentApp:
             self._set_composer_text("", cursor=0)
             self._safe_repaint()
             return should_continue
-        prompt, image_paths = self._message_payload_from_composer(text)
+        prompt, image_paths, image_numbers = self._message_payload_from_composer(text)
         if self._running_task is not None and not self._running_task.done():
             self.state.pending_turns.append(PendingTurn(prompt, image_paths))
+            self._release_image_numbers(image_numbers)
+            self._clear_image_status_tracking()
             self._set_composer_text("", cursor=0)
             self.state.status_message = self._text("queued")
             self._safe_repaint()
             return True
         self._set_composer_text("", cursor=0)
         await self._start_turn(prompt, image_paths=image_paths)
+        self._release_image_numbers(image_numbers)
+        self._clear_image_status_tracking()
         return True
 
-    def _message_payload_from_composer(self, text: str) -> tuple[str, list[Path]]:
+    def _message_payload_from_composer(self, text: str) -> tuple[str, list[Path], set[int]]:
         image_paths: list[Path] = []
         seen: set[int] = set()
         for match in IMAGE_TOKEN_RE.finditer(text):
@@ -1144,8 +1171,8 @@ class AnsiUvAgentApp:
             seen.add(number)
             image_paths.append(path)
         if image_paths and IMAGE_ONLY_TOKEN_RE.fullmatch(text):
-            return self._text("image_only_prompt"), image_paths
-        return text, image_paths
+            return self._text("image_only_prompt"), image_paths, seen
+        return text, image_paths, seen
 
     def _handle_command(self, text: str) -> bool:
         command, _, arg = text.partition(" ")
@@ -1195,8 +1222,8 @@ class AnsiUvAgentApp:
         self.state.goal_objective = ""
         self._pending_goal_enable = False
         self._pending_goal_objective = ""
-        self._image_status_token = None
-        self._image_status_message = None
+        self._image_paths_by_number.clear()
+        self._clear_image_status_tracking()
         self.state.level = self.engine.config.runtime.default_level
         self.state.flushed.clear()
         self.state.live.clear()
