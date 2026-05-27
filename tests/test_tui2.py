@@ -1437,7 +1437,7 @@ def test_agent_view_dispatch_creates_worktree_thread_and_runs(monkeypatch) -> No
     assert app.engine.turns[-1]["user_text"] == "fix login"
 
 
-def test_agent_view_input_mode_dispatches_on_ctrl_enter(monkeypatch) -> None:
+def test_agent_view_input_mode_dispatches_on_enter(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app._open_agent_view()
     created = SimpleNamespace(
@@ -1459,7 +1459,7 @@ def test_agent_view_input_mode_dispatches_on_ctrl_enter(monkeypatch) -> None:
         await app.handle_key("f")
         await app.handle_key("i")
         await app.handle_key("x")
-        await app.handle_key("<C-ENTER>")
+        await app.handle_key("\r")
         for _ in range(5):
             await asyncio.sleep(0)
         task = app._thread_runs.get("thr_1").task
@@ -1505,11 +1505,24 @@ def test_agent_view_reply_queues_for_running_thread(monkeypatch) -> None:
     asyncio.run(app.handle_key(" "))
     asyncio.run(app.handle_key("u"))
     asyncio.run(app.handle_key("p"))
-    asyncio.run(app.handle_key("<C-ENTER>"))
+    asyncio.run(app.handle_key("\r"))
 
     assert [turn.text for turn in run_state.pending_turns] == ["follow up"]
     assert app.state.agent_view.composer == ""
     assert app.state.agent_view.interaction_mode == "normal"
+
+
+def test_agent_view_input_ctrl_enter_inserts_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("i"))
+    asyncio.run(app.handle_key("a"))
+    asyncio.run(app.handle_key("<C-ENTER>"))
+    asyncio.run(app.handle_key("b"))
+
+    assert app.state.agent_view.interaction_mode == "input"
+    assert app.state.agent_view.composer == "a\nb"
 
 
 def test_agent_view_ctrl_c_cancels_selected_running_thread(monkeypatch) -> None:

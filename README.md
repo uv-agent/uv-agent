@@ -231,7 +231,7 @@ language, completion notification, and automatic compression. See
 - Use `/agents` to open Agent View for background worktree tasks. It has a small
   vim-like split: normal mode navigates sessions (`j/k`, `Enter`, `Space`, `c`,
   `d`, `D`, `?`), while input mode (`i` for a new task, `r` for a reply) edits
-  the bottom composer and sends with `Ctrl+Enter`.
+  the bottom composer and sends with `Enter` (`Ctrl+Enter` inserts a newline).
 - Use `/status`, `/mcp`, and `/skills` to inspect runtime state and available
   capabilities.
 - To use the original Textual-only panels such as `/config`, `/models`, Worktree

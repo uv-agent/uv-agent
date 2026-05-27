@@ -718,11 +718,11 @@ class AnsiUvAgentApp:
             self._insert_agent_view_text(key[len(PASTE_PREFIX) :])
             self._safe_repaint()
             return True
-        if key in {"\n", "\x0a", "<C-ENTER>"}:
+        if key == "\r":
             await self._submit_agent_view_input()
             self._safe_repaint()
             return True
-        if key == "\r":
+        if key in {"\n", "\x0a", "<C-ENTER>"}:
             self._insert_agent_view_text("\n")
         elif key == "\x01":
             self._move_agent_view_to_line_start()

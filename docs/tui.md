@@ -81,7 +81,7 @@ fight with text editing:
 | Mode | Keys |
 | --- | --- |
 | Normal | `j/k` or arrows move; `PageUp/PageDown` jump; `Enter` attaches the selected session; `Space` toggles peek; `c` cancels the selected running session; `d` hides a row; `D` deletes its worktree and branch after confirmation; `?` opens Agent View help; `Esc` or `Ctrl+A` returns to the transcript. |
-| Input | Entered with `i` for a new background task or `r` to reply to the selected session. `Enter` inserts a newline, `Ctrl+Enter`/`Ctrl+J` sends, and `Esc` returns to normal mode. |
+| Input | Entered with `i` for a new background task or `r` to reply to the selected session. `Enter` sends, `Ctrl+Enter`/`Ctrl+J` inserts a newline, and `Esc` returns to normal mode. |
 
 ## Config Panel
 
