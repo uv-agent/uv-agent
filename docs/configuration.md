@@ -324,6 +324,7 @@ Runner settings control managed Python script execution.
 | `default_timeout_s` | number | `7200` | Default script timeout in seconds. |
 | `max_output_bytes` | integer | `1000000` | Maximum captured output bytes per run. |
 | `max_run_logs` | integer | `200` | Number of recent run records kept per project. Matching exported debug scripts are pruned with old rows. |
+| `scriptenv_index_url` | string or null | `null` | Optional uv default package index URL written to the managed `runner/scriptenv/pyproject.toml`. |
 
 ## Full Example
 

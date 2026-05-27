@@ -177,7 +177,8 @@ Supported model API formats:
   },
   "runner": {
     "default_timeout_s": 7200,
-    "max_output_bytes": 1000000
+    "max_output_bytes": 1000000,
+    "scriptenv_index_url": null
   },
   "pricing": {
     "currency": "RMB",

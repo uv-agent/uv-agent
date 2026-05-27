@@ -137,6 +137,7 @@
   "runner": {
     "default_timeout_s": 7200,
     "max_output_bytes": 1000000,
-    "max_run_logs": 200
+    "max_run_logs": 200,
+    "scriptenv_index_url": null
   }
 }

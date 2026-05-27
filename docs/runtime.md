@@ -34,7 +34,9 @@ and script path.
 
 The number of retained run records is controlled by `runner.max_run_logs`,
 defaulting to 200. Pruning deletes old rows from SQLite and removes matching
-exported debug scripts.
+exported debug scripts. Set `runner.scriptenv_index_url` to make the managed
+`scriptenv` pyproject use a specific uv default package index, for example a
+regional PyPI mirror.
 
 ## Dependencies
 

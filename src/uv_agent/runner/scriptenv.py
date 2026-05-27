@@ -18,7 +18,7 @@ from uv_agent_runtime.lockfile import file_lock
 
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _READY_LOCK = threading.Lock()
-_READY_DIRS: set[Path] = set()
+_READY_DIRS: set[tuple[Path, str | None]] = set()
 _HOST_PACKAGE = "uv-agent"
 
 # Default Python version for the shared scriptenv. uv will download a matching
@@ -30,23 +30,25 @@ def uv_binary() -> str:
     return shutil.which("uv") or "uv"
 
 
-def ensure_venv(scriptenv_dir: Path) -> Path:
+def ensure_venv(scriptenv_dir: Path, *, index_url: str | None = None) -> Path:
     resolved = scriptenv_dir.resolve()
+    requested_index_url = _normalize_index_url(index_url)
+    ready_key = (resolved, requested_index_url)
     python = _venv_python(resolved / ".venv")
-    if resolved in _READY_DIRS and python.exists():
+    if ready_key in _READY_DIRS and python.exists():
         return python
     with _READY_LOCK:
-        if resolved in _READY_DIRS and python.exists():
+        if ready_key in _READY_DIRS and python.exists():
             return python
         # Multiple uv-agent processes can share one project scriptenv. Serialize
         # uv init/add/sync so concurrent ask subprocesses do not corrupt
         # pyproject.toml or uv.lock while the environment is being prepared.
         with _scriptenv_lock(resolved):
-            ensure_project(resolved)
+            ensure_project(resolved, index_url=requested_index_url)
             _ensure_runtime_package(resolved, python)
             _ensure_runtime_version(resolved, python)
             _ensure_lock_current(resolved)
-            _READY_DIRS.add(resolved)
+            _READY_DIRS.add(ready_key)
         return python
 
 
@@ -62,7 +64,7 @@ def direct_dependencies(scriptenv_dir: Path) -> list[str]:
     return [dependency for dependency in dependencies if isinstance(dependency, str)]
 
 
-def ensure_project(scriptenv_dir: Path) -> None:
+def ensure_project(scriptenv_dir: Path, *, index_url: str | None = None) -> None:
     venv_dir = scriptenv_dir / ".venv"
     pyproject = scriptenv_dir / "pyproject.toml"
     if not pyproject.exists():
@@ -82,6 +84,8 @@ def ensure_project(scriptenv_dir: Path) -> None:
             ],
             check=True,
         )
+    if index_url:
+        _ensure_default_index(pyproject, index_url)
     checkout = _editable_checkout_root()
     needs_runtime = not venv_dir.exists() or not _declares_dependency(pyproject, "uv-agent")
     needs_checkout_source = checkout is not None and not _declares_editable_checkout(pyproject, checkout)
@@ -92,6 +96,13 @@ def ensure_project(scriptenv_dir: Path) -> None:
         original_lock = _read_optional_bytes(scriptenv_dir / "uv.lock")
         if original is not None and _remove_dependency_source(pyproject, _HOST_PACKAGE):
             _lock_and_sync_project(scriptenv_dir, original_pyproject=original, original_lock=original_lock)
+
+
+def _normalize_index_url(index_url: str | None) -> str | None:
+    if not index_url:
+        return None
+    normalized = index_url.strip()
+    return normalized or None
 
 
 def _scriptenv_lock(scriptenv_dir: Path):
@@ -192,6 +203,57 @@ def _lock_and_sync_project(
         # a broken state (e.g. the host pins a version not yet on the index).
         _restore_project_files(scriptenv_dir / "pyproject.toml", original_pyproject, lock, original_lock)
         return False
+    return True
+
+
+def _ensure_default_index(pyproject: Path, index_url: str) -> bool:
+    """Ensure the managed scriptenv pyproject uses the configured default index."""
+
+    normalized_url = index_url.strip()
+    if not normalized_url:
+        return False
+    try:
+        original = pyproject.read_text(encoding="utf-8")
+        document = tomlkit.parse(original)
+    except (OSError, TOMLKitError):
+        return False
+
+    tool = document.get("tool")
+    if not isinstance(tool, dict):
+        tool = tomlkit.table()
+        document["tool"] = tool
+    uv = tool.get("uv")
+    if not isinstance(uv, dict):
+        uv = tomlkit.table()
+        tool["uv"] = uv
+    existing_indexes = uv.get("index")
+    valid_indexes = [item for item in existing_indexes if isinstance(item, dict)] if isinstance(existing_indexes, list) else []
+    target = next((item for item in valid_indexes if item.get("url") == normalized_url), None)
+    if target is None:
+        target = next((item for item in valid_indexes if item.get("default") is True), None)
+
+    indexes = tomlkit.aot()
+    for item in valid_indexes:
+        index = tomlkit.table()
+        for key, value in item.items():
+            index[key] = value
+        if item is target:
+            index["url"] = normalized_url
+            index["default"] = True
+        elif index.get("default") is True:
+            index["default"] = False
+        indexes.append(index)
+    if target is None:
+        index = tomlkit.table()
+        index["url"] = normalized_url
+        index["default"] = True
+        indexes.append(index)
+    uv["index"] = indexes
+
+    updated = tomlkit.dumps(document)
+    if updated == original:
+        return False
+    pyproject.write_text(updated, encoding="utf-8")
     return True
 
 

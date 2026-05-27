@@ -74,7 +74,11 @@ class PythonRunner:
     async def stream_run(self, request: PythonRunRequest) -> AsyncIterator[RunnerEvent]:
         run_id = new_id("run")
         timeout_s = request.timeout_s or self.config.default_timeout_s
-        await asyncio.to_thread(ensure_venv, self.scriptenv_dir)
+        await asyncio.to_thread(
+            ensure_venv,
+            self.scriptenv_dir,
+            index_url=self.config.scriptenv_index_url,
+        )
         run_cwd = (request.cwd or self.project_root).resolve()
         started_at = utc_now_iso()
         script_path = await asyncio.to_thread(

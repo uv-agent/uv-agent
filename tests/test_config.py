@@ -135,13 +135,14 @@ def test_endpoint_config_string_shorthand_and_bad_nested_values(tmp_path: Path) 
     assert config.runtime.compression.enabled is True
 
 
-def test_runner_max_run_logs_can_be_configured(tmp_path: Path) -> None:
+def test_runner_settings_can_be_configured(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
             {
                 "runner": {
                     "max_run_logs": 12,
+                    "scriptenv_index_url": "https://pypi.tuna.tsinghua.edu.cn/simple",
                 },
             }
         ),
@@ -151,6 +152,7 @@ def test_runner_max_run_logs_can_be_configured(tmp_path: Path) -> None:
     config = load_config(tmp_path, [config_path])
 
     assert config.runner.max_run_logs == 12
+    assert config.runner.scriptenv_index_url == "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 
 def test_legacy_reasoning_option_fields_are_ignored(tmp_path: Path) -> None:

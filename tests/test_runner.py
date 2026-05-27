@@ -22,7 +22,7 @@ def make_runner(
     *,
     config: RunnerConfig | None = None,
 ) -> PythonRunner:
-    monkeypatch.setattr("uv_agent.runner.runner.ensure_venv", lambda _path: Path(sys.executable))
+    monkeypatch.setattr("uv_agent.runner.runner.ensure_venv", lambda _path, **_kwargs: Path(sys.executable))
     return PythonRunner(
         project_root=Path.cwd(),
         data_dir=tmp_path / ".uv-agent",
@@ -357,6 +357,91 @@ def test_ensure_venv_serializes_initialization(
     assert set(results) == {python}
     assert [call[1] for call in calls].count("init") == 1
     assert [call[1] for call in calls].count("add") == 1
+
+
+def test_ensure_venv_writes_configured_scriptenv_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scriptenv_dir = tmp_path / "scriptenv"
+    monkeypatch.setattr(scriptenv, "_READY_DIRS", set())
+    monkeypatch.setattr(scriptenv, "_READY_LOCK", threading.Lock())
+    python = scriptenv_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    pyproject = scriptenv_dir / "pyproject.toml"
+
+    def fake_run(args: Sequence[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = list(args)
+        if args[0] != scriptenv.uv_binary():
+            return subprocess.CompletedProcess(args, 0, stdout="9.9.9\n", stderr="")
+        if args[1] == "init":
+            scriptenv_dir.mkdir(parents=True, exist_ok=True)
+            pyproject.write_text(
+                '[project]\nname = "x"\ndependencies = [\n    "uv-agent",\n]\n',
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args, 0)
+        if args[1] == "add":
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(scriptenv.subprocess, "run", fake_run)
+    monkeypatch.setattr(scriptenv, "_host_runtime_version", lambda: "9.9.9")
+
+    ensure_venv(scriptenv_dir, index_url="https://pypi.tuna.tsinghua.edu.cn/simple")
+
+    text = pyproject.read_text(encoding="utf-8")
+    assert "[[tool.uv.index]]" in text
+    assert 'url = "https://pypi.tuna.tsinghua.edu.cn/simple"' in text
+    assert "default = true" in text
+
+
+def test_ensure_venv_updates_existing_default_scriptenv_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scriptenv_dir = tmp_path / "scriptenv"
+    monkeypatch.setattr(scriptenv, "_READY_DIRS", set())
+    monkeypatch.setattr(scriptenv, "_READY_LOCK", threading.Lock())
+    python = scriptenv_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    pyproject = scriptenv_dir / "pyproject.toml"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    scriptenv_dir.mkdir(parents=True, exist_ok=True)
+    pyproject.write_text(
+        "\n".join(
+            [
+                "[project]",
+                'name = "x"',
+                "dependencies = [",
+                '    "uv-agent",',
+                "]",
+                "",
+                "[[tool.uv.index]]",
+                'url = "https://old.example/simple"',
+                "default = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(args: Sequence[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = list(args)
+        if args[0] != scriptenv.uv_binary():
+            return subprocess.CompletedProcess(args, 0, stdout="9.9.9\n", stderr="")
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(scriptenv.subprocess, "run", fake_run)
+    monkeypatch.setattr(scriptenv, "_host_runtime_version", lambda: "9.9.9")
+
+    ensure_venv(scriptenv_dir, index_url="https://new.example/simple")
+
+    text = pyproject.read_text(encoding="utf-8")
+    assert 'url = "https://new.example/simple"' in text
+    assert 'url = "https://old.example/simple"' not in text
+    assert text.count("default = true") == 1
 
 
 def test_ensure_venv_pins_pyproject_and_syncs_on_version_mismatch(

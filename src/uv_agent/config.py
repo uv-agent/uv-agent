@@ -165,6 +165,7 @@ class RunnerConfig:
     default_timeout_s: float = 7200.0
     max_output_bytes: int = 1_000_000
     max_run_logs: int = 200
+    scriptenv_index_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -258,6 +259,7 @@ def default_config(project_root: Path) -> dict[str, Any]:
             "default_timeout_s": 7200,
             "max_output_bytes": 1_000_000,
             "max_run_logs": 200,
+            "scriptenv_index_url": None,
         },
         "plugins": {
             "disabled": [],
@@ -412,10 +414,12 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         stream_retry=stream_retry,
     )
     runner_raw = _object_dict(raw.get("runner", {}))
+    scriptenv_index_url = runner_raw.get("scriptenv_index_url")
     runner = RunnerConfig(
         default_timeout_s=float(runner_raw.get("default_timeout_s", 7200)),
         max_output_bytes=int(runner_raw.get("max_output_bytes", 1_000_000)),
         max_run_logs=int(runner_raw.get("max_run_logs", 200)),
+        scriptenv_index_url=str(scriptenv_index_url) if scriptenv_index_url else None,
     )
     ui_raw = _object_dict(raw.get("ui", {}))
     plugins_raw = _object_dict(raw.get("plugins", {}))
