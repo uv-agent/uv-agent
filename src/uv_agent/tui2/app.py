@@ -636,8 +636,8 @@ class AnsiUvAgentApp:
                 view.pending_confirmation = None
                 if action == "delete_worktree":
                     asyncio.create_task(self._delete_agent_view_worktree(thread_id))
-                elif action == "delete_thread":
-                    self._delete_agent_view_thread(thread_id)
+                elif action in {"hide_thread", "delete_thread"}:
+                    self._hide_agent_view_thread(thread_id)
                 self._safe_repaint()
                 return True
             if key in {"n", "N", "\x1b", "\x03"}:
@@ -1079,15 +1079,18 @@ class AnsiUvAgentApp:
         if selected is None:
             self.state.agent_view.status_message = self._text("agent_view_delete_select")
             return
-        action = "delete_worktree" if include_worktree else "delete_thread"
+        if include_worktree and not (selected.worktree_branch and selected.worktree_path):
+            self.state.agent_view.status_message = self._text("agent_view_no_worktree")
+            return
+        action = "delete_worktree" if include_worktree else "hide_thread"
         target = selected.worktree_branch if include_worktree else short_thread(selected.thread_id)
         self.state.agent_view.pending_confirmation = f"{action}:{selected.thread_id}"
         if include_worktree:
             self.state.agent_view.status_message = self._fmt("agent_view_delete_worktree_status", target=target)
         else:
-            self.state.agent_view.status_message = self._fmt("agent_view_delete_thread_status", target=target)
+            self.state.agent_view.status_message = self._fmt("agent_view_hide_thread_status", target=target)
 
-    def _delete_agent_view_thread(self, thread_id: str) -> None:
+    def _hide_agent_view_thread(self, thread_id: str) -> None:
         self._cancel_agent_view_thread(thread_id)
         try:
             self.engine.thread_store.append(thread_id, "thread.agent_view_deleted")
