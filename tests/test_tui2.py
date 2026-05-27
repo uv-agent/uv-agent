@@ -1371,6 +1371,47 @@ def test_agent_view_renderer_shows_model_picker() -> None:
     assert "test — test-model" in plain
 
 
+def test_agent_view_renderer_distinguishes_hide_confirmation() -> None:
+    state = Tui2State(mode="agent_view")
+    state.agent_view.rows = [
+        AgentViewRow(
+            thread_id="thr_keep",
+            title="Keep workspace",
+            status="completed",
+            worktree_branch="agent-keep-workspace",
+        )
+    ]
+    state.agent_view.pending_confirmation = "hide_thread:thr_keep"
+
+    plain = "\n".join(strip_ansi(line) for line in render_agent_view(state, 88, 0))
+
+    assert "HIDE from Agent View only" in plain
+    assert "Keeps transcript, worktree, and branch" in plain
+    assert "delete_thread:thr_keep" not in plain
+    assert "delete_worktree:thr_keep" not in plain
+
+
+def test_agent_view_renderer_distinguishes_worktree_delete_confirmation() -> None:
+    state = Tui2State(mode="agent_view")
+    state.agent_view.rows = [
+        AgentViewRow(
+            thread_id="thr_delete",
+            title="Delete workspace",
+            status="completed",
+            worktree_branch="agent-delete-workspace",
+            worktree_path="/tmp/agent-delete-workspace",
+        )
+    ]
+    state.agent_view.pending_confirmation = "delete_worktree:thr_delete"
+
+    plain = "\n".join(strip_ansi(line) for line in render_agent_view(state, 88, 0))
+
+    assert "DELETE WORKTREE + branch" in plain
+    assert "Destructive: removes the worktree directory and local branch" in plain
+    assert "agent-delete-workspace" in plain
+    assert "delete_worktree:thr_delete" not in plain
+
+
 def test_agent_view_renderer_respects_max_height_with_many_rows() -> None:
     state = Tui2State(mode="agent_view")
     state.agent_view.rows = [
@@ -1776,16 +1817,34 @@ def test_agent_view_ctrl_c_cancels_selected_running_thread(monkeypatch) -> None:
 
 
 def test_agent_view_delete_hides_thread_after_confirmation(monkeypatch) -> None:
+    from uv_agent.environment import normalize_language
+
     app = _make_app(monkeypatch)
+    app.language = app.state.language = normalize_language("en")
     app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One", "agent_view_joined": True}]
     app._open_agent_view()
 
     asyncio.run(app.handle_key("d"))
-    assert app.state.agent_view.pending_confirmation == "delete_thread:thr_1"
+    assert app.state.agent_view.pending_confirmation == "hide_thread:thr_1"
+    assert "HIDE" in app.state.agent_view.status_message
     asyncio.run(app.handle_key("y"))
 
     assert app.engine.thread_store.threads[0]["agent_view_deleted"] is True
     assert app.state.agent_view.rows == []
+
+
+def test_agent_view_delete_worktree_requires_worktree_metadata(monkeypatch) -> None:
+    from uv_agent.environment import normalize_language
+
+    app = _make_app(monkeypatch)
+    app.language = app.state.language = normalize_language("en")
+    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One", "agent_view_joined": True}]
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("D"))
+
+    assert app.state.agent_view.pending_confirmation is None
+    assert app.state.agent_view.status_message == "selected session has no worktree"
 
 
 def test_agent_view_delete_locked_thread_reports_status(monkeypatch) -> None:

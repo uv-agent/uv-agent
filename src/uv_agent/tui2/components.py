@@ -803,14 +803,44 @@ def _agent_row_line(
     return _agent_box_line(line, width, theme)
 
 
+def _agent_confirmation_lines(state: Tui2State, width: int, theme: AnsiTheme) -> list[str]:
+    view = state.agent_view
+    confirmation = view.pending_confirmation or ""
+    action, _, thread_id = confirmation.partition(":")
+    lang = _resolve_language(state.language)
+    selected = view.selected_row()
+    target = short_thread(thread_id)
+    if selected is not None and selected.thread_id == thread_id:
+        target = selected.worktree_branch if action == "delete_worktree" else short_thread(selected.thread_id)
+    if action == "delete_worktree":
+        return [
+            _agent_box_line(
+                sgr(theme.error, tr(lang, "agent_view_delete_worktree_status").format(target=target)),
+                width,
+                theme,
+            ),
+            _agent_box_line(sgr(theme.warning, tr(lang, "agent_view_delete_worktree_detail")), width, theme),
+        ]
+    if action in {"hide_thread", "delete_thread"}:
+        return [
+            _agent_box_line(
+                sgr(theme.warning, tr(lang, "agent_view_hide_thread_status").format(target=target)),
+                width,
+                theme,
+            ),
+            _agent_box_line(sgr(theme.muted, tr(lang, "agent_view_delete_thread_detail")), width, theme),
+        ]
+    status = view.status_message or confirmation
+    return [_agent_box_line(sgr(theme.warning, status), width, theme)]
+
+
 def _agent_peek_lines(state: Tui2State, width: int, theme: AnsiTheme) -> list[str]:
     view = state.agent_view
     lang = _resolve_language(state.language)
     selected = view.selected_row()
     lines: list[str] = []
     if view.pending_confirmation:
-        lines.append(_agent_box_line(sgr(theme.warning, view.pending_confirmation), width, theme))
-        return lines
+        return _agent_confirmation_lines(state, width, theme)
     if view.status_message:
         lines.append(_agent_box_line(sgr(theme.muted, view.status_message), width, theme))
     if view.dispatch_level:
