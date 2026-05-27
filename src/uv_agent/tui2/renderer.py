@@ -53,6 +53,17 @@ class Renderer:
         self.output.write(text)
         self.output.flush()
 
+    # CSI ?7 toggles DECAWM (auto-wrap mode). With auto-wrap disabled,
+    # writing past the last terminal column simply overwrites that column
+    # instead of scrolling the viewport, so the frame-erase math in
+    # ``_erase_frame`` stays correct even when our cell-width estimate is
+    # off (e.g. Braille/Symbol glyphs that some terminals render at 2 cells
+    # while ``unicodedata.east_asian_width`` reports them as narrow).
+    # The renderer already emits explicit ``\r\n`` between rows, so it
+    # never relied on implicit wrapping to advance to the next line.
+    _AUTOWRAP_OFF = "\x1b[?7l"
+    _AUTOWRAP_ON = "\x1b[?7h"
+
     @staticmethod
     def _up(rows: int) -> str:
         return f"\x1b[{rows}A" if rows > 0 else ""
@@ -103,13 +114,13 @@ class Renderer:
         ]
         if not lines:
             return
-        self._write("\x1b[?2026h")
+        self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
         self._erase_frame()
         # Trailing blank row gives a visual gap between flushed cells; this
         # replaces the per-cell horizontal rule that previously cluttered the
         # transcript.
         self._write("\r\n".join(lines) + "\r\n\r\n")
-        self._write("\x1b[?2026l")
+        self._write(self._AUTOWRAP_ON + "\x1b[?2026l")
 
     def flush_cells(self, cells: Iterable[TranscriptCell]) -> None:
         for cell in cells:
@@ -124,7 +135,7 @@ class Renderer:
         """
 
         self.width = self._paint_width(terminal_size()[0])
-        self._write("\x1b[?2026h")
+        self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
         self._erase_frame()
         # CSI 2J clears the visible viewport; CSI 3J also discards scrollback
         # on terminals that support it.  /clear is an explicit destructive UI
@@ -133,7 +144,7 @@ class Renderer:
         self._write("\x1b[2J\x1b[3J\x1b[H")
         if rule:
             self._write(truncate_visible(rule, self.width) + "\r\n\r\n")
-        self._write("\x1b[?2026l")
+        self._write(self._AUTOWRAP_ON + "\x1b[?2026l")
         self._has_frame = False
         self._frame_cursor_row = 0
 
@@ -150,10 +161,10 @@ class Renderer:
             state, self.width, self.spinner_frame, max_height=max_height
         )
 
-        self._write("\x1b[?2026h")
+        self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
         self._erase_frame()
         if not lines:
-            self._write("\x1b[?2026l")
+            self._write(self._AUTOWRAP_ON + "\x1b[?2026l")
             return
         # ``\r\n`` between rows guarantees a column reset; ``\n`` alone is
         # only "move down one row" in raw mode, which would produce a
@@ -163,11 +174,13 @@ class Renderer:
         if cursor_row < last_row:
             self._write(self._up(last_row - cursor_row))
         self._write(f"\r\x1b[{cursor_col + 1}G")
-        self._write("\x1b[?2026l")
+        self._write(self._AUTOWRAP_ON + "\x1b[?2026l")
         self._has_frame = True
         self._frame_cursor_row = cursor_row
 
     def close(self) -> None:
-        self._write("\x1b[?2026h")
+        self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
         self._erase_frame()
-        self._write("\x1b[?2026l\x1b[0m")
+        # Always restore DECAWM so the shell the user returns to does not
+        # inherit a nowrap terminal state.
+        self._write(self._AUTOWRAP_ON + "\x1b[?2026l\x1b[0m")

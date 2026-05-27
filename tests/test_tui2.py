@@ -488,7 +488,7 @@ def test_second_repaint_erases_using_tracked_cursor_row() -> None:
     renderer.repaint(Tui2State(composer="a"))
     rendered = output.getvalue()
 
-    assert rendered.startswith(f"\x1b[?2026h\r\x1b[{expected}A\x1b[J")
+    assert rendered.startswith(f"\x1b[?2026h\x1b[?7l\r\x1b[{expected}A\x1b[J")
     assert "\r\n" in rendered  # CR+LF separator avoids POSIX staircase
 
 
@@ -515,7 +515,11 @@ def test_flush_cell_separates_cells_with_blank_line() -> None:
     rendered = output.getvalue()
 
     # Each flush ends with two CRLFs → one blank visual row between cells.
-    assert rendered.rstrip("\x1b[?2026l").endswith("\r\n\r\n")
+    # Trailing escape sequences (autowrap restore + sync output close) are
+    # stripped before the layout assertion.
+    trailing_escapes = "\x1b[?7h\x1b[?2026l"
+    assert rendered.endswith(trailing_escapes)
+    assert rendered[: -len(trailing_escapes)].endswith("\r\n\r\n")
 
 
 def test_flush_cell_only_uses_crlf_separators() -> None:
@@ -592,6 +596,39 @@ def test_idempotent_repaint_wraps_in_sync_output() -> None:
     renderer.repaint(Tui2State(composer=""))
     rendered = output.getvalue()
     assert "\x1b[?2026h" in rendered and "\x1b[?2026l" in rendered
+
+
+def test_renderer_disables_autowrap_during_paint() -> None:
+    """DECAWM off/on must wrap every frame so terminals never auto-scroll
+    when a cell-width estimate is off (e.g. Braille glyphs rendered as 2
+    cells on Windows ConPTY). Without this, the ``_frame_cursor_row``
+    erase math drifts and leaks stale ``run_python · running`` rules into
+    scrollback."""
+
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+
+    renderer.repaint(Tui2State(composer="hi"))
+    rendered = output.getvalue()
+    assert "\x1b[?7l" in rendered
+    assert "\x1b[?7h" in rendered
+    # Autowrap must be re-enabled before the sync-output region closes so
+    # any nested terminal behaviour outside the frame is unaffected.
+    assert rendered.rfind("\x1b[?7h") < rendered.rfind("\x1b[?2026l")
+
+    output.seek(0)
+    output.truncate(0)
+    renderer.flush_cell(TranscriptCell("user", text="hello"))
+    flushed = output.getvalue()
+    assert "\x1b[?7l" in flushed and "\x1b[?7h" in flushed
+
+    output.seek(0)
+    output.truncate(0)
+    renderer.close()
+    closed = output.getvalue()
+    # close() must leave the shell with autowrap re-enabled.
+    assert closed.endswith("\x1b[?2026l\x1b[0m")
+    assert "\x1b[?7h" in closed
 
 
 # ---------------------------------------------------------------------------
