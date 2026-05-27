@@ -498,6 +498,8 @@ def test_idempotent_repaint_wraps_in_sync_output() -> None:
 class _DummyEngine:
     def __init__(self) -> None:
         self.turns: list[dict[str, object]] = []
+        self.goal_updates: list[dict[str, object]] = []
+        self.goal_states: dict[str, SimpleNamespace] = {}
 
     class config:
         class runtime:
@@ -595,6 +597,46 @@ class _DummyEngine:
         self.turns.append({"user_text": user_text, "thread_id": thread_id, "level": level})
         yield {"type": "turn.started", "thread_id": thread_id, "turn_id": f"turn_{len(self.turns)}"}
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": f"turn_{len(self.turns)}"}
+
+    def enable_goal_mode(self, thread_id, *, objective=""):
+        state = SimpleNamespace(enabled=True, status="enabled", objective=objective)
+        self.goal_states[thread_id] = state
+        self.goal_updates.append(
+            {
+                "op": "enable",
+                "thread_id": thread_id,
+                "objective": objective,
+                "turns_started": len(self.turns),
+            }
+        )
+        for thread in self.thread_store.threads:
+            if thread.get("thread_id") == thread_id:
+                thread["goal_mode"] = {"enabled": True, "objective": objective}
+                break
+        return state
+
+    def disable_goal_mode(self, thread_id):
+        previous = self.goal_states.get(thread_id)
+        objective = str(getattr(previous, "objective", "")) if previous is not None else ""
+        state = SimpleNamespace(enabled=False, status="disabled", objective=objective)
+        self.goal_states[thread_id] = state
+        self.goal_updates.append({"op": "disable", "thread_id": thread_id, "objective": objective})
+        for thread in self.thread_store.threads:
+            if thread.get("thread_id") == thread_id:
+                thread["goal_mode"] = {"enabled": False, "objective": objective}
+                break
+        return state
+
+    def reset_goal_files(self, thread_id, *, objective=""):
+        state = SimpleNamespace(enabled=False, status="disabled", objective=objective)
+        self.goal_states[thread_id] = state
+        self.goal_updates.append({"op": "reset", "thread_id": thread_id, "objective": objective})
+        return state
+
+    def goal_state(self, thread_id):
+        if not thread_id:
+            return None
+        return self.goal_states.get(thread_id)
 
 
 class _DummyRenderer:
@@ -981,7 +1023,7 @@ def test_command_palette_supports_goal_subcommands(monkeypatch) -> None:
     app._refresh_command_palette()
 
     values = [item.value for item in app.state.command_palette_items]
-    assert "/goal enable " in values
+    assert "/goal enable" in values
     assert "/goal status" in values
 
 
@@ -1300,13 +1342,71 @@ def test_window_title_is_sanitized_and_deduplicated(monkeypatch) -> None:
     assert written == ["badtitle"]
 
 
-def test_goal_command_without_thread_reports_error(monkeypatch) -> None:
+def test_goal_enable_without_thread_is_pending_until_first_send(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app._handle_command("/goal enable build something")
 
     last = app.state.flushed[-1]
-    assert last.kind == "error"
-    assert "active thread" in last.text
+    assert last.kind == "event"
+    assert "enabled for next message" in last.text
+    assert app.state.thread_id is None
+    assert app.state.goal_enabled
+    assert app.state.goal_objective == "build something"
+    assert app.engine.thread_store.threads == []
+    assert app.engine.goal_updates == []
+
+
+def test_goal_enable_palette_selection_submits_without_extra_enter(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "/goal "
+    app._refresh_command_palette()
+    values = [item.value for item in app.state.command_palette_items]
+    app.state.command_palette_index = values.index("/goal enable")
+
+    assert asyncio.run(app.handle_key("\r")) is True
+
+    assert app.state.composer == ""
+    assert not app.state.command_palette_open
+    assert app.state.flushed[-1].kind == "event"
+    assert "enabled for next message" in app.state.flushed[-1].text
+
+
+def test_pending_goal_enable_materializes_before_first_turn(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._handle_command("/goal enable build something")
+
+    async def run_turn() -> None:
+        await app._start_turn("first")
+        assert app._running_task is not None
+        await app._running_task
+
+    asyncio.run(run_turn())
+
+    assert app.state.thread_id == "thr_1"
+    assert app.engine.goal_updates == [
+        {
+            "op": "enable",
+            "thread_id": "thr_1",
+            "objective": "build something",
+            "turns_started": 0,
+        }
+    ]
+    assert app.engine.turns[-1]["thread_id"] == "thr_1"
+    assert app.state.goal_enabled
+    assert app.state.goal_objective == "build something"
+
+
+def test_goal_disable_clears_pending_draft_goal(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+
+    app._handle_command("/goal enable build something")
+    app._handle_command("/goal disable")
+
+    assert app.state.thread_id is None
+    assert not app.state.goal_enabled
+    assert app.state.goal_objective == ""
+    assert app.engine.goal_updates == []
+    assert app.state.flushed[-1].text == "goal mode disabled"
 
 
 def test_goal_command_with_invalid_op_shows_usage(monkeypatch) -> None:

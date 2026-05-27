@@ -120,9 +120,9 @@ TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
 )
 
 GOAL_COMMANDS: tuple[CommandSuggestion, ...] = (
-    CommandSuggestion("/goal enable ", "enable goal mode with optional objective"),
+    CommandSuggestion("/goal enable", "enable goal mode with optional objective"),
     CommandSuggestion("/goal disable", "disable goal mode"),
-    CommandSuggestion("/goal reset ", "reset goal files with optional objective"),
+    CommandSuggestion("/goal reset", "reset goal files with optional objective"),
     CommandSuggestion("/goal status", "show goal state"),
 )
 
@@ -208,6 +208,11 @@ class AnsiUvAgentApp:
         self._picker_mode: str = "command"
         self._mention_start: int | None = None
         self._mention_query: str = ""
+        # Match the Textual TUI's lazy Goal behavior: enabling Goal for the
+        # unsaved draft thread should update the UI immediately, but must not
+        # create thread records or goal files until the first message is sent.
+        self._pending_goal_enable = False
+        self._pending_goal_objective = ""
 
     def run(self) -> None:
         asyncio.run(self.run_async())
@@ -975,6 +980,8 @@ class AnsiUvAgentApp:
         self.state.title = "New thread"
         self.state.goal_enabled = False
         self.state.goal_objective = ""
+        self._pending_goal_enable = False
+        self._pending_goal_objective = ""
         self.state.level = self.engine.config.runtime.default_level
         self.state.flushed.clear()
         self.state.live.clear()
@@ -1084,6 +1091,15 @@ class AnsiUvAgentApp:
             self._refresh_window_title()
         return self.state.thread_id
 
+    def _materialize_pending_goal_enable(self, thread_id: str) -> None:
+        if not self._pending_goal_enable:
+            return
+        state = self.engine.enable_goal_mode(thread_id, objective=self._pending_goal_objective)
+        self.state.goal_enabled = True
+        self.state.goal_objective = state.objective or self._pending_goal_objective
+        self._pending_goal_enable = False
+        self._pending_goal_objective = ""
+
     def _resume_thread(self, thread_id: str) -> None:
         if not thread_id:
             return
@@ -1095,6 +1111,8 @@ class AnsiUvAgentApp:
         goal = metadata.get("goal_mode") if isinstance(metadata.get("goal_mode"), dict) else {}
         self.state.goal_enabled = bool(goal.get("enabled")) if isinstance(goal, dict) else False
         self.state.goal_objective = str(goal.get("objective") or "") if isinstance(goal, dict) else ""
+        self._pending_goal_enable = False
+        self._pending_goal_objective = ""
         self.state.flushed.clear()
         self.state.live.clear()
         self._tool_cells.clear()
@@ -1183,12 +1201,31 @@ class AnsiUvAgentApp:
             )
             return
         if not self.state.thread_id:
-            self._flush(
-                TranscriptCell(
-                    "error",
-                    text="/goal requires an active thread — send a message first, then toggle goal mode",
-                )
-            )
+            if op == "enable":
+                self._pending_goal_enable = True
+                self._pending_goal_objective = rest.strip()
+                self.state.goal_enabled = True
+                self.state.goal_objective = self._pending_goal_objective
+                obj = self._pending_goal_objective or "—"
+                self._flush(TranscriptCell("event", text=f"goal mode enabled for next message · objective: {obj}"))
+                return
+            if op == "disable":
+                self._pending_goal_enable = False
+                self._pending_goal_objective = ""
+                self.state.goal_enabled = False
+                self.state.goal_objective = ""
+                self._flush(TranscriptCell("event", text="goal mode disabled"))
+                return
+            if op == "status":
+                if self._pending_goal_enable:
+                    obj = self._pending_goal_objective or "—"
+                    self._flush(
+                        TranscriptCell("event", text=f"goal mode: enabled (pending first message)\nobjective: {obj}")
+                    )
+                else:
+                    self._flush(TranscriptCell("event", text="goal mode: disabled (no active thread)"))
+                return
+            self._flush(TranscriptCell("error", text="/goal reset requires an active thread — send a message first"))
             return
         try:
             if op == "enable":
@@ -1238,6 +1275,8 @@ class AnsiUvAgentApp:
 
     async def _run_turn(self, text: str) -> None:
         try:
+            if self.state.thread_id:
+                self._materialize_pending_goal_enable(self.state.thread_id)
             async for event in self.engine.run_turn(
                 user_text=text,
                 thread_id=self.state.thread_id,
