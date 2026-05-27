@@ -8,6 +8,7 @@ import threading
 import tomllib
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
+from typing import Sequence
 
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
@@ -44,6 +45,7 @@ def ensure_venv(scriptenv_dir: Path) -> Path:
             ensure_project(resolved)
             _ensure_runtime_package(resolved, python)
             _ensure_runtime_version(resolved, python)
+            _ensure_lock_current(resolved)
             _READY_DIRS.add(resolved)
         return python
 
@@ -65,7 +67,7 @@ def ensure_project(scriptenv_dir: Path) -> None:
     pyproject = scriptenv_dir / "pyproject.toml"
     if not pyproject.exists():
         scriptenv_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
+        _run_uv(
             [
                 uv_binary(),
                 "init",
@@ -78,7 +80,6 @@ def ensure_project(scriptenv_dir: Path) -> None:
                 DEFAULT_PYTHON_VERSION,
                 str(scriptenv_dir),
             ],
-            env=_uv_env(),
             check=True,
         )
     checkout = _editable_checkout_root()
@@ -86,6 +87,11 @@ def ensure_project(scriptenv_dir: Path) -> None:
     needs_checkout_source = checkout is not None and not _declares_editable_checkout(pyproject, checkout)
     if needs_runtime or needs_checkout_source:
         _add_runtime_package(scriptenv_dir)
+    if checkout is None:
+        original = _read_optional_text(pyproject)
+        original_lock = _read_optional_bytes(scriptenv_dir / "uv.lock")
+        if original is not None and _remove_dependency_source(pyproject, _HOST_PACKAGE):
+            _lock_and_sync_project(scriptenv_dir, original_pyproject=original, original_lock=original_lock)
 
 
 def _scriptenv_lock(scriptenv_dir: Path):
@@ -116,7 +122,7 @@ def _add_runtime_package(scriptenv_dir: Path) -> None:
         args.extend(["--editable", str(checkout)])
     else:
         args.append("uv-agent")
-    subprocess.run(args, env=_uv_env(), check=True)
+    _run_uv(args, check=True)
 
 
 def _ensure_runtime_version(scriptenv_dir: Path, python: Path) -> None:
@@ -131,22 +137,112 @@ def _ensure_runtime_version(scriptenv_dir: Path, python: Path) -> None:
         original = pyproject.read_text(encoding="utf-8")
     except OSError:
         return
+    original_lock = _read_optional_bytes(scriptenv_dir / "uv.lock")
     if not _pin_dependency(pyproject, _HOST_PACKAGE, target):
         return
-    result = subprocess.run(
+    _lock_and_sync_project(scriptenv_dir, original_pyproject=original, original_lock=original_lock)
+
+
+def _ensure_lock_current(scriptenv_dir: Path) -> None:
+    pyproject = scriptenv_dir / "pyproject.toml"
+    if not pyproject.exists():
+        return
+    result = _run_uv(
+        [
+            uv_binary(),
+            "lock",
+            "--project",
+            str(scriptenv_dir),
+            "--check",
+            "-q",
+        ]
+    )
+    if result.returncode == 0:
+        return
+    _lock_and_sync_project(
+        scriptenv_dir,
+        original_pyproject=_read_optional_text(pyproject),
+        original_lock=_read_optional_bytes(scriptenv_dir / "uv.lock"),
+    )
+
+
+def _lock_and_sync_project(
+    scriptenv_dir: Path,
+    *,
+    original_pyproject: str | None,
+    original_lock: bytes | None,
+) -> bool:
+    lock = scriptenv_dir / "uv.lock"
+    lock_result = _run_uv([uv_binary(), "lock", "--project", str(scriptenv_dir), "-q"])
+    if lock_result.returncode != 0:
+        _restore_project_files(scriptenv_dir / "pyproject.toml", original_pyproject, lock, original_lock)
+        return False
+    sync_result = _run_uv(
         [
             uv_binary(),
             "sync",
             "--project",
             str(scriptenv_dir),
+            "--locked",
             "-q",
-        ],
-        env=_uv_env(),
+        ]
     )
-    if result.returncode != 0:
-        # Restore the previous pyproject so the scriptenv is not left in a
-        # broken state (e.g. host pins a version not yet on the index).
-        pyproject.write_text(original, encoding="utf-8")
+    if sync_result.returncode != 0:
+        # Restore the previous project metadata so the scriptenv is not left in
+        # a broken state (e.g. the host pins a version not yet on the index).
+        _restore_project_files(scriptenv_dir / "pyproject.toml", original_pyproject, lock, original_lock)
+        return False
+    return True
+
+
+def _remove_dependency_source(pyproject: Path, package: str) -> bool:
+    try:
+        document = tomlkit.parse(pyproject.read_text(encoding="utf-8"))
+    except (OSError, TOMLKitError):
+        return False
+    tool = document.get("tool")
+    uv = tool.get("uv") if isinstance(tool, dict) else None
+    sources = uv.get("sources") if isinstance(uv, dict) else None
+    if not isinstance(sources, dict) or package not in sources:
+        return False
+    del sources[package]
+    pyproject.write_text(tomlkit.dumps(document), encoding="utf-8")
+    return True
+
+
+def _read_optional_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _read_optional_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore_project_files(
+    pyproject: Path,
+    pyproject_text: str | None,
+    lock: Path,
+    lock_bytes: bytes | None,
+) -> None:
+    if pyproject_text is not None:
+        pyproject.write_text(pyproject_text, encoding="utf-8")
+    if lock_bytes is not None:
+        lock.write_bytes(lock_bytes)
+    else:
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _run_uv(args: Sequence[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(list(args), env=_uv_env(), text=True, capture_output=True, check=check)
 
 
 def _pin_dependency(pyproject: Path, package: str, version: str) -> bool:

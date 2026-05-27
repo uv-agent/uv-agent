@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -369,7 +370,8 @@ def test_ensure_venv_pins_pyproject_and_syncs_on_version_mismatch(
     pyproject = scriptenv_dir / "pyproject.toml"
     calls: list[list[str]] = []
 
-    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = list(args)
         calls.append(list(args))
         if args[0] != scriptenv.uv_binary():
             return subprocess.CompletedProcess(args, 0, stdout="0.0.1\n", stderr="")
@@ -384,6 +386,9 @@ def test_ensure_venv_pins_pyproject_and_syncs_on_version_mismatch(
             python.parent.mkdir(parents=True, exist_ok=True)
             python.write_text("", encoding="utf-8")
             return subprocess.CompletedProcess(args, 0)
+        if args[1] == "lock":
+            (scriptenv_dir / "uv.lock").write_text("lock", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
         return subprocess.CompletedProcess(args, 0)
 
     monkeypatch.setattr(scriptenv.subprocess, "run", fake_run)
@@ -392,6 +397,7 @@ def test_ensure_venv_pins_pyproject_and_syncs_on_version_mismatch(
     ensure_venv(scriptenv_dir)
 
     assert '"uv-agent==9.9.9"' in pyproject.read_text(encoding="utf-8")
+    assert [call for call in calls if call[0] == scriptenv.uv_binary() and call[1] == "lock"]
     sync_calls = [call for call in calls if call[0] == scriptenv.uv_binary() and call[1] == "sync"]
     assert sync_calls, "expected uv sync to be invoked after pinning the version"
 
@@ -407,7 +413,8 @@ def test_ensure_venv_skips_sync_when_versions_match(
     pyproject = scriptenv_dir / "pyproject.toml"
     calls: list[list[str]] = []
 
-    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = list(args)
         calls.append(list(args))
         if args[0] != scriptenv.uv_binary():
             return subprocess.CompletedProcess(args, 0, stdout="9.9.9\n", stderr="")
@@ -421,6 +428,8 @@ def test_ensure_venv_skips_sync_when_versions_match(
         if args[1] == "add":
             python.parent.mkdir(parents=True, exist_ok=True)
             python.write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+        if args[1] == "lock":
             return subprocess.CompletedProcess(args, 0)
         return subprocess.CompletedProcess(args, 0)
 
@@ -444,7 +453,8 @@ def test_ensure_venv_restores_pyproject_when_sync_fails(
     pyproject = scriptenv_dir / "pyproject.toml"
     original_pyproject = '[project]\nname = "x"\ndependencies = [\n    "uv-agent",\n]\n'
 
-    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = list(args)
         if args[0] != scriptenv.uv_binary():
             return subprocess.CompletedProcess(args, 0, stdout="0.0.1\n", stderr="")
         if args[1] == "init":
@@ -454,6 +464,9 @@ def test_ensure_venv_restores_pyproject_when_sync_fails(
         if args[1] == "add":
             python.parent.mkdir(parents=True, exist_ok=True)
             python.write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+        if args[1] == "lock":
+            (scriptenv_dir / "uv.lock").write_text("new lock", encoding="utf-8")
             return subprocess.CompletedProcess(args, 0)
         if args[1] == "sync":
             return subprocess.CompletedProcess(args, 1)
@@ -465,3 +478,95 @@ def test_ensure_venv_restores_pyproject_when_sync_fails(
     ensure_venv(scriptenv_dir)
 
     assert pyproject.read_text(encoding="utf-8") == original_pyproject
+
+
+def test_ensure_venv_refreshes_stale_lockfile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scriptenv_dir = tmp_path / "scriptenv"
+    monkeypatch.setattr(scriptenv, "_READY_DIRS", set())
+    monkeypatch.setattr(scriptenv, "_READY_LOCK", threading.Lock())
+    python = scriptenv_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    pyproject = scriptenv_dir / "pyproject.toml"
+    lock = scriptenv_dir / "uv.lock"
+    calls: list[list[str]] = []
+
+    def fake_run(args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = list(args)
+        calls.append(args)
+        if args[0] != scriptenv.uv_binary():
+            return subprocess.CompletedProcess(args, 0, stdout="9.9.9\n", stderr="")
+        if args[1] == "init":
+            scriptenv_dir.mkdir(parents=True, exist_ok=True)
+            pyproject.write_text(
+                '[project]\nname = "x"\ndependencies = [\n    "uv-agent",\n]\n',
+                encoding="utf-8",
+            )
+            lock.write_text("stale lock", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+        if args[1] == "add":
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+        if args[1] == "lock" and "--check" in args:
+            return subprocess.CompletedProcess(args, 1)
+        if args[1] == "lock":
+            lock.write_text("fresh lock", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(scriptenv.subprocess, "run", fake_run)
+    monkeypatch.setattr(scriptenv, "_host_runtime_version", lambda: "9.9.9")
+
+    ensure_venv(scriptenv_dir)
+
+    assert lock.read_text(encoding="utf-8") == "fresh lock"
+    assert [call for call in calls if call[0] == scriptenv.uv_binary() and call[1] == "lock" and "--check" in call]
+    assert [call for call in calls if call[0] == scriptenv.uv_binary() and call[1] == "sync"]
+
+
+def test_ensure_project_removes_checkout_source_for_installed_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scriptenv_dir = tmp_path / "scriptenv"
+    pyproject = scriptenv_dir / "pyproject.toml"
+    lock = scriptenv_dir / "uv.lock"
+    calls: list[list[str]] = []
+    scriptenv_dir.mkdir(parents=True)
+    pyproject.write_text(
+        "\n".join(
+            [
+                "[project]",
+                'name = "x"',
+                "dependencies = [",
+                '    "uv-agent==9.9.9",',
+                "]",
+                "",
+                "[tool.uv.sources]",
+                'uv-agent = { path = "../checkout", editable = true }',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    lock.write_text("stale lock", encoding="utf-8")
+
+    def fake_run(args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        args = list(args)
+        calls.append(args)
+        if args[0] == scriptenv.uv_binary() and args[1] == "lock":
+            lock.write_text("fresh lock", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(scriptenv.subprocess, "run", fake_run)
+    monkeypatch.setattr(scriptenv, "_editable_checkout_root", lambda: None)
+
+    scriptenv.ensure_project(scriptenv_dir)
+
+    text = pyproject.read_text(encoding="utf-8")
+    assert "uv-agent==9.9.9" in text
+    assert "uv-agent = { path" not in text
+    assert lock.read_text(encoding="utf-8") == "fresh lock"
+    assert [call for call in calls if call[0] == scriptenv.uv_binary() and call[1] == "sync"]
