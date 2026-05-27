@@ -782,6 +782,32 @@ def test_ctrl_c_preserves_composer_while_arming_quit(monkeypatch) -> None:
     assert app.state.composer == "abc"
 
 
+def test_ctrl_c_requires_second_press_to_interrupt_when_busy(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.cancel_event = asyncio.Event()
+    app.state.busy = True
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+    assert app._interrupt_armed
+    assert app.cancel_event is not None and not app.cancel_event.is_set()
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+    assert not app._interrupt_armed
+    assert app.cancel_event is not None and app.cancel_event.is_set()
+
+
+def test_cancel_command_interrupts_without_confirmation(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.cancel_event = asyncio.Event()
+    app.state.busy = True
+
+    assert app._handle_command("/cancel") is True
+
+    assert not app._interrupt_armed
+    assert app.cancel_event.is_set()
+    assert app.state.status_message == app._text("interrupted")
+
+
 def test_regular_key_cancels_ctrl_c_quit_confirmation(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     asyncio.run(app.handle_key("\x03"))

@@ -221,6 +221,9 @@ class AnsiUvAgentApp:
         self._quit_armed = False
         self._quit_armed_until: float | None = None
         self._quit_confirmation_status: str | None = None
+        self._interrupt_armed = False
+        self._interrupt_armed_until: float | None = None
+        self._interrupt_confirmation_status: str | None = None
         self._spinner_index = 0
         self._window_title_thread_title = ""
         self._last_window_title = ""
@@ -271,6 +274,7 @@ class AnsiUvAgentApp:
         while True:
             await asyncio.sleep(tick_interval)
             confirmation_expired = self._expire_quit_confirmation()
+            confirmation_expired = self._expire_interrupt_confirmation() or confirmation_expired
             if self.state.busy:
                 self._spinner_index += 1
                 self.renderer.spinner_frame = self._spinner_index
@@ -287,14 +291,20 @@ class AnsiUvAgentApp:
 
     async def handle_key(self, key: str) -> bool:
         if key == "\x03":  # Ctrl+C
+            if self.cancel_event is not None:
+                self._expire_interrupt_confirmation()
+                if self._interrupt_armed:
+                    self._interrupt_running_turn()
+                    self._safe_repaint()
+                    return True
+                self._clear_quit_confirmation()
+                self._arm_interrupt_confirmation(self._text("interrupt_again"))
+                self._safe_repaint()
+                return True
             self._expire_quit_confirmation()
             if self._quit_armed:
                 return False
-            if self.cancel_event is not None:
-                self.cancel_event.set()
-                self._arm_quit_confirmation(self._text("interrupt_again"))
-                self._safe_repaint()
-                return True
+            self._clear_interrupt_confirmation()
             self._arm_quit_confirmation(self._text("quit_again"))
             self._safe_repaint()
             return True
@@ -305,6 +315,7 @@ class AnsiUvAgentApp:
 
         if key:
             self._clear_quit_confirmation()
+            self._clear_interrupt_confirmation()
         if key != "\t":
             self._tab_state = None
         if key == "\x0c":  # Ctrl+L: force a full redraw of the live region.
@@ -476,6 +487,12 @@ class AnsiUvAgentApp:
         self._quit_confirmation_status = message
         self.state.status_message = message
 
+    def _arm_interrupt_confirmation(self, message: str) -> None:
+        self._interrupt_armed = True
+        self._interrupt_armed_until = monotonic() + CTRL_C_CONFIRMATION_S
+        self._interrupt_confirmation_status = message
+        self.state.status_message = message
+
     def _clear_quit_confirmation(self) -> bool:
         was_armed = self._quit_armed
         message = self._quit_confirmation_status
@@ -492,6 +509,32 @@ class AnsiUvAgentApp:
         if self._quit_armed_until is None or monotonic() < self._quit_armed_until:
             return False
         return self._clear_quit_confirmation()
+
+    def _clear_interrupt_confirmation(self) -> bool:
+        was_armed = self._interrupt_armed
+        message = self._interrupt_confirmation_status
+        self._interrupt_armed = False
+        self._interrupt_armed_until = None
+        self._interrupt_confirmation_status = None
+        if message and self.state.status_message == message:
+            self.state.status_message = "running" if self.state.busy else "ready"
+        return was_armed
+
+    def _expire_interrupt_confirmation(self) -> bool:
+        if not self._interrupt_armed:
+            return False
+        if self._interrupt_armed_until is None or monotonic() < self._interrupt_armed_until:
+            return False
+        return self._clear_interrupt_confirmation()
+
+    def _interrupt_running_turn(self) -> bool:
+        if self.cancel_event is None:
+            return False
+        self.cancel_event.set()
+        self._clear_interrupt_confirmation()
+        self._clear_quit_confirmation()
+        self.state.status_message = self._text("interrupted")
+        return True
 
     def _delete_composer_before_cursor(self) -> None:
         cursor = self._composer_cursor()
@@ -978,11 +1021,8 @@ class AnsiUvAgentApp:
             self._refresh_window_title()
             self._flush(TranscriptCell("event", text=f"title set to {arg}"))
         elif command == "/cancel":
-            if self.cancel_event is not None:
-                self.cancel_event.set()
-                self.state.status_message = self._text("interrupt_again")
-            else:
-                self._flush(TranscriptCell("event", text="no turn is running"))
+            if not self._interrupt_running_turn():
+                self._flush(TranscriptCell("event", text=self._text("no_running_turn")))
         elif command in {"/clear", "/new"}:
             # /new is kept as an unadvertised compatibility alias; the palette
             # exposes only /clear, matching the Textual TUI reset behavior.
@@ -1289,6 +1329,8 @@ class AnsiUvAgentApp:
         self._persist_thread_level(thread_id, level)
         self._flush(TranscriptCell("user", text=text))
         self.cancel_event = asyncio.Event()
+        self._clear_quit_confirmation()
+        self._clear_interrupt_confirmation()
         self.state.busy = True
         self.state.status_message = "running"
         self.state.last_error = None

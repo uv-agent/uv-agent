@@ -4974,6 +4974,32 @@ async def test_tui_ctrl_c_twice_interrupts_busy_turn_without_selection(
 
 
 @pytest.mark.asyncio
+async def test_tui_cancel_command_interrupts_busy_turn_without_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    engine = BlockingEngine(fake_engine(project_root, tmp_path / "state"))
+    monkeypatch.setattr("uv_agent.tui.app.create_engine", lambda root: engine)
+    app = UvAgentApp(project_root=project_root)
+
+    async with app.run_test(size=(90, 24), notifications=True) as pilot:
+        composer = app.query_one("#composer", TextArea)
+        composer.insert("long work")
+        await pilot.press("ctrl+enter")
+        await engine.started.wait()
+
+        composer.insert("/cancel")
+        await pilot.press("ctrl+enter")
+        await pilot.pause(0.2)
+
+        assert app._interrupt_armed is False
+        assert app.busy is False
+        assert any(event["type"] == "turn.interrupted" for event in engine.thread_store.read(app.thread_id))
+
+
+@pytest.mark.asyncio
 async def test_tui_renders_persisted_turn_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

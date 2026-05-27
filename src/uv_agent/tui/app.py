@@ -186,6 +186,7 @@ COMMAND_SPECS = [
     ("/threads", "/threads"),
     ("/goal", "/goal"),
     ("/config", "/config"),
+    ("/cancel", "/cancel"),
     ("/quit", "/quit"),
     ("/help", "/help"),
 ]
@@ -2568,6 +2569,14 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._flash(self._text("interrupt_again"), severity="warning")
         self.set_timer(2.0, self._clear_interrupt_arm)
 
+    def _interrupt_from_command(self) -> None:
+        if self._current_cancel_event is None:
+            self._flash(self._text("no_running_turn"))
+            return
+        self._interrupt_armed = False
+        self._current_cancel_event.set()
+        self._flash(self._text("interrupted"), severity="warning")
+
     def action_toggle_status_panel(self) -> None:
         self._open_status_panel()
 
@@ -2834,6 +2843,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
             return True
         if command == "/quit":
             self._quit_from_command()
+            return True
+        if command == "/cancel":
+            self._interrupt_from_command()
             return True
         if command == "/threads":
             self._open_threads_panel()
