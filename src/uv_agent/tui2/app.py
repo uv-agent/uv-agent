@@ -170,7 +170,6 @@ CTRL_C_CONFIRMATION_S = 3.0
 UNBRACKETED_PASTE_ENTER_S = 0.08
 COMPACTION_SUMMARY_PREVIEW_LINES = 4
 COMPACTION_SUMMARY_PREVIEW_CHARS = 800
-BRANCH_SLUG_TIMEOUT_S = 3.0
 _AGENT_VIEW_STATUS_RANK = {status: index for index, status in enumerate(AGENT_VIEW_STATUS_ORDER)}
 
 
@@ -1204,10 +1203,7 @@ class AnsiUvAgentApp:
         generate = getattr(self.engine, "generate_branch_slug", None)
         if callable(generate):
             try:
-                slug = await asyncio.wait_for(
-                    generate(thread_id, prompt, level=level or self._agent_view_dispatch_level()),
-                    timeout=BRANCH_SLUG_TIMEOUT_S,
-                )
+                slug = await generate(thread_id, prompt, level=level or self._agent_view_dispatch_level())
             except Exception:
                 slug = None
         branch = f"agent-{slug}-{short_id}" if slug else f"agent-{short_id}"

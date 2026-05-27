@@ -1141,18 +1141,21 @@ class AgentEngine:
         if not self.config.runtime.branch_name_generation.enabled:
             return None
         branch_level = self.config.runtime.branch_name_generation.model_level or level
-        response = await self.model_client.create_response(
-            input_items=[
-                message_item(
-                    "user",
-                    BRANCH_NAME_GENERATION_PROMPT
-                    + "\n\nUser message:\n"
-                    + user_text.strip(),
-                )
-            ],
-            level=branch_level,
-            tools=[],
-            instructions="Generate a short git branch slug. Return only the slug.",
+        response = await asyncio.wait_for(
+            self.model_client.create_response(
+                input_items=[
+                    message_item(
+                        "user",
+                        BRANCH_NAME_GENERATION_PROMPT
+                        + "\n\nUser message:\n"
+                        + user_text.strip(),
+                    )
+                ],
+                level=branch_level,
+                tools=[],
+                instructions="Generate a short git branch slug. Return only the slug.",
+            ),
+            timeout=max(0.1, self.config.runtime.branch_name_generation.timeout_s),
         )
         self._record_billing_charge(
             thread_id,

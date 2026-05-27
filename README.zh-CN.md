@@ -168,7 +168,8 @@ model 和一个 level。
     },
     "branch_name_generation": {
       "enabled": true,
-      "model_level": "deepseek-flash"
+      "model_level": "deepseek-flash",
+      "timeout_s": 15.0
     }
   },
   "runner": {

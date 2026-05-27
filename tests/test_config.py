@@ -61,7 +61,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                 },
                 "runtime": {
                     "title_generation": {"model_level": "quick"},
-                    "branch_name_generation": {"model_level": "branch"},
+                    "branch_name_generation": {"model_level": "branch", "timeout_s": 7.5},
                     "stream_retry": {
                         "max_retries": 3,
                         "base": 0.5,
@@ -95,6 +95,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert config.runtime.title_generation.model_level == "quick"
     assert config.runtime.branch_name_generation.enabled is True
     assert config.runtime.branch_name_generation.model_level == "branch"
+    assert config.runtime.branch_name_generation.timeout_s == 7.5
     assert config.runtime.compression.enabled is True
     assert config.runtime.stream_retry.max_retries == 3
     assert config.runtime.stream_retry.base == 0.5

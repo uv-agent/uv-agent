@@ -1634,6 +1634,43 @@ def test_agent_view_branch_name_falls_back_to_thread_id(monkeypatch) -> None:
     assert branch == "agent-abcdef12"
 
 
+def test_agent_view_branch_name_uses_generated_slug(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.branch_slug = "fix-login"
+
+    branch = asyncio.run(app._agent_view_branch_name("thr_abcdef123456", "prompt", level="alpha"))
+
+    assert branch == "agent-fix-login-abcdef12"
+    assert app.engine.branch_slug_requests[-1] == {
+        "thread_id": "thr_abcdef123456",
+        "user_text": "prompt",
+        "level": "alpha",
+    }
+
+
+def test_agent_view_branch_name_waits_for_engine_slug(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+
+    async def run() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def generate_branch_slug(thread_id, user_text, *, level=None):
+            started.set()
+            await release.wait()
+            return "delayed-task"
+
+        app.engine.generate_branch_slug = generate_branch_slug
+        task = asyncio.create_task(app._agent_view_branch_name("thr_abcdef123456", "prompt"))
+        await started.wait()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        assert await task == "agent-delayed-task-abcdef12"
+
+    asyncio.run(run())
+
+
 def test_agent_view_reply_queues_for_running_thread(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One", "agent_view_joined": True}]

@@ -98,6 +98,12 @@ class RoutedModelClient(FakeModelClient):
         return parse_responses_response(self.main)
 
 
+class HangingResponseClient(FakeModelClient):
+    async def create_response(self, **kwargs):
+        self.requests.append(kwargs)
+        await asyncio.Event().wait()
+
+
 class ReasoningStreamClient(FakeModelClient):
     async def stream_response(self, **kwargs):
         self.requests.append(
@@ -1428,6 +1434,29 @@ async def test_agent_branch_slug_generation_can_be_disabled(tmp_path: Path) -> N
 
     assert await engine.generate_branch_slug(thread_id, "anything", level="medium") is None
     assert client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_agent_branch_slug_generation_times_out(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        branch_name_generation=BranchNameGenerationConfig(enabled=True, timeout_s=0.01),
+    )
+    client = HangingResponseClient([])
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread("Agent View dispatch")
+
+    with pytest.raises(asyncio.TimeoutError):
+        await engine.generate_branch_slug(thread_id, "Fix the login redirect bug", level="medium")
+    assert client.requests
 
 
 @pytest.mark.asyncio

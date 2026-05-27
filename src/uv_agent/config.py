@@ -129,6 +129,7 @@ class TitleGenerationConfig:
 class BranchNameGenerationConfig:
     enabled: bool = True
     model_level: str | None = None
+    timeout_s: float = 15.0
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,7 @@ def default_config(project_root: Path) -> dict[str, Any]:
             },
             "branch_name_generation": {
                 "enabled": True,
+                "timeout_s": 15.0,
             },
             "stream_retry": {
                 "max_retries": 5,
