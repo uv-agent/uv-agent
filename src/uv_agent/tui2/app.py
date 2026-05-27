@@ -18,6 +18,7 @@ from uv_agent.i18n import tr
 from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.notifications import play_terminal_buzzer
 from uv_agent.paths import project_tui_clipboard_dir, uv_agent_home
+from uv_agent.session import ThreadLockedError
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
@@ -989,7 +990,14 @@ class AnsiUvAgentApp:
 
     def _delete_agent_view_thread(self, thread_id: str) -> None:
         self._cancel_agent_view_thread(thread_id)
-        self.engine.thread_store.append(thread_id, "thread.agent_view_deleted")
+        try:
+            self.engine.thread_store.append(thread_id, "thread.agent_view_deleted")
+        except ThreadLockedError:
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_delete_locked",
+                thread=short_thread(thread_id),
+            )
+            return
         self._thread_runs.pop(thread_id, None)
         if thread_id == self.state.thread_id:
             self._clear_to_new_thread()
@@ -1017,19 +1025,27 @@ class AnsiUvAgentApp:
             self.state.agent_view.status_message = self._fmt("agent_view_worktree_delete_failed", error=exc)
             self._safe_repaint()
             return
-        self.engine.thread_store.append(
-            thread_id,
-            "thread.worktree_deleted",
-            worktree_branch=result.branch,
-            worktree_path=str(result.path),
-            worktree_origin_root=str(result.origin_root),
-            worktree_deleted_at=utc_now_iso(),
-            worktree_deleted_head=result.head,
-            worktree_deleted_status=result.status,
-            worktree_removed=result.worktree_removed,
-            branch_deleted=result.branch_deleted,
-        )
-        self.engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(self.project_root.resolve()))
+        try:
+            self.engine.thread_store.append(
+                thread_id,
+                "thread.worktree_deleted",
+                worktree_branch=result.branch,
+                worktree_path=str(result.path),
+                worktree_origin_root=str(result.origin_root),
+                worktree_deleted_at=utc_now_iso(),
+                worktree_deleted_head=result.head,
+                worktree_deleted_status=result.status,
+                worktree_removed=result.worktree_removed,
+                branch_deleted=result.branch_deleted,
+            )
+            self.engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(self.project_root.resolve()))
+        except ThreadLockedError:
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_delete_locked",
+                thread=short_thread(thread_id),
+            )
+            self._safe_repaint()
+            return
         rule_states = getattr(self.engine, "_rule_states", None)
         if isinstance(rule_states, dict):
             rule_states.pop(thread_id, None)

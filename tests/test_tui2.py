@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from uv_agent.tui2.ansi import strip_ansi, visible_len
+from uv_agent.session import ThreadLockedError
 from uv_agent.tui2.components import (
     render_agent_view,
     render_agent_view_with_cursor,
@@ -1576,6 +1577,25 @@ def test_agent_view_delete_hides_thread_after_confirmation(monkeypatch) -> None:
 
     assert app.engine.thread_store.threads[0]["agent_view_deleted"] is True
     assert app.state.agent_view.rows == []
+
+
+def test_agent_view_delete_locked_thread_reports_status(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One"}]
+    app._open_agent_view()
+
+    def locked_append(thread_id, event_type, **data):
+        raise ThreadLockedError(thread_id, app.project_root / "state.sqlite3")
+
+    monkeypatch.setattr(app.engine.thread_store, "append", locked_append)
+
+    asyncio.run(app.handle_key("d"))
+    asyncio.run(app.handle_key("y"))
+
+    assert app.state.mode == "agent_view"
+    assert app.state.agent_view.rows[0].thread_id == "thr_1"
+    assert app.state.agent_view.status_message
+    assert "thr_1" in app.state.agent_view.status_message
 
 
 def test_agent_view_delete_worktree_records_metadata(monkeypatch) -> None:
