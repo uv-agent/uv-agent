@@ -147,6 +147,23 @@ def test_agent_view_deleted_threads_are_hidden_from_lists(tmp_path: Path) -> Non
     assert digest["agent_view_deleted_at"]
 
 
+def test_agent_view_join_event_marks_thread_and_restores_hidden_thread(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Join me")
+
+    store.append(thread_id, "thread.agent_view_deleted")
+    store.append(thread_id, "thread.agent_view_joined", source="thread_command")
+
+    digest = store.thread_digest(thread_id)
+    listed = store.list_threads()[0]
+
+    assert digest["agent_view_joined"] is True
+    assert digest["agent_view_joined_at"]
+    assert digest["agent_view_source"] == "thread_command"
+    assert "agent_view_deleted" not in digest
+    assert listed["agent_view_joined"] is True
+
+
 def test_billing_accumulated_events_update_thread_metadata(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Billing")

@@ -405,6 +405,9 @@ class ThreadStore:
             "worktree_deleted_at",
             "worktree_deleted_head",
             "worktree_deleted_status",
+            "agent_view_joined",
+            "agent_view_joined_at",
+            "agent_view_source",
             "agent_view_deleted",
             "agent_view_deleted_at",
         ):
@@ -882,6 +885,18 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
             "message": event.get("message") or "",
             "_event_id": event.get("_event_id"),
         }
+        return
+
+    if event_type == "thread.agent_view_joined":
+        metadata["agent_view_joined"] = True
+        metadata["agent_view_joined_at"] = event.get("created_at")
+        source = str(event.get("source") or "").strip()
+        if source:
+            metadata["agent_view_source"] = source
+        # Re-adding a thread from inside the thread should make a previous
+        # Agent View hide reversible without affecting ordinary thread history.
+        metadata.pop("agent_view_deleted", None)
+        metadata.pop("agent_view_deleted_at", None)
         return
 
     if event_type == "thread.agent_view_deleted":

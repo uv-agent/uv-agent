@@ -717,6 +717,10 @@ class _DummyEngine:
                 if event_type == "thread.level_updated":
                     thread["active_level"] = data.get("level")
                     thread["active_model"] = data.get("model")
+                elif event_type == "thread.agent_view_joined":
+                    thread["agent_view_joined"] = True
+                    thread["agent_view_source"] = data.get("source")
+                    thread.pop("agent_view_deleted", None)
                 elif event_type == "thread.worktree_created":
                     thread.update(data)
                 elif event_type == "thread.cwd_updated":
@@ -1420,7 +1424,7 @@ def test_ctrl_a_opens_agent_view_from_empty_composer(monkeypatch) -> None:
 def test_agents_command_opens_agent_view(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.engine.thread_store.threads = [
-        {"thread_id": "thr_1", "title": "Alpha", "last_text": "hello"},
+        {"thread_id": "thr_1", "title": "Alpha", "last_text": "hello", "agent_view_joined": True},
     ]
 
     app._handle_command("/agents")
@@ -1429,11 +1433,36 @@ def test_agents_command_opens_agent_view(monkeypatch) -> None:
     assert app.state.agent_view.rows[0].thread_id == "thr_1"
 
 
+def test_agent_view_omits_ordinary_threads_until_joined(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [
+        {"thread_id": "thr_plain", "title": "Plain"},
+        {"thread_id": "thr_joined", "title": "Joined", "agent_view_joined": True},
+        {"thread_id": "thr_worktree", "title": "Worktree", "worktree_branch": "agent-work"},
+    ]
+
+    app._open_agent_view()
+
+    assert [row.thread_id for row in app.state.agent_view.rows] == ["thr_joined", "thr_worktree"]
+
+
+def test_agents_command_joins_current_thread_to_agent_view(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [{"thread_id": "thr_plain", "title": "Plain"}]
+    app.state.thread_id = "thr_plain"
+
+    app._handle_command("/agents")
+
+    assert app.engine.thread_store.threads[0]["agent_view_joined"] is True
+    assert app.engine.thread_store.threads[0]["agent_view_source"] == "thread_command"
+    assert [row.thread_id for row in app.state.agent_view.rows] == ["thr_plain"]
+
+
 def test_agent_view_selection_order_is_stable_across_status_changes(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.engine.thread_store.threads = [
-        {"thread_id": "thr_completed", "title": "Done"},
-        {"thread_id": "thr_interrupted", "title": "Stopped"},
+        {"thread_id": "thr_completed", "title": "Done", "agent_view_joined": True},
+        {"thread_id": "thr_interrupted", "title": "Stopped", "agent_view_joined": True},
     ]
     app.engine.thread_store.events = [
         {"type": "turn.completed", "thread_id": "thr_completed"},
@@ -1452,8 +1481,8 @@ def test_agent_view_selection_order_is_stable_across_status_changes(monkeypatch)
 def test_agent_view_navigation_and_attach(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.engine.thread_store.threads = [
-        {"thread_id": "thr_1", "title": "Alpha"},
-        {"thread_id": "thr_2", "title": "Beta"},
+        {"thread_id": "thr_1", "title": "Alpha", "agent_view_joined": True},
+        {"thread_id": "thr_2", "title": "Beta", "agent_view_joined": True},
     ]
     app._open_agent_view()
 
@@ -1606,7 +1635,7 @@ def test_agent_view_branch_name_falls_back_to_thread_id(monkeypatch) -> None:
 
 def test_agent_view_reply_queues_for_running_thread(monkeypatch) -> None:
     app = _make_app(monkeypatch)
-    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One"}]
+    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One", "agent_view_joined": True}]
     app._open_agent_view()
     run_state = tui2_app.ThreadRunState(thread_id="thr_1")
 
@@ -1649,7 +1678,7 @@ def test_agent_view_input_ctrl_enter_inserts_newline(monkeypatch) -> None:
 
 def test_agent_view_ctrl_c_cancels_selected_running_thread(monkeypatch) -> None:
     app = _make_app(monkeypatch)
-    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One"}]
+    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One", "agent_view_joined": True}]
     app._open_agent_view()
     run_state = tui2_app.ThreadRunState(thread_id="thr_1")
 
@@ -1668,7 +1697,7 @@ def test_agent_view_ctrl_c_cancels_selected_running_thread(monkeypatch) -> None:
 
 def test_agent_view_delete_hides_thread_after_confirmation(monkeypatch) -> None:
     app = _make_app(monkeypatch)
-    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One"}]
+    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One", "agent_view_joined": True}]
     app._open_agent_view()
 
     asyncio.run(app.handle_key("d"))
@@ -1681,7 +1710,7 @@ def test_agent_view_delete_hides_thread_after_confirmation(monkeypatch) -> None:
 
 def test_agent_view_delete_locked_thread_reports_status(monkeypatch) -> None:
     app = _make_app(monkeypatch)
-    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One"}]
+    app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One", "agent_view_joined": True}]
     app._open_agent_view()
 
     def locked_append(thread_id, event_type, **data):

@@ -75,6 +75,10 @@ in isolated Git worktrees with generated `agent-*` branch names. Existing rows
 can be attached back into the main transcript when you want to inspect or
 continue them directly.
 
+Ordinary threads are not listed automatically. To add the current normal thread
+to Agent View, run `/agents` from inside that thread. Tasks dispatched from Agent
+View are added to the panel automatically.
+
 Agent View deliberately uses two lightweight modes so navigation keys do not
 fight with text editing:
 

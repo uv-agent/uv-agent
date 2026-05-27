@@ -232,7 +232,9 @@ language, completion notification, and automatic compression. See
   vim-like split: normal mode navigates sessions (`j/k`, `Enter`, `Space`, `c`,
   `d`, `D`, `?`) and `m` picks the model level for new tasks, while input mode
   (`i` for a new task, `r` for a reply) edits the bottom composer and sends with
-  `Enter` (`Ctrl+Enter` inserts a newline).
+  `Enter` (`Ctrl+Enter` inserts a newline). Ordinary threads stay out of Agent
+  View unless you run `/agents` from inside that thread; Agent View-dispatched
+  worktree tasks are added automatically.
 - Use `/status`, `/mcp`, and `/skills` to inspect runtime state and available
   capabilities.
 - To use the original Textual-only panels such as `/config`, `/models`, Worktree

@@ -117,7 +117,7 @@ def save_clipboard_image(target_dir: Path):
 HELP_TEXT = (
     "Commands:\n"
     "  /help              show this help\n"
-    "  /agents            open Agent View dashboard (normal/input/help modes)\n"
+    "  /agents            join/open Agent View dashboard (normal/input/help modes)\n"
     "  /clear             clear view and start a new thread\n"
     "  /threads           choose a thread to resume\n"
     "  /skills            list skills and insert @skill mentions\n"
@@ -139,7 +139,7 @@ HELP_TEXT = (
 # the composer instead of submitting immediately.
 TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
     CommandSuggestion("/help", "show help"),
-    CommandSuggestion("/agents", "open Agent View dashboard"),
+    CommandSuggestion("/agents", "join/open Agent View dashboard"),
     CommandSuggestion("/clear", "clear view and start a new thread"),
     CommandSuggestion("/threads", "choose a thread to resume"),
     CommandSuggestion("/status", "show model/context/thread status"),
@@ -540,7 +540,7 @@ class AnsiUvAgentApp:
             if self.state.composer:
                 self._move_composer_to_line_start()
             else:
-                self._open_agent_view()
+                self._open_agent_view(join_current=False)
         elif key == "\x05":  # Ctrl+E: move to the end of the current logical line.
             self._skip_next_lf_after_plain_cr = False
             self._last_plain_input_at = None
@@ -853,8 +853,10 @@ class AnsiUvAgentApp:
         view.interaction_mode = "normal"
         view.status_message = self._fmt("agent_view_model_set", level=level)
 
-    def _open_agent_view(self) -> None:
+    def _open_agent_view(self, *, join_current: bool = False) -> None:
         self._close_command_palette()
+        if join_current:
+            self._join_current_thread_to_agent_view()
         self._refresh_agent_view_rows()
         self.state.mode = "agent_view"
         self.state.agent_view.interaction_mode = "normal"
@@ -864,6 +866,21 @@ class AnsiUvAgentApp:
         if self.state.agent_view.selected >= len(self.state.agent_view.rows):
             self.state.agent_view.selected = max(0, len(self.state.agent_view.rows) - 1)
         self.state.agent_view.status_message = self._text("agent_view_open_status")
+
+    def _join_current_thread_to_agent_view(self) -> None:
+        thread_id = self.state.thread_id
+        if not thread_id:
+            return
+        metadata = self._thread_metadata(thread_id)
+        if metadata.get("agent_view_joined"):
+            return
+        try:
+            self.engine.thread_store.append(thread_id, "thread.agent_view_joined", source="thread_command")
+        except ThreadLockedError:
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_join_locked",
+                thread=short_thread(thread_id),
+            )
 
     def _close_agent_view(self) -> None:
         self.state.mode = "transcript"
@@ -884,6 +901,8 @@ class AnsiUvAgentApp:
             thread_id = str(thread.get("thread_id") or "")
             if not thread_id or thread.get("agent_view_deleted"):
                 continue
+            if not self._is_agent_view_thread(thread):
+                continue
             rows.append(self._agent_view_row_for_thread(thread_id, thread))
 
         def sort_key(row: AgentViewRow) -> tuple[int, int]:
@@ -893,6 +912,12 @@ class AnsiUvAgentApp:
             )
 
         return sorted(rows, key=sort_key)
+
+    @staticmethod
+    def _is_agent_view_thread(thread: dict[str, Any]) -> bool:
+        if thread.get("agent_view_joined"):
+            return True
+        return bool(thread.get("worktree_branch") or thread.get("worktree_path"))
 
     def _agent_view_cursor(self) -> int:
         cursor = self.state.agent_view.composer_cursor
@@ -1130,6 +1155,7 @@ class AnsiUvAgentApp:
             return
         thread_id = self.engine.thread_store.create_thread(self._agent_view_thread_title(prompt))
         run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
+        self.engine.thread_store.append(thread_id, "thread.agent_view_joined", source="agent_view_dispatch")
         run_state.terminal_status = "dispatching"
         run_state.status_message = "dispatching worktree"
         self._refresh_agent_view_rows()
@@ -1927,7 +1953,7 @@ class AnsiUvAgentApp:
         if command == "/help":
             self._flush(TranscriptCell("event", text=HELP_TEXT))
         elif command == "/agents":
-            self._open_agent_view()
+            self._open_agent_view(join_current=True)
         elif command in {"/level", "/model"} and arg:
             self.state.level = arg
             if self.state.thread_id and not self.state.busy:
