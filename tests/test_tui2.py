@@ -21,6 +21,7 @@ from uv_agent.tui2.app import TOP_LEVEL_COMMANDS, load_composer_history, save_co
 from uv_agent.tui2.events import CommandSuggestion, TranscriptCell, Tui2State
 from uv_agent.tui2.renderer import Renderer
 from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
+from uv_agent.tui2.theme import DEFAULT_THEME, sgr
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +344,19 @@ def test_context_row_shrinks_home_path(monkeypatch) -> None:
 
     assert "~/" in plain
     assert "C:/Users/me" not in plain
+
+
+def test_context_row_styles_all_separators_consistently() -> None:
+    state = Tui2State(
+        level="gpt-5.5-xhigh",
+        context_percent=31,
+        project_path=r"C:\Users\me\Desktop\Project\AI\uv-agent",
+    )
+
+    line = render_status_lines(state, 120, 0)[0]
+
+    assert strip_ansi(line).count(" · ") == 2
+    assert line.count(sgr(DEFAULT_THEME.muted, " · ")) == 2
 
 
 def test_tall_render_area_caps_to_viewport() -> None:

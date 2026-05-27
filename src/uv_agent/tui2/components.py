@@ -322,10 +322,9 @@ def render_status_lines(
     # it, and the /status command surfaces the full metadata.  The bottom row
     # only needs model + project context to stay scannable.
     if state.level:
-        level = state.level
+        context.append(sgr(theme.muted, state.level))
         if state.context_percent is not None:
-            level = f"{level} · {state.context_percent}%"
-        context.append(sgr(theme.muted, level))
+            context.append(sgr(theme.muted, f"{state.context_percent}%"))
     if state.project_path:
         context.append(sgr(theme.muted, _shorten_path(state.project_path, max_len=48)))
 
@@ -333,7 +332,10 @@ def render_status_lines(
     if activity:
         lines.append(truncate_visible(sgr(theme.muted, "◆ ") + "  ".join(activity), width))
     if context:
-        lines.append(truncate_visible(sgr(theme.muted, "◇ ") + " · ".join(context), width))
+        # Style separators explicitly instead of relying on whichever segment
+        # precedes them.  Otherwise a row like "level · 31% · path" gives the
+        # first dot the level colour and leaves the second dot unstyled.
+        lines.append(truncate_visible(sgr(theme.muted, "◇ ") + sgr(theme.muted, " · ").join(context), width))
     return lines
 
 
