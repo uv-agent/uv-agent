@@ -653,9 +653,16 @@ class _DummyEngine:
 
             return Snapshot()
 
-    async def run_turn(self, *, user_text, thread_id=None, level=None, cancel_event=None):
+    async def run_turn(self, *, user_text, thread_id=None, level=None, image_paths=None, cancel_event=None):
         thread_id = thread_id or self.thread_store.create_thread("New thread")
-        self.turns.append({"user_text": user_text, "thread_id": thread_id, "level": level})
+        self.turns.append(
+            {
+                "user_text": user_text,
+                "thread_id": thread_id,
+                "level": level,
+                "image_paths": list(image_paths or []),
+            }
+        )
         yield {"type": "turn.started", "thread_id": thread_id, "turn_id": f"turn_{len(self.turns)}"}
         yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": f"turn_{len(self.turns)}"}
 
@@ -876,6 +883,39 @@ def test_backspace_uses_composer_cursor(monkeypatch) -> None:
 
     assert app.state.composer == "bc"
     assert app.state.composer_cursor == 0
+
+
+def test_image_token_deletes_as_single_unit_with_backspace(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "look [Image #1] now"
+    app.state.composer_cursor = len("look [Image #1]")
+
+    asyncio.run(app.handle_key("\b"))
+
+    assert app.state.composer == "look now"
+    assert app.state.composer_cursor == len("look ")
+
+
+def test_image_token_deletes_as_single_unit_with_delete(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "look [Image #1] now"
+    app.state.composer_cursor = len("look ")
+
+    asyncio.run(app.handle_key("\x04"))
+
+    assert app.state.composer == "look now"
+    assert app.state.composer_cursor == len("look ")
+
+
+def test_image_token_deletion_trims_edge_separator(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "prefix [Image #1]"
+    app.state.composer_cursor = len(app.state.composer)
+
+    asyncio.run(app.handle_key("\b"))
+
+    assert app.state.composer == "prefix"
+    assert app.state.composer_cursor == len("prefix")
 
 
 def test_composer_history_persists_across_app_instances(monkeypatch, tmp_path) -> None:
@@ -1287,11 +1327,90 @@ def test_plain_enter_after_idle_still_submits(monkeypatch) -> None:
     assert app.engine.turns[-1]["user_text"] == "hello"
 
 
+def test_ctrl_i_attaches_clipboard_image_token(monkeypatch, tmp_path) -> None:
+    app = _make_app(monkeypatch)
+    image = tmp_path / "clip.png"
+    image.write_bytes(b"fake-png")
+    monkeypatch.setattr(
+        "uv_agent.tui2.app.save_clipboard_image",
+        lambda target_dir: SimpleNamespace(path=image, width=20, height=10),
+    )
+
+    asyncio.run(app.handle_key("<C-I>"))
+
+    assert app.state.composer == "[Image #1]"
+    assert app._image_paths_by_number == {1: image}
+    assert "[Image #1]" in app.state.status_message
+
+
+def test_image_tokens_send_matching_paths_once(monkeypatch, tmp_path) -> None:
+    app = _make_app(monkeypatch)
+    image = tmp_path / "clip.png"
+    image.write_bytes(b"fake-png")
+    app._image_paths_by_number[1] = image
+    app.state.composer = "look [Image #1] and again [Image #1] [Image #99]"
+
+    async def run() -> None:
+        await app.submit()
+        assert app._running_task is not None
+        await app._running_task
+
+    asyncio.run(run())
+
+    assert app.engine.turns[-1]["user_text"] == "look [Image #1] and again [Image #1] [Image #99]"
+    assert app.engine.turns[-1]["image_paths"] == [image]
+
+
+def test_image_only_message_uses_default_prompt(monkeypatch, tmp_path) -> None:
+    app = _make_app(monkeypatch)
+    image = tmp_path / "clip.png"
+    image.write_bytes(b"fake-png")
+    app._image_paths_by_number[1] = image
+    app.state.composer = "[Image #1]"
+
+    async def run() -> None:
+        await app.submit()
+        assert app._running_task is not None
+        await app._running_task
+
+    asyncio.run(run())
+
+    assert app.engine.turns[-1]["user_text"] == app._text("image_only_prompt")
+    assert app.engine.turns[-1]["image_paths"] == [image]
+
+
+def test_queued_turn_captures_image_paths_at_submit_time(monkeypatch, tmp_path) -> None:
+    app = _make_app(monkeypatch)
+    image = tmp_path / "clip.png"
+    image.write_bytes(b"fake-png")
+    app._image_paths_by_number[1] = image
+    app.state.composer = "queued [Image #1]"
+
+    async def run() -> None:
+        app._running_task = asyncio.create_task(asyncio.sleep(0.01))
+        await app.submit()
+        await app._running_task
+
+    asyncio.run(run())
+
+    assert len(app.state.pending_turns) == 1
+    queued = app.state.pending_turns[0]
+    assert queued.text == "queued [Image #1]"
+    assert queued.image_paths == [image]
+
+
 def test_terminal_reads_bracketed_paste_as_single_key() -> None:
     terminal = Terminal(stdin=io.StringIO("\x1b[200~one\r\ntwo\x1b[201~"))
     terminal._windows = False
 
     assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
+
+
+def test_terminal_reads_kitty_ctrl_i_as_distinct_shortcut() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b[105;5u"))
+    terminal._windows = False
+
+    assert terminal.read_key() == "<C-I>"
 
 
 def _install_fake_msvcrt(monkeypatch, text: str) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -12,16 +13,16 @@ from uv_agent.helper_calls import extract_runtime_helper_calls
 from uv_agent.i18n import tr
 from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.notifications import play_terminal_buzzer
-from uv_agent.paths import uv_agent_home
+from uv_agent.paths import project_tui_clipboard_dir, uv_agent_home
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.tui.formatting import short_block, short_thread
 from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
-from uv_agent.tui2.events import CommandSuggestion, TranscriptCell, Tui2State, tool_payload_from_event
+from uv_agent.tui2.events import CommandSuggestion, PendingTurn, TranscriptCell, Tui2State, tool_payload_from_event
 from uv_agent.tui2.renderer import Renderer
-from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal
+from uv_agent.tui2.terminal import CTRL_I_KEY, PASTE_PREFIX, Terminal
 
 CODE_FILE_SUFFIXES = {
     ".cfg",
@@ -84,6 +85,14 @@ def create_engine(project_root: Path | None = None, *, data_dir: Path | None = N
     return _create_engine(project_root, data_dir=data_dir)
 
 
+def save_clipboard_image(target_dir: Path):
+    """Save a clipboard image while keeping tui2 startup image-library free."""
+
+    from uv_agent.clipboard import save_clipboard_image as _save_clipboard_image
+
+    return _save_clipboard_image(target_dir)
+
+
 HELP_TEXT = (
     "Commands:\n"
     "  /help              show this help\n"
@@ -91,13 +100,14 @@ HELP_TEXT = (
     "  /threads           choose a thread to resume\n"
     "  /skills            list skills and insert @skill mentions\n"
     "  /mcp               list MCP servers and insert @mcp mentions\n"
+    "  /image             attach clipboard image as [Image #N]\n"
     "  /level <name>      switch model level\n"
     "  /title <text>      rename the current thread\n"
     "  /goal <op>         enable | disable | reset | status\n"
     "  /cancel            interrupt the running turn\n"
     "  /quit              exit the TUI\n"
     "\n"
-    "Keys: Enter send/select · Ctrl+Enter newline · / command palette · @ mentions · ↑/↓ history\n"
+    "Keys: Enter send/select · Ctrl+Enter newline · Ctrl+I image · / command palette · @ mentions · ↑/↓ history\n"
     "      Ctrl+A/E line ends · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt"
 )
 
@@ -111,6 +121,7 @@ TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
     CommandSuggestion("/status", "show model/context/thread status"),
     CommandSuggestion("/skills", "list skills and insert @skill mentions"),
     CommandSuggestion("/mcp", "list MCP servers and insert @mcp mentions"),
+    CommandSuggestion("/image", "attach clipboard image as [Image #N]"),
     CommandSuggestion("/level ", "switch model level"),
     CommandSuggestion("/model ", "alias for /level"),
     CommandSuggestion("/title ", "rename current thread"),
@@ -127,6 +138,8 @@ GOAL_COMMANDS: tuple[CommandSuggestion, ...] = (
 )
 
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+IMAGE_TOKEN_RE = re.compile(r"\[Image #(\d+)\]")
+IMAGE_ONLY_TOKEN_RE = re.compile(r"(?:\s*\[Image #\d+\]\s*)+")
 MAX_COMPOSER_HISTORY = 50
 COMPOSER_HISTORY_FILENAME = "composer_history.json"
 CTRL_C_CONFIRMATION_S = 3.0
@@ -238,6 +251,8 @@ class AnsiUvAgentApp:
         # create thread records or goal files until the first message is sent.
         self._pending_goal_enable = False
         self._pending_goal_objective = ""
+        self._image_sequence_next = 1
+        self._image_paths_by_number: dict[int, Path] = {}
 
     def run(self) -> None:
         asyncio.run(self.run_async())
@@ -321,6 +336,9 @@ class AnsiUvAgentApp:
         if key == "\x0c":  # Ctrl+L: force a full redraw of the live region.
             self.renderer._has_frame = False  # type: ignore[attr-defined]
             self._safe_repaint()
+            return True
+        if key == CTRL_I_KEY:
+            self._attach_clipboard_image_to_composer()
             return True
         if key == "\r":
             if self._enter_looks_like_unbracketed_paste():
@@ -471,6 +489,47 @@ class AnsiUvAgentApp:
         self._after_composer_changed()
         self._safe_repaint()
 
+    def _attach_clipboard_image_to_composer(self) -> None:
+        try:
+            model = self.engine.config.model_for_level(self.state.level)
+        except Exception as exc:
+            self._flush(TranscriptCell("error", text=str(exc)))
+            self._safe_repaint()
+            return
+        if getattr(model, "supports_images", None) is False:
+            self._flush(TranscriptCell("error", text=self._text("image_model_disabled")))
+            self._safe_repaint()
+            return
+        from uv_agent.clipboard import ClipboardImageError
+
+        try:
+            image = save_clipboard_image(project_tui_clipboard_dir(self.project_root))
+        except ClipboardImageError as exc:
+            self._flush(TranscriptCell("error", text=str(exc)))
+            self._safe_repaint()
+            return
+
+        number = self._image_sequence_next
+        self._image_sequence_next += 1
+        self._image_paths_by_number[number] = Path(image.path)
+        token = f"[Image #{number}]"
+        if self.state.composer:
+            cursor = self._composer_cursor()
+            before = self.state.composer[:cursor]
+            after = self.state.composer[cursor:]
+            insert = token
+            if before and not before.endswith((" ", "\n")):
+                insert = " " + insert
+            if after and not after.startswith((" ", "\n")):
+                insert += " "
+        else:
+            insert = token
+        self._insert_composer_text(insert)
+        self._reset_history()
+        self._after_composer_changed()
+        self.state.status_message = f"{self._text('image_queued')} {token} · {image.width}x{image.height}"
+        self._safe_repaint()
+
     def _mark_plain_input(self) -> None:
         self._last_plain_input_at = monotonic()
 
@@ -541,6 +600,11 @@ class AnsiUvAgentApp:
         if cursor <= 0:
             return
         value = self.state.composer
+        token_span = self._image_token_delete_span_before_cursor(value, cursor)
+        if token_span is not None:
+            start, end = token_span
+            self._set_composer_text(value[:start] + value[end:], cursor=start)
+            return
         self._set_composer_text(value[: cursor - 1] + value[cursor:], cursor=cursor - 1)
 
     def _delete_composer_after_cursor(self) -> None:
@@ -548,7 +612,58 @@ class AnsiUvAgentApp:
         value = self.state.composer
         if cursor >= len(value):
             return
+        token_span = self._image_token_delete_span_after_cursor(value, cursor)
+        if token_span is not None:
+            start, end = token_span
+            self._set_composer_text(value[:start] + value[end:], cursor=start)
+            return
         self._set_composer_text(value[:cursor] + value[cursor + 1 :], cursor=cursor)
+
+    @staticmethod
+    def _image_token_delete_span_before_cursor(text: str, cursor: int) -> tuple[int, int] | None:
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            if match.start() < cursor <= match.end():
+                return AnsiUvAgentApp._expand_image_token_delete_span(text, *match.span())
+        space_start = cursor
+        while space_start > 0 and text[space_start - 1] in {" ", "\t"}:
+            space_start -= 1
+        if space_start == cursor:
+            return None
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            if match.end() == space_start:
+                return match.start(), cursor
+        return None
+
+    @staticmethod
+    def _image_token_delete_span_after_cursor(text: str, cursor: int) -> tuple[int, int] | None:
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            if match.start() <= cursor < match.end():
+                return AnsiUvAgentApp._expand_image_token_delete_span(text, *match.span())
+        space_end = cursor
+        while space_end < len(text) and text[space_end] in {" ", "\t"}:
+            space_end += 1
+        if space_end == cursor:
+            return None
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            if match.start() == space_end:
+                return cursor, match.end()
+        return None
+
+    @staticmethod
+    def _expand_image_token_delete_span(text: str, start: int, end: int) -> tuple[int, int]:
+        """Remove one separator space with an image token when it is obvious."""
+
+        before_is_space = start > 0 and text[start - 1] in {" ", "\t"}
+        after_is_space = end < len(text) and text[end] in {" ", "\t"}
+        if before_is_space and after_is_space:
+            # Keep the word separator before the token and remove the token's
+            # trailing separator, producing "a b" from "a [Image #1] b".
+            return start, end + 1
+        if before_is_space and end == len(text):
+            return start - 1, end
+        if after_is_space and start == 0:
+            return start, end + 1
+        return start, end
 
     def _delete_composer_word_before_cursor(self) -> None:
         cursor = self._composer_cursor()
@@ -984,19 +1099,39 @@ class AnsiUvAgentApp:
         self._reset_history()
         self._close_command_palette()
         if text.startswith("/"):
+            if text.partition(" ")[0] in {"/image", "/paste-image"}:
+                self._set_composer_text("", cursor=0)
+                self._handle_command(text)
+                self._safe_repaint()
+                return True
             should_continue = self._handle_command(text)
             self._set_composer_text("", cursor=0)
             self._safe_repaint()
             return should_continue
+        prompt, image_paths = self._message_payload_from_composer(text)
         if self._running_task is not None and not self._running_task.done():
-            self.state.pending_turns.append(text)
+            self.state.pending_turns.append(PendingTurn(prompt, image_paths))
             self._set_composer_text("", cursor=0)
             self.state.status_message = self._text("queued")
             self._safe_repaint()
             return True
         self._set_composer_text("", cursor=0)
-        await self._start_turn(text)
+        await self._start_turn(prompt, image_paths=image_paths)
         return True
+
+    def _message_payload_from_composer(self, text: str) -> tuple[str, list[Path]]:
+        image_paths: list[Path] = []
+        seen: set[int] = set()
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            number = int(match.group(1))
+            path = self._image_paths_by_number.get(number)
+            if path is None or number in seen:
+                continue
+            seen.add(number)
+            image_paths.append(path)
+        if image_paths and IMAGE_ONLY_TOKEN_RE.fullmatch(text):
+            return self._text("image_only_prompt"), image_paths
+        return text, image_paths
 
     def _handle_command(self, text: str) -> bool:
         command, _, arg = text.partition(" ")
@@ -1016,6 +1151,8 @@ class AnsiUvAgentApp:
             self._open_skill_picker()
         elif command == "/mcp":
             self._open_mcp_picker()
+        elif command in {"/image", "/paste-image"}:
+            self._attach_clipboard_image_to_composer()
         elif command == "/title" and arg:
             self.state.title = arg
             self._refresh_window_title()
@@ -1322,7 +1459,7 @@ class AnsiUvAgentApp:
     # Turn lifecycle
     # ------------------------------------------------------------------
 
-    async def _start_turn(self, text: str) -> None:
+    async def _start_turn(self, text: str, *, image_paths: list[Path] | None = None) -> None:
         thread_id = self._ensure_active_thread()
         level = self._current_level_for_thread(thread_id)
         self.state.level = level
@@ -1337,10 +1474,10 @@ class AnsiUvAgentApp:
         self._reasoning_flushed_for_current_response = False
         self._turn_started_at = monotonic()
         self._apply_window_title()
-        self._running_task = asyncio.create_task(self._run_turn(text))
+        self._running_task = asyncio.create_task(self._run_turn(text, image_paths=list(image_paths or [])))
         self._safe_repaint()
 
-    async def _run_turn(self, text: str) -> None:
+    async def _run_turn(self, text: str, *, image_paths: list[Path]) -> None:
         try:
             if self.state.thread_id:
                 self._materialize_pending_goal_enable(self.state.thread_id)
@@ -1348,6 +1485,7 @@ class AnsiUvAgentApp:
                 user_text=text,
                 thread_id=self.state.thread_id,
                 level=self.state.level,
+                image_paths=image_paths,
                 cancel_event=self.cancel_event,
             ):
                 self._handle_event(event)
@@ -1365,8 +1503,8 @@ class AnsiUvAgentApp:
             self._apply_window_title()
             self._safe_repaint()
             if self.state.pending_turns:
-                next_text = self.state.pending_turns.pop(0)
-                await self._start_turn(next_text)
+                next_turn = self.state.pending_turns.pop(0)
+                await self._start_turn(next_turn.text, image_paths=next_turn.image_paths)
 
     def _handle_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")

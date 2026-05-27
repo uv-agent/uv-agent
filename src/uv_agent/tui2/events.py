@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import monotonic
 from typing import Any, Literal
 
@@ -56,6 +57,14 @@ class TranscriptCell:
 
 
 @dataclass
+class PendingTurn:
+    """A user message waiting behind the active tui2 turn."""
+
+    text: str
+    image_paths: list[Path] = field(default_factory=list)
+
+
+@dataclass
 class Tui2State:
     """Mutable render state shared by the app and renderer."""
 
@@ -64,7 +73,7 @@ class Tui2State:
     title: str = "New thread"
     composer: str = ""
     composer_cursor: int | None = None
-    pending_turns: list[str] = field(default_factory=list)
+    pending_turns: list[PendingTurn] = field(default_factory=list)
     flushed: list[TranscriptCell] = field(default_factory=list)
     live: list[TranscriptCell] = field(default_factory=list)
     last_error: str | None = None
