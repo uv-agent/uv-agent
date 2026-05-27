@@ -13,9 +13,9 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["tui", "tui2", "ask"],
-        default="tui",
-        help="Run the TUI, experimental ANSI TUI, or ask a single question.",
+        choices=["tui2", "tui", "ask"],
+        default="tui2",
+        help="Run the default ANSI TUI, Textual TUI, or ask a single question.",
     )
     parser.add_argument("--level", default=None, help="Model level to use for ask mode.")
     parser.add_argument("--thread", default=None, help="Thread id to resume in ask mode.")
