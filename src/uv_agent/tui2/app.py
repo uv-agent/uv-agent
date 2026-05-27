@@ -116,7 +116,7 @@ TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
     CommandSuggestion("/title ", "rename current thread"),
     CommandSuggestion("/goal ", "goal-mode subcommands"),
     CommandSuggestion("/cancel", "interrupt the running turn"),
-    CommandSuggestion("/quit", "arm Ctrl+C quit confirmation"),
+    CommandSuggestion("/quit", "exit the TUI"),
 )
 
 GOAL_COMMANDS: tuple[CommandSuggestion, ...] = (
@@ -302,8 +302,7 @@ class AnsiUvAgentApp:
                 if completed and self.state.composer.endswith(" "):
                     self._safe_repaint()
                     return True
-            await self.submit()
-            return True
+            return await self.submit()
         if key in {"\n", "\x0a", "<C-ENTER>"}:  # Ctrl+Enter/Ctrl+J inserts a newline.
             if key != "<C-ENTER>" and self._skip_next_lf_after_plain_cr:
                 self._mark_plain_input()
@@ -906,29 +905,30 @@ class AnsiUvAgentApp:
     # Submit & commands
     # ------------------------------------------------------------------
 
-    async def submit(self) -> None:
+    async def submit(self) -> bool:
         text = self.state.composer.strip()
         if not text:
             self._safe_repaint()
-            return
+            return True
         self._remember_composer_input(text)
         self._reset_history()
         self._close_command_palette()
         if text.startswith("/"):
-            self._handle_command(text)
+            should_continue = self._handle_command(text)
             self._set_composer_text("", cursor=0)
             self._safe_repaint()
-            return
+            return should_continue
         if self._running_task is not None and not self._running_task.done():
             self.state.pending_turns.append(text)
             self._set_composer_text("", cursor=0)
             self.state.status_message = self._text("queued")
             self._safe_repaint()
-            return
+            return True
         self._set_composer_text("", cursor=0)
         await self._start_turn(text)
+        return True
 
-    def _handle_command(self, text: str) -> None:
+    def _handle_command(self, text: str) -> bool:
         command, _, arg = text.partition(" ")
         arg = arg.strip()
         if command == "/help":
@@ -963,9 +963,10 @@ class AnsiUvAgentApp:
         elif command == "/goal":
             self._handle_goal(arg)
         elif command == "/quit":
-            self._arm_quit_confirmation(self._text("quit_again"))
+            return False
         else:
             self._flush(TranscriptCell("error", text=f"unknown command: {command}  (try /help)"))
+        return True
 
     def _clear_to_new_thread(self) -> None:
         old_thread_id = self.state.thread_id

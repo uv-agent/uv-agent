@@ -1037,6 +1037,16 @@ def test_tab_completes_unique_command_prefix(monkeypatch) -> None:
     assert app.state.composer == "/quit"
 
 
+def test_quit_command_exits_without_confirmation(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "/quit"
+
+    assert asyncio.run(app.handle_key("\r")) is False
+
+    assert app.state.composer == ""
+    assert not app._quit_armed
+
+
 def test_tab_cycles_through_matching_commands(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.state.composer = "/c"
