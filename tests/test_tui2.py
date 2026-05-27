@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import io
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1267,11 +1268,21 @@ def test_terminal_reads_bracketed_paste_as_single_key() -> None:
     assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
 
 
+def _install_fake_msvcrt(monkeypatch, text: str) -> None:
+    """Provide a tiny ``msvcrt`` module so Windows input paths run on CI."""
+
+    chars = list(text)
+
+    def fake_getwch() -> str:
+        return chars.pop(0)
+
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(getwch=fake_getwch, kbhit=lambda: bool(chars)))
+
+
 def test_windows_terminal_reads_vt_paste_before_enter(monkeypatch) -> None:
     terminal = Terminal()
     terminal._windows = True
-    chars = iter("\x1b[200~one\r\ntwo\x1b[201~\r")
-    monkeypatch.setattr("msvcrt.getwch", lambda: next(chars))
+    _install_fake_msvcrt(monkeypatch, "\x1b[200~one\r\ntwo\x1b[201~\r")
 
     assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
     assert terminal.read_key() == "\r"
@@ -1280,15 +1291,7 @@ def test_windows_terminal_reads_vt_paste_before_enter(monkeypatch) -> None:
 def test_windows_terminal_coalesces_unbracketed_paste(monkeypatch) -> None:
     terminal = Terminal()
     terminal._windows = True
-    chars = iter("one\r\ntwo")
-    remaining = [True] * len("one\r\ntwo")
-
-    def fake_getwch() -> str:
-        remaining.pop(0)
-        return next(chars)
-
-    monkeypatch.setattr("msvcrt.getwch", fake_getwch)
-    monkeypatch.setattr("msvcrt.kbhit", lambda: bool(remaining))
+    _install_fake_msvcrt(monkeypatch, "one\r\ntwo")
 
     assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
 
