@@ -437,6 +437,33 @@ def test_flush_cell_only_uses_crlf_separators() -> None:
     assert bare_lf == []
 
 
+def test_renderer_reserves_last_column_to_avoid_terminal_autowrap(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (40, 10))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+
+    renderer.repaint(Tui2State(composer="hello"))
+
+    assert renderer.width == 39
+    assert all(
+        visible_len(line) <= 39
+        for line in strip_ansi(output.getvalue()).splitlines()
+        if line
+    )
+
+    output.seek(0)
+    output.truncate(0)
+
+    renderer.flush_cell(TranscriptCell("tool", payload={"returncode": 0, "run_id": "run_" + "x" * 24}))
+
+    assert renderer.width == 39
+    assert all(
+        visible_len(line) <= 39
+        for line in strip_ansi(output.getvalue()).splitlines()
+        if line
+    )
+
+
 def test_idempotent_repaint_wraps_in_sync_output() -> None:
     output = io.StringIO()
     renderer = Renderer(output=output)

@@ -28,7 +28,7 @@ class Renderer:
 
     def __init__(self, output: TextIO | None = None) -> None:
         self.output = output or sys.stdout
-        self.width = terminal_size()[0]
+        self.width = self._paint_width(terminal_size()[0])
         self._frame_cursor_row = 0
         self._has_frame = False
         self.spinner_frame = 0
@@ -57,6 +57,21 @@ class Renderer:
     def _up(rows: int) -> str:
         return f"\x1b[{rows}A" if rows > 0 else ""
 
+    @staticmethod
+    def _paint_width(columns: int) -> int:
+        """Return a render width that never writes into the last terminal column.
+
+        Some Windows ConPTY/terminal combinations advance to the next row as
+        soon as a printable character lands in the rightmost column. The live
+        renderer erases previous frames by moving a tracked number of rows up;
+        an unexpected auto-wrap row makes that math land below the old frame,
+        leaving repeated ``run_python · running`` rules in scrollback. Keeping
+        one column empty avoids the terminal-dependent wrap edge while changing
+        the visual layout by only a single cell.
+        """
+
+        return max(1, columns - 1)
+
     def _erase_frame(self) -> None:
         """Move to the top of the previous frame and clear to end of screen.
 
@@ -81,7 +96,7 @@ class Renderer:
     def flush_cell(self, cell: TranscriptCell) -> None:
         """Print a completed cell into the terminal's normal scrollback."""
 
-        self.width = terminal_size()[0]
+        self.width = self._paint_width(terminal_size()[0])
         lines = [
             truncate_visible(line, self.width)
             for line in render_cell(cell, self.width, spinner_frame=self.spinner_frame)
@@ -108,7 +123,7 @@ class Renderer:
         that no longer exist in the same place.
         """
 
-        self.width = terminal_size()[0]
+        self.width = self._paint_width(terminal_size()[0])
         self._write("\x1b[?2026h")
         self._erase_frame()
         self._write("\x1b[2J\x1b[H")
@@ -120,7 +135,7 @@ class Renderer:
 
     def repaint(self, state: Tui2State) -> None:
         cols, rows = terminal_size()
-        self.width = cols
+        self.width = self._paint_width(cols)
         # The app owns spinner timing. Repaint frequency can spike with streaming
         # deltas, so advancing frames here would make animation speed depend on
         # token throughput instead of wall-clock time.
