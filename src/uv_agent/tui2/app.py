@@ -117,7 +117,8 @@ def save_clipboard_image(target_dir: Path):
 HELP_TEXT = (
     "Commands:\n"
     "  /help              show this help\n"
-    "  /agents            join/open Agent View dashboard (normal/input/help modes)\n"
+    "  /agents            open Agent View dashboard (normal/input/help modes)\n"
+    "  /bg                add the current thread to Agent View\n"
     "  /clear             clear view and start a new thread\n"
     "  /threads           choose a thread to resume\n"
     "  /skills            list skills and insert @skill mentions\n"
@@ -139,7 +140,8 @@ HELP_TEXT = (
 # the composer instead of submitting immediately.
 TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
     CommandSuggestion("/help", "show help"),
-    CommandSuggestion("/agents", "join/open Agent View dashboard"),
+    CommandSuggestion("/agents", "open Agent View dashboard"),
+    CommandSuggestion("/bg", "add current thread to Agent View"),
     CommandSuggestion("/clear", "clear view and start a new thread"),
     CommandSuggestion("/threads", "choose a thread to resume"),
     CommandSuggestion("/status", "show model/context/thread status"),
@@ -301,6 +303,8 @@ class AnsiUvAgentApp:
         self._image_paths_by_number: dict[int, Path] = {}
         self._image_status_token: str | None = None
         self._image_status_message: str | None = None
+        self._agent_view_local_threads: set[str] = set()
+        self._agent_view_join_pending_persist: set[str] = set()
 
     @property
     def _running_task(self) -> asyncio.Task[None] | None:
@@ -543,7 +547,7 @@ class AnsiUvAgentApp:
             if self.state.composer:
                 self._move_composer_to_line_start()
             else:
-                self._open_agent_view(join_current=False)
+                self._open_agent_view()
         elif key == "\x05":  # Ctrl+E: move to the end of the current logical line.
             self._skip_next_lf_after_plain_cr = False
             self._last_plain_input_at = None
@@ -856,10 +860,8 @@ class AnsiUvAgentApp:
         view.interaction_mode = "normal"
         view.status_message = self._fmt("agent_view_model_set", level=level)
 
-    def _open_agent_view(self, *, join_current: bool = False) -> None:
+    def _open_agent_view(self) -> None:
         self._close_command_palette()
-        if join_current:
-            self._join_current_thread_to_agent_view()
         self._refresh_agent_view_rows()
         self.state.mode = "agent_view"
         self.state.agent_view.interaction_mode = "normal"
@@ -870,20 +872,61 @@ class AnsiUvAgentApp:
             self.state.agent_view.selected = max(0, len(self.state.agent_view.rows) - 1)
         self.state.agent_view.status_message = self._text("agent_view_open_status")
 
-    def _join_current_thread_to_agent_view(self) -> None:
+    def _background_current_thread(self) -> None:
+        self._close_command_palette()
+        joined = self._join_current_thread_to_agent_view()
+        self._refresh_agent_view_rows()
+        if self.state.thread_id:
+            for index, row in enumerate(self.state.agent_view.rows):
+                if row.thread_id == self.state.thread_id:
+                    self.state.agent_view.selected = index
+                    break
+        self.state.mode = "agent_view"
+        self.state.agent_view.interaction_mode = "normal"
+        self.state.agent_view.input_target = "dispatch"
+        self.state.agent_view.input_target_thread_id = None
+        self.state.agent_view.dispatch_level = self._agent_view_dispatch_level()
+        if joined is True:
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_bg_added",
+                thread=short_thread(self.state.thread_id),
+            )
+        elif joined is False:
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_bg_present",
+                thread=short_thread(self.state.thread_id),
+            )
+        else:
+            self.state.agent_view.status_message = self._text("agent_view_open_status")
+
+    def _join_current_thread_to_agent_view(self) -> bool | None:
         thread_id = self.state.thread_id
         if not thread_id:
+            return None
+        metadata = self._thread_metadata(thread_id)
+        if not metadata.get("agent_view_deleted") and (
+            metadata.get("agent_view_joined") or thread_id in self._agent_view_local_threads
+        ):
+            return False
+        self._agent_view_local_threads.add(thread_id)
+        try:
+            self.engine.thread_store.append(thread_id, "thread.agent_view_joined", source="bg_command")
+        except ThreadLockedError:
+            self._agent_view_join_pending_persist.add(thread_id)
+        return True
+
+    def _persist_pending_agent_view_join(self, thread_id: str) -> None:
+        if thread_id not in self._agent_view_join_pending_persist:
             return
         metadata = self._thread_metadata(thread_id)
         if metadata.get("agent_view_joined"):
+            self._agent_view_join_pending_persist.discard(thread_id)
             return
         try:
-            self.engine.thread_store.append(thread_id, "thread.agent_view_joined", source="thread_command")
+            self.engine.thread_store.append(thread_id, "thread.agent_view_joined", source="bg_command")
         except ThreadLockedError:
-            self.state.agent_view.status_message = self._fmt(
-                "agent_view_join_locked",
-                thread=short_thread(thread_id),
-            )
+            return
+        self._agent_view_join_pending_persist.discard(thread_id)
 
     def _close_agent_view(self) -> None:
         self.state.mode = "transcript"
@@ -900,11 +943,22 @@ class AnsiUvAgentApp:
     def _ordered_agent_view_rows(self) -> list[AgentViewRow]:
         indexed_threads = {row.thread_id: index for index, row in enumerate(self.state.agent_view.rows)}
         rows: list[AgentViewRow] = []
+        seen: set[str] = set()
         for thread in self.engine.thread_store.list_threads()[:100]:
             thread_id = str(thread.get("thread_id") or "")
             if not thread_id or thread.get("agent_view_deleted"):
                 continue
             if not self._is_agent_view_thread(thread):
+                continue
+            rows.append(self._agent_view_row_for_thread(thread_id, thread))
+            seen.add(thread_id)
+
+        for thread_id in sorted(self._agent_view_local_threads.difference(seen)):
+            try:
+                thread = self._thread_metadata(thread_id)
+            except Exception:
+                thread = {"thread_id": thread_id, "title": "New thread"}
+            if thread.get("agent_view_deleted") and thread_id not in self._agent_view_join_pending_persist:
                 continue
             rows.append(self._agent_view_row_for_thread(thread_id, thread))
 
@@ -1953,7 +2007,9 @@ class AnsiUvAgentApp:
         if command == "/help":
             self._flush(TranscriptCell("event", text=HELP_TEXT))
         elif command == "/agents":
-            self._open_agent_view(join_current=True)
+            self._open_agent_view()
+        elif command == "/bg":
+            self._background_current_thread()
         elif command in {"/level", "/model"} and arg:
             self.state.level = arg
             if self.state.thread_id and not self.state.busy:
@@ -2362,6 +2418,7 @@ class AnsiUvAgentApp:
                 self._sync_attached_run_state(run_state)
                 self._finish_live_cells()
                 self._capture_attached_run_state(run_state)
+            self._persist_pending_agent_view_join(thread_id)
             run_state.started_at = None
             run_state.status_message = "ready"
             if self._is_attached_thread(thread_id):
