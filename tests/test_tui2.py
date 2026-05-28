@@ -929,6 +929,34 @@ def test_ctrl_c_requires_second_press_to_interrupt_when_busy(monkeypatch) -> Non
     assert app.cancel_event is not None and app.cancel_event.is_set()
 
 
+def test_ctrl_c_ignores_completed_run_state_after_agent_view_resume(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [{"thread_id": "thr_done", "title": "Done", "agent_view_joined": True}]
+
+    async def run_background_turn() -> None:
+        await app._start_turn_for_thread("thr_done", "background")
+        task = app._thread_runs["thr_done"].task
+        assert task is not None
+        await task
+
+    asyncio.run(run_background_turn())
+    run_state = app._thread_runs["thr_done"]
+    assert not run_state.running
+    assert run_state.cancel_event is not None
+
+    app._open_agent_view()
+    asyncio.run(app.handle_key("\r"))
+
+    assert app.state.mode == "transcript"
+    assert app.state.thread_id == "thr_done"
+    assert app.cancel_event is not None
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+    assert app._quit_armed
+    assert not app._interrupt_armed
+    assert asyncio.run(app.handle_key("\x03")) is False
+
+
 def test_cancel_command_interrupts_without_confirmation(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.cancel_event = asyncio.Event()

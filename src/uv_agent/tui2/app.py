@@ -362,6 +362,27 @@ class AnsiUvAgentApp:
         event_thread_id = str(event.get("thread_id") or self.state.thread_id or "")
         return self._thread_runs.get(event_thread_id) if event_thread_id else None
 
+    def _interruptible_run_state(self) -> ThreadRunState | None:
+        """Return the attached run only when Ctrl+C should interrupt it.
+
+        A completed asyncio task remains ``not done()`` while its own
+        ``finally`` block is executing, so stale run states can otherwise keep a
+        cancel event around after the turn has ended.  Ctrl+C must ignore those
+        completed states and fall through to the normal quit confirmation.
+        """
+
+        run_state = self._run_state()
+        if run_state is None:
+            return None
+        if run_state.running:
+            return run_state
+        # Some tests and embedders simulate a busy turn by installing only a
+        # cancel event.  Keep that path working, but do not treat an already
+        # completed task as interruptible.
+        if run_state.task is None and (self.state.busy or self._interrupt_armed):
+            return run_state
+        return None
+
     def _is_attached_thread(self, thread_id: str | None) -> bool:
         return bool(thread_id and thread_id == self.state.thread_id)
 
@@ -474,7 +495,7 @@ class AnsiUvAgentApp:
             return await self._handle_agent_view_key(key)
 
         if key == "\x03":  # Ctrl+C
-            if self.cancel_event is not None:
+            if self._interruptible_run_state() is not None:
                 self._expire_interrupt_confirmation()
                 if self._interrupt_armed:
                     self._interrupt_running_turn()
@@ -1413,7 +1434,7 @@ class AnsiUvAgentApp:
         return self._clear_interrupt_confirmation()
 
     def _interrupt_running_turn(self) -> bool:
-        run_state = self._run_state()
+        run_state = self._interruptible_run_state()
         if run_state is None:
             return False
         run_state.cancel_event.set()
