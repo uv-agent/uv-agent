@@ -957,6 +957,57 @@ def test_ctrl_c_ignores_completed_run_state_after_agent_view_resume(monkeypatch)
     assert asyncio.run(app.handle_key("\x03")) is False
 
 
+def test_ctrl_c_quits_after_current_thread_completed_but_task_is_unwinding(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "thr_current"
+    run_state = tui2_app.ThreadRunState(thread_id="thr_current")
+
+    class UnwindingTask:
+        def done(self):
+            return False
+
+    run_state.task = UnwindingTask()  # type: ignore[assignment]
+    run_state.terminal_status = "completed"
+    app._thread_runs["thr_current"] = run_state
+    app.state.busy = True
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+    assert app._quit_armed
+    assert not app._interrupt_armed
+    assert not run_state.cancel_event.is_set()
+    assert app.state.busy is False
+    assert app.state.status_message == app._text("quit_again")
+    assert asyncio.run(app.handle_key("\x03")) is False
+
+
+def test_ctrl_c_quits_after_interrupt_requested_for_long_running_turn(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "thr_current"
+    run_state = tui2_app.ThreadRunState(thread_id="thr_current")
+
+    class RunningTask:
+        def done(self):
+            return False
+
+    run_state.task = RunningTask()  # type: ignore[assignment]
+    app._thread_runs["thr_current"] = run_state
+    app.state.busy = True
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+    assert app._interrupt_armed
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+    assert run_state.cancel_event.is_set()
+    assert run_state.terminal_status == "interrupted"
+
+    assert asyncio.run(app.handle_key("\x03")) is True
+    assert app._quit_armed
+    assert not app._interrupt_armed
+    assert app.state.busy is False
+    assert app.state.status_message == app._text("quit_again")
+    assert asyncio.run(app.handle_key("\x03")) is False
+
+
 def test_cancel_command_interrupts_without_confirmation(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.cancel_event = asyncio.Event()

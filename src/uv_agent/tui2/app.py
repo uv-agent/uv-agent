@@ -173,6 +173,7 @@ UNBRACKETED_PASTE_ENTER_S = 0.08
 COMPACTION_SUMMARY_PREVIEW_LINES = 4
 COMPACTION_SUMMARY_PREVIEW_CHARS = 800
 _AGENT_VIEW_STATUS_RANK = {status: index for index, status in enumerate(AGENT_VIEW_STATUS_ORDER)}
+_RUN_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
 
 
 @dataclass
@@ -367,20 +368,50 @@ class AnsiUvAgentApp:
 
         A completed asyncio task remains ``not done()`` while its own
         ``finally`` block is executing, so stale run states can otherwise keep a
-        cancel event around after the turn has ended.  Ctrl+C must ignore those
-        completed states and fall through to the normal quit confirmation.
+        cancel event around after the turn has ended.  Likewise, a turn that has
+        already received an interrupt request may keep unwinding for a while.
+        Ctrl+C must ignore both cases and fall through to the normal quit
+        confirmation instead of repeatedly "interrupting" a non-interruptible
+        state.
         """
 
         run_state = self._run_state()
         if run_state is None:
             return None
-        if run_state.running:
+        if self._run_state_is_active(run_state):
             return run_state
         # Some tests and embedders simulate a busy turn by installing only a
         # cancel event.  Keep that path working, but do not treat an already
         # completed task as interruptible.
-        if run_state.task is None and (self.state.busy or self._interrupt_armed):
+        if (
+            run_state.task is None
+            and not run_state.cancel_event.is_set()
+            and run_state.terminal_status not in _RUN_TERMINAL_STATUSES
+            and (self.state.busy or self._interrupt_armed)
+        ):
             return run_state
+        return None
+
+    @staticmethod
+    def _run_state_is_active(run_state: ThreadRunState) -> bool:
+        return (
+            run_state.running
+            and not run_state.cancel_event.is_set()
+            and run_state.terminal_status not in _RUN_TERMINAL_STATUSES
+        )
+
+    def _inactive_run_status_message(self, run_state: ThreadRunState) -> str:
+        if run_state.terminal_status == "interrupted":
+            return self._text("interrupted")
+        if run_state.terminal_status == "failed" and run_state.last_error:
+            return run_state.last_error
+        return "ready"
+
+    def _active_confirmation_status(self) -> str | None:
+        if self._quit_armed and self._quit_confirmation_status:
+            return self._quit_confirmation_status
+        if self._interrupt_armed and self._interrupt_confirmation_status:
+            return self._interrupt_confirmation_status
         return None
 
     def _is_attached_thread(self, thread_id: str | None) -> bool:
@@ -393,15 +424,23 @@ class AnsiUvAgentApp:
             self.state.pending_turns.clear()
             self.state.turn_elapsed_s = None
             return
-        self.state.busy = run_state.running
+        active = self._run_state_is_active(run_state)
+        self.state.busy = active
         self.state.pending_turns = run_state.pending_turns
-        self.state.status_message = run_state.status_message if run_state.running else "ready"
+        confirmation_status = self._active_confirmation_status()
+        self.state.status_message = (
+            confirmation_status
+            if confirmation_status is not None
+            else run_state.status_message
+            if active
+            else self._inactive_run_status_message(run_state)
+        )
         self.state.last_error = run_state.last_error
         self._assistant_cell = run_state.assistant_cell
         self._reasoning_cell = run_state.reasoning_cell
         self._reasoning_flushed_for_current_response = run_state.reasoning_flushed_for_current_response
         self._tool_cells = run_state.tool_cells
-        if run_state.running and run_state.started_at is not None:
+        if active and run_state.started_at is not None:
             self.state.turn_elapsed_s = monotonic() - run_state.started_at
         else:
             self.state.turn_elapsed_s = None
@@ -1089,12 +1128,12 @@ class AnsiUvAgentApp:
         run_state = self._thread_runs.get(thread_id)
         if run_state is not None and run_state.terminal_status == "dispatching":
             return "dispatching"
-        if run_state is not None and run_state.running:
+        if run_state is not None and run_state.terminal_status in _RUN_TERMINAL_STATUSES:
+            return run_state.terminal_status
+        if run_state is not None and self._run_state_is_active(run_state):
             return "working"
         if run_state is not None and run_state.pending_turns:
             return "queued"
-        if run_state is not None and run_state.terminal_status in {"failed", "interrupted", "completed"}:
-            return run_state.terminal_status
         event_type = self._latest_thread_terminal_event_type(thread_id)
         if event_type == "turn.error":
             return "failed"
@@ -2500,6 +2539,20 @@ class AnsiUvAgentApp:
             self.state.thread_id = str(event_thread_id)
             if self.state.thread_id != previous_thread_id:
                 self._refresh_window_title()
+        run_state = self._run_state_for_event(event)
+        if run_state is not None:
+            if event_type == "turn.started":
+                run_state.terminal_status = "working"
+                run_state.status_message = "running"
+            elif event_type == "turn.error":
+                run_state.terminal_status = "failed"
+                run_state.last_error = str(event.get("message") or "turn error")
+            elif event_type == "turn.interrupted":
+                run_state.terminal_status = "interrupted"
+                run_state.status_message = self._text("interrupted")
+            elif event_type == "turn.completed":
+                run_state.terminal_status = "completed"
+                run_state.status_message = "ready"
         if event_type == "thread.title":
             self.state.title = str(event.get("title") or self.state.title)
             self._refresh_window_title()
