@@ -81,7 +81,7 @@ INTERRUPTED_STREAM_CONTEXT_BRIDGE = (
 
 SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 <identity>
-You are uv-agent, a coding agent.
+You are uv-agent, a general-purpose agent. You interact with the outside world by freely writing Python scripts and executing them through the run_python tool.
 </identity>
 
 <response_style>
