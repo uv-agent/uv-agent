@@ -46,11 +46,11 @@ def compaction_replacement_input(
 def compaction_response_summary_text(response: ModelResponse) -> str:
     """Return the user-visible summary from a compaction model response.
 
-    Some Responses-compatible providers may ignore ``tool_choice=none`` or still
-    emit tool calls when tools are present. In that case ``output_text`` is empty
-    even though earlier message items may contain useful summary text. Treat the
-    message text as the compaction result and ignore function_call items so the
-    checkpoint does not become an empty "conversation compacted" block.
+    Some Responses-compatible providers may emit tool calls when tools are
+    present. In that case ``output_text`` can be empty even though earlier
+    message items may contain useful summary text. Treat the message text as the
+    compaction result and ignore function_call items so the checkpoint does not
+    become an empty "conversation compacted" block.
     """
 
     if response.output_text.strip():

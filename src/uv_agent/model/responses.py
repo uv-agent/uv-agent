@@ -41,7 +41,6 @@ def responses_payload(
         "model": model.model,
         "input": copy.deepcopy(input_items),
         "tools": copy.deepcopy(tools),
-        "tool_choice": "auto" if tools else "none",
         **provider.params,
         **endpoint.params,
         **model.params,

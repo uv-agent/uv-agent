@@ -264,6 +264,7 @@ def test_chat_payload_uses_chat_endpoint_shape() -> None:
     assert payload["stream"] is True
     assert payload["temperature"] == 0
     assert "tools" not in payload
+    assert "tool_choice" not in payload
 
 
 def test_chat_messages_replay_configured_message_passthrough_fields() -> None:
@@ -318,6 +319,32 @@ def test_responses_payload_supports_previous_response_id() -> None:
     assert payload["previous_response_id"] == "resp_1"
     assert payload["input"][0]["content"][0]["text"] == "next"
     assert payload["stream"] is True
+    assert "tool_choice" not in payload
+
+
+def test_tool_choice_is_not_added_by_default() -> None:
+    tool = {
+        "type": "function",
+        "name": "run_python",
+        "description": "Run Python",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    chat_provider = ProviderConfig(name="p", base_url="https://example.com")
+    chat_model = ModelConfig(name="m", provider="p", model="remote", api="chat_completions")
+    responses_model = ModelConfig(name="m", provider="p", model="remote", api="responses")
+
+    chat = chat_payload(chat_provider, chat_model, [], [tool], None, stream=False)
+    responses = responses_payload(
+        chat_provider,
+        responses_model,
+        [],
+        [tool],
+        None,
+        stream=False,
+    )
+
+    assert "tool_choice" not in chat
+    assert "tool_choice" not in responses
 
 
 def test_openai_client_strips_sdk_owned_endpoint_path_and_passes_extra_headers() -> None:
@@ -585,7 +612,6 @@ def test_anthropic_payload_uses_messages_shape() -> None:
     provider = ProviderConfig(
         name="p",
         base_url="https://example.com",
-        anthropic_messages=EndpointConfig(path="/v1/messages", params={"max_tokens": 99}),
     )
     model = ModelConfig(name="m", provider="p", model="claude", api="anthropic_messages")
 
@@ -595,8 +621,21 @@ def test_anthropic_payload_uses_messages_shape() -> None:
     assert payload["system"] == "system"
     assert payload["messages"] == []
     assert payload["stream"] is True
-    assert payload["max_tokens"] == 99
+    assert "max_tokens" not in payload
     assert "tools" not in payload
+
+
+def test_anthropic_payload_preserves_configured_max_tokens() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://example.com",
+        anthropic_messages=EndpointConfig(path="/v1/messages", params={"max_tokens": 99}),
+    )
+    model = ModelConfig(name="m", provider="p", model="claude", api="anthropic_messages")
+
+    payload = anthropic_payload(provider, model, [], [], None, stream=False)
+
+    assert payload["max_tokens"] == 99
 
 
 def test_anthropic_sdk_base_url_strips_default_messages_path() -> None:

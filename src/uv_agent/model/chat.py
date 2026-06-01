@@ -53,7 +53,6 @@ def chat_payload(
         "model": model.model,
         "messages": chat_messages(input_items, instructions, model),
         "tools": [chat_tool(tool) for tool in tools],
-        "tool_choice": "auto" if tools else "none",
         **provider.params,
         **endpoint.params,
         **model.params,

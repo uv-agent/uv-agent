@@ -59,7 +59,6 @@ def anthropic_payload(
         "model": model.model,
         "messages": anthropic_messages(input_items),
         "tools": [anthropic_tool(tool) for tool in tools],
-        "max_tokens": 4096,
         **provider.params,
         **endpoint.params,
         **model.params,
