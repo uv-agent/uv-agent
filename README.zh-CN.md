@@ -84,6 +84,7 @@ model 和一个 level。
     "deepseek": {
       "base_url": "https://api.deepseek.com",
       "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "timeout_s": 7200,
       "chat_completions": {
         "path": "/chat/completions"
       },
@@ -104,6 +105,7 @@ model 和一个 level。
     "minimax": {
       "base_url": "https://api.minimaxi.com",
       "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "timeout_s": 7200,
       "chat_completions": {
         "path": "/v1/chat/completions"
       },

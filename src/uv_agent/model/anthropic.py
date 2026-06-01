@@ -225,12 +225,18 @@ def anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
 
 def anthropic_client(provider: ProviderConfig) -> Any:
     from anthropic import AsyncAnthropic
+    from anthropic import Timeout
 
-    return AsyncAnthropic(
-        api_key=provider.resolved_api_key(),
-        base_url=anthropic_sdk_base_url(provider),
-        default_headers=provider.headers or None,
-    )
+    kwargs = {
+        "api_key": provider.resolved_api_key(),
+        "base_url": anthropic_sdk_base_url(provider),
+        "default_headers": provider.headers or None,
+    }
+    if provider.timeout_s is not None:
+        # Keep connection failures quick while allowing long model generation
+        # or streaming gaps from slower upstream providers.
+        kwargs["timeout"] = Timeout(provider.timeout_s, connect=5.0)
+    return AsyncAnthropic(**kwargs)
 
 
 def anthropic_sdk_base_url(provider: ProviderConfig) -> str:

@@ -92,6 +92,7 @@ Supported model API formats:
     "deepseek": {
       "base_url": "https://api.deepseek.com",
       "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "timeout_s": 7200,
       "chat_completions": {
         "path": "/chat/completions"
       },
@@ -112,6 +113,7 @@ Supported model API formats:
     "minimax": {
       "base_url": "https://api.minimaxi.com",
       "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "timeout_s": 7200,
       "chat_completions": {
         "path": "/v1/chat/completions"
       },

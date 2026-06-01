@@ -35,6 +35,7 @@ Providers describe HTTP endpoints and authentication.
 | `api_key` | string | `null` | Direct bearer token. Prefer `api_key_env` for secrets. |
 | `api_key_env` | string | `null` | Environment variable that contains the bearer token. |
 | `headers` | object | `{}` | Extra SDK default headers passed on a best-effort basis. |
+| `timeout_s` | number or null | `7200` | Provider SDK request timeout in seconds. Set `null` to keep the SDK default. |
 | `params` | object | `{}` | JSON payload fields shared by all model requests for this provider. |
 | `message_passthrough` | object | `{}` | Chat message fields to persist and replay for provider-specific APIs. Models inherit this unless they override fields. |
 | `reasoning_display` | object | `{}` | Provider-specific fields that should be shown as reasoning in the TUI. Models inherit this unless they override fields. |

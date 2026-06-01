@@ -11,6 +11,7 @@ from uv_agent.config import (
     ReasoningDisplayConfig,
 )
 from uv_agent.errors import EmptyModelStreamError
+from uv_agent.model.anthropic import anthropic_client
 from uv_agent.model import (
     ModelStreamEvent,
     anthropic_image_source,
@@ -361,6 +362,38 @@ def test_openai_client_strips_sdk_owned_endpoint_path_and_passes_extra_headers()
     assert str(client.base_url) == "https://api.example.com/v1/"
     assert client.auth_headers == {"Authorization": "Bearer test-key"}
     assert client.default_headers["api-key"] == "test-key"
+    assert client.timeout.read == 7200.0
+    assert client.timeout.connect == 5.0
+
+
+def test_openai_client_uses_configured_provider_timeout() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com/v1",
+        api_key="test-key",
+        timeout_s=123.5,
+    )
+
+    client = openai_client(provider, "responses", "/responses")
+
+    assert client.timeout.read == 123.5
+    assert client.timeout.write == 123.5
+    assert client.timeout.connect == 5.0
+
+
+def test_anthropic_client_uses_configured_provider_timeout() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.anthropic.com",
+        api_key="test-key",
+        timeout_s=123.5,
+    )
+
+    client = anthropic_client(provider)
+
+    assert client.timeout.read == 123.5
+    assert client.timeout.write == 123.5
+    assert client.timeout.connect == 5.0
 
 
 def test_openai_client_uses_sdk_default_missing_credentials_behavior(monkeypatch: pytest.MonkeyPatch) -> None:

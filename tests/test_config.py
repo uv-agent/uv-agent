@@ -16,6 +16,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
                     "p": {
                         "base_url": "https://example.com",
                         "api_key": "secret",
+                        "timeout_s": 123.5,
                         "responses": {"path": "/v1/responses"},
                         "chat_completions": {"path": "/v1/chat/completions"},
                         "message_passthrough": {
@@ -81,6 +82,7 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     provider = config.provider_for_model(model)
     assert provider.name == "p"
     assert provider.resolved_api_key() == "secret"
+    assert provider.timeout_s == 123.5
     assert provider.endpoint_for_api("chat_completions").path == "/v1/chat/completions"
     assert model.api == "chat_completions"
     assert model.supports_images is False
@@ -136,7 +138,31 @@ def test_endpoint_config_string_shorthand_and_bad_nested_values(tmp_path: Path) 
 
     assert provider.responses.path == "/v1/responses"
     assert provider.chat_completions.path == "/chat/completions"
+    assert provider.timeout_s == 7200.0
     assert config.runtime.compression.enabled is True
+
+
+def test_provider_timeout_can_use_sdk_default(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "p": {
+                        "base_url": "https://example.com",
+                        "timeout_s": None,
+                    }
+                },
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {"medium": {"model": "m"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert config.providers["p"].timeout_s is None
 
 
 def test_runner_settings_can_be_configured(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
     "primary": {
       "base_url": "https://api.example.com/v1",
       "api_key_env": "UV_AGENT_PRIMARY_API_KEY",
+      "timeout_s": 7200,
       "headers": {},
       "params": {},
       "message_passthrough": {

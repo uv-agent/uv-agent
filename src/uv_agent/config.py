@@ -31,6 +31,7 @@ class ProviderConfig:
     api_key_env: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
+    timeout_s: float | None = 7200.0
     message_passthrough: MessagePassthroughConfig = field(default_factory=lambda: MessagePassthroughConfig())
     reasoning_display: ReasoningDisplayConfig = field(default_factory=lambda: ReasoningDisplayConfig())
     responses: EndpointConfig = field(default_factory=lambda: EndpointConfig(path="/responses"))
@@ -364,6 +365,8 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         if legacy_api and legacy_api != "responses":
             # Older experimental configs used provider-level api_format. Models now own API choice.
             provider_value.setdefault("params", {})
+        timeout_s = provider_value.get("timeout_s", 7200.0)
+        provider_value["timeout_s"] = None if timeout_s is None else float(timeout_s)
         providers[name] = ProviderConfig(name=name, **provider_value)
     models: dict[str, ModelConfig] = {}
     models_raw = _object_dict(raw.get("models", {}))
