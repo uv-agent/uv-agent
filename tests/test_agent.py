@@ -3034,6 +3034,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Run independent steps concurrently" in prompt
     assert "multiple ask calls or independent helper operations inside run_python" in prompt
     assert "overlapping file writes sequential" in prompt
+    assert "Treat run_python as a free-form multi-step tool" in prompt
+    assert "do them in one script and return one consolidated result" in prompt
+    assert "genuinely need a user check-in" in prompt
     assert "Occam's razor" not in prompt
     assert "capability explanations layered" not in prompt
     assert "<context_updates>" in prompt
