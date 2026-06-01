@@ -686,6 +686,7 @@ def test_parse_anthropic_response_maps_tool_use() -> None:
         {
             "id": "msg_1",
             "content": [
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
                 {"type": "text", "text": "hello"},
                 {
                     "type": "tool_use",
@@ -698,8 +699,63 @@ def test_parse_anthropic_response_maps_tool_use() -> None:
     )
 
     assert response.output_text == "hello"
+    assert response.reasoning_text == "plan"
+    assert response.output[0]["anthropic_content"] == [
+        {"type": "thinking", "thinking": "plan", "signature": "sig"},
+        {"type": "text", "text": "hello"},
+        {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "run_python",
+            "input": {"code": "print(1)"},
+        },
+    ]
     assert response.output[1]["type"] == "function_call"
     assert response.output[1]["call_id"] == "toolu_1"
+
+
+def test_anthropic_messages_replay_provider_content_without_duplicate_tool_use() -> None:
+    messages = anthropic_messages(
+        [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+                "anthropic_content": [
+                    {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                    {"type": "text", "text": "hello"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "run_python",
+                        "input": {"code": "print(1)"},
+                    },
+                ],
+            },
+            {
+                "type": "function_call",
+                "call_id": "toolu_1",
+                "name": "run_python",
+                "arguments": '{"code":"print(1)"}',
+            },
+        ]
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "text", "text": "hello"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "run_python",
+                    "input": {"code": "print(1)"},
+                },
+            ],
+        }
+    ]
 
 
 def test_parse_anthropic_message_maps_sdk_message() -> None:
@@ -943,11 +999,128 @@ async def test_stream_anthropic_tool_use_does_not_prefix_empty_start_input() -> 
     assert completed.response is not None
     assert completed.response.output == [
         {
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "anthropic_content": [
+                {
+                    "type": "tool_use",
+                    "name": "run_python",
+                    "input": {"code": "print(1)"},
+                    "id": "toolu_1",
+                }
+            ],
+        },
+        {
             "type": "function_call",
             "call_id": "toolu_1",
             "name": "run_python",
             "arguments": "{\"code\":\"print(1)\"}",
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_anthropic_preserves_thinking_signature_blocks() -> None:
+    class Messages:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        async def create(self, **kwargs):
+            self.kwargs = kwargs
+
+            class MessageStart:
+                type = "message_start"
+
+                class Message:
+                    id = "msg_1"
+                    usage = {}
+
+                message = Message()
+
+            class ThinkingStart:
+                type = "content_block_start"
+                index = 0
+
+                class ContentBlock:
+                    type = "thinking"
+                    thinking = ""
+
+                content_block = ContentBlock()
+
+            class ThinkingDelta:
+                type = "content_block_delta"
+                index = 0
+
+                class Delta:
+                    type = "thinking_delta"
+                    thinking = "plan"
+
+                delta = Delta()
+
+            class SignatureDelta:
+                type = "content_block_delta"
+                index = 0
+
+                class Delta:
+                    type = "signature_delta"
+                    signature = "sig"
+
+                delta = Delta()
+
+            class TextStart:
+                type = "content_block_start"
+                index = 1
+
+                class ContentBlock:
+                    type = "text"
+                    text = ""
+
+                content_block = ContentBlock()
+
+            class TextDelta:
+                type = "content_block_delta"
+                index = 1
+
+                class Delta:
+                    type = "text_delta"
+                    text = "hello"
+
+                delta = Delta()
+
+            class MessageStop:
+                type = "message_stop"
+
+            return FakeAnthropicStream(
+                [MessageStart(), ThinkingStart(), ThinkingDelta(), SignatureDelta(), TextStart(), TextDelta(), MessageStop()]
+            )
+
+    class Client:
+        def __init__(self) -> None:
+            self.messages = Messages()
+
+    provider = ProviderConfig(name="p", base_url="https://api.anthropic.com")
+    model = ModelConfig(name="m", provider="p", model="claude", api="anthropic_messages")
+
+    events = [
+        event
+        async for event in stream_anthropic_response(
+            provider=provider,
+            model=model,
+            input_items=[],
+            tools=[],
+            instructions=None,
+            client=Client(),
+        )
+    ]
+
+    completed = events[-1]
+    assert completed.response is not None
+    assert completed.response.output_text == "hello"
+    assert completed.response.reasoning_text == "plan"
+    assert completed.response.output[0]["anthropic_content"] == [
+        {"type": "thinking", "thinking": "plan", "signature": "sig"},
+        {"type": "text", "text": "hello"},
     ]
 
 

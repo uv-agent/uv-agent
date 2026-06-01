@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import AsyncIterator
@@ -8,7 +9,6 @@ from typing import Any
 
 from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.errors import EmptyModelStreamError
-from uv_agent.model.content import chat_output_items
 from uv_agent.model.sdk import model_param_sources, object_dump, sdk_base_url, sdk_extra_body, sdk_kwargs, sdk_param_keys
 from uv_agent.model.types import ModelResponse, ModelStreamEvent
 
@@ -16,6 +16,23 @@ from uv_agent.model.types import ModelResponse, ModelStreamEvent
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
 EMPTY_ANTHROPIC_STREAM_MESSAGE = (
     "Anthropic messages stream ended without returning content, reasoning, or tool calls"
+)
+ANTHROPIC_CONTENT_KEY = "anthropic_content"
+ANTHROPIC_FALLBACK_BLOCK_FIELDS = (
+    "type",
+    "text",
+    "thinking",
+    "signature",
+    "data",
+    "id",
+    "name",
+    "input",
+    "content",
+    "tool_use_id",
+    "citations",
+    "source",
+    "title",
+    "url",
 )
 
 
@@ -57,38 +74,31 @@ def anthropic_payload(
 
 
 def parse_anthropic_response(data: dict[str, Any]) -> ModelResponse:
-    text_parts: list[str] = []
-    tool_acc: dict[int, dict[str, Any]] = {}
-    for index, block in enumerate(data.get("content") or []):
-        if block.get("type") == "text":
-            text_parts.append(block.get("text", ""))
-        elif block.get("type") == "tool_use":
-            tool_acc[index] = {
-                "call_id": block.get("id"),
-                "name": block.get("name"),
-                "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
-            }
-    output_text = "".join(text_parts)
-    output = chat_output_items(output_text, tool_acc)
+    content = _anthropic_content_blocks(data.get("content") or [])
+    output_text = _anthropic_text_from_content(content)
+    output = anthropic_output_items(content, _anthropic_tool_acc_from_content(content), output_text=output_text)
     return ModelResponse(
         id=data.get("id"),
         output=output,
         output_text=output_text,
         raw=data,
         usage=data.get("usage") or {},
+        reasoning_text=_anthropic_reasoning_from_content(content),
     )
 
 
 def anthropic_messages(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     pending_assistant: dict[str, Any] | None = None
+    pending_assistant_tool_use_ids: set[str] = set()
     pending_tool_results: list[dict[str, Any]] = []
 
     def flush_pending_assistant() -> None:
-        nonlocal pending_assistant
+        nonlocal pending_assistant, pending_assistant_tool_use_ids
         if pending_assistant is not None:
             messages.append(pending_assistant)
             pending_assistant = None
+            pending_assistant_tool_use_ids = set()
 
     def flush_tool_results() -> None:
         nonlocal pending_tool_results
@@ -126,10 +136,23 @@ def anthropic_messages(input_items: list[dict[str, Any]]) -> list[dict[str, Any]
                 # function_call needs to append tool_use blocks to the same
                 # assistant message.
                 pending_assistant = message
+                pending_assistant_tool_use_ids = _anthropic_tool_use_ids(message.get("content"))
             else:
                 messages.append(message)
         elif item_type == "function_call":
             flush_tool_results()
+            call_id = str(item.get("call_id") or "")
+            existing_input = _anthropic_tool_input_from_content(
+                pending_assistant.get("content") if pending_assistant is not None else None,
+                call_id,
+            )
+            if existing_input is not None:
+                item_arguments = _compact_json(item.get("arguments") or "{}")
+                existing_arguments = json.dumps(existing_input or {}, ensure_ascii=False)
+                if _compact_json(existing_arguments) == item_arguments:
+                    continue
+            elif call_id and call_id in pending_assistant_tool_use_ids:
+                continue
             pending_assistant_content().append(
                 {
                     "type": "tool_use",
@@ -138,6 +161,8 @@ def anthropic_messages(input_items: list[dict[str, Any]]) -> list[dict[str, Any]
                     "input": json.loads(item.get("arguments") or "{}"),
                 }
             )
+            if call_id:
+                pending_assistant_tool_use_ids.add(call_id)
         elif item_type == "function_call_output":
             flush_pending_assistant()
             pending_tool_results.append(
@@ -154,6 +179,12 @@ def anthropic_messages(input_items: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def anthropic_message_content(item: dict[str, Any]) -> str | list[dict[str, Any]]:
     """Return Anthropic content, preserving base64 data URL image parts."""
+
+    if item.get("role") == "assistant":
+        anthropic_content = item.get(ANTHROPIC_CONTENT_KEY)
+        if isinstance(anthropic_content, list):
+            return _anthropic_content_blocks(anthropic_content)
+
     parts: list[dict[str, Any]] = []
     has_image = False
     for content in item.get("content") or []:
@@ -266,6 +297,8 @@ async def stream_anthropic_response(
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_acc: dict[int, dict[str, Any]] = {}
+    input_json_acc: dict[int, str] = {}
+    content_blocks: dict[int, dict[str, Any]] = {}
     response_id: str | None = None
     usage: dict[str, Any] = {}
     stream = await sdk_client.messages.create(
@@ -293,30 +326,59 @@ async def stream_anthropic_response(
             if delta_type == "text_delta":
                 text = getattr(delta, "text", "")
                 text_parts.append(text)
+                block = content_blocks.setdefault(index, {"type": "text", "text": ""})
+                block["type"] = "text"
+                block["text"] = str(block.get("text") or "") + text
                 yield ModelStreamEvent(type="text_delta", text=text)
             elif delta_type in {"thinking_delta", "signature_delta"}:
                 reasoning_text = str(getattr(delta, "thinking", "") or "")
                 if reasoning_text:
                     reasoning_parts.append(reasoning_text)
+                    block = content_blocks.setdefault(index, {"type": "thinking", "thinking": ""})
+                    block["type"] = "thinking"
+                    block["thinking"] = str(block.get("thinking") or "") + reasoning_text
+                signature = str(getattr(delta, "signature", "") or "")
+                if signature:
+                    block = content_blocks.setdefault(index, {"type": "thinking", "thinking": ""})
+                    block["type"] = "thinking"
+                    block["signature"] = str(block.get("signature") or "") + signature
                 yield ModelStreamEvent(type="reasoning_delta", text=reasoning_text)
             elif delta_type == "input_json_delta":
-                existing = tool_acc.setdefault(index, {"arguments": ""})
-                existing["arguments"] += getattr(delta, "partial_json", "")
+                partial_json = getattr(delta, "partial_json", "")
+                input_json_acc[index] = input_json_acc.get(index, "") + partial_json
+                if index in tool_acc:
+                    tool_acc[index]["arguments"] += partial_json
+            elif delta_type == "citations_delta":
+                citation = _anthropic_delta_citation(delta)
+                if citation:
+                    block = content_blocks.setdefault(index, {"type": "text", "text": ""})
+                    block.setdefault("citations", []).append(citation)
         elif event_type == "content_block_start":
             block = getattr(event, "content_block", None)
+            index = int(getattr(event, "index", 0))
+            block_data = _anthropic_content_block(block)
+            if block_data:
+                content_blocks[index] = block_data
             if getattr(block, "type", "") == "tool_use":
-                index = int(getattr(event, "index", 0))
                 tool_acc[index] = {
                     "call_id": getattr(block, "id", None),
                     "name": getattr(block, "name", None),
-                    "arguments": "",
+                    "arguments": input_json_acc.get(index, ""),
                     "_input": object_dump(getattr(block, "input", None)),
                 }
         elif event_type == "message_delta":
             usage = object_dump(getattr(event, "usage", None)) or usage
         elif event_type == "message_stop":
-            output = chat_output_items("".join(text_parts), _finalize_anthropic_stream_tools(tool_acc))
-            reasoning_text = "".join(reasoning_parts)
+            content = _finalize_anthropic_stream_content(content_blocks, tool_acc, input_json_acc)
+            output_text = _anthropic_text_from_content(content) or "".join(text_parts)
+            if not content and output_text:
+                content = [{"type": "text", "text": output_text}]
+            output = anthropic_output_items(
+                content,
+                _finalize_anthropic_stream_tools(tool_acc, input_json_acc),
+                output_text=output_text,
+            )
+            reasoning_text = _anthropic_reasoning_from_content(content) or "".join(reasoning_parts)
             if not output and not reasoning_text:
                 raise EmptyModelStreamError(EMPTY_ANTHROPIC_STREAM_MESSAGE)
             yield ModelStreamEvent(
@@ -324,8 +386,8 @@ async def stream_anthropic_response(
                 response=ModelResponse(
                     id=response_id,
                     output=output,
-                    output_text="".join(text_parts),
-                    raw={"id": response_id, "output": output},
+                    output_text=output_text,
+                    raw={"id": response_id, "content": content, "output": output},
                     usage=usage,
                     reasoning_text=reasoning_text,
                 ),
@@ -333,10 +395,86 @@ async def stream_anthropic_response(
             return
 
 
-def _finalize_anthropic_stream_tools(tool_acc: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:
+def anthropic_output_items(
+    content: list[dict[str, Any]],
+    tool_acc: dict[int, dict[str, Any]],
+    *,
+    output_text: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return internal output while preserving the original Anthropic blocks.
+
+    The ``message`` item carries the provider-native ``anthropic_content`` so a
+    later Anthropic request can replay the assistant turn exactly, including
+    thinking/signature blocks and any provider-added block types.  Separate
+    ``function_call`` items are still emitted for the agent loop, TUI, and tool
+    execution bookkeeping.
+    """
+
+    text = _anthropic_text_from_content(content) if output_text is None else output_text
+    output: list[dict[str, Any]] = []
+    if content:
+        output.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": _anthropic_response_message_content(content, text),
+                ANTHROPIC_CONTENT_KEY: copy.deepcopy(content),
+            }
+        )
+    elif text:
+        output.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }
+        )
+
+    for index in sorted(tool_acc):
+        call = tool_acc[index]
+        output.append(
+            {
+                "type": "function_call",
+                "call_id": call.get("call_id"),
+                "name": call.get("name"),
+                "arguments": call.get("arguments", ""),
+            }
+        )
+    return output
+
+
+def _finalize_anthropic_stream_content(
+    content_blocks: dict[int, dict[str, Any]],
+    tool_acc: dict[int, dict[str, Any]],
+    input_json_acc: dict[int, str],
+) -> list[dict[str, Any]]:
+    for index in set(tool_acc) | set(input_json_acc):
+        call = tool_acc.get(index) or {}
+        block = content_blocks.setdefault(index, {"type": "tool_use"})
+        if block.get("type") not in {"tool_use", "server_tool_use"}:
+            continue
+        if call.get("call_id"):
+            block["id"] = call.get("call_id")
+        if call.get("name"):
+            block["name"] = call.get("name")
+        arguments = str(input_json_acc.get(index) or call.get("arguments") or "")
+        if arguments:
+            try:
+                block["input"] = json.loads(arguments)
+            except json.JSONDecodeError:
+                block["input"] = block.get("input") or call.get("_input") or {}
+        elif "input" not in block and "_input" in call:
+            block["input"] = call.get("_input") or {}
+    return [_strip_none(copy.deepcopy(content_blocks[index])) for index in sorted(content_blocks)]
+
+
+def _finalize_anthropic_stream_tools(
+    tool_acc: dict[int, dict[str, Any]],
+    input_json_acc: dict[int, str],
+) -> dict[int, dict[str, Any]]:
     finalized: dict[int, dict[str, Any]] = {}
     for index, call in tool_acc.items():
-        arguments = call.get("arguments", "")
+        arguments = input_json_acc.get(index) or call.get("arguments", "")
         if not arguments and "_input" in call:
             arguments = json.dumps(call.get("_input") or {}, ensure_ascii=False)
         finalized[index] = {
@@ -345,6 +483,148 @@ def _finalize_anthropic_stream_tools(tool_acc: dict[int, dict[str, Any]]) -> dic
             "arguments": arguments,
         }
     return finalized
+
+
+def _anthropic_tool_acc_from_content(content: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    tool_acc: dict[int, dict[str, Any]] = {}
+    for index, block in enumerate(content):
+        if block.get("type") != "tool_use":
+            continue
+        tool_acc[index] = {
+            "call_id": block.get("id"),
+            "name": block.get("name"),
+            "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+        }
+    return tool_acc
+
+
+def _anthropic_content_blocks(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    blocks: list[dict[str, Any]] = []
+    for block in value:
+        block_data = _anthropic_content_block(block)
+        if block_data:
+            blocks.append(block_data)
+    return blocks
+
+
+def _anthropic_content_block(value: object) -> dict[str, Any]:
+    dumped: dict[str, Any] = {}
+    if isinstance(value, dict):
+        dumped = copy.deepcopy(value)
+    else:
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            try:
+                raw = model_dump(mode="json", exclude_none=True)
+            except TypeError:
+                raw = model_dump(mode="json")
+            if isinstance(raw, dict):
+                dumped = raw
+        if not dumped:
+            dumped = object_dump(value)
+        if not dumped:
+            dumped = _anthropic_content_block_from_attrs(value)
+    return _strip_none(dumped)
+
+
+def _anthropic_content_block_from_attrs(value: object) -> dict[str, Any]:
+    dumped: dict[str, Any] = {}
+    for field in ANTHROPIC_FALLBACK_BLOCK_FIELDS:
+        if not hasattr(value, field):
+            continue
+        field_value = getattr(value, field)
+        if field_value is not None:
+            dumped[field] = _json_value(field_value)
+    return dumped
+
+
+def _anthropic_delta_citation(delta: object) -> dict[str, Any] | None:
+    citation = getattr(delta, "citation", None)
+    if citation is None and isinstance(delta, dict):
+        citation = delta.get("citation")
+    if citation is None:
+        return None
+    value = _json_value(citation)
+    return value if isinstance(value, dict) else None
+
+
+def _anthropic_response_message_content(content: list[dict[str, Any]], output_text: str) -> list[dict[str, str]]:
+    text_blocks = [str(block.get("text") or "") for block in content if block.get("type") == "text"]
+    if text_blocks:
+        return [{"type": "output_text", "text": text} for text in text_blocks]
+    if output_text:
+        return [{"type": "output_text", "text": output_text}]
+    return []
+
+
+def _anthropic_text_from_content(content: list[dict[str, Any]]) -> str:
+    return "".join(str(block.get("text") or "") for block in content if block.get("type") == "text")
+
+
+def _anthropic_reasoning_from_content(content: list[dict[str, Any]]) -> str:
+    return "".join(str(block.get("thinking") or "") for block in content if block.get("type") == "thinking")
+
+
+def _anthropic_tool_use_ids(content: object) -> set[str]:
+    if not isinstance(content, list):
+        return set()
+    return {
+        str(block.get("id") or "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id")
+    }
+
+
+def _anthropic_tool_input_from_content(content: object, call_id: str) -> Any:
+    if not isinstance(content, list) or not call_id:
+        return None
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use" and str(block.get("id") or "") == call_id:
+            return block.get("input")
+    return None
+
+
+def _compact_json(value: object) -> str:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value or "{}")
+        except json.JSONDecodeError:
+            return value
+    else:
+        parsed = value
+    return json.dumps(parsed or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _json_value(value: object) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_value(item) for key, item in value.items()}
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="json", exclude_none=True)
+        except TypeError:
+            dumped = model_dump(mode="json")
+        return _strip_none(dumped)
+    dumped = object_dump(value)
+    if dumped:
+        return _strip_none(dumped)
+    return str(value)
+
+
+def _strip_none(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _strip_none(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [_strip_none(item) for item in value]
+    return value
 
 
 def parse_anthropic_message(message: Any) -> ModelResponse:
