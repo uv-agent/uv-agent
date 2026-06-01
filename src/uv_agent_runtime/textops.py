@@ -398,14 +398,10 @@ def run_process_text(
 ) -> CommandTextResult:
     """Run a command and decode stdout/stderr with explicit encoding policy."""
 
-    process_env = os.environ.copy() if env is None else dict(env)
-    for key, value in (env_patch or {}).items():
-        if value is None:
-            process_env.pop(key, None)
-        else:
-            process_env[key] = value
+    process_env = _build_process_env(env, env_patch)
+    argv = _resolve_process_args(args, env=process_env)
     process = subprocess.Popen(
-        list(args),
+        argv,
         cwd=None if cwd is None else str(resolve_workspace_path(cwd)),
         env=process_env,
         stdout=subprocess.PIPE,
@@ -443,7 +439,7 @@ def run_process_text(
             stdout_bytes = _coerce_subprocess_output(exc.output)
             stderr_bytes = _coerce_subprocess_output(exc.stderr)
     result = CommandTextResult(
-        args=list(args),
+        args=argv,
         returncode=process.returncode if process.returncode is not None else -9,
         stdout=_decode_subprocess_output(stdout_bytes, encoding=encoding, errors=errors),
         stderr=_decode_subprocess_output(stderr_bytes, encoding=encoding, errors=errors),
@@ -452,6 +448,81 @@ def run_process_text(
     if check:
         result.raise_for_error()
     return result
+
+
+def _build_process_env(
+    env: Mapping[str, str] | None,
+    env_patch: Mapping[str, str | None] | None,
+) -> dict[str, str]:
+    """Return the exact environment map that should be passed to Popen."""
+
+    process_env = os.environ.copy() if env is None else dict(env)
+    for key, value in (env_patch or {}).items():
+        if value is None:
+            _unset_process_env_value(process_env, key)
+        else:
+            _set_process_env_value(process_env, key, value)
+    return process_env
+
+
+def _resolve_process_args(args: Sequence[str], *, env: Mapping[str, str]) -> list[str]:
+    """Resolve Windows command shims with the same PATH passed to the child."""
+
+    argv = list(args)
+    if os.name != "nt" or not argv:
+        return argv
+
+    command = argv[0]
+    if not command or os.path.dirname(command):
+        return argv
+
+    path_value = _get_process_env_value(env, "PATH")
+    if path_value is None:
+        return argv
+
+    # On Windows, subprocess with shell=False does not reliably use the env= PATH
+    # while locating the executable, and cmd.exe's PATHEXT expansion is not in
+    # play. Resolve names such as ``npm`` to ``npm.cmd`` up front while keeping
+    # shell=False so arguments are not reinterpreted by a shell.
+    resolved = shutil.which(command, path=path_value)
+    if resolved is not None:
+        argv[0] = resolved
+    return argv
+
+
+def _get_process_env_value(env: Mapping[str, str], key: str) -> str | None:
+    """Read an environment value using Windows' case-insensitive key rules."""
+
+    if key in env:
+        return env[key]
+    if os.name == "nt":
+        normalized = key.casefold()
+        for candidate, value in env.items():
+            if candidate.casefold() == normalized:
+                return value
+    return None
+
+
+def _set_process_env_value(env: dict[str, str], key: str, value: str) -> None:
+    """Set an environment value without leaving duplicate Windows key casings."""
+
+    for candidate in _matching_process_env_keys(env, key):
+        env.pop(candidate, None)
+    env[key] = value
+
+
+def _unset_process_env_value(env: dict[str, str], key: str) -> None:
+    """Unset an environment value without leaving duplicate Windows key casings."""
+
+    for candidate in _matching_process_env_keys(env, key):
+        env.pop(candidate, None)
+
+
+def _matching_process_env_keys(env: Mapping[str, str], key: str) -> list[str]:
+    if os.name != "nt":
+        return [key] if key in env else []
+    normalized = key.casefold()
+    return [candidate for candidate in env if candidate.casefold() == normalized]
 
 
 def _subprocess_tree_kwargs() -> dict[str, Any]:

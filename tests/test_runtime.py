@@ -255,6 +255,58 @@ def test_runtime_run_process_text_accepts_env_and_env_patch() -> None:
     assert result.stdout.strip() == "patched"
 
 
+def test_runtime_run_process_text_resolves_command_from_env_path(
+    tmp_path: Path,
+) -> None:
+    command_name = "uv-agent-runtime-test-command"
+    script = tmp_path / (command_name + (".cmd" if os.name == "nt" else ""))
+    if os.name == "nt":
+        script.write_text("@echo off\r\necho resolved-from-env-path\r\n", encoding="utf-8")
+    else:
+        script.write_text("#!/bin/sh\necho resolved-from-env-path\n", encoding="utf-8")
+        script.chmod(0o755)
+
+    process_env = os.environ.copy()
+    process_env["PATH"] = str(tmp_path)
+    process_env["PATHEXT"] = ".CMD;.EXE;.BAT;.COM"
+
+    result = run_process_text(
+        [command_name],
+        env=process_env,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "resolved-from-env-path"
+
+
+def test_runtime_run_process_text_env_patch_updates_path_case_insensitively(
+    tmp_path: Path,
+) -> None:
+    command_name = "uv-agent-runtime-test-patched-path"
+    script = tmp_path / (command_name + (".cmd" if os.name == "nt" else ""))
+    if os.name == "nt":
+        script.write_text("@echo off\r\necho resolved-from-env-patch\r\n", encoding="utf-8")
+    else:
+        script.write_text("#!/bin/sh\necho resolved-from-env-patch\n", encoding="utf-8")
+        script.chmod(0o755)
+
+    process_env = os.environ.copy()
+    path_key = "Path" if os.name == "nt" else "PATH"
+    for key in list(process_env):
+        if key.casefold() == "path":
+            process_env.pop(key)
+    process_env[path_key] = ""
+
+    result = run_process_text(
+        [command_name],
+        env=process_env,
+        env_patch={"PATH": str(tmp_path)},
+        check=True,
+    )
+
+    assert result.stdout.strip() == "resolved-from-env-patch"
+
+
 def test_runtime_dependency_helpers_use_run_python_env_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
