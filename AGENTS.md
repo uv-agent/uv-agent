@@ -21,6 +21,7 @@ This repository builds `uv-agent`, an experimental coding agent with a Textual T
 ## Prompt And Context
 
 - Keep the stable system prompt concise and structured with explicit XML-style sections and closing tags.
+- Prompt changes should follow “提示词宜删不宜加” (“delete before adding”): prefer removing, merging, or rewriting existing instructions over appending new prompt text; avoid duplicate or conflicting rules.
 - Include stable host metadata and detected user language in the system prompt.
 - Keep AGENTS rules, runtime environment details, skills summaries, and MCP declarations out of the stable prompt. Append them as dynamic workspace context only when first seen, changed, removed, or after compaction.
 - Runtime context must include the `run_python` environment directory, its `pyproject.toml`, and direct dependencies from that file only; do not expose transitive dependencies from `uv.lock` as context.
