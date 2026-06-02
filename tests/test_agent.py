@@ -3023,20 +3023,28 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Call enter_dir proactively whenever the task clearly belongs" in prompt
     assert "including paths discovered during execution" in prompt
     assert "<capability_use>" in prompt
-    assert "Actively use available capabilities" in prompt
+    assert "Use available capabilities when they reduce steps, time, or risk" in prompt
+    assert "Actively use available capabilities" not in prompt
     assert "Actively use available external capabilities" not in prompt
     assert "runtime helpers, declared skills, declared MCP servers, and focused third-party packages" in prompt
     assert "subprocesses through Python" not in prompt
-    assert "Prefer existing helpers and declared external capabilities" in prompt
+    assert "Prefer existing helpers and declared external capabilities" not in prompt
     assert "use simple Python for glue code or very small work" in prompt
-    assert "only when it materially helps" in prompt
+    assert "only when it materially helps" not in prompt
     assert "Use ask for bounded, tedious, or independent investigation" in prompt
-    assert "Run independent steps concurrently" in prompt
+    assert "Run independent work concurrently" in prompt
     assert "multiple ask calls or independent helper operations inside run_python" in prompt
     assert "overlapping file writes sequential" in prompt
-    assert "Treat run_python as a free-form multi-step tool" in prompt
-    assert "do them in one script and return one consolidated result" in prompt
-    assert "genuinely need a user check-in" in prompt
+    assert "Use run_python as a Python script runner" in prompt
+    assert "not as a wrapper around one helper call" in prompt
+    assert "Runtime helpers are ordinary Python functions" in prompt
+    assert "make each script a complete work unit" in prompt
+    assert "batching coupled discovery, reads, edits/retries, and focused verification" in prompt
+    assert "Start a new run_python call only when" in prompt
+    assert "the next step is unrelated or risky" in prompt
+    assert "Treat run_python as a free-form multi-step tool" not in prompt
+    assert "do them in one script and return one consolidated result" not in prompt
+    assert "genuinely need a user check-in" not in prompt
     assert "Occam's razor" not in prompt
     assert "capability explanations layered" not in prompt
     assert "<context_updates>" in prompt
@@ -3128,6 +3136,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'level="small"' not in prompt
     assert "pathlib" in prompt
     assert "Mentions are plain-text hints only" in prompt
+    assert "inspect it inside run_python using file helpers or Python standard library APIs" in prompt
     assert "read_text, write_text" not in prompt
     assert "list_files" not in prompt
     assert "run_command/check_command" not in prompt
