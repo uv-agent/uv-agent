@@ -803,8 +803,8 @@ class AnsiUvAgentApp:
         elif key == "\r":
             selected = view.selected_row()
             if selected is not None:
-                self.state.mode = "transcript"
                 self._resume_thread(selected.thread_id)
+                self.state.mode = "transcript"
         elif key in {"<H>", "<UP>", "k"}:
             self._move_agent_view_selection(-1)
         elif key in {"<P>", "<DOWN>", "j"}:

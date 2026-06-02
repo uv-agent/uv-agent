@@ -2,19 +2,11 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import TextIO
 
 from uv_agent.tui2.ansi import terminal_size, truncate_visible
 from uv_agent.tui2.components import render_cell, render_live_with_cursor
 from uv_agent.tui2.events import TranscriptCell, Tui2State
-
-
-@dataclass(frozen=True)
-class _FrameState:
-    has_frame: bool
-    cursor_row: int
-    rows: int
 
 
 class Renderer:
@@ -38,9 +30,6 @@ class Renderer:
         self._frame_cursor_row = 0
         self._frame_rows = 0
         self._has_frame = False
-        self._alternate_screen = False
-        self._saved_normal_frame: _FrameState | None = None
-        self._deferred_normal_flush: list[TranscriptCell] = []
         self.spinner_frame = 0
 
     # ------------------------------------------------------------------
@@ -73,8 +62,6 @@ class Renderer:
     # never relied on implicit wrapping to advance to the next line.
     _AUTOWRAP_OFF = "\x1b[?7l"
     _AUTOWRAP_ON = "\x1b[?7h"
-    _ALT_SCREEN_ON = "\x1b[?1049h"
-    _ALT_SCREEN_OFF = "\x1b[?1049l"
 
     @staticmethod
     def _up(rows: int) -> str:
@@ -113,57 +100,6 @@ class Renderer:
         self._frame_cursor_row = 0
         self._frame_rows = 0
 
-    def _ensure_screen_for_state(self, state: Tui2State) -> None:
-        """Place Agent View in an alternate screen and transcript in normal scrollback."""
-
-        if state.mode == "agent_view":
-            self._enter_alternate_screen()
-        else:
-            self._exit_alternate_screen()
-
-    def _enter_alternate_screen(self) -> None:
-        """Switch full-screen Agent View away from the transcript scrollback."""
-
-        if self._alternate_screen:
-            return
-        self._saved_normal_frame = _FrameState(
-            has_frame=self._has_frame,
-            cursor_row=self._frame_cursor_row,
-            rows=self._frame_rows,
-        )
-        self._write(
-            "\x1b[?2026h"
-            + self._AUTOWRAP_OFF
-            + self._ALT_SCREEN_ON
-            + "\x1b[2J\x1b[H"
-            + self._AUTOWRAP_ON
-            + "\x1b[?2026l"
-        )
-        self._alternate_screen = True
-        self._has_frame = False
-        self._frame_cursor_row = 0
-        self._frame_rows = 0
-
-    def _exit_alternate_screen(self) -> None:
-        """Restore transcript scrollback after Agent View."""
-
-        if not self._alternate_screen:
-            return
-        self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
-        self._erase_frame()
-        self._write(self._ALT_SCREEN_OFF + self._AUTOWRAP_ON + "\x1b[?2026l")
-        saved = self._saved_normal_frame or _FrameState(False, 0, 0)
-        self._alternate_screen = False
-        self._saved_normal_frame = None
-        self._has_frame = saved.has_frame
-        self._frame_cursor_row = saved.cursor_row if saved.has_frame else 0
-        self._frame_rows = saved.rows if saved.has_frame else 0
-        if self._deferred_normal_flush:
-            deferred = list(self._deferred_normal_flush)
-            self._deferred_normal_flush.clear()
-            for cell in deferred:
-                self.flush_cell(cell)
-
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -171,9 +107,6 @@ class Renderer:
     def flush_cell(self, cell: TranscriptCell) -> None:
         """Print a completed cell into the terminal's normal scrollback."""
 
-        if self._alternate_screen:
-            self._deferred_normal_flush.append(cell)
-            return
         self.width = self._paint_width(terminal_size()[0])
         lines = [
             truncate_visible(line, self.width)
@@ -220,7 +153,6 @@ class Renderer:
         view.
         """
 
-        self._exit_alternate_screen()
         cols, rows = terminal_size()
         self.width = self._paint_width(cols)
         max_height = max(3, rows - 1)
@@ -240,7 +172,6 @@ class Renderer:
         that no longer exist in the same place.
         """
 
-        self._exit_alternate_screen()
         self.width = self._paint_width(terminal_size()[0])
         self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
         self._erase_frame()
@@ -257,7 +188,6 @@ class Renderer:
         self._frame_rows = 0
 
     def repaint(self, state: Tui2State) -> None:
-        self._ensure_screen_for_state(state)
         cols, rows = terminal_size()
         self.width = self._paint_width(cols)
         # The app owns spinner timing. Repaint frequency can spike with streaming
@@ -289,7 +219,6 @@ class Renderer:
         self._frame_rows = len(lines)
 
     def close(self) -> None:
-        self._exit_alternate_screen()
         self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
         self._erase_frame()
         # Always restore DECAWM so the shell the user returns to does not
