@@ -368,9 +368,12 @@ def render_status_lines(
         elapsed = format_elapsed(state.turn_elapsed_s) if state.turn_elapsed_s is not None else ""
         token_rate = _format_token_rate(state.turn_token_rate) if state.turn_token_rate is not None else ""
         status = state.status_message if state.status_message not in {"", "ready", "running"} else busy_fallback
-        suffix = "".join(f" · {part}" for part in (elapsed, token_rate) if part)
-        text = f"{frame} {status}" + suffix
-        rendered_text = sgr(theme.accent, text)
+        rendered_text = sgr(theme.accent, f"{frame} {status}")
+        if elapsed:
+            rendered_text += sgr(theme.accent, f" · {elapsed}")
+        if token_rate:
+            token_style = theme.muted if state.turn_token_rate_frozen else theme.accent
+            rendered_text += sgr(theme.accent, " · ") + sgr(token_style, token_rate)
         objective = _goal_objective_status_text(state.goal_objective) if state.goal_enabled else ""
         if objective:
             rendered_text += sgr(theme.muted, " · ") + sgr(theme.goal, objective)

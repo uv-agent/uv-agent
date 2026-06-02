@@ -150,6 +150,7 @@ class Tui2State:
     image_token_numbers: set[int] = field(default_factory=set)
     turn_elapsed_s: float | None = None
     turn_token_rate: float | None = None
+    turn_token_rate_frozen: bool = False
     command_palette_open: bool = False
     command_palette_items: list[CommandSuggestion] = field(default_factory=list)
     command_palette_index: int = 0

@@ -229,6 +229,8 @@ class ThreadRunState:
     last_animation_tick_at: float | None = None
     displayed_token_rate: float | None = None
     last_token_rate_display_update_at: float | None = None
+    token_rate_frozen: bool = False
+    frozen_token_rate: float | None = None
     pending_finish_assistant_text: str | None = None
     pending_finish_after_drain: bool = False
     engine_finished: bool = False
@@ -249,6 +251,8 @@ class ThreadRunState:
         self.last_animation_tick_at = None
         self.displayed_token_rate = None
         self.last_token_rate_display_update_at = None
+        self.token_rate_frozen = False
+        self.frozen_token_rate = None
         self.pending_finish_assistant_text = None
         self.pending_finish_after_drain = False
         self.engine_finished = False
@@ -507,9 +511,33 @@ class AnsiUvAgentApp:
             return None
         return run_state.token_ratio.token_rate(self._current_visible_unit_rate(run_state, now=now))
 
+    def _freeze_token_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> None:
+        run_state = run_state or self._run_state()
+        if run_state is None or run_state.token_rate_frozen:
+            return
+        now = monotonic() if now is None else now
+        frozen = run_state.displayed_token_rate
+        if frozen is None:
+            frozen = self._display_token_rate(run_state, now=now)
+        run_state.frozen_token_rate = frozen
+        run_state.token_rate_frozen = frozen is not None
+
+    def _resume_token_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> None:
+        run_state = run_state or self._run_state()
+        if run_state is None or not run_state.token_rate_frozen:
+            return
+        now = monotonic() if now is None else now
+        if run_state.frozen_token_rate is not None:
+            run_state.displayed_token_rate = run_state.frozen_token_rate
+            run_state.last_token_rate_display_update_at = now
+        run_state.token_rate_frozen = False
+        run_state.frozen_token_rate = None
+
     def _display_token_rate(self, run_state: ThreadRunState, *, now: float | None = None) -> float | None:
         """Return the row-1 token rate with display-only smoothing applied."""
 
+        if run_state.token_rate_frozen:
+            return run_state.frozen_token_rate
         now = monotonic() if now is None else now
         instant = self._current_token_rate(run_state, now=now)
         if instant is None or instant < TOKEN_RATE_DISPLAY_HIDE_BELOW:
@@ -605,6 +633,7 @@ class AnsiUvAgentApp:
             self.state.pending_turns.clear()
             self.state.turn_elapsed_s = None
             self.state.turn_token_rate = None
+            self.state.turn_token_rate_frozen = False
             return
         active = self._run_state_is_active(run_state)
         ui_busy = self._run_state_busy_for_ui(run_state)
@@ -625,6 +654,9 @@ class AnsiUvAgentApp:
         self._tool_cells = run_state.tool_cells
         now = monotonic()
         self.state.turn_token_rate = self._display_token_rate(run_state, now=now) if ui_busy else None
+        self.state.turn_token_rate_frozen = bool(
+            ui_busy and run_state.token_rate_frozen and self.state.turn_token_rate is not None
+        )
         if ui_busy and run_state.started_at is not None:
             self.state.turn_elapsed_s = now - run_state.started_at
         else:
@@ -2638,6 +2670,7 @@ class AnsiUvAgentApp:
         self.state.status_message = "running"
         self.state.last_error = None
         self.state.turn_token_rate = None
+        self.state.turn_token_rate_frozen = False
         self._reasoning_flushed_for_current_response = False
         self._assistant_cell = None
         self._reasoning_cell = None
@@ -2797,6 +2830,7 @@ class AnsiUvAgentApp:
             self._observe_tool_delta(event, run_state=run_state)
         elif event_type == "tool.started":
             self.state.status_message = self._text("running_python")
+            self._freeze_token_rate(run_state)
             self._finish_text_cells(force=True)
             call = event.get("call") if isinstance(event.get("call"), dict) else {}
             key = str(call.get("call_id") or event.get("tool_call_index") or len(self._tool_cells))
@@ -2928,6 +2962,7 @@ class AnsiUvAgentApp:
         run_state = run_state or self._run_state()
         if run_state is not None:
             now = monotonic()
+            self._resume_token_rate(run_state, now=now)
             run_state.rate_estimator.observe(text, now=now)
             if run_state.last_animation_tick_at is None:
                 run_state.last_animation_tick_at = now
@@ -3010,6 +3045,7 @@ class AnsiUvAgentApp:
             self.state.status_message = "ready"
             self.state.turn_elapsed_s = None
             self.state.turn_token_rate = None
+            self.state.turn_token_rate_frozen = False
             self._apply_window_title()
         if run_state.pending_turns:
             next_turn = run_state.pending_turns.pop(0)
@@ -3178,6 +3214,7 @@ class AnsiUvAgentApp:
             run_state.assistant_cell = None
 
     def _handle_model_response_event(self, event: dict[str, Any]) -> None:
+        run_state = self._run_state_for_event(event)
         reasoning_text = str(event.get("reasoning_text") or "")
         if reasoning_text:
             self._finish_reasoning_cell(reasoning_text)
@@ -3192,9 +3229,9 @@ class AnsiUvAgentApp:
                 visible_units=model_response_visible_units(output, reasoning_text=reasoning_text),
                 output_tokens=output_tokens,
             )
-            run_state = self._run_state_for_event(event)
             if run_state is not None:
                 run_state.token_ratio = ratio
+        self._freeze_token_rate(run_state)
         has_tool_call = any(isinstance(item, dict) and item.get("type") == "function_call" for item in output)
         if not has_tool_call:
             self._finish_assistant_cell()

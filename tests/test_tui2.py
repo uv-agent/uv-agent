@@ -374,6 +374,20 @@ def test_busy_state_renders_token_rate_after_elapsed() -> None:
     assert "12s · 18.4 tok/s" in plain
 
 
+def test_busy_state_renders_frozen_token_rate_muted() -> None:
+    state = Tui2State(
+        busy=True,
+        turn_elapsed_s=12.0,
+        turn_token_rate=18.4,
+        turn_token_rate_frozen=True,
+    )
+
+    rendered = render_status_lines(state, 80, 0)[0]
+
+    assert "12s · 18.4 tok/s" in strip_ansi(rendered)
+    assert sgr(DEFAULT_THEME.muted, "18.4 tok/s") in rendered
+
+
 def test_busy_state_uses_status_message_as_primary_label() -> None:
     state = Tui2State(busy=True, status_message="回复中", turn_elapsed_s=13.0)
 
@@ -1367,6 +1381,37 @@ def test_token_rate_display_smoothing_throttles_row1_updates(monkeypatch) -> Non
     assert displayed is not None
     assert math.isclose(displayed, expected)
     assert 10.0 < displayed < 50.0
+
+
+def test_token_rate_freezes_for_tool_execution_and_resumes_on_stream(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "T-test"
+    run_state = ThreadRunState(thread_id="T-test")
+    run_state.displayed_token_rate = 12.0
+    run_state.last_token_rate_display_update_at = 0.0
+
+    class RunningTask:
+        def done(self):
+            return False
+
+    run_state.task = RunningTask()  # type: ignore[assignment]
+    app._thread_runs["T-test"] = run_state
+
+    app._handle_event({"type": "tool.started", "thread_id": "T-test", "call": {"call_id": "call_1"}})
+
+    assert run_state.token_rate_frozen
+    assert run_state.frozen_token_rate == 12.0
+    assert app._display_token_rate(run_state, now=10.0) == 12.0
+
+    app._sync_attached_run_state(run_state)
+    assert app.state.turn_token_rate == 12.0
+    assert app.state.turn_token_rate_frozen
+
+    app._handle_event({"type": "assistant.delta", "thread_id": "T-test", "text": "next"})
+
+    assert not run_state.token_rate_frozen
+    app._sync_attached_run_state(run_state)
+    assert not app.state.turn_token_rate_frozen
 
 
 def test_provider_only_reasoning_still_flushes_on_model_response(monkeypatch) -> None:
