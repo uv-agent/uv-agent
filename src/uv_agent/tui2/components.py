@@ -278,6 +278,17 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
             lines.append(_indented(f"… more helpers +{len(helper_calls) - _TOOL_HELPER_MAX_LINES} calls", width, theme.muted))
     elif code:
         lines.append(_indented("(no uv_agent_runtime helpers)", width, theme.muted))
+    if running:
+        # Keep live tool cells at a *constant* height during their entire run.
+        # Header text + helpers list are both static (helpers are parsed from
+        # the call code once; the title text only changes the elapsed counter
+        # in place).  Skipping the stdout/stderr block here means the live
+        # frame never grows between repaints, which is the only height change
+        # that could push the frame's top row out of the viewport and leave a
+        # leaked ``── ⠿ run_python · running…`` header in scrollback.  The
+        # completed cell flushed below by ``_flush`` still includes the full
+        # stdout/stderr block, so users still see all output in scrollback.
+        return lines
     stdout = short_block(str(payload.get("stdout") or ""), max_lines=_TOOL_STDOUT_MAX_LINES, max_chars=1000)
     stderr = short_block(str(payload.get("stderr") or ""), max_lines=_TOOL_STDERR_MAX_LINES, max_chars=700)
     if stdout or stderr:
@@ -288,8 +299,6 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
                 continue
             for raw in block.splitlines():
                 lines.append(_indented(raw, width, style))
-    elif running:
-        lines.append(_indented("waiting for run_python output…", width, theme.muted))
     return lines
 
 

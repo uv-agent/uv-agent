@@ -224,6 +224,62 @@ def test_running_tool_header_keeps_right_edge_slack() -> None:
     assert visible_len(completed[0]) == 80
 
 
+def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
+    """Live tool cells must not grow as stdout/stderr arrive.
+
+    A growing live frame can push its top row out of the viewport on
+    terminals that don't honour DECAWM, leaving leaked
+    ``── ⠿ run_python · running…`` rows in scrollback.  Keeping the
+    running cell's rendered height constant (header + static helpers list)
+    eliminates that class of bug.  The completed cell still renders the
+    full stdout/stderr block when it's flushed into scrollback.
+    """
+
+    call = {
+        "name": "run_python",
+        "call_id": "x",
+        "arguments": '{"code":"from uv_agent_runtime import path_info\\npath_info(\\".\\")"}',
+    }
+    empty = render_tool_cell(TranscriptCell("tool", status="running", call=call), 80)
+    with_stdout = render_tool_cell(
+        TranscriptCell(
+            "tool",
+            status="running",
+            call=call,
+            payload={"stdout": "line1\nline2\nline3"},
+        ),
+        80,
+    )
+    with_both = render_tool_cell(
+        TranscriptCell(
+            "tool",
+            status="running",
+            call=call,
+            payload={"stdout": "a\nb\nc", "stderr": "warn1\nwarn2"},
+        ),
+        80,
+    )
+
+    assert len(empty) == len(with_stdout) == len(with_both)
+    for lines in (empty, with_stdout, with_both):
+        plain = "\n".join(strip_ansi(line) for line in lines)
+        assert "line1" not in plain and "warn1" not in plain
+        assert "waiting for run_python output" not in plain
+        assert "path_info" in plain  # helpers still shown for context
+
+    completed = render_tool_cell(
+        TranscriptCell(
+            "tool",
+            call=call,
+            payload={"returncode": 0, "stdout": "done-line", "stderr": "done-warn"},
+        ),
+        80,
+    )
+    completed_plain = "\n".join(strip_ansi(line) for line in completed)
+    assert "done-line" in completed_plain
+    assert "done-warn" in completed_plain
+
+
 # ---------------------------------------------------------------------------
 # Composer: rounded-corner box with inline hint when empty
 # ---------------------------------------------------------------------------
