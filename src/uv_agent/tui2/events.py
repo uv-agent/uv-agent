@@ -65,6 +65,10 @@ class TranscriptCell:
     finished_at: float | None = None
     # Cumulative characters streamed for breath animation phasing.
     chars_streamed: int = 0
+    # Fractional animation phase driven by a per-turn throughput estimator.  The
+    # legacy integer ``chars_streamed`` is still retained for older callers and
+    # finished scrollback metadata.
+    animation_phase: float | None = None
 
     @property
     def done(self) -> bool:
@@ -145,6 +149,7 @@ class Tui2State:
     goal_objective: str = ""
     image_token_numbers: set[int] = field(default_factory=set)
     turn_elapsed_s: float | None = None
+    turn_token_rate: float | None = None
     command_palette_open: bool = False
     command_palette_items: list[CommandSuggestion] = field(default_factory=list)
     command_palette_index: int = 0

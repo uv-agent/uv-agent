@@ -528,6 +528,59 @@ async def test_stream_responses_rejects_completed_without_output() -> None:
         ]
 
 
+@pytest.mark.asyncio
+async def test_stream_responses_emits_tool_call_deltas_for_speed_tracking() -> None:
+    sdk_client = FakeOpenAIClient(
+        response_events=[
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_1", "name": "run_python"},
+            },
+            {"type": "response.function_call_arguments.delta", "output_index": 0, "delta": '{"code":'},
+            {"type": "response.function_call_arguments.delta", "output_index": 0, "delta": '"print(1)"}'},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_1",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "run_python",
+                            "arguments": '{"code":"print(1)"}',
+                        }
+                    ],
+                },
+            },
+        ]
+    )
+    provider = ProviderConfig(name="p", base_url="https://api.example.com/v1")
+    model = ModelConfig(name="m", provider="p", model="remote", api="responses")
+
+    events = [
+        event
+        async for event in stream_responses_response(
+            provider=provider,
+            model=model,
+            input_items=[],
+            tools=[],
+            instructions=None,
+            previous_response_id=None,
+            client=sdk_client,
+        )
+    ]
+
+    tool_events = [event for event in events if event.type == "tool_call_delta"]
+    assert tool_events[0].tool_call is not None
+    assert tool_events[0].tool_call.name == "run_python"
+    assert [event.tool_call.arguments_delta for event in tool_events[1:3] if event.tool_call] == [
+        '{"code":',
+        '"print(1)"}',
+    ]
+    assert events[-1].type == "completed"
+
+
 def test_parse_chat_response_maps_tool_calls() -> None:
     response = parse_chat_response(
         {
@@ -1067,6 +1120,11 @@ async def test_stream_anthropic_tool_use_does_not_prefix_empty_start_input() -> 
         )
     ]
 
+    tool_events = [event for event in events if event.type == "tool_call_delta"]
+    assert tool_events[0].tool_call is not None
+    assert tool_events[0].tool_call.name == "run_python"
+    assert tool_events[1].tool_call is not None
+    assert tool_events[1].tool_call.arguments_delta == "{\"code\":\"print(1)\"}"
     completed = events[-1]
     assert completed.response is not None
     assert completed.response.output == [

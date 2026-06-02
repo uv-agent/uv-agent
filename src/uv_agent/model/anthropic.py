@@ -10,7 +10,7 @@ from typing import Any
 from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.errors import EmptyModelStreamError
 from uv_agent.model.sdk import model_param_sources, object_dump, sdk_base_url, sdk_extra_body, sdk_kwargs, sdk_param_keys
-from uv_agent.model.types import ModelResponse, ModelStreamEvent
+from uv_agent.model.types import ModelResponse, ModelStreamEvent, ToolCallDelta
 
 
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
@@ -353,6 +353,16 @@ async def stream_anthropic_response(
                 input_json_acc[index] = input_json_acc.get(index, "") + partial_json
                 if index in tool_acc:
                     tool_acc[index]["arguments"] += partial_json
+                    yield ModelStreamEvent(
+                        type="tool_call_delta",
+                        tool_call=ToolCallDelta(
+                            index=index,
+                            call_id=tool_acc[index].get("call_id"),
+                            name=tool_acc[index].get("name"),
+                            arguments=tool_acc[index].get("arguments", ""),
+                            arguments_delta=partial_json,
+                        ),
+                    )
             elif delta_type == "citations_delta":
                 citation = _anthropic_delta_citation(delta)
                 if citation:
@@ -371,6 +381,16 @@ async def stream_anthropic_response(
                     "arguments": input_json_acc.get(index, ""),
                     "_input": object_dump(getattr(block, "input", None)),
                 }
+                yield ModelStreamEvent(
+                    type="tool_call_delta",
+                    tool_call=ToolCallDelta(
+                        index=index,
+                        call_id=tool_acc[index].get("call_id"),
+                        name=tool_acc[index].get("name"),
+                        arguments=tool_acc[index].get("arguments", ""),
+                        arguments_delta="",
+                    ),
+                )
         elif event_type == "message_delta":
             usage = object_dump(getattr(event, "usage", None)) or usage
         elif event_type == "message_stop":

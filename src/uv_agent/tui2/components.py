@@ -37,19 +37,29 @@ def _resolve_language(value: UserLanguage | str | None) -> UserLanguage:
 
 # Breath animation calibration: target 12 phase changes per second while text
 # is streaming at 100 characters/second.  Working backwards gives one phase
-# change every 100/12 ≈ 8.33 characters of streamed content.  When the cell
-# is idle (no new chars) the animation naturally pauses, which is desirable.
+# change every 100/12 ≈ 8.33 characters of streamed content.
 _BREATH_CHARS_PER_PHASE = max(1, round(100 / 12))
 
 
 def _breath_frame(cell: TranscriptCell) -> int:
     """Return the breath animation phase index for *cell*.
 
-    Driven by the cell's cumulative streamed character count rather than the
-    wall-clock spinner so the animation speed reflects actual model throughput.
+    Live cells normally carry a fractional phase integrated from the current
+    turn's sliding-window throughput estimate.  ``chars_streamed`` remains as a
+    compatibility fallback for tests and restored scrollback cells.
     """
 
+    if cell.animation_phase is not None:
+        return int(cell.animation_phase)
     return cell.chars_streamed // _BREATH_CHARS_PER_PHASE
+
+
+def _format_token_rate(value: float) -> str:
+    if value >= 100:
+        return f"{value:.0f} tok/s"
+    if value >= 10:
+        return f"{value:.1f} tok/s"
+    return f"{value:.2f} tok/s"
 
 
 # ---------------------------------------------------------------------------
@@ -356,8 +366,10 @@ def render_status_lines(
     if state.busy:
         frame = theme.spinner_frames[spinner_frame % len(theme.spinner_frames)]
         elapsed = format_elapsed(state.turn_elapsed_s) if state.turn_elapsed_s is not None else ""
+        token_rate = _format_token_rate(state.turn_token_rate) if state.turn_token_rate is not None else ""
         status = state.status_message if state.status_message not in {"", "ready", "running"} else busy_fallback
-        text = f"{frame} {status}" + (f" · {elapsed}" if elapsed else "")
+        suffix = "".join(f" · {part}" for part in (elapsed, token_rate) if part)
+        text = f"{frame} {status}" + suffix
         rendered_text = sgr(theme.accent, text)
         objective = _goal_objective_status_text(state.goal_objective) if state.goal_enabled else ""
         if objective:

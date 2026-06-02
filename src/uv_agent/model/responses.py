@@ -9,7 +9,7 @@ from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.errors import EmptyModelStreamError
 from uv_agent.model.content import extract_responses_text
 from uv_agent.model.sdk import model_param_sources, object_dump, sdk_kwargs, sdk_param_keys
-from uv_agent.model.types import ModelResponse, ModelStreamEvent
+from uv_agent.model.types import ModelResponse, ModelStreamEvent, ToolCallDelta
 
 RESPONSES_PATH = "/responses"
 EMPTY_RESPONSES_STREAM_MESSAGE = (
@@ -145,6 +145,7 @@ async def stream_responses_response(
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     output: list[dict[str, Any]] = []
+    tool_acc: dict[int, dict[str, Any]] = {}
     async for event in stream:
         data = object_dump(event)
         event_type = data.get("type", "")
@@ -165,6 +166,73 @@ async def stream_responses_response(
             item = data.get("item")
             if isinstance(item, dict):
                 output.append(item)
+                if item.get("type") == "function_call":
+                    index = _response_output_index(data, len(tool_acc))
+                    existing = tool_acc.setdefault(index, {"arguments": ""})
+                    previous_arguments = str(existing.get("arguments") or "")
+                    if item.get("call_id"):
+                        existing["call_id"] = item.get("call_id")
+                    if item.get("name"):
+                        existing["name"] = item.get("name")
+                    if item.get("arguments"):
+                        existing["arguments"] = item.get("arguments")
+                    final_arguments = str(existing.get("arguments") or "")
+                    if not previous_arguments or final_arguments.startswith(previous_arguments):
+                        arguments_delta = final_arguments[len(previous_arguments):]
+                    else:
+                        arguments_delta = final_arguments
+                    if existing.get("name") or arguments_delta:
+                        yield ModelStreamEvent(
+                            type="tool_call_delta",
+                            tool_call=ToolCallDelta(
+                                index=index,
+                                call_id=existing.get("call_id"),
+                                name=existing.get("name"),
+                                arguments=final_arguments,
+                                arguments_delta=arguments_delta,
+                            ),
+                        )
+        elif event_type in {"response.output_item.added", "response.output_item.created"}:
+            item = data.get("item")
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                index = _response_output_index(data, len(tool_acc))
+                existing = tool_acc.setdefault(index, {"arguments": ""})
+                if item.get("call_id"):
+                    existing["call_id"] = item.get("call_id")
+                if item.get("name"):
+                    existing["name"] = item.get("name")
+                yield ModelStreamEvent(
+                    type="tool_call_delta",
+                    tool_call=ToolCallDelta(
+                        index=index,
+                        call_id=existing.get("call_id"),
+                        name=existing.get("name"),
+                        arguments=existing.get("arguments", ""),
+                        arguments_delta="",
+                    ),
+                )
+        elif event_type == "response.function_call_arguments.delta":
+            index = _response_output_index(data, len(tool_acc))
+            existing = tool_acc.setdefault(index, {"arguments": ""})
+            delta = str(data.get("delta") or "")
+            if delta:
+                existing["arguments"] = str(existing.get("arguments") or "") + delta
+            yield ModelStreamEvent(
+                type="tool_call_delta",
+                tool_call=ToolCallDelta(
+                    index=index,
+                    call_id=existing.get("call_id"),
+                    name=existing.get("name"),
+                    arguments=existing.get("arguments", ""),
+                    arguments_delta=delta,
+                ),
+            )
+        elif event_type == "response.function_call_arguments.done":
+            index = _response_output_index(data, len(tool_acc))
+            existing = tool_acc.setdefault(index, {"arguments": ""})
+            arguments = data.get("arguments")
+            if isinstance(arguments, str):
+                existing["arguments"] = arguments
         elif event_type == "response.completed":
             response_data = data.get("response") or {}
             response = parse_responses_response(response_data)
@@ -194,3 +262,13 @@ async def stream_responses_response(
                 )
             yield ModelStreamEvent(type="completed", response=response)
             return
+
+
+def _response_output_index(data: dict[str, Any], fallback: int = 0) -> int:
+    for key in ("output_index", "item_index", "index"):
+        value = data.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return fallback

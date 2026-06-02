@@ -22,7 +22,7 @@ from uv_agent.tui2.components import (
 )
 import uv_agent.tui2.app as tui2_app
 
-from uv_agent.tui2.app import TOP_LEVEL_COMMANDS, load_composer_history, save_composer_history
+from uv_agent.tui2.app import TOP_LEVEL_COMMANDS, ThreadRunState, load_composer_history, save_composer_history
 from uv_agent.tui2.events import AgentViewRow, CommandSuggestion, TranscriptCell, Tui2State
 from uv_agent.tui2.renderer import Renderer
 from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal, TerminalKeyReader
@@ -363,6 +363,14 @@ def test_busy_state_renders_activity_line() -> None:
     assert len(lines) == 1
     assert "Working" in strip_ansi(lines[0])
     assert "0:12" in strip_ansi(lines[0]) or "12" in strip_ansi(lines[0])
+
+
+def test_busy_state_renders_token_rate_after_elapsed() -> None:
+    state = Tui2State(busy=True, turn_elapsed_s=12.0, turn_token_rate=18.4)
+
+    plain = strip_ansi(render_status_lines(state, 80, 0)[0])
+
+    assert "12s · 18.4 tok/s" in plain
 
 
 def test_busy_state_uses_status_message_as_primary_label() -> None:
@@ -751,6 +759,15 @@ class _DummyEngine:
                 and (event_types is None or event.get("type") in event_types)
             ]
             return matches[:limit], len(matches) > limit
+
+        @classmethod
+        def read_events(cls, thread_id, *, event_types=None):
+            return [
+                event
+                for event in cls.events
+                if event.get("thread_id") == thread_id
+                and (event_types is None or event.get("type") in event_types)
+            ]
 
         @classmethod
         def thread_digest(cls, thread_id):
@@ -1280,6 +1297,53 @@ def test_streamed_reasoning_is_not_flushed_again_on_model_response(monkeypatch) 
 
     reasoning_cells = [cell for cell in app.state.flushed if cell.kind == "reasoning"]
     assert [cell.text for cell in reasoning_cells] == ["plan"]
+
+
+def test_assistant_delta_queues_smooth_display(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "T-test"
+    app._thread_runs["T-test"] = ThreadRunState(thread_id="T-test")
+
+    app._handle_event({"type": "assistant.delta", "text": "chunk"})
+
+    assert app._assistant_cell is not None
+    assert app._assistant_cell.text == ""
+    assert app._thread_runs["T-test"].assistant_display_queue == "chunk"
+
+
+def test_streaming_display_tick_drains_queued_assistant_text(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "T-test"
+    run_state = ThreadRunState(thread_id="T-test")
+    app._thread_runs["T-test"] = run_state
+    app._handle_event({"type": "assistant.delta", "text": "chunk"})
+    run_state.last_animation_tick_at = tui2_app.monotonic() - 1.0
+
+    app._advance_streaming_display()
+
+    assert app._assistant_cell is not None
+    assert app._assistant_cell.text == "chunk"
+    assert run_state.assistant_display_queue == ""
+
+
+def test_model_response_usage_updates_thread_token_rate(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "T-test"
+    run_state = ThreadRunState(thread_id="T-test")
+    app._thread_runs["T-test"] = run_state
+    now = tui2_app.monotonic()
+    run_state.rate_estimator.observe("ab", now=now - 1.0)
+    run_state.rate_estimator.observe("cd", now=now)
+    response = SimpleNamespace(
+        output=[{"type": "message", "content": [{"type": "output_text", "text": "abcd"}]}],
+        usage={"output_tokens": 2},
+    )
+
+    app._handle_event({"type": "model.response", "thread_id": "T-test", "response": response})
+
+    assert run_state.token_ratio.chars == 4
+    assert run_state.token_ratio.output_tokens == 2
+    assert app._current_token_rate(run_state) is not None
 
 
 def test_provider_only_reasoning_still_flushes_on_model_response(monkeypatch) -> None:
