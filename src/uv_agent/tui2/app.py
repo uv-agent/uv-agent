@@ -6,6 +6,7 @@ import re
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
+from math import exp
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -183,6 +184,9 @@ CTRL_C_CONFIRMATION_S = 3.0
 UNBRACKETED_PASTE_ENTER_S = 0.08
 COMPACTION_SUMMARY_PREVIEW_LINES = 4
 COMPACTION_SUMMARY_PREVIEW_CHARS = 800
+TOKEN_RATE_DISPLAY_UPDATE_INTERVAL_S = 0.5
+TOKEN_RATE_DISPLAY_TAU_S = 3.0
+TOKEN_RATE_DISPLAY_HIDE_BELOW = 0.05
 _AGENT_VIEW_STATUS_RANK = {status: index for index, status in enumerate(AGENT_VIEW_STATUS_ORDER)}
 _RUN_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
 TUI2_FLUSHED_CELLS_MAX = 200
@@ -223,6 +227,8 @@ class ThreadRunState:
     assistant_display_queue: str = ""
     assistant_display_credit: float = 0.0
     last_animation_tick_at: float | None = None
+    displayed_token_rate: float | None = None
+    last_token_rate_display_update_at: float | None = None
     pending_finish_assistant_text: str | None = None
     pending_finish_after_drain: bool = False
     engine_finished: bool = False
@@ -241,6 +247,8 @@ class ThreadRunState:
         self.assistant_display_queue = ""
         self.assistant_display_credit = 0.0
         self.last_animation_tick_at = None
+        self.displayed_token_rate = None
+        self.last_token_rate_display_update_at = None
         self.pending_finish_assistant_text = None
         self.pending_finish_after_drain = False
         self.engine_finished = False
@@ -476,17 +484,51 @@ class AnsiUvAgentApp:
             )
         return ratio
 
-    def _current_char_rate(self, run_state: ThreadRunState | None = None) -> float | None:
+    def _current_char_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> float | None:
         run_state = run_state or self._run_state()
         if run_state is None:
             return None
-        return run_state.rate_estimator.current_cps(now=monotonic())
+        return run_state.rate_estimator.current_cps(now=monotonic() if now is None else now)
 
-    def _current_token_rate(self, run_state: ThreadRunState | None = None) -> float | None:
+    def _current_token_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> float | None:
         run_state = run_state or self._run_state()
         if run_state is None:
             return None
-        return run_state.token_ratio.token_rate(self._current_char_rate(run_state))
+        return run_state.token_ratio.token_rate(self._current_char_rate(run_state, now=now))
+
+    def _display_token_rate(self, run_state: ThreadRunState, *, now: float | None = None) -> float | None:
+        """Return the row-1 token rate with display-only smoothing applied."""
+
+        now = monotonic() if now is None else now
+        instant = self._current_token_rate(run_state, now=now)
+        if instant is None or instant < TOKEN_RATE_DISPLAY_HIDE_BELOW:
+            # Clearing on the display cadence avoids a one-frame flicker without
+            # keeping a stale speed visible through long model-output pauses.
+            last_update = run_state.last_token_rate_display_update_at
+            if (
+                run_state.displayed_token_rate is not None
+                and last_update is not None
+                and now - last_update < TOKEN_RATE_DISPLAY_UPDATE_INTERVAL_S
+            ):
+                return run_state.displayed_token_rate
+            run_state.displayed_token_rate = None
+            run_state.last_token_rate_display_update_at = None
+            return None
+
+        previous = run_state.displayed_token_rate
+        last_update = run_state.last_token_rate_display_update_at
+        if previous is None or last_update is None:
+            run_state.displayed_token_rate = instant
+            run_state.last_token_rate_display_update_at = now
+            return instant
+        dt = max(0.0, now - last_update)
+        if dt < TOKEN_RATE_DISPLAY_UPDATE_INTERVAL_S:
+            return previous
+        alpha = 1.0 - exp(-dt / TOKEN_RATE_DISPLAY_TAU_S)
+        displayed = previous + alpha * (instant - previous)
+        run_state.displayed_token_rate = displayed
+        run_state.last_token_rate_display_update_at = now
+        return displayed if displayed >= TOKEN_RATE_DISPLAY_HIDE_BELOW else None
 
     def _interruptible_run_state(self) -> ThreadRunState | None:
         """Return the attached run only when Ctrl+C should interrupt it.
@@ -570,9 +612,10 @@ class AnsiUvAgentApp:
         self._reasoning_cell = run_state.reasoning_cell
         self._reasoning_flushed_for_current_response = run_state.reasoning_flushed_for_current_response
         self._tool_cells = run_state.tool_cells
-        self.state.turn_token_rate = self._current_token_rate(run_state) if ui_busy else None
+        now = monotonic()
+        self.state.turn_token_rate = self._display_token_rate(run_state, now=now) if ui_busy else None
         if ui_busy and run_state.started_at is not None:
-            self.state.turn_elapsed_s = monotonic() - run_state.started_at
+            self.state.turn_elapsed_s = now - run_state.started_at
         else:
             self.state.turn_elapsed_s = None
 

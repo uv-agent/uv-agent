@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import io
+import math
 import sys
 import threading
 from pathlib import Path
@@ -1344,6 +1345,28 @@ def test_model_response_usage_updates_thread_token_rate(monkeypatch) -> None:
     assert run_state.token_ratio.chars == 4
     assert run_state.token_ratio.output_tokens == 2
     assert app._current_token_rate(run_state) is not None
+
+
+def test_token_rate_display_smoothing_throttles_row1_updates(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    run_state = ThreadRunState(thread_id="T-test")
+    instant_token_rate = 10.0
+
+    def current_token_rate(_run_state: ThreadRunState, *, now: float | None = None) -> float:
+        return instant_token_rate
+
+    monkeypatch.setattr(app, "_current_token_rate", current_token_rate)
+
+    assert app._display_token_rate(run_state, now=0.0) == 10.0
+
+    instant_token_rate = 50.0
+    assert app._display_token_rate(run_state, now=0.2) == 10.0
+
+    displayed = app._display_token_rate(run_state, now=0.5)
+    expected = 10.0 + (50.0 - 10.0) * (1.0 - math.exp(-0.5 / tui2_app.TOKEN_RATE_DISPLAY_TAU_S))
+    assert displayed is not None
+    assert math.isclose(displayed, expected)
+    assert 10.0 < displayed < 50.0
 
 
 def test_provider_only_reasoning_still_flushes_on_model_response(monkeypatch) -> None:
