@@ -1470,6 +1470,36 @@ def test_token_rate_freezes_for_tool_execution_and_resumes_on_stream(monkeypatch
     assert not app.state.turn_token_rate_frozen
 
 
+def test_final_model_response_holds_token_rate_while_text_drains(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "T-test"
+    run_state = ThreadRunState(thread_id="T-test")
+    run_state.displayed_token_rate = 12.0
+    run_state.last_token_rate_display_update_at = 0.0
+    app._thread_runs["T-test"] = run_state
+    response = SimpleNamespace(
+        output=[{"type": "message", "content": [{"type": "output_text", "text": "chunk"}]}],
+        usage={"output_tokens": 2},
+    )
+
+    app._handle_event({"type": "assistant.delta", "thread_id": "T-test", "text": "chunk"})
+    app._handle_event({"type": "model.response", "thread_id": "T-test", "response": response})
+
+    assert run_state.token_rate_held
+    assert run_state.held_token_rate == 12.0
+    assert not run_state.token_rate_frozen
+    assert run_state.display_pending
+
+    def fail_current_token_rate(_run_state: ThreadRunState, *, now: float | None = None) -> float:
+        raise AssertionError("held token rate should not be recalculated")
+
+    monkeypatch.setattr(app, "_current_token_rate", fail_current_token_rate)
+    assert app._display_token_rate(run_state, now=10.0) == 12.0
+    app._sync_attached_run_state(run_state)
+    assert app.state.turn_token_rate == 12.0
+    assert not app.state.turn_token_rate_frozen
+
+
 def test_provider_only_reasoning_still_flushes_on_model_response(monkeypatch) -> None:
     app = _make_app(monkeypatch)
 
@@ -1563,6 +1593,29 @@ def test_turn_completed_plays_terminal_buzzer(monkeypatch) -> None:
     app._handle_event({"type": "turn.completed"})
 
     assert calls == ["buzzer"]
+
+
+def test_turn_completed_delays_buzzer_until_streaming_display_drains(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "T-test"
+    run_state = ThreadRunState(thread_id="T-test")
+    app._thread_runs["T-test"] = run_state
+    calls: list[str] = []
+    monkeypatch.setattr("uv_agent.tui2.app.play_terminal_buzzer", lambda: calls.append("buzzer") or True)
+
+    app._handle_event({"type": "assistant.delta", "thread_id": "T-test", "text": "x"})
+    app._handle_event({"type": "turn.completed", "thread_id": "T-test"})
+
+    assert calls == []
+    assert run_state.completion_notification_pending
+
+    run_state.engine_finished = True
+    run_state.assistant_display_credit = 1.0
+    run_state.last_animation_tick_at = tui2_app.monotonic() - 1.0
+    app._advance_streaming_display()
+
+    assert calls == ["buzzer"]
+    assert not run_state.completion_notification_pending
 
 
 def test_turn_completed_respects_buzzer_config(monkeypatch) -> None:

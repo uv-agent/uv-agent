@@ -231,9 +231,12 @@ class ThreadRunState:
     last_token_rate_display_update_at: float | None = None
     token_rate_frozen: bool = False
     frozen_token_rate: float | None = None
+    token_rate_held: bool = False
+    held_token_rate: float | None = None
     pending_finish_assistant_text: str | None = None
     pending_finish_after_drain: bool = False
     engine_finished: bool = False
+    completion_notification_pending: bool = False
 
     @property
     def running(self) -> bool:
@@ -253,9 +256,12 @@ class ThreadRunState:
         self.last_token_rate_display_update_at = None
         self.token_rate_frozen = False
         self.frozen_token_rate = None
+        self.token_rate_held = False
+        self.held_token_rate = None
         self.pending_finish_assistant_text = None
         self.pending_finish_after_drain = False
         self.engine_finished = False
+        self.completion_notification_pending = False
         # Token ratio is thread-level and intentionally survives turns.
 
 
@@ -515,6 +521,8 @@ class AnsiUvAgentApp:
         run_state = run_state or self._run_state()
         if run_state is None or run_state.token_rate_frozen:
             return
+        run_state.token_rate_held = False
+        run_state.held_token_rate = None
         now = monotonic() if now is None else now
         frozen = run_state.displayed_token_rate
         if frozen is None:
@@ -522,20 +530,39 @@ class AnsiUvAgentApp:
         run_state.frozen_token_rate = frozen
         run_state.token_rate_frozen = frozen is not None
 
+    def _hold_token_rate(self, run_state: ThreadRunState | None = None) -> None:
+        """Keep the last shown token rate without marking it as frozen."""
+
+        run_state = run_state or self._run_state()
+        if run_state is None or run_state.token_rate_held:
+            return
+        held = run_state.displayed_token_rate
+        run_state.held_token_rate = held
+        run_state.token_rate_held = True
+        run_state.token_rate_frozen = False
+        run_state.frozen_token_rate = None
+
     def _resume_token_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> None:
         run_state = run_state or self._run_state()
-        if run_state is None or not run_state.token_rate_frozen:
+        if run_state is None or not (run_state.token_rate_frozen or run_state.token_rate_held):
             return
         now = monotonic() if now is None else now
-        if run_state.frozen_token_rate is not None:
-            run_state.displayed_token_rate = run_state.frozen_token_rate
+        resume_rate = (
+            run_state.frozen_token_rate if run_state.token_rate_frozen else run_state.held_token_rate
+        )
+        if resume_rate is not None:
+            run_state.displayed_token_rate = resume_rate
             run_state.last_token_rate_display_update_at = now
         run_state.token_rate_frozen = False
         run_state.frozen_token_rate = None
+        run_state.token_rate_held = False
+        run_state.held_token_rate = None
 
     def _display_token_rate(self, run_state: ThreadRunState, *, now: float | None = None) -> float | None:
         """Return the row-1 token rate with display-only smoothing applied."""
 
+        if run_state.token_rate_held:
+            return run_state.held_token_rate
         if run_state.token_rate_frozen:
             return run_state.frozen_token_rate
         now = monotonic() if now is None else now
@@ -2706,6 +2733,7 @@ class AnsiUvAgentApp:
             run_state.engine_finished = False
             run_state.assistant_display_queue = ""
             run_state.pending_finish_after_drain = False
+            run_state.completion_notification_pending = False
             if self._is_attached_thread(thread_id):
                 self.state.last_error = run_state.last_error
                 self._flush(TranscriptCell("error", text=run_state.last_error))
@@ -2783,12 +2811,14 @@ class AnsiUvAgentApp:
                 run_state.assistant_display_queue = ""
                 run_state.pending_finish_after_drain = False
                 run_state.engine_finished = False
+                run_state.completion_notification_pending = False
             elif event_type == "turn.interrupted":
                 run_state.terminal_status = "interrupted"
                 run_state.status_message = self._text("interrupted")
                 run_state.assistant_display_queue = ""
                 run_state.pending_finish_after_drain = False
                 run_state.engine_finished = False
+                run_state.completion_notification_pending = False
             elif event_type == "turn.completed":
                 run_state.terminal_status = "completed"
                 run_state.status_message = "ready"
@@ -2863,7 +2893,10 @@ class AnsiUvAgentApp:
             self._flush(TranscriptCell("event", text="turn interrupted"))
         elif event_type == "turn.completed":
             self._finish_live_cells()
-            self._notify_turn_completed()
+            if run_state is not None and run_state.display_pending:
+                run_state.completion_notification_pending = True
+            else:
+                self._notify_turn_completed()
             self._refresh_window_title()
 
     def _handle_background_event(self, run_state: ThreadRunState, event: dict[str, Any]) -> None:
@@ -2876,11 +2909,13 @@ class AnsiUvAgentApp:
             run_state.assistant_display_queue = ""
             run_state.pending_finish_after_drain = False
             run_state.engine_finished = False
+            run_state.completion_notification_pending = False
         elif event_type == "turn.interrupted":
             run_state.terminal_status = "interrupted"
             run_state.assistant_display_queue = ""
             run_state.pending_finish_after_drain = False
             run_state.engine_finished = False
+            run_state.completion_notification_pending = False
         elif event_type == "turn.completed":
             run_state.terminal_status = "completed"
             self._notify_turn_completed()
@@ -3037,6 +3072,8 @@ class AnsiUvAgentApp:
     def _complete_finished_run_display(self, run_state: ThreadRunState) -> None:
         """Finish a turn whose engine task ended while text was still draining."""
 
+        should_notify = run_state.completion_notification_pending
+        run_state.completion_notification_pending = False
         run_state.engine_finished = False
         run_state.started_at = None
         run_state.status_message = "ready"
@@ -3047,6 +3084,8 @@ class AnsiUvAgentApp:
             self.state.turn_token_rate = None
             self.state.turn_token_rate_frozen = False
             self._apply_window_title()
+        if should_notify:
+            self._notify_turn_completed()
         if run_state.pending_turns:
             next_turn = run_state.pending_turns.pop(0)
             asyncio.create_task(
@@ -3231,9 +3270,14 @@ class AnsiUvAgentApp:
             )
             if run_state is not None:
                 run_state.token_ratio = ratio
-        self._freeze_token_rate(run_state)
         has_tool_call = any(isinstance(item, dict) and item.get("type") == "function_call" for item in output)
-        if not has_tool_call:
+        if has_tool_call:
+            self._freeze_token_rate(run_state)
+        else:
+            if run_state is not None and run_state.display_pending:
+                self._hold_token_rate(run_state)
+            else:
+                self._freeze_token_rate(run_state)
             self._finish_assistant_cell()
 
     def _finish_text_cells(self, *, force: bool = False) -> None:
