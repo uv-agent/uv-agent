@@ -2693,6 +2693,104 @@ def test_windows_terminal_coalesces_unbracketed_paste(monkeypatch) -> None:
     assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
 
 
+def test_windows_terminal_translates_oem_102_to_angle_bracket(monkeypatch) -> None:
+    """The OEM_102 scan code should reach the composer as a real character.
+
+    On ISO/European 102-key keyboards, ``<`` arrives as an extended-key
+    sequence (``\xe0`` + scan code 0x56).  Without the layout-aware
+    translator the wrapped ``"<V>"`` token would be silently dropped by
+    the composer.
+    """
+    terminal = Terminal()
+    terminal._windows = True
+    _install_fake_msvcrt(monkeypatch, "\xe0V")
+    monkeypatch.setattr(
+        Terminal,
+        "_translate_extended_scan_code",
+        lambda self, code: "<" if code == "V" else None,
+    )
+
+    assert terminal.read_key() == "<"
+
+
+def test_windows_terminal_falls_back_to_token_when_translator_returns_none(monkeypatch) -> None:
+    """Navigation-like extended keys keep the ``<...>`` token contract.
+
+    PageUp still arrives as ``"<I>"`` so the higher-level key dispatcher
+    can match it; only character-producing extended keys get rewritten.
+    """
+    terminal = Terminal()
+    terminal._windows = True
+    _install_fake_msvcrt(monkeypatch, "\xe0I")
+    monkeypatch.setattr(
+        Terminal,
+        "_translate_extended_scan_code",
+        lambda self, code: None,
+    )
+
+    assert terminal.read_key() == "<I>"
+
+
+def test_translate_extended_scan_code_uses_win32_translation(monkeypatch) -> None:
+    """The translator must consult MapVirtualKeyW + ToUnicode + modifier state."""
+    import ctypes
+
+    class FakeUser32:
+        def __init__(self) -> None:
+            self.map_args: list[tuple[int, int]] = []
+            self.tounicode_args: list[tuple[int, int, int]] = []
+            self.async_calls: list[int] = []
+
+        def MapVirtualKeyW(self, scan: int, mode: int) -> int:  # noqa: ARG002
+            self.map_args.append((scan, mode))
+            return 0xE2  # VK_OEM_102
+
+        def GetAsyncKeyState(self, vk: int) -> int:
+            self.async_calls.append(vk)
+            return 0x8000 if vk in (0x10, 0xA0) else 0  # shift pressed
+
+        def ToUnicode(self, vk: int, scan: int, state, buf, bufsize: int, flags: int):  # noqa: ARG002
+            self.tounicode_args.append((vk, scan, bufsize))
+            buf[0] = ord("<")
+            return 1
+
+    fake = FakeUser32()
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=fake))
+
+    terminal = Terminal()
+    assert terminal._translate_extended_scan_code("V") == "<"
+    assert (0x56, 3) in fake.map_args
+    assert fake.async_calls  # modifier state was queried
+    assert fake.tounicode_args and fake.tounicode_args[0][2] == 8
+
+
+def test_translate_extended_scan_code_returns_none_for_unmappable_keys() -> None:
+    """Empty input, non-byte scan codes, and unmapped scan codes return None."""
+    terminal = Terminal()
+
+    assert terminal._translate_extended_scan_code("") is None
+    assert terminal._translate_extended_scan_code("\u0100") is None  # > 0xFF
+
+    import ctypes
+
+    class StubUser32:
+        def MapVirtualKeyW(self, scan: int, mode: int) -> int:  # noqa: ARG002
+            return 0  # nothing mapped
+
+        def GetAsyncKeyState(self, vk: int) -> int:  # noqa: ARG002
+            return 0
+
+        def ToUnicode(self, *args, **kwargs):  # noqa: ARG002
+            return 0  # no character
+
+    original_windll = ctypes.windll
+    ctypes.windll = SimpleNamespace(user32=StubUser32())  # type: ignore[attr-defined]
+    try:
+        assert terminal._translate_extended_scan_code("V") is None
+    finally:
+        ctypes.windll = original_windll  # type: ignore[attr-defined]
+
+
 def test_unbracketed_paste_fallback_does_not_swallow_stringio_input() -> None:
     terminal = Terminal(stdin=io.StringIO("ab"))
     terminal._windows = False

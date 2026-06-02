@@ -72,6 +72,16 @@ class Terminal(AbstractContextManager["Terminal"]):
                     return "<UP>"
                 if code == "P":
                     return "<DOWN>"
+                # Some layouts (notably ISO/European 102-key keyboards)
+                # deliver the OEM_102 angle bracket key as an extended-key
+                # sequence, so "<" arrives as ``\xe0`` + scan code 0x56.
+                # Without this translation the wrapped "<V>" token would
+                # be dropped by the composer's "<..." guard.  Ask the
+                # current keyboard layout to turn the scan code back
+                # into the actual character and use it when available.
+                character = self._translate_extended_scan_code(code)
+                if character is not None:
+                    return character
                 return "<" + code + ">"
         if ch != "\x1b":
             return self._coalesce_unbracketed_paste(ch)
@@ -82,6 +92,74 @@ class Terminal(AbstractContextManager["Terminal"]):
         if second != "[":
             return "\x1b"
         return self._read_csi_key()
+
+    def _translate_extended_scan_code(self, scan_code: str) -> str | None:
+        """Map a Windows extended-key scan code to its current character.
+
+        Some layouts (notably ISO/European 102-key keyboards) deliver the
+        OEM_102 angle bracket key as an extended-key sequence, so "<"
+        arrives as ``\xe0`` followed by scan code 0x56.  Without this
+        translation the wrapped "<V>" token would be dropped by the
+        composer's "<..." guard.  Ask the current keyboard layout to
+        turn the scan code back into the actual character and return it
+        when one is available.
+
+        Returns ``None`` for non-character keys (function keys, arrow
+        keys, etc.) and whenever the underlying Win32 call is not
+        available, so the caller can fall back to the "<...>" token.
+        """
+        if not scan_code:
+            return None
+        scan_code_value = ord(scan_code[0])
+        # Console input scan codes are always one byte.  Anything above
+        # that is not a physical-key signal we know how to translate.
+        if scan_code_value > 0xFF:
+            return None
+        try:
+            import ctypes
+        except ImportError:
+            return None
+        try:
+            user32 = ctypes.windll.user32
+        except (AttributeError, OSError):
+            return None
+        try:
+            # MAPVK_VSC_TO_VK_EX: scan code -> virtual key code,
+            # distinguishing left/right variants of Shift/Ctrl/Alt.
+            vk = user32.MapVirtualKeyW(scan_code_value, 3)
+        except Exception:
+            return None
+        if not vk:
+            return None
+        try:
+            state = (ctypes.c_uint8 * 256)()
+            # GetAsyncKeyState reflects the foreground window's modifier
+            # state even when the key reader runs on a background thread,
+            # so "<" and ">" come back with the right Shift level.
+            for modifier in (
+                0x10,  # VK_SHIFT
+                0x11,  # VK_CONTROL
+                0x12,  # VK_MENU
+                0x14,  # VK_CAPITAL
+                0xA0,  # VK_LSHIFT
+                0xA1,  # VK_RSHIFT
+                0xA2,  # VK_LCONTROL
+                0xA3,  # VK_RCONTROL
+                0xA4,  # VK_LMENU
+                0xA5,  # VK_RMENU
+            ):
+                if user32.GetAsyncKeyState(modifier) & 0x8000:
+                    state[modifier] = 0x80
+            buf = (ctypes.c_uint16 * 8)()
+            result = user32.ToUnicode(vk, scan_code_value, state, buf, 8, 0)
+        except Exception:
+            return None
+        if result <= 0:
+            return None
+        try:
+            return ctypes.wstring_at(buf, result)
+        except Exception:
+            return None
 
     def _read_char(self) -> str:
         if self._windows:
