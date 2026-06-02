@@ -35,10 +35,11 @@ class Capture:
 
     name: str
     path: str
+    rel_path: str
     language: str
-    start_row: int
+    start_line: int
     start_col: int
-    end_row: int
+    end_line: int
     end_col: int
     text: str
 
@@ -50,9 +51,10 @@ class Symbol:
     kind: str
     name: str
     path: str
+    rel_path: str
     language: str
-    start_row: int
-    end_row: int
+    start_line: int
+    end_line: int
 
 
 # Pre-baked symbol queries. Each capture name maps directly to ``Symbol.kind``.
@@ -283,7 +285,7 @@ def _candidate_files(
 ) -> list[tuple[str, str]]:
     """Return ``[(rel_path, language), ...]`` for files under root."""
     effective_file_types = file_types or _rg_file_types_for_languages(languages)
-    rels = codesearch.find_files(
+    paths = codesearch.find_files(
         root,
         globs=globs,
         file_types=effective_file_types,
@@ -291,8 +293,14 @@ def _candidate_files(
         no_ignore=no_ignore,
     )
     candidates: list[tuple[str, str]] = []
-    for rel in rels:
-        lang = _detect_language(rel)
+    root_path = root.parent if root.is_file() else root
+    for path in paths:
+        abs_path = Path(path).resolve()
+        try:
+            rel = str(abs_path.relative_to(root_path))
+        except ValueError:
+            rel = abs_path.name
+        lang = _detect_language(abs_path)
         if lang is None:
             continue
         if languages and lang not in languages:
@@ -437,18 +445,19 @@ def query_code(
             out.append(
                 Capture(
                     name=cap["name"],
-                    path=rel,
+                    path=str((root_path / rel).resolve()),
+                    rel_path=rel,
                     language=lang,
-                    start_row=cap["start_row"],
+                    start_line=cap["start_row"] + 1,
                     start_col=cap["start_col"],
-                    end_row=cap["end_row"],
+                    end_line=_closed_end_line(cap),
                     end_col=cap["end_col"],
                     text=cap["text"],
                 )
             )
             if max_count is not None and len(out) >= max_count:
                 return out
-    out.sort(key=lambda c: (c.path, c.start_row, c.start_col))
+    out.sort(key=lambda c: (c.path, c.start_line, c.start_col))
     return out
 
 
@@ -543,16 +552,17 @@ def find_symbols(
                         Symbol(
                             kind=cap["name"],
                             name=cap["text"],
-                            path=rel,
+                            path=str((root_path / rel).resolve()),
+                            rel_path=rel,
                             language=file_lang,
-                            start_row=cap["start_row"],
-                            end_row=end_row,
+                            start_line=cap["start_row"] + 1,
+                            end_line=_closed_end_line({**cap, "end_row": end_row, "end_col": body["end_col"] if body else cap["end_col"]}),
                         )
                     )
                     if max_count is not None and len(out) >= max_count:
-                        out.sort(key=lambda s: (s.path, s.start_row))
+                        out.sort(key=lambda s: (s.path, s.start_line))
                         return out
-    out.sort(key=lambda s: (s.path, s.start_row))
+    out.sort(key=lambda s: (s.path, s.start_line))
     return out
 
 
@@ -582,6 +592,17 @@ def _contains(outer: dict, inner: dict) -> bool:
 
 def _span(cap: dict) -> tuple[int, int]:
     return (cap["end_row"] - cap["start_row"], cap["end_col"] - cap["start_col"])
+
+
+def _closed_end_line(cap: dict) -> int:
+    """Convert tree-sitter's end point into a 1-indexed inclusive line number."""
+
+    end_row = int(cap["end_row"])
+    end_col = int(cap["end_col"])
+    start_row = int(cap["start_row"])
+    if end_col == 0 and end_row > start_row:
+        return end_row
+    return end_row + 1
 
 
 def supported_symbol_languages() -> list[str]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -42,6 +43,36 @@ class TextFile:
 
 
 @dataclass(frozen=True)
+class FileView:
+    """A text-file view plus metadata useful for follow-up edits."""
+
+    path: str
+    exists: bool
+    text: str
+    line_count: int
+    start_line: int
+    end_line: int
+    truncated: bool
+    encoding: str
+    newline: Literal["lf", "crlf", "cr", "mixed", "none"]
+    final_newline: bool
+    bom: bool
+    size: int | None
+    kind: Literal["file", "dir", "missing", "other"]
+
+    def numbered(self) -> str:
+        """Return the selected text with 1-indexed line-number prefixes."""
+
+        if not self.text:
+            return ""
+        width = max(len(str(self.end_line)), len(str(self.start_line)), 1)
+        return "\n".join(
+            f"{line_no:>{width}}: {line}"
+            for line_no, line in enumerate(self.text.splitlines(), start=self.start_line)
+        )
+
+
+@dataclass(frozen=True)
 class TextComparison:
     equal: bool
     kind: Literal["equal", "content", "eol", "final_newline"]
@@ -57,6 +88,16 @@ class ReplacementResult:
     replacements: int
     before: TextFile
     after: TextFile
+
+
+@dataclass(frozen=True)
+class EditResult:
+    path: str
+    changed: bool
+    replaced_text: str
+    line_count_before: int
+    line_count_after: int
+    line_delta: int
 
 
 @dataclass(frozen=True)
@@ -145,6 +186,72 @@ def read_text_lossless(path: str | Path, *, encoding: str = "utf-8") -> TextFile
     )
 
 
+def read_file(
+    path: str | Path,
+    *,
+    lines: tuple[int, int] | None = None,
+    head: int | None = None,
+    tail: int | None = None,
+    around: str | None = None,
+    context: int = 20,
+    encoding: str = "utf-8",
+) -> FileView:
+    """Read a file or selected line range and return metadata in one object."""
+
+    selectors = [lines is not None, head is not None, tail is not None, around is not None]
+    if sum(selectors) > 1:
+        raise ValueError("lines, head, tail, and around are mutually exclusive")
+    if context < 0:
+        raise ValueError("context must be >= 0")
+    resolved = resolve_workspace_path(path)
+    kind = _path_kind(resolved)
+    size = resolved.stat().st_size if kind == "file" else None
+    if kind != "file":
+        return FileView(
+            path=str(resolved),
+            exists=resolved.exists(),
+            text="",
+            line_count=0,
+            start_line=0,
+            end_line=0,
+            truncated=False,
+            encoding=encoding,
+            newline="none",
+            final_newline=False,
+            bom=False,
+            size=size,
+            kind=kind,
+        )
+
+    loaded = read_text_lossless(resolved, encoding=encoding)
+    logical_lines = _logical_lines(loaded.text)
+    line_count = len(logical_lines)
+    start_line, end_line = _selected_line_range(
+        logical_lines,
+        lines=lines,
+        head=head,
+        tail=tail,
+        around=around,
+        context=context,
+    )
+    selected = _slice_text_by_lines(loaded.text, start_line, end_line)
+    return FileView(
+        path=loaded.path,
+        exists=True,
+        text=selected,
+        line_count=line_count,
+        start_line=start_line,
+        end_line=end_line,
+        truncated=start_line > 1 or end_line < line_count,
+        encoding=loaded.encoding,
+        newline=loaded.newline,
+        final_newline=loaded.final_newline,
+        bom=loaded.bom,
+        size=size,
+        kind="file",
+    )
+
+
 def write_text_lossless(
     path: str | Path,
     text: str,
@@ -177,6 +284,29 @@ def write_text_lossless(
     else:
         resolved.write_bytes(data)
     return resolved
+
+
+def write_file(
+    path: str | Path,
+    text: str,
+    *,
+    like: FileView | TextFile | str | Path | None = None,
+    encoding: str | None = None,
+    newline: Literal["lf", "crlf", "cr", "none"] | None = None,
+    final_newline: bool | None = None,
+    bom: bool | None = None,
+) -> Path:
+    """Write text with source-derived metadata, keeping atomic writes internal."""
+
+    return write_text_lossless(
+        path,
+        text,
+        like=_coerce_write_like(like) if like is not None else None,
+        encoding=encoding,
+        newline=newline,
+        final_newline=final_newline,
+        bom=bom,
+    )
 
 
 def compare_text(
@@ -272,6 +402,96 @@ def replace_text(
         return ReplacementResult(path=after.path, replacements=count, before=before, after=after)
     context = _replacement_missing_context(before, old, found=best_found, count=count, newlines=newlines)
     raise ValueError(f"expected at least {count} occurrence(s), found {best_found}.{context}")
+
+
+def edit_lines(
+    path: str | Path,
+    start: int,
+    end: int,
+    new_text: str,
+    *,
+    expect_first: str | None = None,
+    expect_last: str | None = None,
+    expect_mode: Literal["startswith", "contains", "exact", "regex"] = "startswith",
+    strip_indent: bool = True,
+    encoding: str | None = None,
+    newline: Literal["preserve", "lf", "crlf", "cr"] = "preserve",
+    final_newline: bool | None = None,
+    bom: bool | None = None,
+) -> EditResult:
+    """Replace, delete, or insert 1-indexed lines with optional anchor checks."""
+
+    if expect_mode not in {"startswith", "contains", "exact", "regex"}:
+        raise ValueError("expect_mode must be 'startswith', 'contains', 'exact', or 'regex'")
+    if newline not in {"preserve", "lf", "crlf", "cr"}:
+        raise ValueError("newline must be 'preserve', 'lf', 'crlf', or 'cr'")
+    if start < 1:
+        raise ValueError("start must be >= 1")
+    if end < 0:
+        raise ValueError("end must be >= 0")
+
+    before = read_text_lossless(path, encoding=encoding or "utf-8")
+    logical_lines = _logical_lines(before.text)
+    line_count_before = len(logical_lines)
+    inserting = start == end + 1
+    if inserting:
+        if start > line_count_before + 1:
+            raise ValueError("insert start must be at most line_count + 1")
+        replaced_lines: list[str] = []
+    else:
+        if start > end:
+            raise ValueError("start must be <= end unless inserting with start == end + 1")
+        if start > line_count_before or end > line_count_before:
+            raise ValueError("line range is outside the file")
+        replaced_lines = logical_lines[start - 1 : end]
+
+    if expect_first is not None:
+        if inserting:
+            raise ValueError("expect_first is not valid for insert edits")
+        _check_expected_line(
+            replaced_lines[0],
+            expect_first,
+            mode=expect_mode,
+            strip_indent=strip_indent,
+            label="expect_first",
+        )
+    if expect_last is not None:
+        if inserting:
+            raise ValueError("expect_last is not valid for insert edits")
+        _check_expected_line(
+            replaced_lines[-1],
+            expect_last,
+            mode=expect_mode,
+            strip_indent=strip_indent,
+            label="expect_last",
+        )
+
+    new_lines = _logical_lines(new_text)
+    after_lines = logical_lines[: start - 1] + new_lines + logical_lines[end:]
+    after_text = _join_logical_lines(after_lines)
+    chosen_newline: Literal["lf", "crlf", "cr", "none"] | None
+    chosen_newline = None if newline == "preserve" else newline
+    chosen_final_newline = (before.final_newline and bool(after_lines)) if final_newline is None else final_newline
+    write_file(
+        before.path,
+        after_text,
+        like=before,
+        encoding=encoding,
+        newline=chosen_newline,
+        final_newline=chosen_final_newline,
+        bom=bom,
+    )
+    after = read_text_lossless(before.path, encoding=encoding or before.encoding)
+    line_count_after = len(after_lines)
+    replaced_text = _join_logical_lines(replaced_lines)
+    return EditResult(
+        path=before.path,
+        changed=before.text != after.text,
+        replaced_text=replaced_text,
+        line_count_before=line_count_before,
+        line_count_after=line_count_after,
+        line_delta=line_count_after - line_count_before,
+    )
 
 
 def make_unified_diff(
@@ -598,6 +818,112 @@ def _coerce_text_file(value: TextFile | str | Path) -> TextFile:
     if isinstance(value, TextFile):
         return value
     return read_text_lossless(value)
+
+
+def _coerce_write_like(value: FileView | TextFile | str | Path) -> TextFile | str | Path:
+    if isinstance(value, FileView):
+        return TextFile(
+            path=value.path,
+            text=value.text,
+            encoding=value.encoding,
+            newline=value.newline,
+            final_newline=value.final_newline,
+            bom=value.bom,
+        )
+    return value
+
+
+def _path_kind(path: Path) -> Literal["file", "dir", "missing", "other"]:
+    if path.is_file():
+        return "file"
+    if path.is_dir():
+        return "dir"
+    if path.exists():
+        return "other"
+    return "missing"
+
+
+def _logical_lines(text: str) -> list[str]:
+    """Split text into logical lines without retaining newline separators."""
+
+    return text.splitlines()
+
+
+def _join_logical_lines(lines: Sequence[str]) -> str:
+    return "\n".join(lines)
+
+
+def _selected_line_range(
+    logical_lines: Sequence[str],
+    *,
+    lines: tuple[int, int] | None,
+    head: int | None,
+    tail: int | None,
+    around: str | None,
+    context: int,
+) -> tuple[int, int]:
+    line_count = len(logical_lines)
+    if line_count == 0:
+        if lines is not None and lines != (1, 0):
+            raise ValueError("line range is outside the file")
+        if around is not None:
+            raise ValueError(f"around text not found: {around!r}")
+        return (0, 0)
+    if lines is not None:
+        start, end = lines
+        if start < 1 or end < start or end > line_count:
+            raise ValueError("line range is outside the file")
+        return (start, end)
+    if head is not None:
+        if head < 0:
+            raise ValueError("head must be >= 0")
+        if head == 0:
+            return (0, 0)
+        return (1, min(head, line_count))
+    if tail is not None:
+        if tail < 0:
+            raise ValueError("tail must be >= 0")
+        if tail == 0:
+            return (0, 0)
+        start = max(1, line_count - tail + 1)
+        return (start, line_count)
+    if around is not None:
+        if not around:
+            raise ValueError("around must be non-empty")
+        for index, line in enumerate(logical_lines, start=1):
+            if around in line:
+                return (max(1, index - context), min(line_count, index + context))
+        raise ValueError(f"around text not found: {around!r}")
+    return (1, line_count)
+
+
+def _slice_text_by_lines(text: str, start_line: int, end_line: int) -> str:
+    if start_line == 0:
+        return ""
+    return "".join(text.splitlines(keepends=True)[start_line - 1 : end_line])
+
+
+def _check_expected_line(
+    line: str,
+    expected: str,
+    *,
+    mode: Literal["startswith", "contains", "exact", "regex"],
+    strip_indent: bool,
+    label: str,
+) -> None:
+    actual = line.lstrip() if strip_indent else line
+    if mode == "startswith":
+        matched = actual.startswith(expected)
+    elif mode == "contains":
+        matched = expected in actual
+    elif mode == "exact":
+        matched = actual == expected
+    elif mode == "regex":
+        matched = re.search(expected, actual) is not None
+    else:  # Defensive guard for future edits; public validation happens earlier.
+        raise ValueError(f"unsupported expect_mode: {mode!r}")
+    if not matched:
+        raise ValueError(f"{label} did not match: expected {expected!r} with {mode}, got {actual!r}")
 
 
 def _detect_newline_style(text: str) -> Literal["lf", "crlf", "cr", "mixed", "none"]:

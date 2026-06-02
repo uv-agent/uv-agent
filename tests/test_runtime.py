@@ -26,6 +26,7 @@ from uv_agent_runtime import (
     emit_progress,
     emit_result,
     enter_dir,
+    edit_lines,
     find_files,
     find_symbols,
     list_declared_servers,
@@ -36,6 +37,7 @@ from uv_agent_runtime import (
     normalize_text,
     path_info,
     query_code,
+    read_file,
     read_json,
     read_text,
     read_text_lossless,
@@ -48,6 +50,7 @@ from uv_agent_runtime import (
     supported_symbol_languages,
     thread_digest,
     workspace_transaction,
+    write_file,
     write_text_lossless,
     write_json,
     write_text,
@@ -350,6 +353,82 @@ def test_runtime_lossless_text_helpers_preserve_metadata(tmp_path: Path) -> None
 
     assert path.read_bytes() == b"\xef\xbb\xbfchanged\r\nagain\r\n"
 
+
+
+def test_runtime_read_file_views_and_write_file_preserve_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_bytes(b"\xef\xbb\xbffirst\r\nsecond\r\nthird\r\n")
+
+    view = read_file(path, around="second", context=1)
+
+    assert view.path == str(path.resolve())
+    assert view.exists is True
+    assert view.kind == "file"
+    assert view.line_count == 3
+    assert view.start_line == 1
+    assert view.end_line == 3
+    assert view.text == "first\r\nsecond\r\nthird\r\n"
+    assert view.numbered().splitlines()[1].endswith(": second")
+    assert view.newline == "crlf"
+    assert view.bom is True
+
+    tail = read_file(path, tail=1)
+    assert tail.start_line == 3
+    assert tail.truncated is True
+    assert tail.text == "third\r\n"
+
+    missing = read_file(tmp_path / "missing.txt")
+    assert missing.exists is False
+    assert missing.kind == "missing"
+    assert missing.path == str((tmp_path / "missing.txt").resolve())
+
+    write_file(path, "changed\nagain\n", like=view)
+
+    assert path.read_bytes() == b"\xef\xbb\xbfchanged\r\nagain\r\n"
+
+
+def test_runtime_edit_lines_replaces_inserts_deletes_and_checks_anchors(tmp_path: Path) -> None:
+    path = tmp_path / "sample.py"
+    path.write_text(
+        "def parse():\n    return 1\n\ndef other():\n    return 2\n",
+        encoding="utf-8",
+        newline="",
+    )
+
+    result = edit_lines(
+        path,
+        1,
+        2,
+        "def parse(value):\n    return value",
+        expect_first="def parse",
+        expect_last="return",
+        expect_mode="contains",
+    )
+
+    assert result.path == str(path.resolve())
+    assert result.changed is True
+    assert result.replaced_text == "def parse():\n    return 1"
+    assert result.line_count_before == 5
+    assert result.line_count_after == 5
+    assert result.line_delta == 0
+    assert path.read_text(encoding="utf-8") == (
+        "def parse(value):\n    return value\n\ndef other():\n    return 2\n"
+    )
+
+    inserted = edit_lines(path, 3, 2, "# inserted", expect_mode="exact")
+    assert inserted.line_delta == 1
+    assert "# inserted" in path.read_text(encoding="utf-8")
+
+    deleted = edit_lines(path, 3, 3, "", expect_first="# inserted")
+    assert deleted.line_delta == -1
+    assert "# inserted" not in path.read_text(encoding="utf-8")
+
+    eof = edit_lines(path, 6, 5, "# eof")
+    assert eof.line_delta == 1
+    assert path.read_text(encoding="utf-8").endswith("# eof\n")
+
+    with pytest.raises(ValueError, match="expect_first did not match"):
+        edit_lines(path, 1, 1, "def nope():", expect_first="class")
 
 def test_runtime_write_text_lossless_without_template_preserves_input_text(tmp_path: Path) -> None:
     path = tmp_path / "sample.txt"
@@ -946,17 +1025,21 @@ def test_codesearch_find_files_and_search_text(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
 
     files = find_files(tmp_path, globs=["*.py"])
-    assert sorted(p.replace("\\", "/") for p in files) == ["src/a.py", "src/b.py"]
+    assert sorted(Path(p).relative_to(tmp_path).as_posix() for p in files) == ["src/a.py", "src/b.py"]
+    assert all(Path(p).is_absolute() for p in files)
 
     limited_files = find_files(tmp_path, globs=["*.py"], max_total=1)
     assert len(limited_files) == 1
+    assert Path(limited_files[0]).is_absolute()
 
-    hits = search_text("hello", root=tmp_path, file_types=["py"])
-    paths = [h.path.replace("\\", "/") for h in hits]
+    hits = search_text("hello", root=tmp_path, file_types=["py"], context=1)
+    paths = [h.rel_path.replace("\\", "/") for h in hits]
     lines = sorted((p, h.line) for p, h in zip(paths, hits))
     assert ("src/a.py", 1) in lines
     assert ("src/a.py", 6) in lines
+    assert all(Path(h.path).is_absolute() for h in hits)
     assert all(h.text and h.submatches for h in hits)
+    assert hits[0].context_after
 
 
 @requires_rg
@@ -965,11 +1048,13 @@ def test_codesearch_accepts_file_root(tmp_path: Path) -> None:
     target = tmp_path / "src" / "a.py"
 
     files = find_files(target)
-    assert [p.replace("\\", "/") for p in files] == ["a.py"]
+    assert [Path(p).name for p in files] == ["a.py"]
+    assert files == [str(target.resolve())]
 
     hits = search_text("hello", root=target)
     assert hits
-    assert {h.path.replace("\\", "/") for h in hits} == {"a.py"}
+    assert {h.rel_path.replace("\\", "/") for h in hits} == {"a.py"}
+    assert {h.path for h in hits} == {str(target.resolve())}
 
     # Searching a file should not pick up unrelated matches in sibling files.
     world_hits = search_text("world", root=target)
@@ -984,12 +1069,14 @@ def test_codesearch_accepts_multiple_roots(tmp_path: Path) -> None:
     _make_python_workspace(second)
 
     files = find_files(roots=[first / "src" / "a.py", second / "src"], globs=["*.py"])
-    assert sorted(p.replace("\\", "/") for p in files) == ["a.py", "a.py", "b.py"]
+    assert sorted(Path(p).name for p in files) == ["a.py", "a.py", "b.py"]
+    assert all(Path(p).is_absolute() for p in files)
 
     hits = search_text("hello", roots=[first / "src" / "a.py", second / "src"])
-    paths = [h.path.replace("\\", "/") for h in hits]
-    assert "a.py" in paths
-    assert "b.py" not in paths
+    rel_paths = [h.rel_path.replace("\\", "/") for h in hits]
+    assert "a.py" in rel_paths
+    assert "b.py" not in rel_paths
+    assert all(Path(h.path).is_absolute() for h in hits)
 
 
 @requires_rg
@@ -1025,9 +1112,11 @@ def test_codequery_accepts_file_root(
     target = tmp_path / "src" / "a.py"
 
     symbols = find_symbols(target)
-    names = {(s.kind, s.name, s.path.replace("\\", "/")) for s in symbols}
+    names = {(s.kind, s.name, s.rel_path.replace("\\", "/")) for s in symbols}
     assert ("function", "hello", "a.py") in names
     assert ("class", "Foo", "a.py") in names
+    assert all(Path(s.path).is_absolute() for s in symbols)
+    assert all(s.start_line >= 1 and s.end_line >= s.start_line for s in symbols)
     # b.py's `world` must not appear when scoping to a.py.
     assert all(s.name != "world" for s in symbols)
 
@@ -1037,7 +1126,8 @@ def test_codequery_accepts_file_root(
         root=target,
     )
     assert [c.text for c in captures] == ["hello"]
-    assert {c.path.replace("\\", "/") for c in captures} == {"a.py"}
+    assert {c.rel_path.replace("\\", "/") for c in captures} == {"a.py"}
+    assert {c.path for c in captures} == {str(target.resolve())}
 
 
 @requires_rg
@@ -1076,11 +1166,15 @@ def test_codequery_find_symbols_returns_python_definitions(
     _make_python_workspace(tmp_path)
 
     symbols = find_symbols(tmp_path)
-    names = {(s.kind, s.name, s.path.replace("\\", "/")) for s in symbols}
+    names = {(s.kind, s.name, s.rel_path.replace("\\", "/")) for s in symbols}
     assert ("function", "hello", "src/a.py") in names
     assert ("class", "Foo", "src/a.py") in names
     assert ("function", "bar", "src/a.py") in names
     assert ("function", "world", "src/b.py") in names
+    hello = next(s for s in symbols if s.name == "hello")
+    assert hello.path == str((tmp_path / "src" / "a.py").resolve())
+    assert hello.start_line == 1
+    assert hello.end_line == 2
 
     # Cache was populated on disk under the isolated home.
     assert (codequery_home / "cache" / "codequery" / "index.sqlite").exists()
@@ -1120,7 +1214,9 @@ def test_codequery_query_code_runs_arbitrary_tree_sitter_query(
     cap = captures[0]
     assert cap.name == "call"
     assert cap.text == "hello"
-    assert cap.path.replace("\\", "/") == "src/a.py"
+    assert cap.rel_path.replace("\\", "/") == "src/a.py"
+    assert cap.path == str((tmp_path / "src" / "a.py").resolve())
+    assert cap.start_line == 6
 
 
 @requires_rg

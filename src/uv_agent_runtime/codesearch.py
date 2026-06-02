@@ -32,10 +32,13 @@ class Match:
     """A single ripgrep match line."""
 
     path: str
+    rel_path: str
     line: int
     column: int
     text: str
     submatches: list[Submatch] = field(default_factory=list)
+    context_before: list[tuple[int, str]] = field(default_factory=list)
+    context_after: list[tuple[int, str]] = field(default_factory=list)
 
 
 def _rg_binary() -> str:
@@ -59,6 +62,8 @@ def _build_args(
     fixed_string: bool,
     multiline: bool,
     word: bool,
+    before: int,
+    after: int,
     max_count: int | None,
     hidden: bool,
     no_ignore: bool,
@@ -77,6 +82,10 @@ def _build_args(
             args.extend(["--multiline", "--multiline-dotall"])
         if word:
             args.append("--word-regexp")
+        if before:
+            args.extend(["--before-context", str(before)])
+        if after:
+            args.extend(["--after-context", str(after)])
         if max_count is not None:
             args.extend(["--max-count", str(max_count)])
     if hidden:
@@ -228,6 +237,9 @@ def search_text(
     literal: bool | None = None,
     multiline: bool = False,
     word: bool = False,
+    before: int = 0,
+    after: int = 0,
+    context: int | None = None,
     max_count_per_file: int | None = None,
     max_total: int | None = None,
     hidden: bool = False,
@@ -246,6 +258,7 @@ def search_text(
     """
     if not pattern:
         raise ValueError("pattern must be non-empty")
+    before, after = _resolve_context_counts(before=before, after=after, context=context)
     resolved_roots = _resolve_roots(root=root, roots=roots)
     if max_total is not None and max_total <= 0:
         return []
@@ -264,6 +277,8 @@ def search_text(
             literal=literal,
             multiline=multiline,
             word=word,
+            before=before,
+            after=after,
             max_count_per_file=max_count_per_file,
             max_total=remaining,
             hidden=hidden,
@@ -290,6 +305,8 @@ def _search_text_one(
     literal: bool | None,
     multiline: bool,
     word: bool,
+    before: int,
+    after: int,
     max_count_per_file: int | None,
     max_total: int | None,
     hidden: bool,
@@ -308,6 +325,8 @@ def _search_text_one(
         fixed_string=effective_fixed_string,
         multiline=multiline,
         word=word,
+        before=before,
+        after=after,
         max_count=max_count_per_file,
         hidden=hidden,
         no_ignore=no_ignore,
@@ -319,15 +338,28 @@ def _search_text_one(
         # rg exits 1 when no matches; 2+ for real errors.
         if code >= 2:
             raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
-        return _parse_search_matches(stdout.splitlines(), max_total=None)
+        return _parse_search_matches(stdout.splitlines(), cwd=cwd_path, before=before, after=after, max_total=None)
+
+    if before or after:
+        code, stdout, stderr = _run(args, cwd_path)
+        if code >= 2:
+            raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
+        return _parse_search_matches(stdout.splitlines(), cwd=cwd_path, before=before, after=after, max_total=max_total)
 
     code, lines, stderr, terminated = _run_until_matches(args, cwd_path, match_limit=max_total)
     if code >= 2 and not terminated:
         raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
-    return _parse_search_matches(lines, max_total=max_total)
+    return _parse_search_matches(lines, cwd=cwd_path, before=before, after=after, max_total=max_total)
 
 
-def _parse_search_matches(lines: Sequence[str], *, max_total: int | None) -> list[Match]:
+def _parse_search_matches(
+    lines: Sequence[str],
+    *,
+    cwd: Path,
+    before: int,
+    after: int,
+    max_total: int | None,
+) -> list[Match]:
     """Parse ripgrep JSON lines into Match objects without rerunning rg."""
 
     matches: list[Match] = []
@@ -342,8 +374,8 @@ def _parse_search_matches(lines: Sequence[str], *, max_total: int | None) -> lis
             continue
         data = event.get("data", {})
         path_obj = data.get("path", {})
-        path = path_obj.get("text") or _decode_bytes_field(path_obj)
-        if path is None:
+        rel_path = path_obj.get("text") or _decode_bytes_field(path_obj)
+        if rel_path is None:
             continue
         lines_field = data.get("lines", {})
         text = lines_field.get("text") or _decode_bytes_field(lines_field) or ""
@@ -361,16 +393,72 @@ def _parse_search_matches(lines: Sequence[str], *, max_total: int | None) -> lis
                 first_col = start + 1
         matches.append(
             Match(
-                path=path,
+                path=str((cwd / rel_path).resolve()),
+                rel_path=rel_path,
                 line=line_no,
                 column=first_col or 1,
                 text=text,
                 submatches=submatches,
+                context_before=_context_for_match(
+                    lines,
+                    cwd=cwd,
+                    rel_path=rel_path,
+                    line_no=line_no,
+                    before=True,
+                    context_lines=before,
+                ),
+                context_after=_context_for_match(
+                    lines,
+                    cwd=cwd,
+                    rel_path=rel_path,
+                    line_no=line_no,
+                    before=False,
+                    context_lines=after,
+                ),
             )
         )
         if max_total is not None and len(matches) >= max_total:
             break
     return matches
+
+
+def _context_for_match(
+    events: Sequence[str],
+    *,
+    cwd: Path,
+    rel_path: str,
+    line_no: int,
+    before: bool,
+    context_lines: int,
+) -> list[tuple[int, str]]:
+    if context_lines <= 0:
+        return []
+    context: list[tuple[int, str]] = []
+    abs_path = (cwd / rel_path).resolve()
+    for raw in events:
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "context":
+            continue
+        data = event.get("data", {})
+        event_rel = data.get("path", {}).get("text") or _decode_bytes_field(data.get("path", {}))
+        if event_rel is None or (cwd / event_rel).resolve() != abs_path:
+            continue
+        context_line_no = int(data.get("line_number") or 0)
+        if before:
+            if not line_no - context_lines <= context_line_no < line_no:
+                continue
+        elif not line_no < context_line_no <= line_no + context_lines:
+            continue
+        lines_field = data.get("lines", {})
+        text = lines_field.get("text") or _decode_bytes_field(lines_field) or ""
+        context.append((context_line_no, text.rstrip("\r\n")))
+    context.sort(key=lambda item: item[0])
+    return context
 
 
 def find_files(
@@ -386,9 +474,8 @@ def find_files(
 ) -> list[str]:
     """List workspace files via ripgrep, respecting `.gitignore` by default.
 
-    Returns paths relative to `root` using ripgrep's own enumeration, or relative
-    to each producing root when `roots` is supplied. This is typically far faster
-    than `Path.rglob` on large repositories.
+    Returns absolute paths so the result can be passed directly to file helpers.
+    This is typically far faster than `Path.rglob` on large repositories.
     """
     resolved_roots = _resolve_roots(root=root, roots=roots)
     if max_total is not None and max_total <= 0:
@@ -434,6 +521,8 @@ def _find_files_one(
         fixed_string=False,
         multiline=False,
         word=False,
+        before=0,
+        after=0,
         max_count=None,
         hidden=hidden,
         no_ignore=no_ignore,
@@ -444,11 +533,11 @@ def _find_files_one(
         code, stdout, stderr = _run(args, cwd_path)
         if code >= 2:
             raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
-        return [line for line in stdout.splitlines() if line]
+        return [_absolute_result_path(cwd_path, line) for line in stdout.splitlines() if line]
     code, lines, stderr, terminated = _run_limited(args, cwd_path, line_limit=max_total)
     if code >= 2 and not terminated:
         raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
-    return [line for line in lines if line][:max_total]
+    return [_absolute_result_path(cwd_path, line) for line in lines if line][:max_total]
 
 
 def _resolve_roots(
@@ -464,6 +553,22 @@ def _resolve_roots(
     if Path(root) != Path("."):
         raise ValueError("root and roots are mutually exclusive")
     return [resolve_workspace_path(item) for item in roots]
+
+
+def _resolve_context_counts(*, before: int, after: int, context: int | None) -> tuple[int, int]:
+    if before < 0 or after < 0:
+        raise ValueError("before and after must be >= 0")
+    if context is None:
+        return before, after
+    if context < 0:
+        raise ValueError("context must be >= 0")
+    if before or after:
+        raise ValueError("context is mutually exclusive with before/after")
+    return context, context
+
+
+def _absolute_result_path(cwd: Path, rel_path: str) -> str:
+    return str((cwd / rel_path).resolve())
 
 
 def _split_root(resolved: Path) -> tuple[Path, list[str]]:

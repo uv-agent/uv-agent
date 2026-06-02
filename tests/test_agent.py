@@ -3073,46 +3073,50 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<level>medium</level>" in turn_context
     assert "</runtime_helpers>" in turn_context
     assert "These helpers are already available in run_python" in turn_context
-    assert "path_info" in turn_context
-    assert "read_text_lossless" in turn_context
-    assert "write_text_lossless" in turn_context
+    assert "read_file" in turn_context
+    assert "write_file" in turn_context
+    assert "edit_lines" in turn_context
+    assert "path_info" not in turn_context
+    assert "read_text_lossless" not in turn_context
+    assert "write_text_lossless" not in turn_context
     assert "compare_text" not in turn_context
     assert "normalize_text" not in turn_context
     assert "replace_text" in turn_context
     assert "replace_exact" not in turn_context
-    assert "make_unified_diff" in turn_context
-    assert "apply_patch_any" in turn_context
-    assert "convert_patch" in turn_context
-    assert "workspace_transaction" in turn_context
-    assert "snapshot_files" in turn_context
-    assert "restore_snapshot" in turn_context
+    assert "make_unified_diff" not in turn_context
+    assert "apply_patch_any" not in turn_context
+    assert "convert_patch" not in turn_context
+    assert "workspace_transaction" not in turn_context
+    assert "snapshot_files" not in turn_context
+    assert "restore_snapshot" not in turn_context
+    assert "goal_paths" not in turn_context
+    assert "supported_symbol_languages" not in turn_context
+    assert "clear_codequery_cache" not in turn_context
     assert "run_process_text" in turn_context
     assert "add_dependency" in turn_context
     assert "run_python_env_dir" in turn_context
-    assert "search_text and find_files both pass extra_args to rg" in turn_context
-    assert '["--max-depth", "3"]' in turn_context
-    assert '["--no-ignore-vcs"]' in turn_context
+    assert "context=None" in turn_context
     assert "max_total=None" in turn_context
     assert 'find_files("src", globs=["*.py", "!**/migrations/**"], max_total=30)' in turn_context
     assert "<helper_selection>" in turn_context
     assert "Prefer the smallest helper that directly matches the task" in turn_context
-    assert "replace_text for small replacements" in turn_context
-    assert "apply_patch for multi-line or structured edits" in turn_context
-    assert "read_text_lossless/write_text_lossless only when raw text metadata" in turn_context
+    assert "replace_text for unique short text replacements" in turn_context
+    assert "edit_lines for line-number or symbol-range edits" in turn_context
+    assert "Paths returned by find_files/search_text/find_symbols/query_code are absolute" in turn_context
     assert "prefer find_files/search_text/find_symbols" in turn_context
     assert "prefer run_process_text over raw subprocess" in turn_context
     assert "Use ask for bounded independent work" in turn_context
-    assert "uv-agent patch envelope shown below" in turn_context
-    assert turn_context.count("<description>") >= 18
-    assert turn_context.count("<example>") >= 18
+    assert "uv-agent patch envelope shown below" not in turn_context
+    assert turn_context.count("<description>") >= 15
+    assert turn_context.count("<example>") >= 15
     assert "<![CDATA[" not in turn_context
     assert '<helper name="replace_text">' in turn_context
     assert '<helper name="mcp">' in turn_context
     assert '<helper name="stdlib">' not in turn_context
     assert '<helper name="inspect_signatures">' not in turn_context
     assert "These helpers do not switch the active TUI thread" in turn_context
-    assert "*** Begin Patch" in turn_context
-    assert "*** Update File: src/app.py" in turn_context
+    assert "*** Begin Patch" not in turn_context
+    assert "*** Update File: src/app.py" not in turn_context
     assert "connect_named(\"server-name\")" in turn_context
     assert "client.initialize()" in turn_context
     assert "inspect its returned instructions" in turn_context
@@ -4126,10 +4130,11 @@ def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> N
     assert text.index("<model_levels>") < text.index("<runtime_helpers>")
     assert text.index('name="enter_dir"') < text.index('name="ask"')
     assert text.index('name="ask"') < text.index('name="look_at"')
-    assert text.index('name="look_at"') < text.index('name="workspace_transaction"')
-    assert text.index('name="workspace_transaction"') < text.index('name="read_text_lossless"')
-    assert text.index('name="read_text_lossless"') < text.index('name="apply_patch"')
-    assert text.index('name="apply_patch"') < text.index('name="run_process_text"')
+    assert text.index('name="look_at"') < text.index('name="read_file"')
+    assert text.index('name="read_file"') < text.index('name="write_file"')
+    assert text.index('name="write_file"') < text.index('name="edit_lines"')
+    assert text.index('name="edit_lines"') < text.index('name="replace_text"')
+    assert text.index('name="replace_text"') < text.index('name="run_process_text"')
 
 
 def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) -> None:
