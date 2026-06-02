@@ -213,11 +213,17 @@ class ThreadTokenRatio:
 
 
 def usage_output_tokens(usage: dict[str, Any] | None) -> int:
-    """Return provider-reported output tokens from common usage shapes."""
+    """Return provider-reported visible output tokens from common usage shapes.
+
+    Hidden reasoning / thinking tokens (e.g. o1/o3/DeepSeek-R1 internal
+    chain-of-thought) are subtracted so the token-rate ratio is not inflated
+    by tokens the user cannot see.
+    """
 
     if not isinstance(usage, dict):
         return 0
-    return billing_token_breakdown(usage).output_tokens
+    breakdown = billing_token_breakdown(usage)
+    return max(0, breakdown.output_tokens - breakdown.reasoning_tokens)
 
 
 def model_response_visible_units(

@@ -3277,6 +3277,50 @@ def test_billing_token_breakdown_supports_anthropic_cache_tokens() -> None:
     assert breakdown.output_tokens == 20
 
 
+def test_billing_token_breakdown_extracts_reasoning_tokens() -> None:
+    """Reasoning tokens from completion_tokens_details/output_tokens_details."""
+    breakdown = billing_token_breakdown(
+        {
+            "input_tokens": 100,
+            "output_tokens": 80,
+            "completion_tokens_details": {"reasoning_tokens": 30},
+        }
+    )
+    assert breakdown.output_tokens == 80
+    assert breakdown.reasoning_tokens == 30
+
+    # Responses API shape: output_tokens_details.reasoning_tokens
+    breakdown2 = billing_token_breakdown(
+        {
+            "input_tokens": 50,
+            "output_tokens": 60,
+            "output_tokens_details": {"reasoning_tokens": 40},
+        }
+    )
+    assert breakdown2.output_tokens == 60
+    assert breakdown2.reasoning_tokens == 40
+
+    # Fallback to top-level "reasoning_tokens" (some compatible providers)
+    breakdown3 = billing_token_breakdown(
+        {
+            "input_tokens": 50,
+            "output_tokens": 60,
+            "reasoning_tokens": 20,
+        }
+    )
+    assert breakdown3.output_tokens == 60
+    assert breakdown3.reasoning_tokens == 20
+
+    # No reasoning tokens present
+    breakdown4 = billing_token_breakdown(
+        {
+            "input_tokens": 50,
+            "output_tokens": 60,
+        }
+    )
+    assert breakdown4.output_tokens == 60
+    assert breakdown4.reasoning_tokens == 0
+
 @pytest.mark.asyncio
 async def test_agent_accumulates_billing_for_model_response(tmp_path: Path) -> None:
     project_root = tmp_path / "project"

@@ -35,11 +35,19 @@ CURRENCY_SYMBOLS = {
 
 @dataclass(frozen=True)
 class BillingTokenBreakdown:
-    """Provider usage normalized into billable token buckets."""
+    """Provider usage normalized into billable token buckets.
+
+    ``output_tokens`` is the provider-reported total including reasoning tokens,
+    while ``reasoning_tokens`` captures the portion that came from hidden
+    reasoning / thinking (not visible in the model output text).  Callers that
+    need a visible‑output token estimate can compute
+    ``output_tokens - reasoning_tokens``.
+    """
 
     input_tokens: int = 0
     cached_input_tokens: int = 0
     output_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -188,10 +196,23 @@ def billing_token_breakdown(usage: dict[str, Any]) -> BillingTokenBreakdown:
     else:
         input_tokens = max(0, cache_creation)
 
+    # Extract hidden reasoning/thinking token counts that are included in
+    # output_tokens but not visible in the model response text.
+    reasoning = (
+        first_nested_int(
+            usage,
+            ("output_tokens_details", "reasoning_tokens"),
+            ("completion_tokens_details", "reasoning_tokens"),
+        )
+        or first_int(usage, "reasoning_tokens")
+        or 0
+    )
+
     return BillingTokenBreakdown(
         input_tokens=input_tokens,
         cached_input_tokens=cached_tokens,
         output_tokens=max(0, output_tokens),
+        reasoning_tokens=max(0, reasoning),
     )
 
 
