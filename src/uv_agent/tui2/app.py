@@ -919,7 +919,7 @@ class AnsiUvAgentApp:
             self._skip_next_lf_after_plain_cr = False
             self._last_plain_input_at = None
             self._move_composer_cursor(1)
-        elif key and key >= " " and not key.startswith("<"):
+        elif self._is_text_input_key(key):
             self._skip_next_lf_after_plain_cr = False
             self._insert_composer_text(key)
             self._reset_history()
@@ -927,6 +927,11 @@ class AnsiUvAgentApp:
             self._after_composer_changed()
         self._safe_repaint()
         return True
+
+    @staticmethod
+    def _is_text_input_key(key: str) -> bool:
+        """Return True for user text keys, excluding wrapped control tokens."""
+        return bool(key) and key >= " " and (key == "<" or not key.startswith("<"))
 
     @staticmethod
     def _delete_word(text: str) -> str:
@@ -1081,7 +1086,7 @@ class AnsiUvAgentApp:
             self._move_agent_view_cursor(-1)
         elif key == "\x06" or key in {"<M>", "<RIGHT>"}:
             self._move_agent_view_cursor(1)
-        elif key and key >= " " and not key.startswith("<"):
+        elif self._is_text_input_key(key):
             self._insert_agent_view_text(key)
         self._safe_repaint()
         return True

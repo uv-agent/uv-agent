@@ -1201,6 +1201,36 @@ def test_backspace_uses_composer_cursor(monkeypatch) -> None:
     assert app.state.composer_cursor == 0
 
 
+def test_left_angle_bracket_inserts_as_text(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+
+    asyncio.run(app.handle_key("<"))
+
+    assert app.state.composer == "<"
+    assert app.state.composer_cursor == 1
+
+
+def test_left_angle_bracket_in_agent_view_composer(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+    app._enter_agent_view_input_mode(target="dispatch")
+
+    asyncio.run(app.handle_key("<"))
+
+    assert app.state.agent_view.composer == "<"
+    assert app.state.agent_view.composer_cursor == 1
+
+
+def test_wrapped_key_tokens_are_not_inserted_as_text(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "abc"
+
+    asyncio.run(app.handle_key("<V>"))
+
+    assert app.state.composer == "abc"
+    assert app.state.composer_cursor is None
+
+
 def test_image_token_deletes_as_single_unit_with_backspace(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.state.composer = "look [Image #1] now"
