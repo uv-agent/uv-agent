@@ -181,6 +181,22 @@ def _rule(label: str, width: int, style: str, theme: AnsiTheme) -> str:
     return sgr(style, "─" * max(1, width))
 
 
+def _live_tool_rule(label: str, width: int, style: str, theme: AnsiTheme) -> str:
+    """Return a non-full-width rule for frequently repainted live tool rows.
+
+    Running tool headers repaint on every spinner tick.  A full-width rule is
+    fragile on Windows terminals when font fallback renders Braille/box/ambiguous
+    glyphs wider than our Python cell-width estimate: the physical row can wrap
+    by one line, so the renderer's later erase lands below the leaked header.
+    Keep generous right-side slack while the tool is live; the completed result
+    still uses the full-width rule when it is flushed once into scrollback.
+    """
+
+    head = "── "
+    label_width = max(1, width - visible_len(head) - 8)
+    return sgr(style, head) + truncate_visible(label, label_width)
+
+
 def _thin_rule(width: int, theme: AnsiTheme = DEFAULT_THEME) -> str:
     """Subtle separator used between live transcript and input chrome."""
 
@@ -227,7 +243,11 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
         + " "
         + sgr(theme.muted, "· " + status + suffix)
     )
-    lines = [_rule(title, width, border_style, theme)]
+    lines = [
+        _live_tool_rule(title, width, border_style, theme)
+        if running
+        else _rule(title, width, border_style, theme)
+    ]
     code = ""
     if cell.call:
         import json

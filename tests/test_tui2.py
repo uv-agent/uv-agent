@@ -214,6 +214,15 @@ def test_running_tool_cell_uses_spinner_glyph() -> None:
     assert "running" in header
 
 
+def test_running_tool_header_keeps_right_edge_slack() -> None:
+    call = {"name": "run_python", "call_id": "call_" + "x" * 24, "arguments": "{}"}
+    running = render_tool_cell(TranscriptCell("tool", status="running", call=call), 80)
+    completed = render_tool_cell(TranscriptCell("tool", call=call, payload={"returncode": 0}), 80)
+
+    assert visible_len(running[0]) <= 72
+    assert visible_len(completed[0]) == 80
+
+
 # ---------------------------------------------------------------------------
 # Composer: rounded-corner box with inline hint when empty
 # ---------------------------------------------------------------------------
