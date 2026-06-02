@@ -3010,12 +3010,14 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "All filesystem, process, network, and verification work must happen inside run_python scripts" in prompt
     assert "Do not assume shell, filesystem, browser, network, or MCP model tools exist outside Python" in prompt
     assert "prefer uv_agent_runtime helpers when they fit" in prompt
-    assert "consult the appended runtime helper guidance for operation-specific details" in prompt
+    assert "Consult the appended runtime helper guidance for operation-specific details" in prompt
     assert "raw subprocess" not in prompt
-    assert "Use Python standard library modules such as pathlib, os, and json" in prompt
-    assert "ordinary in-script glue" in prompt
-    assert "prefer runtime file and edit helpers" in prompt
-    assert "text metadata such as newline style, BOM, final newline" in prompt
+    assert "Use Python standard library modules such as pathlib, os, and json" not in prompt
+    assert "use Python standard library modules such as pathlib, os, and json for in-script glue" in prompt
+    assert "especially file and edit helpers for repository-visible text work" in prompt
+    assert "metadata such as newline style, BOM, final newline" in prompt
+    assert "ordinary in-script glue" not in prompt
+    assert "prefer runtime file and edit helpers" not in prompt
     assert "When running independent work concurrently inside run_python" in prompt
     assert "asyncio, concurrent.futures, and threading" in prompt
     assert "asyncio, concurrent.futures, threading, and subprocess" not in prompt
@@ -3032,7 +3034,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "runtime helpers, declared skills, declared MCP servers, and focused third-party packages" in prompt
     assert "subprocesses through Python" not in prompt
     assert "Prefer existing helpers and declared external capabilities" not in prompt
-    assert "use simple Python for glue code or very small work" in prompt
+    assert "use simple Python for glue code or very small work" not in prompt
     assert "only when it materially helps" not in prompt
     assert "Use ask for bounded, tedious, or independent investigation" in prompt
     assert "Run independent work concurrently" in prompt
