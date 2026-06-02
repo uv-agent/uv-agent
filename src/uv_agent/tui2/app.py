@@ -484,13 +484,17 @@ class AnsiUvAgentApp:
             return ThreadTokenRatio()
         ratio = ThreadTokenRatio()
         for event in events:
+            reasoning_text = str(event.get("reasoning_text") or "")
             response_units = model_response_visible_units(
                 event.get("output") if isinstance(event.get("output"), list) else [],
-                reasoning_text=str(event.get("reasoning_text") or ""),
+                reasoning_text=reasoning_text,
             )
             ratio.observe_response(
                 visible_units=response_units,
-                output_tokens=usage_output_tokens(event.get("usage") if isinstance(event.get("usage"), dict) else {}),
+                output_tokens=usage_output_tokens(
+                    event.get("usage") if isinstance(event.get("usage"), dict) else {},
+                    reasoning_visible=bool(reasoning_text),
+                ),
             )
         return ratio
 
@@ -3266,7 +3270,10 @@ class AnsiUvAgentApp:
             self._drop_reasoning_cell()
         response = event.get("response")
         output = list(getattr(response, "output", []) or [])
-        output_tokens = usage_output_tokens(getattr(response, "usage", {}) if response is not None else {})
+        output_tokens = usage_output_tokens(
+            getattr(response, "usage", {}) if response is not None else {},
+            reasoning_visible=bool(reasoning_text),
+        )
         if output_tokens:
             ratio = self._token_ratio_for_thread(str(event.get("thread_id") or self.state.thread_id or ""))
             ratio.observe_response(

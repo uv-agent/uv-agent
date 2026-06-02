@@ -6,6 +6,7 @@ from uv_agent.tui2.streaming import (
     model_response_visible_units,
     tool_call_name,
     tool_delta_visible_text,
+    usage_output_tokens,
     visible_units,
 )
 
@@ -42,6 +43,23 @@ def test_thread_token_ratio_converts_visible_unit_rate_after_usage() -> None:
 
 def test_visible_units_count_words_cjk_and_punctuation() -> None:
     assert visible_units('hello, 世界! {"a": 1}') == 12
+
+
+def test_usage_output_tokens_subtracts_hidden_reasoning_only() -> None:
+    usage = {
+        "input_tokens": 10,
+        "output_tokens": 100,
+        "output_tokens_details": {"reasoning_tokens": 40},
+    }
+
+    # Hidden CoT (no visible reasoning text): subtract reasoning tokens so the
+    # denominator matches the visible-units numerator.
+    assert usage_output_tokens(usage) == 60
+    assert usage_output_tokens(usage, reasoning_visible=False) == 60
+
+    # Visible thinking (reasoning text already counted in visible_units):
+    # keep the provider total so we do not under-count tok/s.
+    assert usage_output_tokens(usage, reasoning_visible=True) == 100
 
 
 def test_model_response_visible_units_counts_text_reasoning_and_tool_calls() -> None:

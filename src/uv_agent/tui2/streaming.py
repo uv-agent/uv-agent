@@ -212,17 +212,25 @@ class ThreadTokenRatio:
         return max(0.0, unit_rate / units_per_token)
 
 
-def usage_output_tokens(usage: dict[str, Any] | None) -> int:
+def usage_output_tokens(
+    usage: dict[str, Any] | None,
+    *,
+    reasoning_visible: bool = False,
+) -> int:
     """Return provider-reported visible output tokens from common usage shapes.
 
-    Hidden reasoning / thinking tokens (e.g. o1/o3/DeepSeek-R1 internal
-    chain-of-thought) are subtracted so the token-rate ratio is not inflated
-    by tokens the user cannot see.
+    When ``reasoning_visible`` is False, the provider's ``reasoning_tokens``
+    are subtracted so the token-rate ratio is not inflated by tokens the user
+    cannot see.  When the reasoning text was streamed/persisted and already
+    counted in ``visible_units``, pass ``reasoning_visible=True`` so the
+    denominator matches the numerator.
     """
 
     if not isinstance(usage, dict):
         return 0
     breakdown = billing_token_breakdown(usage)
+    if reasoning_visible:
+        return max(0, breakdown.output_tokens)
     return max(0, breakdown.output_tokens - breakdown.reasoning_tokens)
 
 
