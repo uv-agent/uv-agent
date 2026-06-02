@@ -3013,6 +3013,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "consult the appended runtime helper guidance for operation-specific details" in prompt
     assert "raw subprocess" not in prompt
     assert "Use Python standard library modules such as pathlib, os, and json" in prompt
+    assert "ordinary in-script glue" in prompt
+    assert "prefer runtime file and edit helpers" in prompt
+    assert "text metadata such as newline style, BOM, final newline" in prompt
     assert "When running independent work concurrently inside run_python" in prompt
     assert "asyncio, concurrent.futures, and threading" in prompt
     assert "asyncio, concurrent.futures, threading, and subprocess" not in prompt
