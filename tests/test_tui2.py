@@ -1310,6 +1310,54 @@ def test_tool_output_allows_next_response_reasoning_to_flush(monkeypatch) -> Non
     assert [cell.text for cell in reasoning_cells] == ["tool plan", "final plan"]
 
 
+def test_flushed_tool_cells_retain_only_lightweight_payload(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    call = {"name": "run_python", "call_id": "call_1", "arguments": '{"code":"print(1)"}'}
+    stdout = "x" * 5000
+
+    app._handle_event({"type": "tool.started", "call": call})
+    app._handle_event({
+        "type": "tool.output",
+        "call": call,
+        "output": {
+            "output": json.dumps(
+                {
+                    "run_id": "run_123",
+                    "returncode": 0,
+                    "stdout": stdout,
+                    "stderr": "err",
+                    "events": [{"big": stdout}],
+                    "helper_calls": [{"name": "run_process_text", "args": "[]"}],
+                }
+            )
+        },
+    })
+
+    rendered = app.renderer.flushed[-1]
+    retained = app.state.flushed[-1]
+
+    assert rendered.payload["stdout"] == stdout
+    assert retained.payload == {
+        "run_id": "run_123",
+        "returncode": 0,
+        "helper_calls": [{"name": "run_process_text", "args": "[]"}],
+    }
+    assert retained.call == {"name": "run_python", "call_id": "call_1"}
+
+
+def test_flushed_cells_are_bounded(monkeypatch) -> None:
+    from uv_agent.tui2.app import TUI2_FLUSHED_CELLS_MAX
+
+    app = _make_app(monkeypatch)
+
+    for index in range(TUI2_FLUSHED_CELLS_MAX + 3):
+        app._flush(TranscriptCell("event", text=str(index)))
+
+    assert len(app.state.flushed) == TUI2_FLUSHED_CELLS_MAX
+    assert app.state.flushed[0].text == "3"
+    assert app.state.flushed[-1].text == str(TUI2_FLUSHED_CELLS_MAX + 2)
+
+
 def test_turn_completed_plays_terminal_buzzer(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     calls: list[str] = []

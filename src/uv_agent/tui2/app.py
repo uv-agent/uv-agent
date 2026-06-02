@@ -174,6 +174,20 @@ COMPACTION_SUMMARY_PREVIEW_LINES = 4
 COMPACTION_SUMMARY_PREVIEW_CHARS = 800
 _AGENT_VIEW_STATUS_RANK = {status: index for index, status in enumerate(AGENT_VIEW_STATUS_ORDER)}
 _RUN_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
+TUI2_FLUSHED_CELLS_MAX = 200
+_RETAINED_TOOL_PAYLOAD_KEYS = frozenset(
+    {
+        "run_id",
+        "returncode",
+        "timed_out",
+        "interrupted",
+        "truncated",
+        "partial",
+        "partial_reason",
+        "helper_calls",
+    }
+)
+_RETAINED_TOOL_CALL_KEYS = frozenset({"name", "call_id", "_status_label"})
 
 
 @dataclass
@@ -216,6 +230,39 @@ def _compaction_summary_preview(text: str) -> str:
 def _compaction_event_text(label: str, summary: object) -> str:
     preview = _compaction_summary_preview(str(summary or ""))
     return label + (f"\n{preview}" if preview else "")
+
+
+def _retained_mapping(value: dict[str, Any] | None, keys: frozenset[str]) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    retained: dict[str, Any] = {}
+    for key in keys:
+        if key not in value:
+            continue
+        item = value[key]
+        if key == "helper_calls" and isinstance(item, list):
+            retained[key] = [dict(helper) if isinstance(helper, dict) else helper for helper in item]
+        else:
+            retained[key] = item
+    return retained or None
+
+
+def _retained_flushed_cell(cell: TranscriptCell) -> TranscriptCell:
+    """Return the lightweight copy kept after a cell is in terminal scrollback."""
+
+    call = _retained_mapping(cell.call, _RETAINED_TOOL_CALL_KEYS) if cell.kind == "tool" else None
+    payload = _retained_mapping(cell.payload, _RETAINED_TOOL_PAYLOAD_KEYS) if cell.kind == "tool" else None
+    return TranscriptCell(
+        cell.kind,
+        text=cell.text,
+        title=cell.title,
+        status=cell.status,
+        call=call,
+        payload=payload,
+        created_at=cell.created_at,
+        finished_at=cell.finished_at,
+        chars_streamed=cell.chars_streamed,
+    )
 
 
 def composer_history_path() -> Path:
@@ -2178,9 +2225,13 @@ class AnsiUvAgentApp:
                 listed = dict(item)
                 break
         try:
-            metadata = dict(self.engine.thread_store.snapshot(thread_id).metadata)
+            read_metadata = getattr(self.engine.thread_store, "thread_metadata")
+            metadata = dict(read_metadata(thread_id))
         except Exception:
-            metadata = {}
+            try:
+                metadata = dict(self.engine.thread_store.snapshot(thread_id).metadata)
+            except Exception:
+                metadata = {}
         return {**listed, **metadata}
 
     def _thread_metadata_level(self, thread_id: str) -> str | None:
@@ -2276,7 +2327,8 @@ class AnsiUvAgentApp:
         self.state.last_error = None
         self._refresh_window_title()
         cells = self._history_cells_for_thread(thread_id)
-        self.state.flushed.extend(cells)
+        self.state.flushed.extend(_retained_flushed_cell(cell) for cell in cells)
+        self._trim_flushed_cells()
         if hasattr(self.renderer, "clear_screen"):
             self.renderer.clear_screen()
         else:
@@ -2651,6 +2703,18 @@ class AnsiUvAgentApp:
         fallback = self.state.title if self.state.title not in DEFAULT_THREAD_TITLES else self._text("new_thread")
         if not self.state.thread_id:
             return fallback
+        metadata_available = False
+        try:
+            read_metadata = getattr(self.engine.thread_store, "thread_metadata")
+            metadata = dict(read_metadata(self.state.thread_id))
+            metadata_available = True
+        except Exception:
+            metadata = {}
+        title = str(metadata.get("title") or "").strip()
+        if title and title not in DEFAULT_THREAD_TITLES:
+            return title
+        if metadata_available:
+            return fallback
         try:
             digest = self.engine.thread_store.thread_digest(self.state.thread_id)
         except Exception:
@@ -2823,13 +2887,22 @@ class AnsiUvAgentApp:
                 self._flush(cell)
             self._tool_cells.pop(key, None)
 
+    def _remember_flushed_cell(self, cell: TranscriptCell) -> None:
+        self.state.flushed.append(_retained_flushed_cell(cell))
+        self._trim_flushed_cells()
+
+    def _trim_flushed_cells(self) -> None:
+        overflow = len(self.state.flushed) - TUI2_FLUSHED_CELLS_MAX
+        if overflow > 0:
+            del self.state.flushed[:overflow]
+
     def _flush(self, cell: TranscriptCell) -> None:
         if cell in self.state.live:
             self.state.live.remove(cell)
         cell.status = "done" if cell.status in {"running", "streaming"} else cell.status
         cell.finished_at = cell.finished_at or monotonic()
-        self.state.flushed.append(cell)
         self.renderer.flush_cell(cell)
+        self._remember_flushed_cell(cell)
 
     # ------------------------------------------------------------------
     # Render guard

@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from uv_agent.session.store import ThreadLockedError, ThreadStore, _THREAD_LOCK_CONTEXT
+from uv_agent.session.store import (
+    HISTORY_SEGMENT_CACHE_MAX_ENTRIES,
+    ThreadLockedError,
+    ThreadStore,
+    _THREAD_LOCK_CONTEXT,
+)
 
 
 def test_list_threads_returns_latest_first_with_snippet(tmp_path: Path) -> None:
@@ -290,6 +295,69 @@ def test_read_after_latest_compaction_returns_only_needed_suffix(tmp_path: Path)
     assert compaction["text"] == "summary2"
     assert [event["type"] for event in events] == ["item.user"]
     assert events[0]["turn_id"] == "t3"
+
+
+def test_read_after_latest_compaction_filters_suffix_events(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Filtered suffix")
+    store.append(thread_id, "item.context_update", context_state={"fingerprint": "old"})
+    store.append(thread_id, "item.compaction", text="summary")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]},
+    )
+    store.append(thread_id, "item.context_update", context_state={"fingerprint": "new"})
+
+    events, compaction = store.read_after_latest_compaction(
+        thread_id,
+        event_types={"item.context_update"},
+    )
+
+    assert compaction is not None
+    assert compaction["text"] == "summary"
+    assert [event["type"] for event in events] == ["item.context_update"]
+    assert events[0]["context_state"] == {"fingerprint": "new"}
+
+
+def test_latest_event_helpers_are_scoped_to_open_epoch(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Epoch helpers")
+    store.append(thread_id, "item.rule_index", text="before")
+    store.append(thread_id, "item.context_update", context_state={"fingerprint": "before"})
+    store.append(thread_id, "item.compaction", text="summary")
+
+    assert not store.has_event_after_latest_compaction(thread_id, event_types={"item.rule_index"})
+    assert store.latest_event_after_latest_compaction(thread_id, event_types={"item.context_update"}) is None
+
+    store.append(thread_id, "item.rule_index", text="after")
+    store.append(thread_id, "item.context_update", context_state={"fingerprint": "after"})
+
+    latest = store.latest_event_after_latest_compaction(thread_id, event_types={"item.context_update"})
+
+    assert store.has_event_after_latest_compaction(thread_id, event_types={"item.rule_index"})
+    assert latest is not None
+    assert latest["context_state"] == {"fingerprint": "after"}
+
+
+def test_history_segment_cache_is_lru_bounded_and_cleared_on_append(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Bounded cache")
+
+    for index in range(HISTORY_SEGMENT_CACHE_MAX_ENTRIES + 5):
+        store.read_history_segment(thread_id, event_types={f"item.synthetic_{index}"})
+
+    assert len(store._history_segment_cache) == HISTORY_SEGMENT_CACHE_MAX_ENTRIES
+
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="t1",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]},
+    )
+
+    assert store._history_segment_cache == {}
 
 
 def test_history_segment_starts_at_latest_compaction_and_pages_to_previous_compaction(tmp_path: Path) -> None:

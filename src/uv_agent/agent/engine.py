@@ -1051,7 +1051,7 @@ class AgentEngine:
     def _should_generate_title(self, thread_id: str) -> bool:
         if not self.config.runtime.title_generation.enabled:
             return False
-        metadata = self.thread_store.snapshot(thread_id).metadata
+        metadata = self.thread_store.thread_metadata(thread_id)
         if int(metadata.get("user_message_count") or 0) > 0:
             return False
         return self._thread_title_is_pending(metadata)
@@ -1095,7 +1095,7 @@ class AgentEngine:
             title = await self._generate_thread_title(thread_id, user_text, level=level)
         except Exception:
             return None
-        if not title or not self._thread_title_is_pending(self.thread_store.snapshot(thread_id).metadata):
+        if not title or not self._thread_title_is_pending(self.thread_store.thread_metadata(thread_id)):
             return None
         self.thread_store.update_title(thread_id, title, source="generated")
         return title
@@ -1416,15 +1416,17 @@ class AgentEngine:
     def _latest_compaction_provider_tokens(self, thread_id: str) -> int | None:
         """Return the latest provider-reported usage tokens for the open epoch."""
 
-        snap = self.thread_store.snapshot(thread_id)
-        for event in reversed(snap.events_after_compaction):
+        events, compaction = self.thread_store.read_after_latest_compaction(
+            thread_id,
+            event_types={"item.model_response", "item.compaction"},
+        )
+        for event in reversed(events):
             if event.get("type") not in {"item.model_response", "item.compaction"}:
                 continue
             used = usage_token_count(event.get("usage") or {})
             if used is not None:
                 return used
 
-        compaction = snap.latest_compaction
         if compaction is not None:
             used = usage_token_count(compaction.get("usage") or {})
             if used is not None:
@@ -1699,7 +1701,7 @@ class AgentEngine:
             yield output_event(tool_output, result)
             return
 
-        thread_kind = str(self.thread_store.snapshot(thread_id).metadata.get("kind") or "thread")
+        thread_kind = str(self.thread_store.thread_metadata(thread_id).get("kind") or "thread")
         code = args.get("code")
         if not isinstance(code, str) or not code.strip():
             output = {"error": "run_python requires code"}
@@ -1999,7 +2001,7 @@ class AgentEngine:
             **payload,
         )
         total = billing_total_from_metadata(
-            self.thread_store.snapshot(thread_id).metadata,
+            self.thread_store.thread_metadata(thread_id),
             preferred_currency=charge.currency,
         )
         if total is not None:
@@ -2220,7 +2222,7 @@ class AgentEngine:
         if not subthread_id or subthread_id == thread_id:
             return
         try:
-            metadata = self.thread_store.snapshot(subthread_id).metadata
+            metadata = self.thread_store.thread_metadata(subthread_id)
         except (OSError, ValueError, FileNotFoundError):
             return
         total = billing_total_from_metadata(
@@ -2732,7 +2734,7 @@ class AgentEngine:
         if not thread_id:
             return None
         try:
-            metadata = self.thread_store.snapshot(thread_id).metadata
+            metadata = self.thread_store.thread_metadata(thread_id)
         except FileNotFoundError:
             return None
         raw_goal = metadata.get("goal_mode")
@@ -2766,9 +2768,12 @@ class AgentEngine:
         return ""
 
     def _latest_goal_notice_status(self, thread_id: str) -> str | None:
-        snap = self.thread_store.snapshot(thread_id)
+        events, _ = self.thread_store.read_after_latest_compaction(
+            thread_id,
+            event_types={"item.goal_mode_notice", "thread.goal_mode_updated", "thread.goal_files_reset"},
+        )
         status: str | None = None
-        for event in snap.events_after_compaction:
+        for event in events:
             event_type = event.get("type")
             if event_type == "item.goal_mode_notice":
                 status = str(event.get("status") or "") or None
@@ -2821,7 +2826,7 @@ class AgentEngine:
 
     def _worktree_state(self, thread_id: str) -> dict[str, Any] | None:
         try:
-            metadata = self.thread_store.snapshot(thread_id).metadata
+            metadata = self.thread_store.thread_metadata(thread_id)
         except FileNotFoundError:
             return None
         status = str(metadata.get("worktree_status") or "").strip()
@@ -2834,9 +2839,12 @@ class AgentEngine:
         return dict(metadata)
 
     def _latest_worktree_notice_status(self, thread_id: str) -> str | None:
-        snap = self.thread_store.snapshot(thread_id)
+        events, _ = self.thread_store.read_after_latest_compaction(
+            thread_id,
+            event_types={"item.worktree_notice", "thread.worktree_created", "thread.worktree_deleted"},
+        )
         status: str | None = None
-        for event in snap.events_after_compaction:
+        for event in events:
             event_type = event.get("type")
             if event_type == "item.worktree_notice":
                 status = str(event.get("status") or "") or None
@@ -2990,7 +2998,7 @@ class AgentEngine:
         return state
 
     def _latest_active_cwd(self, thread_id: str) -> Path:
-        raw_cwd = self.thread_store.snapshot(thread_id).metadata.get("latest_cwd")
+        raw_cwd = self.thread_store.thread_metadata(thread_id).get("latest_cwd")
         if isinstance(raw_cwd, str) and raw_cwd:
             try:
                 cwd = Path(raw_cwd).resolve()
@@ -3010,11 +3018,12 @@ class AgentEngine:
         state.cwd_notice_cwd = None
 
     def _loaded_rule_paths_in_epoch(self, thread_id: str) -> set[Path]:
-        events = self.thread_store.snapshot(thread_id).events_after_compaction
+        events, _ = self.thread_store.read_after_latest_compaction(
+            thread_id,
+            event_types={"item.rules_loaded"},
+        )
         loaded: set[Path] = set()
         for event in events:
-            if event.get("type") != "item.rules_loaded":
-                continue
             paths = event.get("paths")
             if not isinstance(paths, list):
                 continue
@@ -3029,30 +3038,32 @@ class AgentEngine:
 
     def _rule_index_already_emitted(self, thread_id: str, active_cwd: Path) -> bool:
         del active_cwd
-        events = self.thread_store.snapshot(thread_id).events_after_compaction
-        for event in events:
-            if event.get("type") == "item.rule_index":
-                return True
-        return False
+        return self.thread_store.has_event_after_latest_compaction(
+            thread_id,
+            event_types={"item.rule_index"},
+        )
 
     def _latest_cwd_notice_in_epoch(self, thread_id: str) -> Path | None:
-        events = self.thread_store.snapshot(thread_id).events_after_compaction
-        for event in reversed(events):
-            if event.get("type") != "item.cwd_notice":
-                continue
-            raw_cwd = event.get("cwd")
-            if not isinstance(raw_cwd, str) or not raw_cwd:
-                continue
-            try:
-                cwd = Path(raw_cwd).resolve()
-            except OSError:
-                continue
-            if self._is_within_project(cwd):
-                return cwd
-        return None
+        event = self.thread_store.latest_event_after_latest_compaction(
+            thread_id,
+            event_types={"item.cwd_notice"},
+        )
+        if event is None:
+            return None
+        raw_cwd = event.get("cwd")
+        if not isinstance(raw_cwd, str) or not raw_cwd:
+            return None
+        try:
+            cwd = Path(raw_cwd).resolve()
+        except OSError:
+            return None
+        return cwd if self._is_within_project(cwd) else None
 
     def _has_compaction(self, thread_id: str, *, snapshot: ThreadSnapshot | None = None) -> bool:
-        return (snapshot or self.thread_store.snapshot(thread_id)).latest_compaction is not None
+        if snapshot is not None:
+            return snapshot.latest_compaction is not None
+        metadata = self.thread_store.thread_metadata(thread_id)
+        return metadata.get("latest_compaction") is not None or metadata.get("latest_compaction_event_id") is not None
 
     def _is_within_project(self, path: Path) -> bool:
         try:
@@ -3157,15 +3168,19 @@ class AgentEngine:
     def _latest_context_state(self, thread_id: str | None) -> dict[str, Any] | None:
         if not thread_id:
             return None
-        snap = self.thread_store.snapshot(thread_id)
-        events = snap.events_after_compaction
-        for event in reversed(events):
-            if event.get("type") == "item.context_update":
-                state = event.get("context_state")
-                if isinstance(state, dict):
-                    return state
-                return {"fingerprint": str(event.get("context_fingerprint") or ""), "parts": {}}
-        return None
+        try:
+            event = self.thread_store.latest_event_after_latest_compaction(
+                thread_id,
+                event_types={"item.context_update"},
+            )
+        except FileNotFoundError:
+            return None
+        if event is None:
+            return None
+        state = event.get("context_state")
+        if isinstance(state, dict):
+            return state
+        return {"fingerprint": str(event.get("context_fingerprint") or ""), "parts": {}}
 
     def _turn_context_text(self) -> str:
         return "\n\n".join(part.text for part in self._turn_context_parts())
@@ -3312,7 +3327,7 @@ class AgentEngine:
                 source="empty",
             )
         try:
-            snapshot = self.thread_store.snapshot(thread_id)
+            metadata = self.thread_store.thread_metadata(thread_id)
         except FileNotFoundError:
             return ContextStats(
                 used_tokens=0,
@@ -3322,13 +3337,16 @@ class AgentEngine:
                 headroom_tokens=model.context_window_tokens,
                 source="empty",
             )
-        used = self._latest_usage_tokens(thread_id, snapshot=snapshot)
+        used = metadata.get("latest_usage_tokens") if isinstance(metadata.get("latest_usage_tokens"), int) else None
         source = "provider"
         if used is None:
-            update = self._turn_context_update(thread_id)
-            context_items = [message_item("user", update["text"])] if update else []
-            used = estimate_tokens(self._reconstruct_input(thread_id, snapshot=snapshot) + context_items)
-            source = "estimate"
+            snapshot = self.thread_store.snapshot(thread_id)
+            used = self._latest_usage_tokens(thread_id, snapshot=snapshot)
+            if used is None:
+                update = self._turn_context_update(thread_id)
+                context_items = [message_item("user", update["text"])] if update else []
+                used = estimate_tokens(self._reconstruct_input(thread_id, snapshot=snapshot) + context_items)
+                source = "estimate"
         percent = min(100, max(0, round(used * 100 / model.context_window_tokens)))
         return ContextStats(
             used_tokens=used,

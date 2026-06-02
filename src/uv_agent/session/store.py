@@ -4,6 +4,7 @@ import contextvars
 import json
 import os
 import sqlite3
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -89,6 +90,7 @@ _THREAD_LOCK_CONTEXT: contextvars.ContextVar[dict[tuple[str, str], tuple[str, in
     "uv_agent_thread_lock_context",
     default={},
 )
+HISTORY_SEGMENT_CACHE_MAX_ENTRIES = 32
 
 
 @dataclass(frozen=True)
@@ -137,7 +139,7 @@ class ThreadStore:
         self.db_path = state_db_path(self.data_dir)
         self._lock_owner_id = new_id("owner")
         self._held_thread_locks: dict[str, str] = {}
-        self._history_segment_cache: dict[tuple[Any, ...], ThreadHistorySegment] = {}
+        self._history_segment_cache: OrderedDict[tuple[Any, ...], ThreadHistorySegment] = OrderedDict()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._remove_empty_legacy_thread_dirs()
         with self._connect():
@@ -235,6 +237,11 @@ class ThreadStore:
         with self._connect() as db:
             return self._read_events_db(db, thread_id, event_types=event_types)
 
+    def thread_metadata(self, thread_id: str, *, kind: str | None = None) -> dict[str, Any]:
+        """Return thread metadata without loading the event suffix."""
+
+        return self._read_metadata(thread_id, kind=kind)
+
     def snapshot(self, thread_id: str) -> ThreadSnapshot:
         metadata = self._read_metadata(thread_id)
         events, compaction = self.read_after_latest_compaction(thread_id, metadata=metadata)
@@ -245,16 +252,30 @@ class ThreadStore:
         thread_id: str,
         *,
         metadata: dict[str, Any] | None = None,
+        event_types: set[str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         metadata = metadata or self._read_metadata(thread_id)
         compaction_event_id = _int_or_none(metadata.get("latest_compaction_event_id"))
         with self._connect() as db:
             if compaction_event_id is None:
-                return self._read_events_db(db, thread_id), None
-            events = self._read_events_db(db, thread_id, event_id_gte=compaction_event_id)
-        if not events:
-            return [], None
-        return events[1:], events[0]
+                return self._read_events_db(db, thread_id, event_types=event_types), None
+            compaction_row = db.execute(
+                """
+                SELECT event_id, payload_json
+                FROM thread_events
+                WHERE thread_id = ? AND event_id = ?
+                LIMIT 1
+                """,
+                (thread_id, compaction_event_id),
+            ).fetchone()
+            events = self._read_events_db(
+                db,
+                thread_id,
+                event_types=event_types,
+                event_id_gt=compaction_event_id,
+            )
+        compaction = _event_from_row(compaction_row) if compaction_row is not None else None
+        return events, compaction
 
     def read_recent_events(
         self,
@@ -304,6 +325,7 @@ class ThreadStore:
         cache_key = (thread_id, kind, before_event_id, event_type_key, last_event_id)
         cached = self._history_segment_cache.get(cache_key)
         if cached is not None:
+            self._history_segment_cache.move_to_end(cache_key)
             return ThreadHistorySegment(
                 events=list(cached.events),
                 start_event_id=cached.start_event_id,
@@ -344,6 +366,9 @@ class ThreadStore:
             has_more=has_more,
         )
         self._history_segment_cache[cache_key] = segment
+        self._history_segment_cache.move_to_end(cache_key)
+        while len(self._history_segment_cache) > HISTORY_SEGMENT_CACHE_MAX_ENTRIES:
+            self._history_segment_cache.popitem(last=False)
         return ThreadHistorySegment(
             events=list(segment.events),
             start_event_id=segment.start_event_id,
@@ -354,6 +379,54 @@ class ThreadStore:
     def latest_event(self, thread_id: str, event_type: str) -> dict[str, Any] | None:
         events, _ = self.read_recent_events(thread_id, limit=1, event_types={event_type})
         return events[0] if events else None
+
+    def latest_event_after_latest_compaction(
+        self,
+        thread_id: str,
+        *,
+        event_types: set[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        metadata = metadata or self._read_metadata(thread_id)
+        compaction_event_id = _int_or_none(metadata.get("latest_compaction_event_id")) or 0
+        with self._connect() as db:
+            clauses = ["thread_id = ?", "event_id > ?"]
+            params: list[Any] = [thread_id, compaction_event_id]
+            if event_types:
+                clauses.append(f"type IN ({_placeholders(event_types)})")
+                params.extend(sorted(event_types))
+            row = db.execute(
+                f"""
+                SELECT event_id, payload_json
+                FROM thread_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY event_id DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return _event_from_row(row) if row is not None else None
+
+    def has_event_after_latest_compaction(
+        self,
+        thread_id: str,
+        *,
+        event_types: set[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        metadata = metadata or self._read_metadata(thread_id)
+        compaction_event_id = _int_or_none(metadata.get("latest_compaction_event_id")) or 0
+        with self._connect() as db:
+            clauses = ["thread_id = ?", "event_id > ?"]
+            params: list[Any] = [thread_id, compaction_event_id]
+            if event_types:
+                clauses.append(f"type IN ({_placeholders(event_types)})")
+                params.extend(sorted(event_types))
+            row = db.execute(
+                f"SELECT 1 FROM thread_events WHERE {' AND '.join(clauses)} LIMIT 1",
+                params,
+            ).fetchone()
+        return row is not None
 
     def list_threads(self) -> list[dict[str, Any]]:
         return self._list_threads(kind="thread")
@@ -607,12 +680,16 @@ class ThreadStore:
         *,
         event_types: set[str] | None = None,
         event_id_gte: int | None = None,
+        event_id_gt: int | None = None,
     ) -> list[dict[str, Any]]:
         clauses = ["thread_id = ?"]
         params: list[Any] = [thread_id]
         if event_id_gte is not None:
             clauses.append("event_id >= ?")
             params.append(event_id_gte)
+        if event_id_gt is not None:
+            clauses.append("event_id > ?")
+            params.append(event_id_gt)
         if event_types:
             clauses.append(f"type IN ({_placeholders(event_types)})")
             params.extend(sorted(event_types))
