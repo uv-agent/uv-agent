@@ -511,6 +511,36 @@ def test_grown_paint_area_remembers_cursor_for_next_erase() -> None:
     assert "\x1b[J" in erase
 
 
+def test_repaint_reserves_blank_rows_before_first_live_frame() -> None:
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+
+    renderer.repaint(Tui2State(composer=""))
+
+    rendered = output.getvalue()
+    # The first three-row composer frame must reserve two blank rows before
+    # painting. If the frame itself scrolls while being drawn, stale live rows
+    # can escape into scrollback and later erases cannot reach them.
+    assert "\r\n\r\n\x1b[2A" in rendered
+    assert renderer.live_height == 3
+
+
+def test_growing_repaint_reserves_blank_rows_before_painting() -> None:
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer.repaint(Tui2State(composer=""))
+    output.seek(0)
+    output.truncate(0)
+
+    renderer.repaint(Tui2State(composer="line1\nline2\nline3", busy=True, turn_elapsed_s=1.0))
+
+    rendered = output.getvalue()
+    # Grow from the initial three-row composer to six live rows by scrolling
+    # blank rows at the old bottom, then repainting from the new top.
+    assert "\x1b[2B\r\n\r\n\r\n\x1b[5A" in rendered
+    assert renderer.live_height == 6
+
+
 def test_flush_cell_separates_cells_with_blank_line() -> None:
     output = io.StringIO()
     Renderer(output=output).flush_cell(TranscriptCell("user", text="hi"))

@@ -20,16 +20,17 @@ class Renderer:
 
     This renderer trades that diff for a much simpler model: every frame is
     a full repaint wrapped in CSI 2026 synchronized output (which removes
-    flicker on terminals that honour it).  We only track the cursor row
-    relative to the *top* of the previously emitted frame; that single
-    number plus ``\\r\\x1b[NA\\x1b[J`` is enough to erase the old frame
-    regardless of whether the terminal scrolled while drawing it.
+    flicker on terminals that honour it).  It tracks the live frame's height
+    and cursor row, reserves blank terminal rows before painting first/grown
+    frames, and then erases from the tracked top with ``\\r\\x1b[NA\\x1b[J``.
+    Scrolling blank rows first keeps live-frame text out of scrollback.
     """
 
     def __init__(self, output: TextIO | None = None) -> None:
         self.output = output or sys.stdout
         self.width = self._paint_width(terminal_size()[0])
         self._frame_cursor_row = 0
+        self._frame_rows = 0
         self._has_frame = False
         self.spinner_frame = 0
 
@@ -39,7 +40,7 @@ class Renderer:
 
     @property
     def live_height(self) -> int:
-        return 0 if not self._has_frame else self._frame_cursor_row + 1
+        return 0 if not self._has_frame else self._frame_rows
 
     @property
     def cursor_row(self) -> int:
@@ -69,6 +70,10 @@ class Renderer:
         return f"\x1b[{rows}A" if rows > 0 else ""
 
     @staticmethod
+    def _down(rows: int) -> str:
+        return f"\x1b[{rows}B" if rows > 0 else ""
+
+    @staticmethod
     def _paint_width(columns: int) -> int:
         """Return a render width that never writes into the last terminal column.
 
@@ -88,17 +93,47 @@ class Renderer:
 
         We end every frame with the cursor at row ``_frame_cursor_row`` of
         that frame, so moving up by exactly that amount lands on row 0.
-        ``\\x1b[J`` then wipes everything below.  This is safe even after the
-        terminal scrolls: the cursor follows the scroll, and so does the
-        frame, so the offset stays correct.
+        ``\\x1b[J`` then wipes everything below.  ``_prepare_frame_region``
+        makes first/grown paints scroll blank rows before any frame text is
+        written, so this erase should not need to reach into scrollback.
         """
 
         if not self._has_frame:
             self._write("\r")
+            self._frame_cursor_row = 0
+            self._frame_rows = 0
             return
         self._write("\r" + self._up(self._frame_cursor_row) + "\x1b[J")
         self._has_frame = False
         self._frame_cursor_row = 0
+        self._frame_rows = 0
+
+    def _prepare_frame_region(self, rows: int, *, previous_rows: int) -> None:
+        """Reserve enough physical rows before painting a live frame.
+
+        Repainting directly from the terminal's current bottom row makes a
+        multi-line live frame scroll while it is being drawn. Once a line has
+        scrolled into terminal scrollback, a later ``CSI J`` erase cannot reach
+        it, which is how stale ``run_python · running`` rules leak into the
+        transcript. Reserve space with blank rows first, then move back to the
+        top and paint inside that cleared region; any unavoidable scrolling now
+        moves only blank rows, never live-frame content.
+        """
+
+        if rows <= 0:
+            return
+        if previous_rows <= 0:
+            self._write("\r\n" * (rows - 1) + self._up(rows - 1))
+            return
+        if rows < previous_rows:
+            # Keep the live frame visually docked near the bottom when its
+            # height shrinks, instead of leaving the composer stranded above a
+            # block of cleared rows from the previous taller frame.
+            self._write(self._down(previous_rows - rows))
+            return
+        if rows > previous_rows:
+            grow_by = rows - previous_rows
+            self._write(self._down(previous_rows - 1) + "\r\n" * grow_by + self._up(rows - 1))
 
     # ------------------------------------------------------------------
     # Public API
@@ -185,6 +220,7 @@ class Renderer:
         self._write(self._AUTOWRAP_ON + "\x1b[?2026l")
         self._has_frame = False
         self._frame_cursor_row = 0
+        self._frame_rows = 0
 
     def repaint(self, state: Tui2State) -> None:
         cols, rows = terminal_size()
@@ -200,10 +236,12 @@ class Renderer:
         )
 
         self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
+        previous_rows = self._frame_rows if self._has_frame else 0
         self._erase_frame()
         if not lines:
             self._write(self._AUTOWRAP_ON + "\x1b[?2026l")
             return
+        self._prepare_frame_region(len(lines), previous_rows=previous_rows)
         # ``\r\n`` between rows guarantees a column reset; ``\n`` alone is
         # only "move down one row" in raw mode, which would produce a
         # staircase of indented lines on POSIX terminals.
@@ -215,6 +253,7 @@ class Renderer:
         self._write(self._AUTOWRAP_ON + "\x1b[?2026l")
         self._has_frame = True
         self._frame_cursor_row = cursor_row
+        self._frame_rows = len(lines)
 
     def close(self) -> None:
         self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
