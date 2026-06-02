@@ -41,7 +41,7 @@ from uv_agent.tui2.streaming import (
     DEFAULT_STREAM_CHARS_PER_SECOND,
     StreamRateEstimator,
     ThreadTokenRatio,
-    model_response_visible_chars,
+    model_response_visible_units,
     tool_call_name,
     tool_call_stream_key,
     tool_delta_visible_text,
@@ -474,12 +474,12 @@ class AnsiUvAgentApp:
             return ThreadTokenRatio()
         ratio = ThreadTokenRatio()
         for event in events:
-            response_chars = model_response_visible_chars(
+            response_units = model_response_visible_units(
                 event.get("output") if isinstance(event.get("output"), list) else [],
                 reasoning_text=str(event.get("reasoning_text") or ""),
             )
             ratio.observe_response(
-                visible_chars=response_chars,
+                visible_units=response_units,
                 output_tokens=usage_output_tokens(event.get("usage") if isinstance(event.get("usage"), dict) else {}),
             )
         return ratio
@@ -490,11 +490,22 @@ class AnsiUvAgentApp:
             return None
         return run_state.rate_estimator.current_cps(now=monotonic() if now is None else now)
 
+    def _current_visible_unit_rate(
+        self,
+        run_state: ThreadRunState | None = None,
+        *,
+        now: float | None = None,
+    ) -> float | None:
+        run_state = run_state or self._run_state()
+        if run_state is None:
+            return None
+        return run_state.rate_estimator.current_ups(now=monotonic() if now is None else now)
+
     def _current_token_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> float | None:
         run_state = run_state or self._run_state()
         if run_state is None:
             return None
-        return run_state.token_ratio.token_rate(self._current_char_rate(run_state, now=now))
+        return run_state.token_ratio.token_rate(self._current_visible_unit_rate(run_state, now=now))
 
     def _display_token_rate(self, run_state: ThreadRunState, *, now: float | None = None) -> float | None:
         """Return the row-1 token rate with display-only smoothing applied."""
@@ -3178,7 +3189,7 @@ class AnsiUvAgentApp:
         if output_tokens:
             ratio = self._token_ratio_for_thread(str(event.get("thread_id") or self.state.thread_id or ""))
             ratio.observe_response(
-                visible_chars=model_response_visible_chars(output, reasoning_text=reasoning_text),
+                visible_units=model_response_visible_units(output, reasoning_text=reasoning_text),
                 output_tokens=output_tokens,
             )
             run_state = self._run_state_for_event(event)

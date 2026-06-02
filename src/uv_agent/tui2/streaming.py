@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from unicodedata import category
 from typing import Any
 
 from uv_agent.billing import billing_token_breakdown
@@ -9,22 +10,77 @@ from uv_agent.billing import billing_token_breakdown
 
 STREAM_RATE_WINDOW_S = 3.0
 DEFAULT_STREAM_CHARS_PER_SECOND = 100.0
+DEFAULT_STREAM_VISIBLE_UNITS_PER_SECOND = DEFAULT_STREAM_CHARS_PER_SECOND
 BREATH_CHARS_PER_PHASE = max(1, round(DEFAULT_STREAM_CHARS_PER_SECOND / 12))
+
+
+def visible_units(text: str) -> int:
+    """Count visible text units used for token-rate estimates.
+
+    The unit is intentionally tokenizer-adjacent rather than linguistically
+    precise: CJK characters count one-by-one, contiguous word characters count
+    as one unit, and visible punctuation/symbols each count as one unit.
+    """
+
+    count, _in_word = _count_visible_units(text, starts_in_word=False)
+    return count
+
+
+def _count_visible_units(text: str, *, starts_in_word: bool) -> tuple[int, bool]:
+    count = 0
+    in_word = starts_in_word
+    for char in text:
+        if char.isspace():
+            in_word = False
+            continue
+        if _is_cjk_visible_unit(char):
+            count += 1
+            in_word = False
+            continue
+        if char == "_" or char.isalnum():
+            if not in_word:
+                count += 1
+            in_word = True
+            continue
+        kind = category(char)[0]
+        if kind in {"C", "M"}:
+            continue
+        count += 1
+        in_word = False
+    return count, in_word
+
+
+def _is_cjk_visible_unit(char: str) -> bool:
+    code = ord(char)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+        or 0x20000 <= code <= 0x2EBEF
+        or 0x3040 <= code <= 0x30FF
+        or 0x31F0 <= code <= 0x31FF
+        or 0xAC00 <= code <= 0xD7AF
+        or 0x1100 <= code <= 0x11FF
+    )
 
 
 @dataclass
 class StreamRateEstimator:
-    """Estimate model-output character throughput over a sliding time window.
+    """Estimate model-output throughput over a sliding time window.
 
     Timing starts when the first visible model-output text arrives.  The first
     chunk can be arbitrarily large depending on provider buffering, so callers
     may still choose a display fallback while the estimator only has one point.
+    Character throughput drives animation/display pacing; visible-unit
+    throughput drives the displayed token-rate estimate.
     """
 
     window_s: float = STREAM_RATE_WINDOW_S
     first_output_at: float | None = None
     total_chars: int = 0
-    _samples: deque[tuple[float, int]] = field(default_factory=deque)
+    total_units: int = 0
+    _samples: deque[tuple[float, int, int]] = field(default_factory=deque)
+    _in_visible_word_unit: bool = False
 
     def observe(self, text: str, *, now: float) -> None:
         """Record newly received model-output text at ``now``."""
@@ -32,10 +88,15 @@ class StreamRateEstimator:
         count = len(text)
         if count <= 0:
             return
+        unit_count, self._in_visible_word_unit = _count_visible_units(
+            text,
+            starts_in_word=self._in_visible_word_unit,
+        )
         if self.first_output_at is None:
             self.first_output_at = now
         self.total_chars += count
-        self._samples.append((now, self.total_chars))
+        self.total_units += unit_count
+        self._samples.append((now, self.total_chars, self.total_units))
         self._trim(now)
 
     def current_cps(self, *, now: float) -> float | None:
@@ -52,11 +113,31 @@ class StreamRateEstimator:
                 return None
             return min(DEFAULT_STREAM_CHARS_PER_SECOND, self.total_chars / elapsed)
         start = max(self.first_output_at, now - self.window_s)
-        baseline_chars = 0 if start <= self.first_output_at else self._chars_at_or_before(start)
+        baseline_chars = 0 if start <= self.first_output_at else self._values_at_or_before(start)[0]
         elapsed = max(0.0, now - start)
         if elapsed <= 0.0:
             return None
         return max(0.0, (self.total_chars - baseline_chars) / elapsed)
+
+    def current_ups(self, *, now: float) -> float | None:
+        """Return the current window-average visible-unit rate, if started."""
+
+        if self.first_output_at is None:
+            return None
+        self._trim(now)
+        if len(self._samples) < 2:
+            elapsed = max(0.0, now - self.first_output_at)
+            if self._samples and now - self._samples[-1][0] >= self.window_s:
+                return 0.0
+            if elapsed <= 0.0:
+                return None
+            return min(DEFAULT_STREAM_VISIBLE_UNITS_PER_SECOND, self.total_units / elapsed)
+        start = max(self.first_output_at, now - self.window_s)
+        baseline_units = 0 if start <= self.first_output_at else self._values_at_or_before(start)[1]
+        elapsed = max(0.0, now - start)
+        if elapsed <= 0.0:
+            return None
+        return max(0.0, (self.total_units - baseline_units) / elapsed)
 
     def display_cps(self, *, now: float, backlog_chars: int) -> float:
         """Return a smooth display speed for queued final-answer text.
@@ -75,13 +156,15 @@ class StreamRateEstimator:
         backlog_cps = backlog_chars / 1.2
         return max(base, backlog_cps)
 
-    def _chars_at_or_before(self, when: float) -> int:
+    def _values_at_or_before(self, when: float) -> tuple[int, int]:
         chars = 0
-        for sample_time, sample_chars in self._samples:
+        units = 0
+        for sample_time, sample_chars, sample_units in self._samples:
             if sample_time > when:
                 break
             chars = sample_chars
-        return chars
+            units = sample_units
+        return chars, units
 
     def _trim(self, now: float) -> None:
         # Keep one sample older than the window as a cumulative baseline.  Without
@@ -94,32 +177,39 @@ class StreamRateEstimator:
 
 @dataclass
 class ThreadTokenRatio:
-    """Per-thread visible-output character/token ratio."""
+    """Per-thread visible-output unit/token ratio."""
 
-    chars: int = 0
+    visible_units: int = 0
     output_tokens: int = 0
 
     @property
     def available(self) -> bool:
-        return self.chars > 0 and self.output_tokens > 0
+        return self.visible_units > 0 and self.output_tokens > 0
 
     @property
-    def chars_per_token(self) -> float | None:
+    def visible_units_per_token(self) -> float | None:
         if not self.available:
             return None
-        return self.chars / self.output_tokens
+        return self.visible_units / self.output_tokens
 
-    def observe_response(self, *, visible_chars: int, output_tokens: int) -> None:
-        if visible_chars <= 0 or output_tokens <= 0:
+    def observe_response(
+        self,
+        *,
+        visible_units: int | None = None,
+        output_tokens: int = 0,
+        visible_chars: int | None = None,
+    ) -> None:
+        units = visible_units if visible_units is not None else visible_chars or 0
+        if units <= 0 or output_tokens <= 0:
             return
-        self.chars += visible_chars
+        self.visible_units += units
         self.output_tokens += output_tokens
 
-    def token_rate(self, char_rate: float | None) -> float | None:
-        chars_per_token = self.chars_per_token
-        if char_rate is None or char_rate <= 0.0 or chars_per_token is None or chars_per_token <= 0:
+    def token_rate(self, unit_rate: float | None) -> float | None:
+        units_per_token = self.visible_units_per_token
+        if unit_rate is None or unit_rate <= 0.0 or units_per_token is None or units_per_token <= 0:
             return None
-        return max(0.0, char_rate / chars_per_token)
+        return max(0.0, unit_rate / units_per_token)
 
 
 def usage_output_tokens(usage: dict[str, Any] | None) -> int:
@@ -130,12 +220,12 @@ def usage_output_tokens(usage: dict[str, Any] | None) -> int:
     return billing_token_breakdown(usage).output_tokens
 
 
-def model_response_visible_chars(
+def model_response_visible_units(
     output: list[dict[str, Any]] | None,
     *,
     reasoning_text: str = "",
 ) -> int:
-    """Count visible text available from a model response.
+    """Count token-rate visible units available from a model response.
 
     This intentionally ignores hidden reasoning token counts that providers may
     include in usage.  It counts the text uv-agent can actually observe: final
@@ -143,6 +233,28 @@ def model_response_visible_chars(
     or arguments.
     """
 
+    return sum(visible_units(part) for part in _model_response_visible_text_parts(output, reasoning_text=reasoning_text))
+
+
+def model_response_visible_chars(
+    output: list[dict[str, Any]] | None,
+    *,
+    reasoning_text: str = "",
+) -> int:
+    """Count raw visible characters from a model response.
+
+    The displayed token-rate estimate uses :func:`model_response_visible_units`;
+    this helper is retained for callers that still need raw character volume.
+    """
+
+    return sum(len(part) for part in _model_response_visible_text_parts(output, reasoning_text=reasoning_text))
+
+
+def _model_response_visible_text_parts(
+    output: list[dict[str, Any]] | None,
+    *,
+    reasoning_text: str = "",
+) -> list[str]:
     parts: list[str] = []
     if reasoning_text:
         parts.append(reasoning_text)
@@ -166,7 +278,7 @@ def model_response_visible_chars(
                     parts.append(value)
             parts.extend(_content_text_parts(item.get("content")))
             parts.extend(_content_text_parts(item.get("summary")))
-    return sum(len(part) for part in parts)
+    return parts
 
 
 def tool_delta_visible_text(tool_call: object) -> str:

@@ -1342,7 +1342,7 @@ def test_model_response_usage_updates_thread_token_rate(monkeypatch) -> None:
 
     app._handle_event({"type": "model.response", "thread_id": "T-test", "response": response})
 
-    assert run_state.token_ratio.chars == 4
+    assert run_state.token_ratio.visible_units == 1
     assert run_state.token_ratio.output_tokens == 2
     assert app._current_token_rate(run_state) is not None
 
