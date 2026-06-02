@@ -511,6 +511,48 @@ def test_grown_paint_area_remembers_cursor_for_next_erase() -> None:
     assert "\x1b[J" in erase
 
 
+def test_agent_view_uses_alternate_screen_and_restores_transcript_frame() -> None:
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer.repaint(Tui2State(composer=""))
+    output.seek(0)
+    output.truncate(0)
+
+    agent_state = Tui2State(mode="agent_view")
+    agent_state.agent_view.rows = [AgentViewRow(thread_id="thr_1", title="One", status="completed")]
+    renderer.repaint(agent_state)
+
+    entered = output.getvalue()
+    assert "\x1b[?1049h" in entered
+    assert "Agent View" in strip_ansi(entered)
+
+    output.seek(0)
+    output.truncate(0)
+    renderer.repaint(Tui2State(composer=""))
+
+    restored = output.getvalue()
+    assert "\x1b[?1049l" in restored
+    assert "Agent View" not in strip_ansi(restored)
+    # Returning from Agent View should reuse the saved normal transcript frame
+    # instead of reserving a fresh block of blank rows, which was visible as a
+    # large gap after closing the dashboard.
+    assert "\r\n\r\n\x1b[2A" not in restored
+
+
+def test_renderer_close_leaves_alternate_screen() -> None:
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer.repaint(Tui2State(mode="agent_view"))
+    output.seek(0)
+    output.truncate(0)
+
+    renderer.close()
+
+    closed = output.getvalue()
+    assert "\x1b[?1049l" in closed
+    assert closed.endswith("\x1b[?2026l\x1b[0m")
+
+
 def test_repaint_reserves_blank_rows_before_first_live_frame() -> None:
     output = io.StringIO()
     renderer = Renderer(output=output)
