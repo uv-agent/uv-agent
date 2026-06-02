@@ -45,6 +45,7 @@ from uv_agent_runtime import (
     restore_snapshot,
     run_python_env_dir,
     run_process_text,
+    run_digest,
     search_text,
     snapshot_files,
     supported_symbol_languages,
@@ -470,6 +471,97 @@ def test_runtime_replace_text_raw_mode_is_newline_sensitive(tmp_path: Path) -> N
 
     assert result.replacements == 1
     assert path.read_bytes() == b"first\r\nnew\r\nlast\r\n"
+
+
+
+
+def test_runtime_replace_text_result_changed_and_repr_omits_full_text(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    long_text = "old " + ("secret-ish text " * 40) + "tail\n"
+    path.write_text(long_text, encoding="utf-8")
+
+    result = replace_text(path, "old", "new")
+
+    assert result.changed is True
+    assert result.replacements == 1
+    rendered = repr(result)
+    assert "TextFile" in rendered
+    assert "secret-ish text" not in rendered
+    assert "text=" not in rendered
+
+
+def test_runtime_run_digest_summarizes_code_outputs_and_helper_calls(tmp_path: Path) -> None:
+    from uv_agent.runner.run_log import RunLogStore
+
+    store = RunLogStore(tmp_path)
+    code = "from uv_agent_runtime import replace_text\nreplace_text('a.txt', 'old', 'new')\n"
+    store.create_run_record(
+        run_id="run_one",
+        code=code,
+        script_args=[],
+        cwd=tmp_path,
+        timeout_s=30,
+        started_at="2026-01-01T00:00:00+00:00",
+        thread_id="thr_one",
+        turn_id="turn_one",
+        script_path=None,
+    )
+    store.complete_run(
+        run_id="run_one",
+        completed_at="2026-01-01T00:00:01+00:00",
+        returncode=0,
+        timed_out=False,
+        interrupted=False,
+        truncated=False,
+        stdout="line1\n" + "x" * 80,
+        stderr="",
+        structured_events=[{"kind": "cwd", "cwd": "."}],
+    )
+
+    digest = run_digest("run_one", state_dir=tmp_path, max_code_chars=30, max_output_chars=20)
+
+    assert digest["run_id"] == "run_one"
+    assert digest["thread_id"] == "thr_one"
+    assert digest["returncode"] == 0
+    assert digest["code_truncated"] is True
+    assert digest["stdout_truncated"] is True
+    assert digest["stdout"].endswith("x" * 20)
+    assert digest["helper_calls"] == [
+        {"name": "replace_text", "args": "'a.txt', 'old', 'new'", "line": 2}
+    ]
+    assert digest["structured_events"] == [{"kind": "cwd", "cwd": "."}]
+
+
+def test_runtime_thread_digest_includes_bounded_tool_details(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Tools")
+    store.append(
+        thread_id,
+        "item.runner_result",
+        turn_id="turn_one",
+        result={
+            "run_id": "run_tool",
+            "returncode": 0,
+            "helper_calls": [{"name": "replace_text", "args": "'a.txt', 'old', 'new'"}],
+        },
+    )
+    store.append(
+        thread_id,
+        "item.tool_output",
+        turn_id="turn_one",
+        item={
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": '{"run_id":"run_tool","returncode":0,"stdout":"ok\\n"}',
+        },
+    )
+
+    digest = thread_digest(thread_id, state_dir=tmp_path, include_tools=True)
+
+    assert digest["items"] == [
+        {"role": "tool", "text": "run_python rc=0 run=run_tool helpers=replace_text('a.txt', 'old', 'new')"},
+        {"role": "tool", "text": "tool_output run=run_tool rc=0 stdout='ok'"},
+    ]
 
 
 def test_runtime_replace_text_preserves_mixed_newlines(tmp_path: Path) -> None:

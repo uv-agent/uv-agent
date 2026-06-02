@@ -45,6 +45,7 @@ RUNTIME_HELPER_NAMES: frozenset[str] = frozenset(
         "resolve_workspace_path",
         "restore_snapshot",
         "run_process_text",
+        "run_digest",
         "run_python_env_dir",
         "search_text",
         "snapshot_files",

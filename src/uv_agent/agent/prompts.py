@@ -151,6 +151,7 @@ from uv_agent_runtime import (
     run_process_text,
     list_thread_digests,
     thread_digest,
+    run_digest,
     list_declared_servers,
     connect_named,
     connect_url,
@@ -161,342 +162,83 @@ from uv_agent_runtime import (
 )
 </imports>
 <helper_selection>
-<rule>Prefer the smallest helper that directly matches the task. When two helpers both work, choose the one requiring less generated code, less parsing, and a smaller read/write surface.</rule>
-<rule>For reading or metadata, use read_file. Use head/tail/lines/around before printing large files.</rule>
-<rule>For edits, use replace_text for unique short text replacements, edit_lines for line-number or symbol-range edits, and write_file for whole-file writes.</rule>
-<rule>Paths returned by find_files/search_text/find_symbols/query_code are absolute and can be passed directly to read_file/write_file/edit_lines; use rel_path only for display when present.</rule>
-<rule>For discovery, prefer find_files/search_text/find_symbols over manual directory walking, broad file reads, or ad hoc parsing.</rule>
-<rule>For process execution, prefer run_process_text over raw subprocess unless advanced subprocess control is needed.</rule>
-<rule>Set command timeouts shorter than the outer run_python timeout when diagnosing hangs; timed-out run_process_text calls return buffered output with timed_out=True.</rule>
-<rule>Use ask for bounded independent work; handle the immediate critical path locally.</rule>
+<rule>Choose by task: discovery=find_files/search_text/find_symbols/query_code; reading=read_file; edit=replace_text for unique text, edit_lines for anchored line ranges, write_file for whole-file/generated content; process=run_process_text; thread/run history=thread_digest/run_digest/list_thread_digests; dependencies=add_dependency before import.</rule>
+<rule>Keep printed output bounded; prefer selected fields, line ranges, heads/tails, or summaries for large data.</rule>
+<rule>Search and symbol helpers return absolute paths for file helpers; use rel_path only for display.</rule>
 </helper_selection>
 <helper name="enter_dir">
-<description>Use early when the task belongs in a repository, subdirectory, or path discovered during execution. It changes the Python cwd, persists that cwd for later runs in the thread, and may load directory rules.</description>
-<signature>
-enter_dir(path: str | Path) -> Path
-</signature>
-<example>
-from uv_agent_runtime import enter_dir
-
-enter_dir("src")
-</example>
+<description>Set and persist the active cwd for repository/subdirectory work; may load directory rules.</description>
+<signature>enter_dir(path: str | Path) -> Path</signature>
 </helper>
 <helper name="ask">
-<description>Use for isolated, tedious, or parallelizable investigation through a nested uv-agent subagent. It returns .text, .stdout, .stderr, .thread_id, and .raise_for_error().</description>
-<signature>
-ask(prompt: str, *, level=None, model_level=None, cwd=None, env=None, executable=None,
-    timeout_s=300, check=False, retain=True) -> SubagentResult
-</signature>
-<returns>
-@dataclass(frozen=True)
-class SubagentResult:
-    text: str
-    stdout: str
-    stderr: str
-    thread_id: str | None
-    returncode: int
-    timed_out: bool
-    def raise_for_error(self) -> SubagentResult: ...
-</returns>
-<example>
-from uv_agent_runtime import ask
-
-result = ask("Inspect parser tests and summarize likely failures", check=True, timeout_s=300)
-print(result.text[:2000])
-</example>
+<description>Launch a nested uv-agent for isolated or parallel investigation.</description>
+<signature>ask(prompt: str, *, level=None, model_level=None, cwd=None, env=None, executable=None, timeout_s=300, check=False, retain=True) -> SubagentResult</signature>
+<returns>SubagentResult(text, stdout, stderr, thread_id, returncode, timed_out, raise_for_error())</returns>
 </helper>
 <helper name="add_dependency">
-<description>Use to add direct packages to the run_python uv project. Call it before importing the package in the current script; do not use it to upgrade a package already imported in this Python process. Added packages persist for later run_python calls in the same project and appear in the runtime context dependency list after context refresh. Use run_python_env_dir() only when you need the exact environment directory or want to inspect its pyproject.toml.</description>
-<signature>
-add_dependency(*packages: str, editable=False, optional=None, dev=False, group=None,
-    timeout_s=None, check=True) -> CommandTextResult
-run_python_env_dir() -> Path
-</signature>
-<example>
-from uv_agent_runtime import add_dependency
-
-add_dependency("requests", check=True)
-import requests
-</example>
+<description>Add direct packages to the run_python uv project; call before importing the package in that script.</description>
+<signature>add_dependency(*packages: str, editable=False, optional=None, dev=False, group=None, timeout_s=None, check=True) -> CommandTextResult
+run_python_env_dir() -> Path</signature>
 </helper>
 <helper name="look_at">
-<description>Use when a script produces or discovers an image that should be visible to the model on future turns. It emits structured image context with an optional note.</description>
-<signature>
-look_at(path: str | Path, *, note="") -> dict[str, Any]
-</signature>
-<example>
-from uv_agent_runtime import look_at
-
-look_at("screenshots/failure.png", note="inspect failing UI state")
-</example>
+<description>Attach an image produced or found by a script so it is visible on future turns.</description>
+<signature>look_at(path: str | Path, *, note="") -> dict[str, Any]</signature>
 </helper>
 <helper name="read_file">
-<description>Use to read text, inspect existence/kind/size, preserve newline metadata, or fetch bounded line ranges. Selectors lines/head/tail/around are mutually exclusive; around returns the first matching line plus context.</description>
-<signature>
-read_file(path: str | Path, *, lines: tuple[int, int] | None = None,
-    head: int | None = None, tail: int | None = None,
-    around: str | None = None, context: int = 20,
-    encoding: str = "utf-8") -> FileView
-</signature>
-<returns>
-@dataclass(frozen=True)
-class FileView:
-    path: str             # absolute; pass directly to write_file/edit_lines
-    exists: bool
-    text: str             # selected text; full file by default
-    line_count: int       # full-file line count
-    start_line: int       # 1-indexed selected start, or 0 for empty selections
-    end_line: int         # 1-indexed selected end, or 0 for empty files/selections
-    truncated: bool
-    encoding: str
-    newline: Literal["lf", "crlf", "cr", "mixed", "none"]
-    final_newline: bool
-    bom: bool
-    size: int | None
-    kind: Literal["file", "dir", "missing", "other"]
-    def numbered(self) -> str: ...  # render selected text as "  42: text"
-</returns>
-<example>
-from uv_agent_runtime import read_file
-
-view = read_file("src/app.py", around="def parse", context=5)
-print(view.numbered())
-print(view.path, view.line_count, view.newline)
-</example>
+<description>Read text, metadata, or a bounded view. Select at most one of lines/head/tail/around.</description>
+<signature>read_file(path: str | Path, *, lines: tuple[int, int] | None = None, head: int | None = None, tail: int | None = None, around: str | None = None, context: int = 20, encoding: str = "utf-8") -> FileView</signature>
+<returns>FileView(path, exists, text, line_count, start_line, end_line, truncated, newline, final_newline, bom, size, kind, numbered())</returns>
 </helper>
 <helper name="write_file">
-<description>Use to write generated or substantially transformed text while preserving or explicitly choosing encoding/newline/final-newline/BOM metadata. Internal writes are safe by default; there is no atomic parameter for the model to choose.</description>
-<signature>
-write_file(path: str | Path, text: str, *, like: FileView | str | Path | None = None,
-    encoding: str | None = None,
-    newline: Literal["lf", "crlf", "cr", "none"] | None = None,
-    final_newline: bool | None = None,
-    bom: bool | None = None) -> Path
-</signature>
-<example>
-from uv_agent_runtime import read_file, write_file
-
-before = read_file("README.md")
-write_file(before.path, before.text.replace("old", "new"), like=before)
-</example>
+<description>Write generated or substantially transformed whole-file text while preserving or choosing text metadata.</description>
+<signature>write_file(path: str | Path, text: str, *, like: FileView | str | Path | None = None, encoding: str | None = None, newline: Literal["lf", "crlf", "cr", "none"] | None = None, final_newline: bool | None = None, bom: bool | None = None) -> Path</signature>
 </helper>
 <helper name="edit_lines">
-<description>Use to replace, delete, or insert 1-indexed closed line ranges. It preserves source text metadata by default and supports cheap anchor checks so stale line numbers fail loudly instead of editing the wrong place.</description>
-<signature>
-edit_lines(path: str | Path, start: int, end: int, new_text: str, *,
-    expect_first: str | None = None,
-    expect_last: str | None = None,
-    expect_mode: Literal["startswith", "contains", "exact", "regex"] = "startswith",
-    strip_indent: bool = True,
-    encoding: str | None = None,
-    newline: Literal["preserve", "lf", "crlf", "cr"] = "preserve",
-    final_newline: bool | None = None,
-    bom: bool | None = None) -> EditResult
-</signature>
-<returns>
-@dataclass(frozen=True)
-class EditResult:
-    path: str                 # absolute
-    changed: bool
-    replaced_text: str
-    line_count_before: int
-    line_count_after: int
-    line_delta: int
-</returns>
-<failure_modes>
-`expect_first`/`expect_last` mismatch raises ValueError. Normal replacement requires
-1 <= start <= end <= line_count. Insertion uses start == end + 1, including EOF insertion
-(start == line_count + 1, end == line_count). new_text == "" deletes the range.
-</failure_modes>
-<example>
-from uv_agent_runtime import read_file, edit_lines
-
-view = read_file("src/app.py", around="def parse", context=3)
-print(view.numbered())
-edit_lines(view.path, view.start_line, view.end_line, "def parse(x):\\n    return x",
-           expect_first="def parse")
-</example>
+<description>Replace, delete, or insert 1-indexed closed line ranges with optional stale-anchor checks.</description>
+<signature>edit_lines(path: str | Path, start: int, end: int, new_text: str, *, expect_first: str | None = None, expect_last: str | None = None, expect_mode: Literal["startswith", "contains", "exact", "regex"] = "startswith", strip_indent: bool = True, encoding: str | None = None, newline: Literal["preserve", "lf", "crlf", "cr"] = "preserve", final_newline: bool | None = None, bom: bool | None = None) -> EditResult</signature>
+<returns>EditResult(path, changed, replaced_text, line_count_before, line_count_after, line_delta)</returns>
 </helper>
 <helper name="replace_text">
-<description>Use for small, unique text replacements in existing files. By default old and new use logical \\n newlines while the helper matches and writes with the file's original newline style; pass newlines="raw" only when raw exact matching is intended.</description>
-<signature>
-replace_text(path: str | Path, old: str, new: str, *, count=1,
-    newlines: Literal["logical", "raw"] = "logical") -> ReplacementResult
-</signature>
-<example>
-from uv_agent_runtime import replace_text
-
-replace_text("README.md", "old paragraph\\n\\nnext", "new paragraph\\n\\nnext")
-</example>
+<description>Replace small, unique text in an existing file; logical newlines match the file's newline style by default.</description>
+<signature>replace_text(path: str | Path, old: str, new: str, *, count=1, newlines: Literal["logical", "raw"] = "logical") -> ReplacementResult</signature>
+<returns>ReplacementResult(path, replacements, changed, before, after). Its repr omits full file text.</returns>
 </helper>
 <helper name="run_process_text">
-<description>Use to run external commands with explicit stdout/stderr decoding, env/env_patch support, timeout control, and optional check=True failure raising. Prefer it over raw subprocess for ordinary command execution. On timeout it best-effort kills the process tree and returns buffered output with timed_out=True.</description>
-<signature>
-run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace",
-    env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult
-</signature>
-<returns>
-@dataclass(frozen=True)
-class CommandTextResult:
-    args: list[str]
-    returncode: int
-    stdout: str
-    stderr: str
-    timed_out: bool
-    @property
-    def ok(self) -> bool: ...
-    def raise_for_error(self) -> CommandTextResult: ...
-</returns>
-<example>
-from uv_agent_runtime import run_process_text
-
-result = run_process_text(["git", "status", "--short"], timeout_s=30, check=True)
-print(result.stdout)
-</example>
+<description>Run an external command with decoded stdout/stderr, timeout handling, env/env_patch, and optional check=True.</description>
+<signature>run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace", env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult</signature>
+<returns>CommandTextResult(args, returncode, stdout, stderr, timed_out, ok, raise_for_error())</returns>
 </helper>
 <helper name="threads">
-<description>Use to inspect compact summaries from this or other threads when the user references @thread:id, asks about prior work, or needs a recent-thread lookup. list_thread_digests lists recent thread ids/titles/last text; thread_digest reads one thread's compact conversation digest. These helpers do not switch the active TUI thread.</description>
-<signature>
-list_thread_digests(*, state_dir=None, limit=10, kind="thread", parent_thread_id=None,
-    since_last_compaction=True, include_tools=False) -> list[dict[str, Any]]
-thread_digest(thread_id: str, *, state_dir=None, kind=None,
-    since_last_compaction=True, include_tools=False) -> dict[str, Any]
-</signature>
-<example>
-from uv_agent_runtime import list_thread_digests, thread_digest
-
-threads = list_thread_digests(limit=5)
-if threads:
-    print(thread_digest(threads[0]["thread_id"]))
-</example>
+<description>Inspect compact conversation and run summaries; these helpers do not switch the active TUI thread.</description>
+<signature>list_thread_digests(*, state_dir=None, limit=10, kind="thread", parent_thread_id=None, since_last_compaction=True, include_tools=False) -> list[dict[str, Any]]
+thread_digest(thread_id: str, *, state_dir=None, kind=None, since_last_compaction=True, include_tools=False) -> dict[str, Any]
+run_digest(run_id: str, *, state_dir=None, max_code_chars=4000, max_output_chars=4000, max_events=20, include_events=False) -> dict[str, Any]</signature>
+<returns>thread_digest/list_thread_digests return compact items; run_digest returns bounded code/stdout/stderr/helper_calls for one run_python execution.</returns>
 </helper>
 <helper name="mcp">
-<description>Use to discover and call declared MCP servers from Python through the official MCP SDK. Declarations may use stdio, streamable_http, or sse transport. MCP is not a direct model tool. When using an MCP server, call client.initialize() first and inspect its returned instructions before listing or calling tools. The available_mcp_servers context may include only a truncated instructions preview.</description>
-<signature>
-list_declared_servers(*, config_paths=None, cwd=None) -> list[dict[str, Any]]
+<description>Discover and call declared MCP servers from Python. Call client.initialize() first and inspect returned instructions before listing or calling tools.</description>
+<signature>list_declared_servers(*, config_paths=None, cwd=None) -> list[dict[str, Any]]
 connect_named(name: str, *, config_paths=None, cwd=None, timeout_s=30) -> McpClient
-connect_url(url: str, *, transport="streamable_http", timeout_s=30) -> McpClient
-</signature>
-<example>
-from uv_agent_runtime import connect_named, connect_url, list_declared_servers
-
-print(list_declared_servers())
-with connect_named("server-name") as client:
-    init = client.initialize()
-    instructions = init.value.get("instructions")
-    if instructions:
-        print(instructions)
-    print(client.list_tools())
-
-with connect_url("http://localhost:3001/mcp") as client:
-    client.initialize()
-    print(client.list_tools())
-</example>
+connect_url(url: str, *, transport="streamable_http", timeout_s=30) -> McpClient</signature>
 </helper>
 <helper name="search_text">
-<description>Use for grep-like content search across the workspace instead of broad file reads or manual scanning. It wraps `rg` (ripgrep), honors .gitignore, and returns structured Match objects. Use literal=True/fixed_string=True to disable regex, case_sensitive=False for case-insensitive search, context=N for surrounding lines, and max_count_per_file/max_total to bound output.</description>
-<signature>
-search_text(pattern: str, *, root=".", roots=None, globs=None, file_types=None,
-    ignore_case=False, case_sensitive=None, fixed_string=False, literal=None,
-    multiline=False, word=False, before=0, after=0, context=None,
-    max_count_per_file=None, max_total=None, hidden=False, no_ignore=False,
-    extra_args=None) -> list[Match]
-</signature>
-<returns>
-@dataclass(frozen=True)
-class Match:
-    path: str                                  # absolute; pass directly to edit_lines
-    rel_path: str                              # relative to the queried root, for display
-    line: int                                  # 1-indexed
-    column: int                                # 1-indexed
-    text: str                                  # matched line, no trailing newline
-    submatches: list[Submatch]                 # byte ranges within text
-    context_before: list[tuple[int, str]]
-    context_after: list[tuple[int, str]]
-</returns>
-<example>
-from uv_agent_runtime import search_text, edit_lines
-
-hits = search_text(r"def\\s+parse", root="src", file_types=["py"], context=3, max_total=5)
-for m in hits:
-    print(f"{m.rel_path}:{m.line}: {m.text}")
-
-edit_lines(hits[0].path, hits[0].line, hits[0].line,
-           "def parse(self, x: int) -> str:", expect_first="def parse")
-</example>
+<description>Grep-like content search with ripgrep; supports regex/literal search, context, globs/types, hidden/no_ignore, and max bounds.</description>
+<signature>search_text(pattern: str, *, root=".", roots=None, globs=None, file_types=None, ignore_case=False, case_sensitive=None, fixed_string=False, literal=None, multiline=False, word=False, before=0, after=0, context=None, max_count_per_file=None, max_total=None, hidden=False, no_ignore=False, extra_args=None) -> list[Match]</signature>
+<returns>Match(path, rel_path, line, column, text, submatches, context_before, context_after)</returns>
 </helper>
 <helper name="find_files">
-<description>Use to enumerate workspace files honoring .gitignore via `rg --files` instead of manual directory walking. It returns absolute paths that can be passed directly to file helpers. `root` may be a directory or a single file; use `roots=[...]` to enumerate multiple roots.</description>
-<signature>
-find_files(root=".", *, roots=None, globs=None, file_types=None, max_total=None,
-    hidden=False, no_ignore=False, extra_args=None) -> list[str]
-</signature>
-<example>
-from pathlib import Path
-from uv_agent_runtime import find_files
-
-for path in find_files("src", globs=["*.py", "!**/migrations/**"], max_total=30):
-    print(Path(path).relative_to(Path.cwd()))
-</example>
+<description>Enumerate files via ripgrep while honoring .gitignore by default.</description>
+<signature>find_files(root=".", *, roots=None, globs=None, file_types=None, max_total=None, hidden=False, no_ignore=False, extra_args=None) -> list[str]</signature>
+<returns>Absolute paths.</returns>
 </helper>
 <helper name="find_symbols">
-<description>Use to locate function/class/method/struct/interface/... definitions via tree-sitter. Results are cached per file in ~/.uv-agent/cache/codequery so repeat calls only re-parse files whose (mtime, size) changed. Built-in symbol languages: c, cpp, go, java, javascript, python, ruby, rust, tsx, typescript. For unsupported languages, use search_text.</description>
-<signature>
-find_symbols(root=".", *, languages=None, language=None, kinds=None, kind=None,
-    name_pattern=None, name=None, contains=None, max_count=None,
-    hidden=False, no_ignore=False, globs=None) -> list[Symbol]
-</signature>
-<returns>
-@dataclass(frozen=True)
-class Symbol:
-    kind: str
-    name: str
-    path: str          # absolute; pass directly to edit_lines
-    rel_path: str      # relative to query root, for display
-    language: str
-    start_line: int    # 1-indexed closed range
-    end_line: int      # 1-indexed closed range, pass directly to edit_lines
-</returns>
-<example>
-from uv_agent_runtime import find_symbols, edit_lines
-
-for sym in find_symbols("src", kind="class", contains="Engine"):
-    print(sym.rel_path, sym.start_line, sym.name)
-
-sym = find_symbols("src", name="parse", max_count=1)[0]
-edit_lines(sym.path, sym.start_line, sym.end_line, "def parse(x):\\n    return x",
-           expect_first="def parse")
-</example>
+<description>Locate tree-sitter symbols. Built-in languages: c, cpp, go, java, javascript, python, ruby, rust, tsx, typescript.</description>
+<signature>find_symbols(root=".", *, languages=None, language=None, kinds=None, kind=None, name_pattern=None, name=None, contains=None, max_count=None, hidden=False, no_ignore=False, globs=None) -> list[Symbol]</signature>
+<returns>Symbol(kind, name, path, rel_path, language, start_line, end_line)</returns>
 </helper>
 <helper name="query_code">
-<description>Use to run a custom tree-sitter query (S-expression text) over a single language across the workspace. Each capture in the query becomes a Capture with absolute path, relative display path, position, and source text. Results are cached identically to find_symbols and keyed by query SHA.</description>
-<signature>
-query_code(query_text: str, *, language: str, root=".", globs=None, file_types=None,
-    hidden=False, no_ignore=False, max_count=None) -> list[Capture]
-</signature>
-<returns>
-@dataclass(frozen=True)
-class Capture:
-    name: str
-    path: str
-    rel_path: str
-    language: str
-    start_line: int
-    start_col: int
-    end_line: int
-    end_col: int
-    text: str
-</returns>
-<example>
-from uv_agent_runtime import query_code
-
-for cap in query_code(
-    "(call function: (attribute attribute: (identifier) @method))",
-    language="python",
-    root="src",
-    max_count=20,
-):
-    print(cap.rel_path, cap.start_line, cap.text)
-</example>
+<description>Run a custom tree-sitter query over one language across files.</description>
+<signature>query_code(query_text: str, *, language: str, root=".", globs=None, file_types=None, hidden=False, no_ignore=False, max_count=None) -> list[Capture]</signature>
+<returns>Capture(name, path, rel_path, language, start_line, start_col, end_line, end_col, text)</returns>
 </helper>
 </runtime_helpers>"""

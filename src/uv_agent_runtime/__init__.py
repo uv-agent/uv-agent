@@ -65,6 +65,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "resolve_workspace_path": (".files", "resolve_workspace_path"),
     "restore_snapshot": (".textops", "restore_snapshot"),
     "run_process_text": (".textops", "run_process_text"),
+    "run_digest": (".threads", "run_digest"),
     "run_python_env_dir": (".dependencies", "run_python_env_dir"),
     "search_text": (".codesearch", "search_text"),
     "snapshot_files": (".textops", "snapshot_files"),

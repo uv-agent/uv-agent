@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -35,7 +35,7 @@ class PathInfo:
 @dataclass(frozen=True)
 class TextFile:
     path: str
-    text: str
+    text: str = field(repr=False)
     encoding: str
     newline: Literal["lf", "crlf", "cr", "mixed", "none"]
     final_newline: bool
@@ -48,7 +48,7 @@ class FileView:
 
     path: str
     exists: bool
-    text: str
+    text: str = field(repr=False)
     line_count: int
     start_line: int
     end_line: int
@@ -88,6 +88,12 @@ class ReplacementResult:
     replacements: int
     before: TextFile
     after: TextFile
+
+    @property
+    def changed(self) -> bool:
+        """Return whether the replacement changed the file."""
+
+        return self.replacements > 0
 
 
 @dataclass(frozen=True)

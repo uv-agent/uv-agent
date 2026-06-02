@@ -3097,30 +3097,34 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "run_python_env_dir" in turn_context
     assert "context=None" in turn_context
     assert "max_total=None" in turn_context
-    assert 'find_files("src", globs=["*.py", "!**/migrations/**"], max_total=30)' in turn_context
+    assert '<helper name="threads">' in turn_context
+    assert "run_digest" in turn_context
     assert "<helper_selection>" in turn_context
-    assert "Prefer the smallest helper that directly matches the task" in turn_context
-    assert "replace_text for unique short text replacements" in turn_context
-    assert "edit_lines for line-number or symbol-range edits" in turn_context
-    assert "Paths returned by find_files/search_text/find_symbols/query_code are absolute" in turn_context
-    assert "prefer find_files/search_text/find_symbols" in turn_context
-    assert "prefer run_process_text over raw subprocess" in turn_context
-    assert "Use ask for bounded independent work" in turn_context
+    assert "Choose by task:" in turn_context
+    assert "discovery=find_files/search_text/find_symbols/query_code" in turn_context
+    assert "edit=replace_text for unique text, edit_lines for anchored line ranges" in turn_context
+    assert "write_file for whole-file/generated content" in turn_context
+    assert "thread/run history=thread_digest/run_digest/list_thread_digests" in turn_context
+    assert "Keep printed output bounded" in turn_context
+    assert "Search and symbol helpers return absolute paths" in turn_context
+    assert "Prefer the smallest helper that directly matches the task" not in turn_context
     assert "uv-agent patch envelope shown below" not in turn_context
     assert turn_context.count("<description>") >= 15
-    assert turn_context.count("<example>") >= 15
+    assert "<example>" not in turn_context
     assert "<![CDATA[" not in turn_context
     assert '<helper name="replace_text">' in turn_context
     assert '<helper name="mcp">' in turn_context
     assert '<helper name="stdlib">' not in turn_context
     assert '<helper name="inspect_signatures">' not in turn_context
-    assert "These helpers do not switch the active TUI thread" in turn_context
+    assert "These helpers do not switch the active TUI thread" not in turn_context
     assert "*** Begin Patch" not in turn_context
     assert "*** Update File: src/app.py" not in turn_context
-    assert "connect_named(\"server-name\")" in turn_context
+    assert 'find_files("src", globs=["*.py", "!**/migrations/**"], max_total=30)' not in turn_context
+    assert "before.text.replace" not in turn_context
+    assert 'connect_named("server-name")' not in turn_context
     assert "client.initialize()" in turn_context
-    assert "inspect its returned instructions" in turn_context
-    assert "nested uv-agent subagent" in turn_context
+    assert "inspect returned instructions" in turn_context
+    assert "Launch a nested uv-agent" in turn_context
     assert 'level="small"' not in prompt
     assert "pathlib" in prompt
     assert "Mentions are plain-text hints only" in prompt
