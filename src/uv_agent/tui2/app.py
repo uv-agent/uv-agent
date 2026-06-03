@@ -6,6 +6,7 @@ import re
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from math import exp
 from pathlib import Path
 from time import monotonic
@@ -23,7 +24,8 @@ from uv_agent.session import ThreadLockedError
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
-from uv_agent.tui.formatting import short_block, short_thread
+from uv_agent.tui.formatting import format_elapsed, short_block, short_thread
+from uv_agent.billing import billing_total_from_metadata, format_billing_total
 from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
 from uv_agent.tui2.events import (
@@ -2421,6 +2423,25 @@ class AnsiUvAgentApp:
             lines.append(f"title: {self.state.title}")
         if self.state.project_path:
             lines.append(f"project: {self.state.project_path}")
+        # Cumulative billing total and wall-clock time for the current thread.
+        if self.state.thread_id:
+            try:
+                metadata = self._thread_metadata(self.state.thread_id)
+                if self.engine.config.pricing.models:
+                    total = billing_total_from_metadata(
+                        metadata,
+                        preferred_currency=self.engine.config.pricing.currency,
+                    )
+                    if total is not None:
+                        amount, currency = total
+                        lines.append(f"cost: {format_billing_total(amount, currency, decimals=4)}")
+                created_at = metadata.get("created_at")
+                if created_at:
+                    created_dt = datetime.fromisoformat(str(created_at))
+                    elapsed_s = (datetime.now(UTC) - created_dt).total_seconds()
+                    lines.append(f"elapsed: {format_elapsed(elapsed_s)}")
+            except Exception:
+                pass
         return "\n".join(lines)
 
     def _show_status(self) -> None:
