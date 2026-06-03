@@ -135,7 +135,7 @@ You are uv-agent, a general-purpose agent. You interact with the outside world b
 
 RUNTIME_HELPERS_CONTEXT = """<runtime_helpers>
 <imports>
-# These helpers are already available in run_python; import and use them directly.
+# Import the helpers you need; they are available from uv_agent_runtime, not preloaded globals.
 from uv_agent_runtime import (
     enter_dir,
     ask,
@@ -160,7 +160,7 @@ from uv_agent_runtime import (
 )
 </imports>
 <helper_selection>
-<rule>Choose by task: discovery=find_files/search_text/find_symbols/query_code; reading=read_file; edit=replace_text for unique text, edit_lines for anchored line ranges, write_file for whole-file/generated content; process=run_process_text; thread/run history=thread_digest/run_digest/list_thread_digests; dependencies=add_dependency before import.</rule>
+<rule>Choose by task: discovery=find_files/search_text/find_symbols/query_code (search_text is regex by default; use literal=True for exact code strings; use globs for path patterns and file_types for rg type aliases); reading=read_file; edit=replace_text for unique text, edit_lines for anchored ranges/inserts; write_file for whole-file/generated content; process=run_process_text; thread/run history=thread_digest/run_digest/list_thread_digests; dependencies=add_dependency before import.</rule>
 <rule>Keep printed output bounded; prefer selected fields, line ranges, heads/tails, or summaries for large data.</rule>
 <rule>Search and symbol helpers return absolute paths for file helpers; use rel_path only for display.</rule>
 </helper_selection>
@@ -192,7 +192,7 @@ run_python_env_dir() -> Path</signature>
 <signature>write_file(path: str | Path, text: str, *, like: FileView | str | Path | None = None, encoding: str | None = None, newline: Literal["lf", "crlf", "cr", "none"] | None = None, final_newline: bool | None = None, bom: bool | None = None) -> Path</signature>
 </helper>
 <helper name="edit_lines">
-<description>Replace, delete, or insert 1-indexed closed line ranges with optional stale-anchor checks.</description>
+<description>Replace/delete 1-indexed closed line ranges, or insert with start=end+1, with optional stale-anchor checks.</description>
 <signature>edit_lines(path: str | Path, start: int, end: int, new_text: str, *, expect_first: str | None = None, expect_last: str | None = None, expect_mode: Literal["startswith", "contains", "exact", "regex"] = "startswith", strip_indent: bool = True, encoding: str | None = None, newline: Literal["preserve", "lf", "crlf", "cr"] = "preserve", final_newline: bool | None = None, bom: bool | None = None) -> EditResult</signature>
 <returns>EditResult(path, changed, replaced_text, line_count_before, line_count_after, line_delta)</returns>
 </helper>
@@ -220,7 +220,7 @@ connect_named(name: str, *, config_paths=None, cwd=None, timeout_s=30) -> McpCli
 connect_url(url: str, *, transport="streamable_http", timeout_s=30) -> McpClient</signature>
 </helper>
 <helper name="search_text">
-<description>Grep-like content search with ripgrep; supports regex/literal search, context, globs/types, hidden/no_ignore, and max bounds.</description>
+<description>Grep-like content search with ripgrep; pattern is regex by default, pass literal=True for exact strings; supports context, globs/types, hidden/no_ignore, and max bounds.</description>
 <signature>search_text(pattern: str, *, root=".", roots=None, globs=None, file_types=None, ignore_case=False, case_sensitive=None, fixed_string=False, literal=None, multiline=False, word=False, before=0, after=0, context=None, max_count_per_file=None, max_total=None, hidden=False, no_ignore=False, extra_args=None) -> list[Match]</signature>
 <returns>Match(path, rel_path, line, column, text, submatches, context_before, context_after)</returns>
 </helper>

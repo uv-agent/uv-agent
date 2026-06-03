@@ -3085,7 +3085,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<level>small</level>" in turn_context
     assert "<level>medium</level>" in turn_context
     assert "</runtime_helpers>" in turn_context
-    assert "These helpers are already available in run_python" in turn_context
+    assert "available from uv_agent_runtime, not preloaded globals" in turn_context
     assert "read_file" in turn_context
     assert "write_file" in turn_context
     assert "edit_lines" in turn_context
@@ -3115,11 +3115,16 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<helper_selection>" in turn_context
     assert "Choose by task:" in turn_context
     assert "discovery=find_files/search_text/find_symbols/query_code" in turn_context
-    assert "edit=replace_text for unique text, edit_lines for anchored line ranges" in turn_context
+    assert "search_text is regex by default" in turn_context
+    assert "use literal=True for exact code strings" in turn_context
+    assert "file_types for rg type aliases" in turn_context
+    assert "edit=replace_text for unique text, edit_lines for anchored ranges/inserts" in turn_context
     assert "write_file for whole-file/generated content" in turn_context
     assert "thread/run history=thread_digest/run_digest/list_thread_digests" in turn_context
     assert "Keep printed output bounded" in turn_context
     assert "Search and symbol helpers return absolute paths" in turn_context
+    assert "insert with start=end+1" in turn_context
+    assert "pattern is regex by default, pass literal=True" in turn_context
     assert "Prefer the smallest helper that directly matches the task" not in turn_context
     assert "uv-agent patch envelope shown below" not in turn_context
     assert turn_context.count("<description>") >= 15

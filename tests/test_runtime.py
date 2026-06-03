@@ -388,6 +388,17 @@ def test_runtime_read_file_views_and_write_file_preserve_metadata(tmp_path: Path
     assert path.read_bytes() == b"\xef\xbb\xbfchanged\r\nagain\r\n"
 
 
+def test_runtime_read_file_errors_include_recovery_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text("first\nsecond\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"line range \(2, 5\).*2 lines"):
+        read_file(path, lines=(2, 5))
+    with pytest.raises(ValueError, match="around text not found in file with 2 lines"):
+        read_file(path, around="missing")
+
+
+
 def test_runtime_edit_lines_replaces_inserts_deletes_and_checks_anchors(tmp_path: Path) -> None:
     path = tmp_path / "sample.py"
     path.write_text(
@@ -430,6 +441,10 @@ def test_runtime_edit_lines_replaces_inserts_deletes_and_checks_anchors(tmp_path
 
     with pytest.raises(ValueError, match="expect_first did not match"):
         edit_lines(path, 1, 1, "def nope():", expect_first="class")
+    with pytest.raises(ValueError, match=r"line range \(1, 99\).*6 lines"):
+        edit_lines(path, 1, 99, "def nope():")
+    with pytest.raises(ValueError, match="valid insert start"):
+        edit_lines(path, 99, 98, "# nope")
 
 def test_runtime_write_text_lossless_without_template_preserves_input_text(tmp_path: Path) -> None:
     path = tmp_path / "sample.txt"
@@ -458,6 +473,8 @@ def test_runtime_replace_text_uses_logical_newlines_and_preserves_style(tmp_path
         replace_text(path, "missing", "nope")
     with pytest.raises(ValueError, match="old text must not be empty"):
         replace_text(path, "", "nope")
+    with pytest.raises(ValueError, match="no-op"):
+        replace_text(path, "new", "new")
 
 
 def test_runtime_replace_text_raw_mode_is_newline_sensitive(tmp_path: Path) -> None:
@@ -1185,9 +1202,13 @@ def test_codesearch_multiple_roots_share_max_total(tmp_path: Path) -> None:
     assert len(hits) == 2
 
 
-def test_codesearch_roots_rejects_single_path_string() -> None:
-    with pytest.raises(TypeError, match="roots must be a sequence"):
-        find_files(roots="src")  # type: ignore[arg-type]
+@requires_rg
+def test_codesearch_roots_accepts_single_path_string(tmp_path: Path) -> None:
+    _make_python_workspace(tmp_path)
+
+    files = find_files(roots=str(tmp_path / "src" / "a.py"))
+
+    assert files == [str((tmp_path / "src" / "a.py").resolve())]
 
 
 def test_codesearch_root_and_roots_are_mutually_exclusive(tmp_path: Path) -> None:
@@ -1244,6 +1265,29 @@ def test_codesearch_search_text_accepts_literal_and_case_sensitive_aliases(tmp_p
 
 
 @requires_rg
+def test_codesearch_accepts_scalar_filter_arguments(tmp_path: Path) -> None:
+    _make_python_workspace(tmp_path)
+
+    files = find_files(tmp_path, globs="*.py", file_types="py", max_total=1)
+    hits = search_text("hello", root=tmp_path, globs="*.py", file_types="py", max_total=1)
+
+    assert len(files) == 1
+    assert len(hits) == 1
+
+
+def test_codesearch_file_types_rejects_extension_patterns(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="file_types uses ripgrep type aliases"):
+        find_files(tmp_path, file_types=".py")
+
+
+@requires_rg
+def test_codesearch_regex_error_suggests_literal_search(tmp_path: Path) -> None:
+    _make_python_workspace(tmp_path)
+
+    with pytest.raises(RuntimeError, match="literal=True"):
+        search_text("hello(", root=tmp_path)
+
+@requires_rg
 def test_codequery_supported_languages_includes_python() -> None:
     langs = supported_symbol_languages()
     assert "python" in langs
@@ -1291,6 +1335,9 @@ def test_codequery_find_symbols_filters_by_kind_and_name(
     assert [s.name for s in contained] == ["Foo"]
 
 
+    scalar_filters = find_symbols(tmp_path, languages="python", kinds="class")
+    assert [s.name for s in scalar_filters] == ["Foo"]
+
 @requires_rg
 def test_codequery_query_code_runs_arbitrary_tree_sitter_query(
     tmp_path: Path,
@@ -1301,6 +1348,7 @@ def test_codequery_query_code_runs_arbitrary_tree_sitter_query(
         "(call function: (identifier) @call)",
         language="python",
         root=tmp_path,
+        globs="*.py",
     )
     assert len(captures) == 1
     cap = captures[0]

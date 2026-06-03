@@ -278,8 +278,8 @@ def _candidate_files(
     *,
     root: Path,
     languages: set[str] | None,
-    globs: Sequence[str] | None,
-    file_types: Sequence[str] | None,
+    globs: str | Sequence[str] | None,
+    file_types: str | Sequence[str] | None,
     hidden: bool,
     no_ignore: bool,
 ) -> list[tuple[str, str]]:
@@ -402,8 +402,8 @@ def query_code(
     *,
     language: str,
     root: str | Path = ".",
-    globs: Sequence[str] | None = None,
-    file_types: Sequence[str] | None = None,
+    globs: str | Sequence[str] | None = None,
+    file_types: str | Sequence[str] | None = None,
     hidden: bool = False,
     no_ignore: bool = False,
     max_count: int | None = None,
@@ -464,9 +464,9 @@ def query_code(
 def find_symbols(
     root: str | Path = ".",
     *,
-    languages: Sequence[str] | None = None,
+    languages: str | Sequence[str] | None = None,
     language: str | None = None,
-    kinds: Sequence[str] | None = None,
+    kinds: str | Sequence[str] | None = None,
     kind: str | None = None,
     name_pattern: str | None = None,
     name: str | None = None,
@@ -474,7 +474,7 @@ def find_symbols(
     max_count: int | None = None,
     hidden: bool = False,
     no_ignore: bool = False,
-    globs: Sequence[str] | None = None,
+    globs: str | Sequence[str] | None = None,
 ) -> list[Symbol]:
     """Find function/class/method/... definitions across the workspace.
 
@@ -488,7 +488,7 @@ def find_symbols(
     resolved = resolve_workspace_path(root)
     root_path = resolved.parent if resolved.is_file() else resolved
     root_key = str(root_path)
-    lang_set = set(languages or [])
+    lang_set = set(codesearch._coerce_str_sequence(languages, name="languages") or [])
     if language:
         lang_set.add(language)
     if not lang_set:
@@ -504,7 +504,7 @@ def find_symbols(
         hidden=hidden,
         no_ignore=no_ignore,
     )
-    kind_filter = {k for k in kinds} if kinds else set()
+    kind_filter = set(codesearch._coerce_str_sequence(kinds, name="kinds") or [])
     if kind:
         kind_filter.add(kind)
     kind_filter = kind_filter or None

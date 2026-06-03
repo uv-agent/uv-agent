@@ -18,6 +18,86 @@ class RipgrepNotFoundError(RuntimeError):
     """Raised when the `rg` binary is not on PATH."""
 
 
+def _coerce_str_sequence(value: str | Sequence[str] | None, *, name: str) -> list[str] | None:
+    """Accept a scalar string or a sequence for model-friendly list parameters."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, bytes):
+        raise TypeError(f"{name} must be a string or a sequence of strings, not bytes")
+    items = list(value)
+    for index, item in enumerate(items):
+        if not isinstance(item, str):
+            raise TypeError(f"{name}[{index}] must be a string, got {type(item).__name__}")
+    return items
+
+
+def _coerce_path_sequence(
+    value: str | Path | Sequence[str | Path] | None,
+    *,
+    name: str,
+) -> list[str | Path] | None:
+    """Accept either one path-like value or an explicit path sequence."""
+
+    if value is None:
+        return None
+    if isinstance(value, (str, Path)):
+        return [value]
+    if isinstance(value, bytes):
+        raise TypeError(f"{name} must be a path or a sequence of paths, not bytes")
+    items = list(value)
+    for index, item in enumerate(items):
+        if not isinstance(item, (str, Path)):
+            raise TypeError(f"{name}[{index}] must be a path-like value, got {type(item).__name__}")
+    return items
+
+
+def _coerce_file_types(value: str | Sequence[str] | None) -> list[str] | None:
+    """Normalize rg type aliases and reject common extension/glob mixups."""
+
+    kinds = _coerce_str_sequence(value, name="file_types")
+    if kinds is None:
+        return None
+    for kind in kinds:
+        if not kind:
+            raise ValueError("file_types entries must be non-empty ripgrep type aliases such as 'py'")
+        if kind.startswith(".") or any(char in kind for char in "*?[]/\\"):
+            raise ValueError(
+                "file_types uses ripgrep type aliases such as 'py', not filename extensions "
+                f"or glob patterns: {kind!r}. Use globs=['*.py'] for extension/path patterns."
+            )
+    return kinds
+
+
+def _raise_ripgrep_error(
+    code: int,
+    stderr: str,
+    *,
+    pattern: str | None = None,
+    fixed_string: bool = False,
+) -> None:
+    """Raise a ripgrep failure with hints tuned for common script mistakes."""
+
+    detail = stderr.strip()
+    hints: list[str] = []
+    if pattern is not None and not fixed_string and "regex parse error" in detail:
+        hints.append(
+            "search_text patterns are regular expressions by default; use literal=True "
+            "or fixed_string=True when searching for exact code text."
+        )
+    if "unrecognized file type" in detail:
+        hints.append(
+            "file_types uses ripgrep type aliases such as 'py'; use globs=['*.py'] "
+            "for filename extensions or path patterns."
+        )
+    message = f"ripgrep failed (exit {code}): {detail}"
+    if hints:
+        message += "\n" + "\n".join(f"Hint: {hint}" for hint in hints)
+    raise RuntimeError(message)
+
+
 @dataclass(frozen=True)
 class Submatch:
     """Byte-range of a single match inside the surrounding line."""
@@ -228,9 +308,9 @@ def search_text(
     pattern: str,
     *,
     root: str | Path = ".",
-    roots: Sequence[str | Path] | None = None,
-    globs: Sequence[str] | None = None,
-    file_types: Sequence[str] | None = None,
+    roots: str | Path | Sequence[str | Path] | None = None,
+    globs: str | Sequence[str] | None = None,
+    file_types: str | Sequence[str] | None = None,
     ignore_case: bool = False,
     case_sensitive: bool | None = None,
     fixed_string: bool = False,
@@ -244,7 +324,7 @@ def search_text(
     max_total: int | None = None,
     hidden: bool = False,
     no_ignore: bool = False,
-    extra_args: Sequence[str] | None = None,
+    extra_args: str | Sequence[str] | None = None,
 ) -> list[Match]:
     """Search file contents with ripgrep and return structured matches.
 
@@ -260,6 +340,9 @@ def search_text(
         raise ValueError("pattern must be non-empty")
     before, after = _resolve_context_counts(before=before, after=after, context=context)
     resolved_roots = _resolve_roots(root=root, roots=roots)
+    normalized_globs = _coerce_str_sequence(globs, name="globs")
+    normalized_file_types = _coerce_file_types(file_types)
+    normalized_extra_args = _coerce_str_sequence(extra_args, name="extra_args")
     if max_total is not None and max_total <= 0:
         return []
 
@@ -269,8 +352,8 @@ def search_text(
         root_matches = _search_text_one(
             pattern,
             resolved=resolved,
-            globs=globs,
-            file_types=file_types,
+            globs=normalized_globs,
+            file_types=normalized_file_types,
             ignore_case=ignore_case,
             case_sensitive=case_sensitive,
             fixed_string=fixed_string,
@@ -283,7 +366,7 @@ def search_text(
             max_total=remaining,
             hidden=hidden,
             no_ignore=no_ignore,
-            extra_args=extra_args,
+            extra_args=normalized_extra_args,
         )
         matches.extend(root_matches)
         if remaining is not None:
@@ -337,18 +420,18 @@ def _search_text_one(
         code, stdout, stderr = _run(args, cwd_path)
         # rg exits 1 when no matches; 2+ for real errors.
         if code >= 2:
-            raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
+            _raise_ripgrep_error(code, stderr, pattern=pattern, fixed_string=effective_fixed_string)
         return _parse_search_matches(stdout.splitlines(), cwd=cwd_path, before=before, after=after, max_total=None)
 
     if before or after:
         code, stdout, stderr = _run(args, cwd_path)
         if code >= 2:
-            raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
+            _raise_ripgrep_error(code, stderr, pattern=pattern, fixed_string=effective_fixed_string)
         return _parse_search_matches(stdout.splitlines(), cwd=cwd_path, before=before, after=after, max_total=max_total)
 
     code, lines, stderr, terminated = _run_until_matches(args, cwd_path, match_limit=max_total)
     if code >= 2 and not terminated:
-        raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
+        _raise_ripgrep_error(code, stderr, pattern=pattern, fixed_string=effective_fixed_string)
     return _parse_search_matches(lines, cwd=cwd_path, before=before, after=after, max_total=max_total)
 
 
@@ -464,13 +547,13 @@ def _context_for_match(
 def find_files(
     root: str | Path = ".",
     *,
-    roots: Sequence[str | Path] | None = None,
-    globs: Sequence[str] | None = None,
-    file_types: Sequence[str] | None = None,
+    roots: str | Path | Sequence[str | Path] | None = None,
+    globs: str | Sequence[str] | None = None,
+    file_types: str | Sequence[str] | None = None,
     max_total: int | None = None,
     hidden: bool = False,
     no_ignore: bool = False,
-    extra_args: Sequence[str] | None = None,
+    extra_args: str | Sequence[str] | None = None,
 ) -> list[str]:
     """List workspace files via ripgrep, respecting `.gitignore` by default.
 
@@ -478,6 +561,9 @@ def find_files(
     This is typically far faster than `Path.rglob` on large repositories.
     """
     resolved_roots = _resolve_roots(root=root, roots=roots)
+    normalized_globs = _coerce_str_sequence(globs, name="globs")
+    normalized_file_types = _coerce_file_types(file_types)
+    normalized_extra_args = _coerce_str_sequence(extra_args, name="extra_args")
     if max_total is not None and max_total <= 0:
         return []
 
@@ -486,12 +572,12 @@ def find_files(
     for resolved in resolved_roots:
         root_files = _find_files_one(
             resolved=resolved,
-            globs=globs,
-            file_types=file_types,
+            globs=normalized_globs,
+            file_types=normalized_file_types,
             max_total=remaining,
             hidden=hidden,
             no_ignore=no_ignore,
-            extra_args=extra_args,
+            extra_args=normalized_extra_args,
         )
         files.extend(root_files)
         if remaining is not None:
@@ -532,27 +618,26 @@ def _find_files_one(
     if max_total is None:
         code, stdout, stderr = _run(args, cwd_path)
         if code >= 2:
-            raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
+            _raise_ripgrep_error(code, stderr)
         return [_absolute_result_path(cwd_path, line) for line in stdout.splitlines() if line]
     code, lines, stderr, terminated = _run_limited(args, cwd_path, line_limit=max_total)
     if code >= 2 and not terminated:
-        raise RuntimeError(f"ripgrep failed (exit {code}): {stderr.strip()}")
+        _raise_ripgrep_error(code, stderr)
     return [_absolute_result_path(cwd_path, line) for line in lines if line][:max_total]
 
 
 def _resolve_roots(
     *,
     root: str | Path,
-    roots: Sequence[str | Path] | None,
+    roots: str | Path | Sequence[str | Path] | None,
 ) -> list[Path]:
     """Resolve either the legacy single root or the newer multi-root list."""
+
     if roots is None:
         return [resolve_workspace_path(root)]
-    if isinstance(roots, (str, bytes, Path)):
-        raise TypeError("roots must be a sequence of paths; use root= for a single path")
     if Path(root) != Path("."):
         raise ValueError("root and roots are mutually exclusive")
-    return [resolve_workspace_path(item) for item in roots]
+    return [resolve_workspace_path(item) for item in _coerce_path_sequence(roots, name="roots") or []]
 
 
 def _resolve_context_counts(*, before: int, after: int, context: int | None) -> tuple[int, int]:

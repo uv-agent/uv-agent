@@ -385,6 +385,11 @@ def replace_text(
         raise ValueError("count must be >= 1")
     if newlines not in {"logical", "raw"}:
         raise ValueError("newlines must be 'logical' or 'raw'")
+    if old == new:
+        raise ValueError(
+            "old and new are identical; replace_text would be a no-op. "
+            "Use edit_lines with start=end+1 for insertion, or include changed text in new."
+        )
     before = read_text_lossless(path)
     best_found = 0
     for candidate_old, candidate_new in _replacement_candidates(before, old, new, newlines):
@@ -442,13 +447,20 @@ def edit_lines(
     inserting = start == end + 1
     if inserting:
         if start > line_count_before + 1:
-            raise ValueError("insert start must be at most line_count + 1")
+            raise ValueError(
+                f"insert start {start} is outside file with {line_count_before} lines; "
+                f"valid insert start is 1..{line_count_before + 1} (use start=end+1 for insertion)"
+            )
         replaced_lines: list[str] = []
     else:
         if start > end:
-            raise ValueError("start must be <= end unless inserting with start == end + 1")
+            raise ValueError(
+                f"start {start} must be <= end {end} unless inserting with start == end + 1"
+            )
         if start > line_count_before or end > line_count_before:
-            raise ValueError("line range is outside the file")
+            raise ValueError(
+                f"line range ({start}, {end}) is outside file with {line_count_before} lines"
+            )
         replaced_lines = logical_lines[start - 1 : end]
 
     if expect_first is not None:
@@ -871,14 +883,21 @@ def _selected_line_range(
     line_count = len(logical_lines)
     if line_count == 0:
         if lines is not None and lines != (1, 0):
-            raise ValueError("line range is outside the file")
+            start, end = lines
+            raise ValueError(
+                f"line range ({start}, {end}) is outside file with 0 lines; "
+                "use lines=(1, 0) for an empty selection"
+            )
         if around is not None:
-            raise ValueError(f"around text not found: {around!r}")
+            raise ValueError(f"around text not found in file with 0 lines: {around!r}")
         return (0, 0)
     if lines is not None:
         start, end = lines
         if start < 1 or end < start or end > line_count:
-            raise ValueError("line range is outside the file")
+            raise ValueError(
+                f"line range ({start}, {end}) is outside file with {line_count} lines; "
+                "use head=..., tail=..., around=..., or a range within the file"
+            )
         return (start, end)
     if head is not None:
         if head < 0:
@@ -899,7 +918,7 @@ def _selected_line_range(
         for index, line in enumerate(logical_lines, start=1):
             if around in line:
                 return (max(1, index - context), min(line_count, index + context))
-        raise ValueError(f"around text not found: {around!r}")
+        raise ValueError(f"around text not found in file with {line_count} lines: {around!r}")
     return (1, line_count)
 
 
