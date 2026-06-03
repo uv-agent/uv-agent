@@ -430,10 +430,11 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert "thread's active cwd" in PYTHON_TOOL["description"]
     assert "Python-native control flow and imports" in PYTHON_TOOL["description"]
     assert "not shell-style fragments" in PYTHON_TOOL["description"]
-    assert "Use one call for a complete work unit" in PYTHON_TOOL["description"]
+    assert "Treat one call as a work-unit script" in PYTHON_TOOL["description"]
     assert "batch related commands, searches, reads, edits" in PYTHON_TOOL["description"]
-    assert "simple conditional fallbacks" in PYTHON_TOOL["description"]
+    assert "conditional fallbacks" in PYTHON_TOOL["description"]
     assert "one bounded summary" in PYTHON_TOOL["description"]
+    assert "one run_python call per command, file read, or helper call" in PYTHON_TOOL["description"]
     assert "Prefer runtime helpers" in PYTHON_TOOL["description"]
     assert "run_process_text for ordinary external commands" in PYTHON_TOOL["description"]
     assert "run commands, access the network" in PYTHON_TOOL["description"]
@@ -443,7 +444,8 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert "Complete, valid Python source" in code_description
     assert "Use normal Python syntax" in code_description
     assert "not shell-style pseudo-code" in code_description
-    assert "conditionals, loops, functions" in code_description
+    assert "small Python program" in code_description
+    assert "variables, functions, loops, conditionals, try/except" in code_description
     assert "uv_agent_runtime helper calls" in code_description
     assert "script_args" not in PYTHON_TOOL["parameters"]["properties"]
     assert PYTHON_TOOL["parameters"]["required"] == ["code"]
@@ -3044,9 +3046,14 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Do not guess helper signatures" not in prompt
     assert "The system does not truncate oversized output for you" in prompt
     assert "filter, limit, or summarize it in your Python code" in prompt
-    assert "Python-native control flow" in prompt
-    assert "imports, dependencies, and helpers" in prompt
-    assert "branching, fallbacks, and outside interaction" in prompt
+    assert "<run_python_workflow>" in prompt
+    assert "small Python program" in prompt
+    assert "not a shell-command wrapper or a single-helper wrapper" in prompt
+    assert "current bounded objective or safe phase" in prompt
+    assert "not one file read, one command, or one helper call" in prompt
+    assert "Python-native control flow and normal Python syntax" in prompt
+    assert "imports, variables, functions, loops, conditionals, try/except" in prompt
+    assert "coordinate related steps, fallbacks, parsing, verification, and summaries" in prompt
     assert "Call enter_dir proactively whenever the task clearly belongs" not in prompt
     assert "including paths discovered during execution" not in prompt
     assert "<capability_use>" in prompt
@@ -3062,9 +3069,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Run independent work concurrently" in prompt
     assert "multiple ask calls or independent helper operations inside run_python" in prompt
     assert "overlapping file writes sequential" in prompt
-    assert "Plan each run_python call as a complete work unit" in prompt
-    assert "split only when prior output must change the plan" in prompt
+    assert "Split into another run_python call only when prior output must change the plan" in prompt
     assert "a risky write/verification boundary is reached" in prompt
+    assert "Plan each run_python call as a complete work unit" not in prompt
     assert "Use one call for a complete work unit" not in prompt
     assert "batch related commands, searches, reads, edits" not in prompt
     assert "shell-style fragments" not in prompt
@@ -3139,15 +3146,32 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "max_total=None" in turn_context
     assert '<helper name="threads">' in turn_context
     assert "run_digest" in turn_context
+    assert "<usage_pattern>" in turn_context
+    assert "Helpers are Python functions for work-unit scripts" in turn_context
+    assert "not separate tool modes" in turn_context
+    assert "Do not start a new run_python call just because the next step uses another helper" in turn_context
+    assert "use Python for orchestration" in turn_context
+    assert "branch on helper results" in turn_context
+    assert "parse structured output with Python libraries" in turn_context
+    assert "collect one bounded summary" in turn_context
+    assert "Translate shell habits into Python" in turn_context
+    assert "use read_file instead of cat" in turn_context
+    assert "search_text/find_files instead of ad-hoc grep/find" in turn_context
+    assert "run_process_text([...]) instead of raw subprocess" in turn_context
+    assert "For skill files, read SKILL.md with read_file" in turn_context
+    assert "keep foreseeable follow-up parsing or fallback logic in the same script" in turn_context
+    assert '<example name="work-unit-script">' in turn_context
+    assert "Pattern only; adapt paths, commands, and bounds to the task" in turn_context
+    assert "from uv_agent_runtime import find_files, read_file, run_process_text, search_text" in turn_context
+    assert "config_files = find_files" in turn_context
+    assert "for path in config_files[:5]" in turn_context
+    assert 'print("\\n".join(summary))' in turn_context
     assert "<helper_selection>" in turn_context
     assert "Listed helpers are ordinary Python functions" in turn_context
     assert "combined with each other, standard library code, and control flow" in turn_context
     assert "use modules such as pathlib, os, and json for in-script glue" in turn_context
     assert "prefer helpers when they fit" in turn_context
     assert "metadata such as newline style, BOM, final newline" in turn_context
-    assert "Do not split work just because it uses multiple helpers or external commands" in turn_context
-    assert "Python conditionals, loops, functions, data structures" in turn_context
-    assert "fallback logic in one script" in turn_context
     assert "Choose by task:" in turn_context
     assert "discovery=find_files/search_text/find_symbols/query_code" in turn_context
     assert "search_text is regex by default" in turn_context
@@ -3160,7 +3184,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "including shell commands shown by skills or docs" in turn_context
     assert "prefer run_process_text over raw subprocess" in turn_context
     assert "custom process control" in turn_context
-    assert "drive branching, parsing, and fallbacks with Python rather than shell habits" in turn_context
     assert "thread/run history=thread_digest/run_digest/list_thread_digests" in turn_context
     assert "For large data, prefer selected fields, line ranges, heads/tails, or summaries" in turn_context
     assert "Do not guess helper signatures" in turn_context
@@ -3170,7 +3193,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Prefer the smallest helper that directly matches the task" not in turn_context
     assert "uv-agent patch envelope shown below" not in turn_context
     assert turn_context.count("<description>") >= 15
-    assert "<example>" not in turn_context
     assert "<![CDATA[" not in turn_context
     assert '<helper name="replace_text">' in turn_context
     assert '<helper name="mcp">' in turn_context
