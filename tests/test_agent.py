@@ -3161,10 +3161,20 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "For skill files, read SKILL.md with read_file" in turn_context
     assert "keep foreseeable follow-up parsing or fallback logic in the same script" in turn_context
     assert '<example name="work-unit-script">' in turn_context
-    assert "Pattern only; adapt paths, commands, and bounds to the task" in turn_context
+    assert "when the objective and safe next steps are known" in turn_context
+    assert "Keep caution in Python guards, timeouts, fallbacks, and output limits" in turn_context
+    assert "from __future__ import annotations" not in turn_context
+    assert "import json" in turn_context
     assert "from uv_agent_runtime import find_files, read_file, run_process_text, search_text" in turn_context
+    assert "def section(title: str) -> None" in turn_context
+    assert "def bounded(text: str, limit: int = 2000) -> str" in turn_context
+    assert "def command(args: list[str], *, timeout_s: int = 30) -> str" in turn_context
+    assert 'return "\\n".join([' in turn_context
     assert "config_files = find_files" in turn_context
-    assert "for path in config_files[:5]" in turn_context
+    assert "for path in config_files[:8]" in turn_context
+    assert "json.loads(ci.stdout)" in turn_context
+    assert "except json.JSONDecodeError as exc" in turn_context
+    assert "gh run list unavailable or returned no data" in turn_context
     assert 'print("\\n".join(summary))' in turn_context
     assert "<helper_selection>" in turn_context
     assert "Listed helpers are ordinary Python functions" in turn_context

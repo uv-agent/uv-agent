@@ -170,28 +170,74 @@ from uv_agent_runtime import (
 <rule>For skill files, read SKILL.md with read_file; for commands shown by skills or docs, run them with run_process_text and keep foreseeable follow-up parsing or fallback logic in the same script.</rule>
 </usage_pattern>
 <example name="work-unit-script">
-Pattern only; adapt paths, commands, and bounds to the task.
+Pattern only; when the objective and safe next steps are known, do the bounded investigation in one script. Keep caution in Python guards, timeouts, fallbacks, and output limits.
 ```python
+import json
 from pathlib import Path
+
 from uv_agent_runtime import find_files, read_file, run_process_text, search_text
 
-summary = []
+summary: list[str] = []
 
-status = run_process_text(["git", "status", "--short"], timeout_s=30)
-summary.append("git status: " + (status.stdout.strip() or status.stderr.strip() or "(clean)"))
 
-config_files = find_files(globs=["pyproject.toml", ".github/**/*.yml"], max_total=20)
+def section(title: str) -> None:
+    summary.append(f"\\n=== {title} ===")
+
+
+def bounded(text: str, limit: int = 2000) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return "...<truncated>...\\n" + text[-limit:]
+
+
+def command(args: list[str], *, timeout_s: int = 30) -> str:
+    result = run_process_text(args, timeout_s=timeout_s)
+    output = result.stdout or result.stderr
+    return "\\n".join([
+        f"$ {' '.join(args)}",
+        f"rc={result.returncode}",
+        bounded(output),
+    ])
+
+
+section("repository state")
+summary.append(command(["git", "status", "--short"]))
+summary.append(command(["git", "log", "--oneline", "-5"]))
+
+section("relevant config files")
+config_files = find_files(globs=["pyproject.toml", ".github/**/*.yml", ".github/**/*.yaml"], max_total=20)
 summary.append(f"config files found: {len(config_files)}")
-
-for path in config_files[:5]:
-    view = read_file(path, head=40)
+for path in config_files[:8]:
+    view = read_file(path, head=80)
     summary.append(f"\\n--- {Path(path).as_posix()} lines {view.start_line}-{view.end_line} ---")
-    summary.append(view.text[:1200])
+    summary.append(bounded(view.text, 1200))
 
-hits = search_text("pytest", globs=["pyproject.toml", ".github/**/*.yml"], literal=True, max_total=20)
-summary.append(f"\\npytest references: {len(hits)}")
-for hit in hits[:10]:
-    summary.append(f"{hit.rel_path}:{hit.line}: {hit.text.strip()[:160]}")
+section("test references")
+hits = search_text("pytest", globs=["pyproject.toml", ".github/**/*.yml", ".github/**/*.yaml"], literal=True, max_total=30)
+for hit in hits[:15]:
+    summary.append(f"{hit.rel_path}:{hit.line}: {hit.text.strip()[:180]}")
+
+section("optional CI status")
+ci = run_process_text(
+    ["gh", "run", "list", "--limit", "5", "--json", "databaseId,status,conclusion,displayTitle,headSha"],
+    timeout_s=30,
+)
+if ci.returncode == 0 and ci.stdout.strip():
+    try:
+        runs = json.loads(ci.stdout)
+    except json.JSONDecodeError as exc:
+        summary.append(f"Could not parse gh JSON: {exc}")
+        summary.append(bounded(ci.stdout))
+    else:
+        for item in runs:
+            state = item.get("conclusion") or item.get("status")
+            title = item.get("displayTitle") or "(untitled)"
+            sha = str(item.get("headSha") or "")[:8]
+            summary.append(f"{state}: {title} {sha}")
+else:
+    summary.append("gh run list unavailable or returned no data:")
+    summary.append(bounded(ci.stderr or ci.stdout))
 
 print("\\n".join(summary))
 ```
