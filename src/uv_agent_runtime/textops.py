@@ -16,8 +16,14 @@ from typing import Any, Literal
 from unidiff import PatchSet
 from unidiff.patch import PatchedFile
 
+from .errors import CommandError, FileSelectionError, HelperValueError
 from .files import resolve_workspace_path
 from .patch import PatchResult, apply_patch, dry_run_patch
+
+_MAX_ERROR_PREVIEW_LINES = 20
+_MAX_ERROR_PREVIEW_CHARS = 4000
+_MAX_COMMAND_PREVIEW_LINES = 40
+_MAX_COMMAND_PREVIEW_CHARS = 4000
 
 
 @dataclass(frozen=True)
@@ -125,18 +131,36 @@ class CommandTextResult:
         return self.returncode == 0
 
     def raise_for_error(self) -> "CommandTextResult":
-        """Raise RuntimeError if the command exited non-zero."""
+        """Raise CommandError if the command exited non-zero or timed out."""
+
         if self.timed_out:
-            detail = self.stderr or self.stdout
-            raise RuntimeError(
-                f"command timed out: {self.args!r}"
-                + (f"\n{detail}" if detail else "")
+            raise CommandError(
+                helper="run_process_text",
+                problem=f"command timed out: {self.args!r}",
+                details={
+                    "args": self.args,
+                    "returncode": self.returncode,
+                    "timed_out": self.timed_out,
+                },
+                preview_title="Captured output (tail)",
+                preview=_command_output_preview(self.stdout, self.stderr),
+                hints=(
+                    "Run with check=False to inspect CommandTextResult without raising.",
+                    "Pass a larger timeout_s only if the command is expected to run longer.",
+                ),
             )
         if self.returncode != 0:
-            detail = self.stderr or self.stdout
-            raise RuntimeError(
-                f"command failed with exit {self.returncode}: {self.args!r}"
-                + (f"\n{detail}" if detail else "")
+            raise CommandError(
+                helper="run_process_text",
+                problem=f"command failed with exit {self.returncode}: {self.args!r}",
+                details={
+                    "args": self.args,
+                    "returncode": self.returncode,
+                    "timed_out": self.timed_out,
+                },
+                preview_title="Captured output (tail)",
+                preview=_command_output_preview(self.stdout, self.stderr),
+                hints=("Run with check=False to inspect CommandTextResult without raising.",),
             )
         return self
 
@@ -206,9 +230,13 @@ def read_file(
 
     selectors = [lines is not None, head is not None, tail is not None, around is not None]
     if sum(selectors) > 1:
-        raise ValueError("lines, head, tail, and around are mutually exclusive")
+        raise HelperValueError(
+            helper="read_file",
+            problem="lines, head, tail, and around are mutually exclusive",
+            hints=("Pass only one selector. Use lines=(start, end), head=N, tail=N, or around='text'.",),
+        )
     if context < 0:
-        raise ValueError("context must be >= 0")
+        raise HelperValueError(helper="read_file", problem="context must be >= 0")
     resolved = resolve_workspace_path(path)
     kind = _path_kind(resolved)
     size = resolved.stat().st_size if kind == "file" else None
@@ -232,6 +260,7 @@ def read_file(
     loaded = read_text_lossless(resolved, encoding=encoding)
     logical_lines = _logical_lines(loaded.text)
     line_count = len(logical_lines)
+    _validate_read_file_selection(loaded, logical_lines, lines=lines, around=around)
     start_line, end_line = _selected_line_range(
         logical_lines,
         lines=lines,
@@ -380,15 +409,19 @@ def replace_text(
     """Replace text in a file while preserving its original text metadata."""
 
     if not old:
-        raise ValueError("old text must not be empty")
+        raise HelperValueError(helper="replace_text", problem="old text must not be empty")
     if count < 1:
-        raise ValueError("count must be >= 1")
+        raise HelperValueError(helper="replace_text", problem="count must be >= 1")
     if newlines not in {"logical", "raw"}:
-        raise ValueError("newlines must be 'logical' or 'raw'")
+        raise HelperValueError(helper="replace_text", problem="newlines must be 'logical' or 'raw'")
     if old == new:
-        raise ValueError(
-            "old and new are identical; replace_text would be a no-op. "
-            "Use edit_lines with start=end+1 for insertion, or include changed text in new."
+        raise HelperValueError(
+            helper="replace_text",
+            problem=(
+                "old and new are identical; replace_text would be a no-op. "
+                "Use edit_lines with start=end+1 for insertion, or include changed text in new."
+            ),
+            hints=("For insertion, call edit_lines(path, start, end, text) with start == end + 1.",),
         )
     before = read_text_lossless(path)
     best_found = 0
@@ -412,7 +445,23 @@ def replace_text(
         )
         return ReplacementResult(path=after.path, replacements=count, before=before, after=after)
     context = _replacement_missing_context(before, old, found=best_found, count=count, newlines=newlines)
-    raise ValueError(f"expected at least {count} occurrence(s), found {best_found}.{context}")
+    preview_view, preview_title = _replacement_context_view(before, old)
+    raise HelperValueError(
+        helper="replace_text",
+        problem=f"expected at least {count} occurrence(s), found {best_found}.{context}",
+        details={
+            "path": before.path,
+            "count": count,
+            "found": best_found,
+            "newlines": newlines,
+            "file_newline": before.newline,
+            "final_newline": before.final_newline,
+            "search_text": old,
+        },
+        preview_title=preview_title,
+        preview=preview_view.numbered() if preview_view else None,
+        hints=_replacement_missing_hints(before, old, found=best_found, count=count, newlines=newlines),
+    )
 
 
 def edit_lines(
@@ -433,13 +482,16 @@ def edit_lines(
     """Replace, delete, or insert 1-indexed lines with optional anchor checks."""
 
     if expect_mode not in {"startswith", "contains", "exact", "regex"}:
-        raise ValueError("expect_mode must be 'startswith', 'contains', 'exact', or 'regex'")
+        raise HelperValueError(
+            helper="edit_lines",
+            problem="expect_mode must be 'startswith', 'contains', 'exact', or 'regex'",
+        )
     if newline not in {"preserve", "lf", "crlf", "cr"}:
-        raise ValueError("newline must be 'preserve', 'lf', 'crlf', or 'cr'")
+        raise HelperValueError(helper="edit_lines", problem="newline must be 'preserve', 'lf', 'crlf', or 'cr'")
     if start < 1:
-        raise ValueError("start must be >= 1")
+        raise HelperValueError(helper="edit_lines", problem="start must be >= 1")
     if end < 0:
-        raise ValueError("end must be >= 0")
+        raise HelperValueError(helper="edit_lines", problem="end must be >= 0")
 
     before = read_text_lossless(path, encoding=encoding or "utf-8")
     logical_lines = _logical_lines(before.text)
@@ -447,41 +499,65 @@ def edit_lines(
     inserting = start == end + 1
     if inserting:
         if start > line_count_before + 1:
-            raise ValueError(
-                f"insert start {start} is outside file with {line_count_before} lines; "
-                f"valid insert start is 1..{line_count_before + 1} (use start=end+1 for insertion)"
+            _raise_line_selection_error(
+                "edit_lines",
+                before,
+                logical_lines,
+                problem=(
+                    f"insert start {start} is outside file with {line_count_before} lines; "
+                    f"valid insert start is 1..{line_count_before + 1} (use start=end+1 for insertion)"
+                ),
+                requested_start=start,
+                requested_end=start,
+                details={"operation": "insert", "valid_insert_start": f"1..{line_count_before + 1}"},
+                hints=(
+                    "Use start=end+1 for insertion.",
+                    "Use start=line_count+1 and end=line_count to append at EOF.",
+                ),
             )
         replaced_lines: list[str] = []
     else:
         if start > end:
-            raise ValueError(
-                f"start {start} must be <= end {end} unless inserting with start == end + 1"
+            raise HelperValueError(
+                helper="edit_lines",
+                problem=f"start {start} must be <= end {end} unless inserting with start == end + 1",
+                hints=("For insertion, pass start=end+1; for replacement/deletion, pass start <= end.",),
+                details={"start": start, "end": end},
             )
         if start > line_count_before or end > line_count_before:
-            raise ValueError(
-                f"line range ({start}, {end}) is outside file with {line_count_before} lines"
+            _raise_line_selection_error(
+                "edit_lines",
+                before,
+                logical_lines,
+                problem=f"line range ({start}, {end}) is outside file with {line_count_before} lines",
+                requested_start=start,
+                requested_end=end,
+                details={"operation": "replace/delete"},
+                hints=("Re-read the file with read_file(..., head=..., tail=..., or around=...) before editing.",),
             )
         replaced_lines = logical_lines[start - 1 : end]
 
     if expect_first is not None:
         if inserting:
-            raise ValueError("expect_first is not valid for insert edits")
+            raise HelperValueError(helper="edit_lines", problem="expect_first is not valid for insert edits")
         _check_expected_line(
             replaced_lines[0],
             expect_first,
             mode=expect_mode,
             strip_indent=strip_indent,
             label="expect_first",
+            line_no=start,
         )
     if expect_last is not None:
         if inserting:
-            raise ValueError("expect_last is not valid for insert edits")
+            raise HelperValueError(helper="edit_lines", problem="expect_last is not valid for insert edits")
         _check_expected_line(
             replaced_lines[-1],
             expect_last,
             mode=expect_mode,
             strip_indent=strip_indent,
             label="expect_last",
+            line_no=end,
         )
 
     new_lines = _logical_lines(new_text)
@@ -832,6 +908,26 @@ def _decode_subprocess_output(value: bytes | str | None, *, encoding: str, error
     return value.decode(encoding, errors=errors)
 
 
+def _command_output_preview(stdout: str, stderr: str) -> str | None:
+    parts: list[str] = []
+    if stdout:
+        parts.append("stdout:\n" + _tail_for_preview(stdout))
+    if stderr:
+        parts.append("stderr:\n" + _tail_for_preview(stderr))
+    return "\n".join(parts) if parts else None
+
+
+def _tail_for_preview(text: str) -> str:
+    stripped = text.rstrip("\r\n")
+    lines = stripped.splitlines()
+    if len(stripped) <= _MAX_COMMAND_PREVIEW_CHARS and len(lines) <= _MAX_COMMAND_PREVIEW_LINES:
+        return stripped
+    tail = "\n".join(lines[-_MAX_COMMAND_PREVIEW_LINES:])
+    if len(tail) > _MAX_COMMAND_PREVIEW_CHARS:
+        tail = tail[-_MAX_COMMAND_PREVIEW_CHARS:]
+    return "...<output truncated>\n" + tail
+
+
 def _coerce_text_file(value: TextFile | str | Path) -> TextFile:
     if isinstance(value, TextFile):
         return value
@@ -884,41 +980,47 @@ def _selected_line_range(
     if line_count == 0:
         if lines is not None and lines != (1, 0):
             start, end = lines
-            raise ValueError(
-                f"line range ({start}, {end}) is outside file with 0 lines; "
-                "use lines=(1, 0) for an empty selection"
+            raise HelperValueError(
+                helper="read_file",
+                problem=(
+                    f"line range ({start}, {end}) is outside file with 0 lines; "
+                    "use lines=(1, 0) for an empty selection"
+                ),
             )
         if around is not None:
-            raise ValueError(f"around text not found in file with 0 lines: {around!r}")
+            raise HelperValueError(helper="read_file", problem=f"around text not found in file with 0 lines: {around!r}")
         return (0, 0)
     if lines is not None:
         start, end = lines
         if start < 1 or end < start or end > line_count:
-            raise ValueError(
-                f"line range ({start}, {end}) is outside file with {line_count} lines; "
-                "use head=..., tail=..., around=..., or a range within the file"
+            raise HelperValueError(
+                helper="read_file",
+                problem=(
+                    f"line range ({start}, {end}) is outside file with {line_count} lines; "
+                    "use head=..., tail=..., around=..., or a range within the file"
+                ),
             )
         return (start, end)
     if head is not None:
         if head < 0:
-            raise ValueError("head must be >= 0")
+            raise HelperValueError(helper="read_file", problem="head must be >= 0")
         if head == 0:
             return (0, 0)
         return (1, min(head, line_count))
     if tail is not None:
         if tail < 0:
-            raise ValueError("tail must be >= 0")
+            raise HelperValueError(helper="read_file", problem="tail must be >= 0")
         if tail == 0:
             return (0, 0)
         start = max(1, line_count - tail + 1)
         return (start, line_count)
     if around is not None:
         if not around:
-            raise ValueError("around must be non-empty")
+            raise HelperValueError(helper="read_file", problem="around must be non-empty")
         for index, line in enumerate(logical_lines, start=1):
             if around in line:
                 return (max(1, index - context), min(line_count, index + context))
-        raise ValueError(f"around text not found in file with {line_count} lines: {around!r}")
+        raise HelperValueError(helper="read_file", problem=f"around text not found in file with {line_count} lines: {around!r}")
     return (1, line_count)
 
 
@@ -928,6 +1030,186 @@ def _slice_text_by_lines(text: str, start_line: int, end_line: int) -> str:
     return "".join(text.splitlines(keepends=True)[start_line - 1 : end_line])
 
 
+def _validate_read_file_selection(
+    loaded: TextFile,
+    logical_lines: Sequence[str],
+    *,
+    lines: tuple[int, int] | None,
+    around: str | None,
+) -> None:
+    """Validate strict read selectors and attach the closest useful preview on failure."""
+
+    line_count = len(logical_lines)
+    if lines is not None:
+        start, end = lines
+        if line_count == 0 and lines == (1, 0):
+            return
+        if line_count == 0:
+            _raise_line_selection_error(
+                "read_file",
+                loaded,
+                logical_lines,
+                problem=(
+                    f"line range ({start}, {end}) is outside file with 0 lines; "
+                    "use lines=(1, 0) for an empty selection"
+                ),
+                requested_start=start,
+                requested_end=end,
+                hints=("Use lines=(1, 0) when you intentionally want an empty selection.",),
+            )
+        if start < 1 or end < start or end > line_count:
+            _raise_line_selection_error(
+                "read_file",
+                loaded,
+                logical_lines,
+                problem=(
+                    f"line range ({start}, {end}) is outside file with {line_count} lines; "
+                    "use head=..., tail=..., around=..., or a range within the file"
+                ),
+                requested_start=start,
+                requested_end=end,
+                hints=(
+                    "Use the partial_view attribute on this exception if you caught it in a script.",
+                    "Use head=..., tail=..., around=..., or a range within the reported line_count.",
+                ),
+            )
+    if around is not None:
+        if not around:
+            raise HelperValueError(helper="read_file", problem="around must be non-empty")
+        if not any(around in line for line in logical_lines):
+            preview_view, preview_title = _tail_context_view(loaded, logical_lines)
+            raise FileSelectionError(
+                helper="read_file",
+                problem=f"around text not found in file with {line_count} lines: {around!r}",
+                details={"path": loaded.path, "line_count": line_count, "around": around},
+                preview_title=preview_title,
+                preview=preview_view.numbered() if preview_view else None,
+                partial_view=preview_view,
+                hints=("Use head=..., tail=..., or a known nearby string, then retry with a current line range.",),
+            )
+
+
+def _raise_line_selection_error(
+    helper: str,
+    loaded: TextFile,
+    logical_lines: Sequence[str],
+    *,
+    problem: str,
+    requested_start: int,
+    requested_end: int,
+    details: dict[str, Any] | None = None,
+    hints: tuple[str, ...] | list[str] = (),
+) -> None:
+    partial_view, preview_title = _partial_view_for_failed_range(
+        loaded,
+        logical_lines,
+        requested_start=requested_start,
+        requested_end=requested_end,
+    )
+    error_details: dict[str, Any] = {
+        "path": loaded.path,
+        "line_count": len(logical_lines),
+        "requested_start": requested_start,
+        "requested_end": requested_end,
+    }
+    error_details.update(details or {})
+    raise FileSelectionError(
+        helper=helper,
+        problem=problem,
+        details=error_details,
+        preview_title=preview_title,
+        preview=partial_view.numbered() if partial_view else None,
+        partial_view=partial_view,
+        hints=hints,
+    )
+
+
+def _partial_view_for_failed_range(
+    loaded: TextFile,
+    logical_lines: Sequence[str],
+    *,
+    requested_start: int,
+    requested_end: int,
+) -> tuple[FileView | None, str | None]:
+    line_count = len(logical_lines)
+    if line_count == 0:
+        return None, None
+    if requested_start < 1:
+        view = _make_partial_file_view(loaded, logical_lines, 1, min(line_count, max(1, requested_end)))
+        title = f"Nearest available head lines {view.start_line}-{view.end_line}" if view else None
+        return view, title
+    if requested_start <= line_count:
+        end_line = min(line_count, max(requested_start, requested_end))
+        view = _make_partial_file_view(loaded, logical_lines, requested_start, end_line)
+        title = f"Available requested prefix lines {view.start_line}-{view.end_line}" if view else None
+        return view, title
+    return _tail_context_view(loaded, logical_lines)
+
+
+def _tail_context_view(loaded: TextFile, logical_lines: Sequence[str]) -> tuple[FileView | None, str | None]:
+    line_count = len(logical_lines)
+    if line_count == 0:
+        return None, None
+    start_line = max(1, line_count - _MAX_ERROR_PREVIEW_LINES + 1)
+    view = _make_partial_file_view(loaded, logical_lines, start_line, line_count)
+    title = f"Nearest available tail lines {view.start_line}-{view.end_line}" if view else None
+    return view, title
+
+
+def _make_partial_file_view(
+    loaded: TextFile,
+    logical_lines: Sequence[str],
+    start_line: int,
+    end_line: int,
+) -> FileView | None:
+    line_count = len(logical_lines)
+    if line_count == 0 or start_line < 1 or end_line < start_line:
+        return None
+    bounded_start = min(start_line, line_count)
+    bounded_end = min(end_line, line_count, bounded_start + _MAX_ERROR_PREVIEW_LINES - 1)
+    line_parts = loaded.text.splitlines(keepends=True)
+    selected_parts: list[str] = []
+    used_chars = 0
+    actual_end = bounded_start - 1
+    for line_no in range(bounded_start, bounded_end + 1):
+        line_text = line_parts[line_no - 1] if line_no - 1 < len(line_parts) else logical_lines[line_no - 1]
+        remaining = _MAX_ERROR_PREVIEW_CHARS - used_chars
+        if remaining <= 0:
+            break
+        if len(line_text) > remaining:
+            selected_parts.append(line_text[:remaining])
+            actual_end = line_no
+            break
+        selected_parts.append(line_text)
+        used_chars += len(line_text)
+        actual_end = line_no
+    if actual_end < bounded_start:
+        return None
+    selected_text = "".join(selected_parts)
+    return FileView(
+        path=loaded.path,
+        exists=True,
+        text=selected_text,
+        line_count=line_count,
+        start_line=bounded_start,
+        end_line=actual_end,
+        truncated=bounded_start > 1 or actual_end < line_count,
+        encoding=loaded.encoding,
+        newline=loaded.newline,
+        final_newline=selected_text.endswith(("\n", "\r")),
+        bom=loaded.bom,
+        size=_safe_file_size(loaded.path),
+        kind="file",
+    )
+
+
+def _safe_file_size(path: str) -> int | None:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return None
+
+
 def _check_expected_line(
     line: str,
     expected: str,
@@ -935,6 +1217,7 @@ def _check_expected_line(
     mode: Literal["startswith", "contains", "exact", "regex"],
     strip_indent: bool,
     label: str,
+    line_no: int,
 ) -> None:
     actual = line.lstrip() if strip_indent else line
     if mode == "startswith":
@@ -944,11 +1227,26 @@ def _check_expected_line(
     elif mode == "exact":
         matched = actual == expected
     elif mode == "regex":
-        matched = re.search(expected, actual) is not None
+        try:
+            matched = re.search(expected, actual) is not None
+        except re.error as exc:
+            raise HelperValueError(
+                helper="edit_lines",
+                problem=f"{label} regex is invalid: {exc}",
+                details={"line": line_no, "regex": expected},
+                hints=("Use expect_mode='contains' for plain text anchors, or escape regex metacharacters.",),
+            ) from exc
     else:  # Defensive guard for future edits; public validation happens earlier.
-        raise ValueError(f"unsupported expect_mode: {mode!r}")
+        raise HelperValueError(helper="edit_lines", problem=f"unsupported expect_mode: {mode!r}")
     if not matched:
-        raise ValueError(f"{label} did not match: expected {expected!r} with {mode}, got {actual!r}")
+        raise HelperValueError(
+            helper="edit_lines",
+            problem=f"{label} did not match: expected {expected!r} with {mode}, got {actual!r}",
+            details={"line": line_no, "expected": expected, "actual": actual, "mode": mode},
+            preview_title=f"Actual {label} line {line_no}",
+            preview=f"{line_no}: {line}",
+            hints=("Re-read the target range with read_file(..., lines=(start, end)) and update the anchor.",),
+        )
 
 
 def _detect_newline_style(text: str) -> Literal["lf", "crlf", "cr", "mixed", "none"]:
@@ -1073,6 +1371,42 @@ def _newline_styles_in_text(text: str) -> list[Literal["lf", "crlf", "cr"]]:
     if "\r" in without_crlf:
         styles.append("cr")
     return styles
+
+
+def _replacement_context_view(before: TextFile, needle: str) -> tuple[FileView | None, str | None]:
+    logical_lines = _logical_lines(before.text)
+    first = needle.splitlines()[0] if needle.splitlines() else needle
+    if not first:
+        return None, None
+    for line_no, line in enumerate(logical_lines, start=1):
+        if first in line:
+            start_line = max(1, line_no - 2)
+            end_line = min(len(logical_lines), line_no + 2)
+            view = _make_partial_file_view(before, logical_lines, start_line, end_line)
+            title = f"Nearest lines containing first needle line {view.start_line}-{view.end_line}" if view else None
+            return view, title
+    return None, None
+
+
+def _replacement_missing_hints(
+    before: TextFile,
+    needle: str,
+    *,
+    found: int,
+    count: int,
+    newlines: Literal["logical", "raw"],
+) -> tuple[str, ...]:
+    hints = ["replace_text requires an exact occurrence after the selected newline mode is applied."]
+    if newlines == "raw" and "\n" in needle and before.newline == "crlf":
+        hints.append("raw mode is newline-sensitive; include '\\r\\n' in old or use newlines='logical'.")
+    elif newlines == "logical" and found == 0 and "\n" in needle and before.newline == "mixed":
+        hints.append("The file has mixed newlines; inspect the target snippet before matching across lines.")
+    if found < count:
+        first = needle.splitlines()[0] if needle.splitlines() else needle
+        if first and any(first in line for line in before.text.splitlines()):
+            hints.append("The first needle line exists nearby; re-read that preview or use edit_lines with anchors.")
+    hints.append("For insertion, use edit_lines(..., start=end+1, ...) instead of replace_text.")
+    return tuple(hints)
 
 
 def _replacement_missing_context(

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 from importlib import import_module
 from typing import Any
+
+from .errors import MANAGED_RUN_ENV, install_friendly_excepthook
 
 # Public names are resolved lazily so cheap helpers such as ``enter_dir`` do not
 # pay the import cost of heavyweight optional areas like MCP or tree-sitter code
@@ -10,9 +13,14 @@ from typing import Any
 # global side effects of importing every submodule up front.
 _EXPORTS: dict[str, tuple[str, str]] = {
     "Capture": (".codequery", "Capture"),
+    "CommandError": (".errors", "CommandError"),
     "CommandTextResult": (".textops", "CommandTextResult"),
     "EditResult": (".textops", "EditResult"),
+    "FileSelectionError": (".errors", "FileSelectionError"),
     "FileView": (".textops", "FileView"),
+    "FriendlyErrorMixin": (".errors", "FriendlyErrorMixin"),
+    "HelperRuntimeError": (".errors", "HelperRuntimeError"),
+    "HelperValueError": (".errors", "HelperValueError"),
     "Match": (".codesearch", "Match"),
     "McpResult": (".mcp", "McpResult"),
     "PatchResult": (".patch", "PatchResult"),
@@ -47,6 +55,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "edit_lines": (".textops", "edit_lines"),
     "find_files": (".codesearch", "find_files"),
     "find_symbols": (".codequery", "find_symbols"),
+    "format_friendly_exception": (".errors", "format_friendly_exception"),
     "goal_paths": (".goal_mode", "goal_paths"),
     "list_declared_servers": (".mcp", "list_declared_servers"),
     "list_files": (".files", "list_files"),
@@ -88,6 +97,7 @@ _SUBMODULES = {
     "dependencies",
     "events",
     "files",
+    "errors",
     "goal_mode",
     "lockfile",
     "mcp",
@@ -100,6 +110,9 @@ _SUBMODULES = {
 }
 
 __all__ = sorted([*_EXPORTS, *_SUBMODULES])
+
+if os.environ.get(MANAGED_RUN_ENV):
+    install_friendly_excepthook()
 
 
 def __getattr__(name: str) -> Any:

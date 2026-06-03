@@ -15,6 +15,7 @@ from uv_agent_runtime import (
     apply_patch_any,
     ask,
     clear_codequery_cache,
+    CommandError,
     CommandTextResult,
     compare_text,
     connect_declared,
@@ -29,6 +30,9 @@ from uv_agent_runtime import (
     edit_lines,
     find_files,
     find_symbols,
+    FileSelectionError,
+    HelperRuntimeError,
+    HelperValueError,
     list_declared_servers,
     list_files,
     list_thread_digests,
@@ -225,8 +229,22 @@ def test_runtime_run_process_text_check_and_result_helpers() -> None:
     assert result.stdout.strip() == "ok"
     assert result.raise_for_error() is result
 
-    with pytest.raises(RuntimeError, match="command failed with exit 3"):
-        run_process_text([sys.executable, "-c", "raise SystemExit(3)"], check=True)
+    with pytest.raises(CommandError, match="command failed with exit 3") as excinfo:
+        run_process_text(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print('out'); print('err', file=sys.stderr); raise SystemExit(3)",
+            ],
+            check=True,
+        )
+    message = str(excinfo.value)
+    assert "Captured output (tail)" in message
+    assert "stdout:" in message
+    assert "out" in message
+    assert "stderr:" in message
+    assert "err" in message
+
 
 
 def test_runtime_run_process_text_timeout_returns_partial_output() -> None:
@@ -242,7 +260,7 @@ def test_runtime_run_process_text_timeout_returns_partial_output() -> None:
     assert result.timed_out is True
     assert result.returncode != 0
     assert "started" in result.stdout
-    with pytest.raises(RuntimeError, match="command timed out"):
+    with pytest.raises(CommandError, match="command timed out"):
         result.raise_for_error()
 
 
@@ -392,10 +410,71 @@ def test_runtime_read_file_errors_include_recovery_metadata(tmp_path: Path) -> N
     path = tmp_path / "sample.txt"
     path.write_text("first\nsecond\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match=r"line range \(2, 5\).*2 lines"):
+    with pytest.raises(FileSelectionError, match=r"line range \(2, 5\).*2 lines") as excinfo:
         read_file(path, lines=(2, 5))
-    with pytest.raises(ValueError, match="around text not found in file with 2 lines"):
+    assert isinstance(excinfo.value, ValueError)
+    assert excinfo.value.partial_view is not None
+    assert excinfo.value.partial_view.start_line == 2
+    assert excinfo.value.partial_view.end_line == 2
+    message = str(excinfo.value)
+    assert "Preview:" in message
+    assert "Available requested prefix lines 2-2" in message
+    assert "2: second" in message
+
+    with pytest.raises(FileSelectionError, match=r"line range \(5, 8\).*2 lines") as tail_excinfo:
+        read_file(path, lines=(5, 8))
+    assert tail_excinfo.value.partial_view is not None
+    assert tail_excinfo.value.partial_view.start_line == 1
+    assert tail_excinfo.value.partial_view.end_line == 2
+    assert "Nearest available tail lines 1-2" in str(tail_excinfo.value)
+
+    with pytest.raises(FileSelectionError, match="around text not found in file with 2 lines") as around_excinfo:
         read_file(path, around="missing")
+    assert around_excinfo.value.partial_view is not None
+    assert "Nearest available tail lines 1-2" in str(around_excinfo.value)
+
+
+def test_runtime_friendly_excepthook_suppresses_tracebacks_for_helper_errors(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text("first\nsecond\n", encoding="utf-8")
+    code = f"from uv_agent_runtime import read_file; read_file({str(path)!r}, lines=(2, 5))"
+
+    result = run_process_text(
+        [sys.executable, "-c", code],
+        env_patch={"UV_AGENT_RUNTIME_RUN_ID": "run_test_hook"},
+    )
+
+    assert result.returncode != 0
+    assert "uv_agent_runtime helper error: read_file" in result.stderr
+    assert "Problem:" in result.stderr
+    assert "Preview:" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_runtime_friendly_excepthook_preserves_ordinary_and_full_tracebacks(tmp_path: Path) -> None:
+    ordinary = run_process_text(
+        [sys.executable, "-c", "import uv_agent_runtime; raise RuntimeError('ordinary')"],
+        env_patch={"UV_AGENT_RUNTIME_RUN_ID": "run_test_hook"},
+    )
+    assert ordinary.returncode != 0
+    assert "Traceback" in ordinary.stderr
+    assert "RuntimeError: ordinary" in ordinary.stderr
+
+    path = tmp_path / "sample.txt"
+    path.write_text("first\nsecond\n", encoding="utf-8")
+    code = f"from uv_agent_runtime import read_file; read_file({str(path)!r}, lines=(2, 5))"
+    full = run_process_text(
+        [sys.executable, "-c", code],
+        env_patch={
+            "UV_AGENT_RUNTIME_RUN_ID": "run_test_hook",
+            "UV_AGENT_RUNTIME_FULL_TRACEBACK": "1",
+        },
+    )
+    assert full.returncode != 0
+    assert "Traceback" in full.stderr
+    assert "FileSelectionError" in full.stderr
+
+
 
 
 
@@ -439,12 +518,17 @@ def test_runtime_edit_lines_replaces_inserts_deletes_and_checks_anchors(tmp_path
     assert eof.line_delta == 1
     assert path.read_text(encoding="utf-8").endswith("# eof\n")
 
-    with pytest.raises(ValueError, match="expect_first did not match"):
+    with pytest.raises(HelperValueError, match="expect_first did not match") as anchor_excinfo:
         edit_lines(path, 1, 1, "def nope():", expect_first="class")
-    with pytest.raises(ValueError, match=r"line range \(1, 99\).*6 lines"):
+    assert "Actual expect_first line 1" in str(anchor_excinfo.value)
+    with pytest.raises(FileSelectionError, match=r"line range \(1, 99\).*6 lines") as range_excinfo:
         edit_lines(path, 1, 99, "def nope():")
-    with pytest.raises(ValueError, match="valid insert start"):
+    assert range_excinfo.value.partial_view is not None
+    assert "Available requested prefix lines 1-6" in str(range_excinfo.value)
+    with pytest.raises(FileSelectionError, match="valid insert start") as insert_excinfo:
         edit_lines(path, 99, 98, "# nope")
+    assert insert_excinfo.value.partial_view is not None
+    assert "Nearest available tail lines" in str(insert_excinfo.value)
 
 def test_runtime_write_text_lossless_without_template_preserves_input_text(tmp_path: Path) -> None:
     path = tmp_path / "sample.txt"
@@ -469,11 +553,11 @@ def test_runtime_replace_text_uses_logical_newlines_and_preserves_style(tmp_path
 
     assert result.replacements == 1
     assert path.read_bytes() == b"first\r\nnew\r\n\r\nlast\r\n"
-    with pytest.raises(ValueError, match="File newline='crlf'"):
+    with pytest.raises(HelperValueError, match="File newline='crlf'"):
         replace_text(path, "missing", "nope")
-    with pytest.raises(ValueError, match="old text must not be empty"):
+    with pytest.raises(HelperValueError, match="old text must not be empty"):
         replace_text(path, "", "nope")
-    with pytest.raises(ValueError, match="no-op"):
+    with pytest.raises(HelperValueError, match="no-op"):
         replace_text(path, "new", "new")
 
 
@@ -481,7 +565,7 @@ def test_runtime_replace_text_raw_mode_is_newline_sensitive(tmp_path: Path) -> N
     path = tmp_path / "sample.txt"
     path.write_text("first\r\nold\r\nlast\r\n", encoding="utf-8", newline="")
 
-    with pytest.raises(ValueError, match="CRLF/LF mismatch"):
+    with pytest.raises(HelperValueError, match="CRLF/LF mismatch"):
         replace_text(path, "old\nlast", "new\nlast", newlines="raw")
 
     result = replace_text(path, "old\r\nlast", "new\r\nlast", newlines="raw")
@@ -1276,7 +1360,7 @@ def test_codesearch_accepts_scalar_filter_arguments(tmp_path: Path) -> None:
 
 
 def test_codesearch_file_types_rejects_extension_patterns(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="file_types uses ripgrep type aliases"):
+    with pytest.raises(HelperValueError, match="file_types uses ripgrep type aliases"):
         find_files(tmp_path, file_types=".py")
 
 
@@ -1284,7 +1368,7 @@ def test_codesearch_file_types_rejects_extension_patterns(tmp_path: Path) -> Non
 def test_codesearch_regex_error_suggests_literal_search(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
 
-    with pytest.raises(RuntimeError, match="literal=True"):
+    with pytest.raises(HelperRuntimeError, match="literal=True"):
         search_text("hello(", root=tmp_path)
 
 @requires_rg

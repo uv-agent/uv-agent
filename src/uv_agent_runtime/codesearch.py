@@ -11,11 +11,23 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .errors import HelperRuntimeError, HelperValueError
 from .files import resolve_workspace_path
 
 
-class RipgrepNotFoundError(RuntimeError):
+class RipgrepNotFoundError(HelperRuntimeError):
     """Raised when the `rg` binary is not on PATH."""
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(
+            helper="search helpers",
+            problem=message
+            or "ripgrep (`rg`) not found on PATH; install it and retry the search helper.",
+            hints=(
+                "Install ripgrep with winget install BurntSushi.ripgrep.MSVC, brew install ripgrep, or apt-get install ripgrep.",
+                "After installing, restart the agent or ensure rg is available on PATH for run_python.",
+            ),
+        )
 
 
 def _coerce_str_sequence(value: str | Sequence[str] | None, *, name: str) -> list[str] | None:
@@ -26,11 +38,27 @@ def _coerce_str_sequence(value: str | Sequence[str] | None, *, name: str) -> lis
     if isinstance(value, str):
         return [value]
     if isinstance(value, bytes):
-        raise TypeError(f"{name} must be a string or a sequence of strings, not bytes")
-    items = list(value)
+        raise HelperValueError(
+            helper="search helpers",
+            problem=f"{name} must be a string or a sequence of strings, not bytes",
+            details={"parameter": name, "received_type": "bytes"},
+        )
+    try:
+        items = list(value)
+    except TypeError as exc:
+        raise HelperValueError(
+            helper="search helpers",
+            problem=f"{name} must be a string or a sequence of strings",
+            details={"parameter": name, "received_type": type(value).__name__},
+            hints=(f"Pass {name}='value' for one item or {name}=['value1', 'value2'] for multiple items.",),
+        ) from exc
     for index, item in enumerate(items):
         if not isinstance(item, str):
-            raise TypeError(f"{name}[{index}] must be a string, got {type(item).__name__}")
+            raise HelperValueError(
+                helper="search helpers",
+                problem=f"{name}[{index}] must be a string, got {type(item).__name__}",
+                details={"parameter": name, "index": index, "received_type": type(item).__name__},
+            )
     return items
 
 
@@ -46,11 +74,27 @@ def _coerce_path_sequence(
     if isinstance(value, (str, Path)):
         return [value]
     if isinstance(value, bytes):
-        raise TypeError(f"{name} must be a path or a sequence of paths, not bytes")
-    items = list(value)
+        raise HelperValueError(
+            helper="search helpers",
+            problem=f"{name} must be a path or a sequence of paths, not bytes",
+            details={"parameter": name, "received_type": "bytes"},
+        )
+    try:
+        items = list(value)
+    except TypeError as exc:
+        raise HelperValueError(
+            helper="search helpers",
+            problem=f"{name} must be a path or a sequence of paths",
+            details={"parameter": name, "received_type": type(value).__name__},
+            hints=(f"Pass {name}=path for one path or {name}=[path1, path2] for multiple paths.",),
+        ) from exc
     for index, item in enumerate(items):
         if not isinstance(item, (str, Path)):
-            raise TypeError(f"{name}[{index}] must be a path-like value, got {type(item).__name__}")
+            raise HelperValueError(
+                helper="search helpers",
+                problem=f"{name}[{index}] must be a path-like value, got {type(item).__name__}",
+                details={"parameter": name, "index": index, "received_type": type(item).__name__},
+            )
     return items
 
 
@@ -62,11 +106,20 @@ def _coerce_file_types(value: str | Sequence[str] | None) -> list[str] | None:
         return None
     for kind in kinds:
         if not kind:
-            raise ValueError("file_types entries must be non-empty ripgrep type aliases such as 'py'")
+            raise HelperValueError(
+                helper="search helpers",
+                problem="file_types entries must be non-empty ripgrep type aliases such as 'py'",
+                details={"file_types": kinds},
+            )
         if kind.startswith(".") or any(char in kind for char in "*?[]/\\"):
-            raise ValueError(
-                "file_types uses ripgrep type aliases such as 'py', not filename extensions "
-                f"or glob patterns: {kind!r}. Use globs=['*.py'] for extension/path patterns."
+            raise HelperValueError(
+                helper="search helpers",
+                problem=(
+                    "file_types uses ripgrep type aliases such as 'py', not filename extensions "
+                    f"or glob patterns: {kind!r}. Use globs=['*.py'] for extension/path patterns."
+                ),
+                details={"file_types": kinds, "invalid_entry": kind},
+                hints=("Use file_types='py' for ripgrep's Python alias, or globs=['*.py'] for filename patterns.",),
             )
     return kinds
 
@@ -75,6 +128,7 @@ def _raise_ripgrep_error(
     code: int,
     stderr: str,
     *,
+    helper: str = "search_text",
     pattern: str | None = None,
     fixed_string: bool = False,
 ) -> None:
@@ -92,10 +146,14 @@ def _raise_ripgrep_error(
             "file_types uses ripgrep type aliases such as 'py'; use globs=['*.py'] "
             "for filename extensions or path patterns."
         )
-    message = f"ripgrep failed (exit {code}): {detail}"
-    if hints:
-        message += "\n" + "\n".join(f"Hint: {hint}" for hint in hints)
-    raise RuntimeError(message)
+    raise HelperRuntimeError(
+        helper=helper,
+        problem=f"ripgrep failed (exit {code}): {detail}" if detail else f"ripgrep failed (exit {code})",
+        details={"pattern": pattern, "fixed_string": fixed_string},
+        preview_title="ripgrep stderr",
+        preview=detail or None,
+        hints=hints,
+    )
 
 
 @dataclass(frozen=True)
@@ -337,7 +395,7 @@ def search_text(
     aliases.
     """
     if not pattern:
-        raise ValueError("pattern must be non-empty")
+        raise HelperValueError(helper="search_text", problem="pattern must be non-empty")
     before, after = _resolve_context_counts(before=before, after=after, context=context)
     resolved_roots = _resolve_roots(root=root, roots=roots)
     normalized_globs = _coerce_str_sequence(globs, name="globs")
@@ -420,18 +478,18 @@ def _search_text_one(
         code, stdout, stderr = _run(args, cwd_path)
         # rg exits 1 when no matches; 2+ for real errors.
         if code >= 2:
-            _raise_ripgrep_error(code, stderr, pattern=pattern, fixed_string=effective_fixed_string)
+            _raise_ripgrep_error(code, stderr, helper="search_text", pattern=pattern, fixed_string=effective_fixed_string)
         return _parse_search_matches(stdout.splitlines(), cwd=cwd_path, before=before, after=after, max_total=None)
 
     if before or after:
         code, stdout, stderr = _run(args, cwd_path)
         if code >= 2:
-            _raise_ripgrep_error(code, stderr, pattern=pattern, fixed_string=effective_fixed_string)
+            _raise_ripgrep_error(code, stderr, helper="search_text", pattern=pattern, fixed_string=effective_fixed_string)
         return _parse_search_matches(stdout.splitlines(), cwd=cwd_path, before=before, after=after, max_total=max_total)
 
     code, lines, stderr, terminated = _run_until_matches(args, cwd_path, match_limit=max_total)
     if code >= 2 and not terminated:
-        _raise_ripgrep_error(code, stderr, pattern=pattern, fixed_string=effective_fixed_string)
+        _raise_ripgrep_error(code, stderr, helper="search_text", pattern=pattern, fixed_string=effective_fixed_string)
     return _parse_search_matches(lines, cwd=cwd_path, before=before, after=after, max_total=max_total)
 
 
@@ -618,11 +676,11 @@ def _find_files_one(
     if max_total is None:
         code, stdout, stderr = _run(args, cwd_path)
         if code >= 2:
-            _raise_ripgrep_error(code, stderr)
+            _raise_ripgrep_error(code, stderr, helper="find_files")
         return [_absolute_result_path(cwd_path, line) for line in stdout.splitlines() if line]
     code, lines, stderr, terminated = _run_limited(args, cwd_path, line_limit=max_total)
     if code >= 2 and not terminated:
-        _raise_ripgrep_error(code, stderr)
+        _raise_ripgrep_error(code, stderr, helper="find_files")
     return [_absolute_result_path(cwd_path, line) for line in lines if line][:max_total]
 
 
@@ -636,19 +694,23 @@ def _resolve_roots(
     if roots is None:
         return [resolve_workspace_path(root)]
     if Path(root) != Path("."):
-        raise ValueError("root and roots are mutually exclusive")
+        raise HelperValueError(
+            helper="search helpers",
+            problem="root and roots are mutually exclusive",
+            hints=("Use root=... for one search root, or leave root='.' and pass roots=[...].",),
+        )
     return [resolve_workspace_path(item) for item in _coerce_path_sequence(roots, name="roots") or []]
 
 
 def _resolve_context_counts(*, before: int, after: int, context: int | None) -> tuple[int, int]:
     if before < 0 or after < 0:
-        raise ValueError("before and after must be >= 0")
+        raise HelperValueError(helper="search_text", problem="before and after must be >= 0")
     if context is None:
         return before, after
     if context < 0:
-        raise ValueError("context must be >= 0")
+        raise HelperValueError(helper="search_text", problem="context must be >= 0")
     if before or after:
-        raise ValueError("context is mutually exclusive with before/after")
+        raise HelperValueError(helper="search_text", problem="context is mutually exclusive with before/after")
     return context, context
 
 
