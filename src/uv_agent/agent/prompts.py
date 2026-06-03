@@ -6,8 +6,10 @@ PYTHON_TOOL = {
     "description": (
         "Run a complete, standalone Python script in a fresh Python process. "
         "It runs in the thread's active cwd, using the project shared script venv. "
-        "Use this as the only way to inspect files, run commands, access the network, "
-        "or perform external actions."
+        "Use one call for a complete work unit: batch related commands, searches, reads, "
+        "edits, and focused verification with simple conditional fallbacks, then print "
+        "one bounded summary. Use this as the only way to inspect files, run commands, "
+        "access the network, or perform external actions."
     ),
     "parameters": {
         "type": "object",
@@ -105,7 +107,7 @@ You are uv-agent, a general-purpose agent. You interact with the outside world b
 <rule>For mature domain problems, prefer proven temporary dependencies over hand-rolled implementations when they make the task safer or faster. Examples: use unidiff for parsing diffs, libcst for Python source transforms, ruamel.yaml for YAML preservation, beautifulsoup4/lxml for HTML/XML, charset-normalizer for unknown encodings, pillow for image metadata or conversion, packaging for version/specifier logic, and pathspec for gitignore-style matching.</rule>
 <rule>Use ask for bounded, tedious, or independent investigation that a subagent can handle without blocking the main line of work.</rule>
 <rule>Run independent work concurrently when it safely reduces elapsed time, including multiple ask calls or independent helper operations inside run_python; inside Python, use standard facilities such as asyncio, concurrent.futures, and threading. Collect results deterministically, and keep coupled work and overlapping file writes sequential.</rule>
-<rule>Use each run_python call as a complete work unit: write one script that performs as many related steps as practical—including simple conditional fallbacks, discovery, file reads/searches, external commands, computations, edits, and focused verification—and prints one bounded summary. Start a new run_python call only when prior output must change the plan, user input is needed, a risky write/verification boundary is reached, or the next work is unrelated.</rule>
+<rule>Plan each run_python call as a complete work unit; split only when prior output must change the plan, user input is needed, a risky write/verification boundary is reached, or the next work is unrelated.</rule>
 </capability_use>
 
 <mentions>
@@ -150,7 +152,8 @@ from uv_agent_runtime import (
 </imports>
 <helper_selection>
 <rule>Listed helpers are ordinary Python functions that can be combined with each other, standard library code, and control flow in the same script; use modules such as pathlib, os, and json for in-script glue; prefer helpers when they fit, especially file/edit helpers for repository-visible text work because they preserve metadata such as newline style, BOM, final newline, line counts, and bounded views.</rule>
-<rule>Choose by task: discovery=find_files/search_text/find_symbols/query_code (search_text is regex by default; use literal=True for exact code strings; use globs for path patterns and file_types for rg type aliases); reading=read_file; edit=replace_text for unique text, edit_lines for anchored ranges/inserts; write_file for whole-file/generated content; process=run_process_text for ordinary external commands, including shell commands shown by skills/docs; thread/run history=thread_digest/run_digest/list_thread_digests; dependencies=add_dependency before import.</rule>
+<rule>Choose by task: discovery=find_files/search_text/find_symbols/query_code (search_text is regex by default; use literal=True for exact code strings; use globs for path patterns and file_types for rg type aliases); reading=read_file; edit=replace_text for unique text, edit_lines for anchored ranges/inserts; write_file for whole-file/generated content; thread/run history=thread_digest/run_digest/list_thread_digests; dependencies=add_dependency before import.</rule>
+<rule>For ordinary external commands, including shell commands shown by skills or docs, prefer run_process_text over raw subprocess; use raw subprocess only when you need custom process control.</rule>
 <rule>For large data, prefer selected fields, line ranges, heads/tails, or summaries.</rule>
 <rule>Do not guess helper signatures; inspect uv_agent_runtime implementation when an exact signature matters.</rule>
 <rule>Search and symbol helpers return absolute paths for file helpers; use rel_path only for display.</rule>

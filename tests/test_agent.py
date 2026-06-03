@@ -428,6 +428,10 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert PYTHON_TOOL["type"] == "function"
     assert "fresh Python process" in PYTHON_TOOL["description"]
     assert "thread's active cwd" in PYTHON_TOOL["description"]
+    assert "Use one call for a complete work unit" in PYTHON_TOOL["description"]
+    assert "batch related commands, searches, reads, edits" in PYTHON_TOOL["description"]
+    assert "simple conditional fallbacks" in PYTHON_TOOL["description"]
+    assert "one bounded summary" in PYTHON_TOOL["description"]
     assert "run commands, access the network" in PYTHON_TOOL["description"]
     assert "call subprocesses" not in PYTHON_TOOL["description"]
     assert set(PYTHON_TOOL["parameters"]["properties"]) == {"code", "timeout_s"}
@@ -3046,13 +3050,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Run independent work concurrently" in prompt
     assert "multiple ask calls or independent helper operations inside run_python" in prompt
     assert "overlapping file writes sequential" in prompt
-    assert "Use each run_python call as a complete work unit" in prompt
-    assert "as many related steps as practical" in prompt
-    assert "simple conditional fallbacks" in prompt
-    assert "external commands, computations, edits, and focused verification" in prompt
-    assert "prints one bounded summary" in prompt
-    assert "Start a new run_python call only when prior output must change the plan" in prompt
+    assert "Plan each run_python call as a complete work unit" in prompt
+    assert "split only when prior output must change the plan" in prompt
     assert "a risky write/verification boundary is reached" in prompt
+    assert "Use one call for a complete work unit" not in prompt
+    assert "batch related commands, searches, reads, edits" not in prompt
     assert "not as a wrapper around one helper call" not in prompt
     assert "Treat run_python as a free-form multi-step tool" not in prompt
     assert "do them in one script and return one consolidated result" not in prompt
@@ -3136,8 +3138,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "file_types for rg type aliases" in turn_context
     assert "edit=replace_text for unique text, edit_lines for anchored ranges/inserts" in turn_context
     assert "write_file for whole-file/generated content" in turn_context
-    assert "process=run_process_text for ordinary external commands" in turn_context
-    assert "including shell commands shown by skills/docs" in turn_context
+    assert "process=run_process_text for ordinary external commands" not in turn_context
+    assert "For ordinary external commands" in turn_context
+    assert "including shell commands shown by skills or docs" in turn_context
+    assert "prefer run_process_text over raw subprocess" in turn_context
+    assert "custom process control" in turn_context
     assert "thread/run history=thread_digest/run_digest/list_thread_digests" in turn_context
     assert "For large data, prefer selected fields, line ranges, heads/tails, or summaries" in turn_context
     assert "Do not guess helper signatures" in turn_context
