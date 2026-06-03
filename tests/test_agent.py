@@ -3046,13 +3046,14 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Run independent work concurrently" in prompt
     assert "multiple ask calls or independent helper operations inside run_python" in prompt
     assert "overlapping file writes sequential" in prompt
-    assert "Use run_python as a Python script runner" in prompt
-    assert "not as a wrapper around one helper call" in prompt
-    assert "Runtime helpers are ordinary Python functions" in prompt
-    assert "make each script a complete work unit" in prompt
-    assert "batching coupled discovery, reads, edits/retries, and focused verification" in prompt
-    assert "Start a new run_python call only when" in prompt
-    assert "the next step is unrelated or risky" in prompt
+    assert "Use each run_python call as a complete work unit" in prompt
+    assert "as many related steps as practical" in prompt
+    assert "simple conditional fallbacks" in prompt
+    assert "external commands, computations, edits, and focused verification" in prompt
+    assert "prints one bounded summary" in prompt
+    assert "Start a new run_python call only when prior output must change the plan" in prompt
+    assert "a risky write/verification boundary is reached" in prompt
+    assert "not as a wrapper around one helper call" not in prompt
     assert "Treat run_python as a free-form multi-step tool" not in prompt
     assert "do them in one script and return one consolidated result" not in prompt
     assert "genuinely need a user check-in" not in prompt
@@ -3123,8 +3124,10 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert '<helper name="threads">' in turn_context
     assert "run_digest" in turn_context
     assert "<helper_selection>" in turn_context
-    assert "Use Python standard library modules such as pathlib, os, and json for in-script glue" in turn_context
-    assert "prefer listed helpers when they fit" in turn_context
+    assert "Listed helpers are ordinary Python functions" in turn_context
+    assert "combined with each other, standard library code, and control flow" in turn_context
+    assert "use modules such as pathlib, os, and json for in-script glue" in turn_context
+    assert "prefer helpers when they fit" in turn_context
     assert "metadata such as newline style, BOM, final newline" in turn_context
     assert "Choose by task:" in turn_context
     assert "discovery=find_files/search_text/find_symbols/query_code" in turn_context
@@ -3133,6 +3136,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "file_types for rg type aliases" in turn_context
     assert "edit=replace_text for unique text, edit_lines for anchored ranges/inserts" in turn_context
     assert "write_file for whole-file/generated content" in turn_context
+    assert "process=run_process_text for ordinary external commands" in turn_context
+    assert "including shell commands shown by skills/docs" in turn_context
     assert "thread/run history=thread_digest/run_digest/list_thread_digests" in turn_context
     assert "For large data, prefer selected fields, line ranges, heads/tails, or summaries" in turn_context
     assert "Do not guess helper signatures" in turn_context
