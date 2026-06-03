@@ -145,7 +145,6 @@ from uv_agent_runtime import (
     ask,
     add_dependency,
     run_python_env_dir,
-    helper_stats_db_path,
     look_at,
     read_file,
     write_file,
@@ -251,10 +250,6 @@ print("\\n".join(summary))
 <rule>Do not guess helper signatures; inspect uv_agent_runtime implementation when an exact signature matters.</rule>
 <rule>Search and symbol helpers return absolute paths for file helpers; use rel_path only for display.</rule>
 </helper_selection>
-<helper name="helper_stats_db_path">
-<description>Return the local SQLite file used for runtime-helper usage statistics.</description>
-<signature>helper_stats_db_path() -> Path</signature>
-</helper>
 <helper name="enter_dir">
 <description>Set and persist the active cwd for repository/subdirectory work; may load directory rules.</description>
 <signature>enter_dir(path: str | Path) -> Path</signature>
