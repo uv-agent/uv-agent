@@ -4,6 +4,7 @@ import asyncio
 import json
 import io
 import math
+import pytest
 import sys
 import threading
 from pathlib import Path
@@ -2761,6 +2762,10 @@ def test_windows_terminal_falls_back_to_token_when_translator_returns_none(monke
     assert terminal.read_key() == "<I>"
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="ctypes.windll is only available on Windows; verified on windows-latest CI",
+)
 def test_translate_extended_scan_code_uses_win32_translation(monkeypatch) -> None:
     """The translator must consult MapVirtualKeyW + ToUnicode + modifier state."""
     import ctypes
@@ -2794,6 +2799,10 @@ def test_translate_extended_scan_code_uses_win32_translation(monkeypatch) -> Non
     assert fake.tounicode_args and fake.tounicode_args[0][2] == 8
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="ctypes.windll is only available on Windows; verified on windows-latest CI",
+)
 def test_translate_extended_scan_code_returns_none_for_unmappable_keys() -> None:
     """Empty input, non-byte scan codes, and unmapped scan codes return None."""
     terminal = Terminal()
