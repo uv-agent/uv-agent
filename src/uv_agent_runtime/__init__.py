@@ -21,6 +21,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "FriendlyErrorMixin": (".errors", "FriendlyErrorMixin"),
     "HelperRuntimeError": (".errors", "HelperRuntimeError"),
     "HelperValueError": (".errors", "HelperValueError"),
+    "helper_stats_db_path": (".helper_stats", "helper_stats_db_path"),
     "Match": (".codesearch", "Match"),
     "McpResult": (".mcp", "McpResult"),
     "PatchResult": (".patch", "PatchResult"),
@@ -99,6 +100,7 @@ _SUBMODULES = {
     "files",
     "errors",
     "goal_mode",
+    "helper_stats",
     "lockfile",
     "mcp",
     "patch",
@@ -131,9 +133,71 @@ def __getattr__(name: str) -> Any:
             return dynamic
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
     module = import_module(module_name, __name__)
-    value = getattr(module, attribute)
+    value = _maybe_tracked_helper(name, getattr(module, attribute))
     globals()[name] = value
     return value
+
+
+_TRACKED_HELPER_EXPORTS: frozenset[str] = frozenset(
+    {
+        "add_dependencies",
+        "add_dependency",
+        "apply_patch",
+        "apply_patch_any",
+        "ask",
+        "call_host",
+        "clear_codequery_cache",
+        "compare_text",
+        "connect_declared",
+        "connect_named",
+        "connect_stdio",
+        "connect_url",
+        "convert_patch",
+        "emit_event",
+        "emit_progress",
+        "emit_result",
+        "enter_dir",
+        "edit_lines",
+        "file_lock",
+        "find_files",
+        "find_symbols",
+        "goal_paths",
+        "list_declared_servers",
+        "list_files",
+        "list_thread_digests",
+        "look_at",
+        "make_unified_diff",
+        "normalize_text",
+        "path_info",
+        "query_code",
+        "read_file",
+        "read_json",
+        "read_text",
+        "read_text_lossless",
+        "replace_text",
+        "resolve_workspace_path",
+        "restore_snapshot",
+        "run_digest",
+        "run_process_text",
+        "run_python_env_dir",
+        "search_text",
+        "snapshot_files",
+        "supported_symbol_languages",
+        "thread_digest",
+        "workspace_transaction",
+        "write_file",
+        "write_json",
+        "write_text",
+        "write_text_lossless",
+    }
+)
+
+
+def _maybe_tracked_helper(name: str, value: Any) -> Any:
+    if name not in _TRACKED_HELPER_EXPORTS or not callable(value):
+        return value
+    helper_stats = import_module(".helper_stats", __name__)
+    return helper_stats.tracked_helper(value, name=name)
 
 
 def _dynamic_host_helper(name: str) -> Any:
@@ -150,7 +214,8 @@ def _dynamic_host_helper(name: str) -> Any:
     helper.__name__ = name
     helper.__qualname__ = name
     helper.__doc__ = str(resolved.get("doc") or f"Host-provided runtime helper {name}.")
-    return helper
+    helper_stats = import_module(".helper_stats", __name__)
+    return helper_stats.tracked_helper(helper, name=name)
 
 
 def __dir__() -> list[str]:

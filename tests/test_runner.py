@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -91,6 +92,52 @@ async def test_runner_passes_project_root_without_polluting_parent_env(
     assert result.stdout.strip() == str(project_root.resolve())
     assert "UV_AGENT_RUNTIME_PROJECT_ROOT" not in os.environ
 
+
+@pytest.mark.asyncio
+async def test_runner_records_runtime_helper_stats_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = Path.cwd()
+    runner = make_runner(tmp_path, monkeypatch)
+
+    result = await runner.run(
+        PythonRunRequest(
+            code=(
+                "from uv_agent_runtime import helper_stats_db_path, path_info\n"
+                "path_info('.')\n"
+                "print(helper_stats_db_path())\n"
+            ),
+            cwd=project_root,
+        )
+    )
+
+    db_path = (runner.data_dir / "log" / "helper-stats.sqlite3").resolve()
+    assert result.returncode == 0
+    assert result.stdout.strip() == str(db_path)
+    assert db_path.exists()
+    with sqlite3.connect(db_path) as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            """
+            SELECT helper, run_id, positional_count, keyword_names_json,
+                   argument_types_json, duration_ms, outcome, error_type
+            FROM helper_calls
+            WHERE run_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (result.run_id,),
+        ).fetchone()
+
+    assert row is not None
+    assert row["helper"] == "path_info"
+    assert row["positional_count"] == 1
+    assert row["keyword_names_json"] == "[]"
+    assert '"str"' in row["argument_types_json"]
+    assert row["duration_ms"] >= 0
+    assert row["outcome"] == "ok"
+    assert row["error_type"] is None
 
 @pytest.mark.asyncio
 async def test_runner_truncates_large_output(

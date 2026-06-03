@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import sqlite3
 import sys
 import threading
 from pathlib import Path
@@ -33,6 +35,7 @@ from uv_agent_runtime import (
     FileSelectionError,
     HelperRuntimeError,
     HelperValueError,
+    helper_stats_db_path,
     list_declared_servers,
     list_files,
     list_thread_digests,
@@ -355,6 +358,45 @@ def test_runtime_dependency_helpers_use_run_python_env_dir(
     assert result.args[:4] == ["uv-test", "add", "--project", str(scriptenv.resolve())]
     assert result.args[-1] == "idna"
     assert calls[0][1] == {"timeout_s": 1, "check": False}
+
+
+def test_runtime_helper_stats_records_top_level_helper_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("UV_AGENT_RUNTIME_RUN_ID", "run_stats")
+    monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thread_stats")
+    monkeypatch.setenv("UV_AGENT_RUNTIME_TURN_ID", "turn_stats")
+
+    path_info("secret-token-value")
+
+    db_path = helper_stats_db_path()
+    assert db_path == (tmp_path / "log" / "helper-stats.sqlite3").resolve()
+    with sqlite3.connect(db_path) as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            """
+            SELECT helper, run_id, thread_id, turn_id, positional_count,
+                   keyword_names_json, argument_types_json, duration_ms, outcome, error_type
+            FROM helper_calls
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert row["helper"] == "path_info"
+    assert row["run_id"] == "run_stats"
+    assert row["thread_id"] == "thread_stats"
+    assert row["turn_id"] == "turn_stats"
+    assert row["positional_count"] == 1
+    assert json.loads(row["keyword_names_json"]) == []
+    assert json.loads(row["argument_types_json"]) == {"args": ["str"], "kwargs": {}}
+    assert row["duration_ms"] >= 0
+    assert row["outcome"] == "ok"
+    assert row["error_type"] is None
+    assert "secret-token-value" not in row["argument_types_json"]
 
 
 def test_runtime_lossless_text_helpers_preserve_metadata(tmp_path: Path) -> None:
