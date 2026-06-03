@@ -3049,7 +3049,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<run_python_workflow>" in prompt
     assert "small Python program" in prompt
     assert "not a shell-command wrapper or a single-helper wrapper" in prompt
-    assert "current bounded objective or safe phase" in prompt
+    assert "current bounded objective or coherent phase" in prompt
     assert "not one file read, one command, or one helper call" in prompt
     assert "Python-native control flow and normal Python syntax" in prompt
     assert "imports, variables, functions, loops, conditionals, try/except" in prompt
@@ -3161,8 +3161,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "For skill files, read SKILL.md with read_file" in turn_context
     assert "keep foreseeable follow-up parsing or fallback logic in the same script" in turn_context
     assert '<example name="work-unit-script">' in turn_context
-    assert "when the objective and safe next steps are known" in turn_context
-    assert "Keep caution in Python guards, timeouts, fallbacks, and output limits" in turn_context
+    assert "when the objective and next steps are clear" in turn_context
+    assert "Use Python functions, loops, parsing, timeouts, fallbacks, and output limits" in turn_context
+    assert "keep the script robust and bounded" in turn_context
+    assert "safe next steps" not in turn_context
+    assert "Keep caution" not in turn_context
     assert "from __future__ import annotations" not in turn_context
     assert "import json" in turn_context
     assert "from uv_agent_runtime import find_files, read_file, run_process_text, search_text" in turn_context
