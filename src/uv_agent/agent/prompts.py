@@ -172,7 +172,7 @@ from uv_agent_runtime import (
 <example name="work-unit-script">
 Pattern only; when the objective and next steps are clear, perform the related investigation in one script. Use Python functions, loops, parsing, timeouts, fallbacks, and output limits to keep the script robust and bounded.
 ```python
-import json
+import tomllib
 from pathlib import Path
 
 from uv_agent_runtime import find_files, read_file, run_process_text, search_text
@@ -206,7 +206,8 @@ summary.append(command(["git", "status", "--short"]))
 summary.append(command(["git", "log", "--oneline", "-5"]))
 
 section("relevant config files")
-config_files = find_files(globs=["pyproject.toml", ".github/**/*.yml", ".github/**/*.yaml"], max_total=20)
+config_globs = ["pyproject.toml", "pytest.ini", "tox.ini", "noxfile.py", "setup.cfg", "README*"]
+config_files = find_files(globs=config_globs, max_total=20)
 summary.append(f"config files found: {len(config_files)}")
 for path in config_files[:8]:
     view = read_file(path, head=80)
@@ -214,30 +215,30 @@ for path in config_files[:8]:
     summary.append(bounded(view.text, 1200))
 
 section("test references")
-hits = search_text("pytest", globs=["pyproject.toml", ".github/**/*.yml", ".github/**/*.yaml"], literal=True, max_total=30)
+hits = search_text("pytest", globs=config_globs + ["tests/**/*.py"], literal=True, max_total=30)
 for hit in hits[:15]:
     summary.append(f"{hit.rel_path}:{hit.line}: {hit.text.strip()[:180]}")
 
-section("optional CI status")
-ci = run_process_text(
-    ["gh", "run", "list", "--limit", "5", "--json", "databaseId,status,conclusion,displayTitle,headSha"],
-    timeout_s=30,
-)
-if ci.returncode == 0 and ci.stdout.strip():
+section("project metadata")
+pyproject_paths = [path for path in config_files if Path(path).name == "pyproject.toml"]
+if pyproject_paths:
+    pyproject = read_file(pyproject_paths[0])
     try:
-        runs = json.loads(ci.stdout)
-    except json.JSONDecodeError as exc:
-        summary.append(f"Could not parse gh JSON: {exc}")
-        summary.append(bounded(ci.stdout))
+        metadata = tomllib.loads(pyproject.text)
+    except tomllib.TOMLDecodeError as exc:
+        summary.append(f"Could not parse pyproject.toml: {exc}")
+        summary.append(bounded(pyproject.text, 1200))
     else:
-        for item in runs:
-            state = item.get("conclusion") or item.get("status")
-            title = item.get("displayTitle") or "(untitled)"
-            sha = str(item.get("headSha") or "")[:8]
-            summary.append(f"{state}: {title} {sha}")
+        project = metadata.get("project", {})
+        summary.append(f"project name: {project.get('name', '(unknown)')}")
+        dependencies = project.get("dependencies", [])
+        if isinstance(dependencies, list) and dependencies:
+            summary.append("dependencies: " + ", ".join(str(dep) for dep in dependencies[:8]))
+        tool_config = metadata.get("tool", {})
+        if isinstance(tool_config, dict):
+            summary.append("tool config sections: " + ", ".join(sorted(tool_config)[:12]))
 else:
-    summary.append("gh run list unavailable or returned no data:")
-    summary.append(bounded(ci.stderr or ci.stdout))
+    summary.append("pyproject.toml not found in config search")
 
 print("\\n".join(summary))
 ```
