@@ -426,9 +426,13 @@ def make_test_config(
 def test_agent_exposes_only_python_runner_tool() -> None:
     assert PYTHON_TOOL["name"] == "run_python"
     assert PYTHON_TOOL["type"] == "function"
+    assert "fresh Python process" in PYTHON_TOOL["description"]
+    assert "thread's active cwd" in PYTHON_TOOL["description"]
     assert "run commands, access the network" in PYTHON_TOOL["description"]
     assert "call subprocesses" not in PYTHON_TOOL["description"]
-    assert set(PYTHON_TOOL["parameters"]["properties"]) == {"code", "script_args", "timeout_s"}
+    assert set(PYTHON_TOOL["parameters"]["properties"]) == {"code", "timeout_s"}
+    assert "Complete, valid Python source" in PYTHON_TOOL["parameters"]["properties"]["code"]["description"]
+    assert "script_args" not in PYTHON_TOOL["parameters"]["properties"]
     assert PYTHON_TOOL["parameters"]["required"] == ["code"]
 
 
@@ -2995,38 +2999,40 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "lean toward fuller in-code documentation" in prompt
     assert "what changed, why, and how it was verified" in prompt
     assert "Write comments generously" not in prompt
-    assert "project-shared uv environment" in prompt
-    assert 'add_dependency("package-name")' in prompt
-    assert "Call add_dependency before importing the package" in prompt
-    assert "already been imported in the current Python process" in prompt
-    assert "run_python environment pyproject.toml" in prompt
-    assert "run_python accepts code, script_args, and timeout_s" in prompt
-    assert "thread's active cwd" in prompt
+    assert "project-shared uv environment" not in prompt
+    assert 'add_dependency("package-name")' not in prompt
+    assert "Call add_dependency before importing the package" not in prompt
+    assert "already been imported in the current Python process" not in prompt
+    assert "run_python environment pyproject.toml" not in prompt
+    assert "run_python accepts" not in prompt
+    assert "script_args" not in prompt
+    assert "thread's active cwd" not in prompt
     assert "PEP 723" not in prompt
     assert "uv pip" not in prompt
     assert "For mature domain problems" in prompt
     assert "unidiff for parsing diffs" in prompt
     assert "libcst for Python source transforms" in prompt
-    assert "All filesystem, process, network, and verification work must happen inside run_python scripts" in prompt
-    assert "Do not assume shell, filesystem, browser, network, or MCP model tools exist outside Python" in prompt
-    assert "prefer uv_agent_runtime helpers when they fit" in prompt
-    assert "Consult the appended runtime helper guidance for operation-specific details" in prompt
+    assert "Your only external action tool is run_python" in prompt
+    assert "must be initiated by Python code inside a run_python call" in prompt
+    assert "Do not assume shell, filesystem, browser, network, or MCP model tools exist outside Python" not in prompt
+    assert "prefer uv_agent_runtime helpers when they fit" not in prompt
+    assert "Consult the appended runtime helper guidance for operation-specific details" not in prompt
     assert "raw subprocess" not in prompt
     assert "Use Python standard library modules such as pathlib, os, and json" not in prompt
-    assert "use Python standard library modules such as pathlib, os, and json for in-script glue" in prompt
-    assert "especially file and edit helpers for repository-visible text work" in prompt
-    assert "metadata such as newline style, BOM, final newline" in prompt
+    assert "use Python standard library modules such as pathlib, os, and json for in-script glue" not in prompt
+    assert "especially file and edit helpers for repository-visible text work" not in prompt
+    assert "metadata such as newline style, BOM, final newline" not in prompt
     assert "ordinary in-script glue" not in prompt
     assert "prefer runtime file and edit helpers" not in prompt
-    assert "When running independent work concurrently inside run_python" in prompt
-    assert "asyncio, concurrent.futures, and threading" in prompt
+    assert "When running independent work concurrently inside run_python" not in prompt
+    assert "inside Python, use standard facilities such as asyncio, concurrent.futures, and threading" in prompt
     assert "asyncio, concurrent.futures, threading, and subprocess" not in prompt
-    assert "Collect results deterministically and keep printed output bounded" in prompt
-    assert "Do not guess helper signatures" in prompt
+    assert "Collect results deterministically" in prompt
+    assert "Do not guess helper signatures" not in prompt
     assert "The system does not truncate oversized output for you" in prompt
     assert "filter, limit, or summarize it in your Python code" in prompt
-    assert "Call enter_dir proactively whenever the task clearly belongs" in prompt
-    assert "including paths discovered during execution" in prompt
+    assert "Call enter_dir proactively whenever the task clearly belongs" not in prompt
+    assert "including paths discovered during execution" not in prompt
     assert "<capability_use>" in prompt
     assert "Use available capabilities when they reduce steps, time, or risk" in prompt
     assert "Actively use available capabilities" not in prompt
@@ -3076,6 +3082,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<user_language>" in turn_context
     assert str(project_root) in turn_context
     assert "<run_python_environment>" in turn_context
+    assert "This is the uv project environment used by run_python" in turn_context
     assert str(runner.scriptenv_dir) in turn_context
     assert str(runner.scriptenv_dir / "pyproject.toml") in turn_context
     assert "uv-agent&gt;=0.6.2" not in turn_context
@@ -3107,12 +3114,18 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "clear_codequery_cache" not in turn_context
     assert "run_process_text" in turn_context
     assert "add_dependency" in turn_context
+    assert "Add direct packages to the shared run_python uv project" in turn_context
+    assert "Call before importing the package in the current script" in turn_context
+    assert "already imported in that process" in turn_context
     assert "run_python_env_dir" in turn_context
     assert "context=None" in turn_context
     assert "max_total=None" in turn_context
     assert '<helper name="threads">' in turn_context
     assert "run_digest" in turn_context
     assert "<helper_selection>" in turn_context
+    assert "Use Python standard library modules such as pathlib, os, and json for in-script glue" in turn_context
+    assert "prefer listed helpers when they fit" in turn_context
+    assert "metadata such as newline style, BOM, final newline" in turn_context
     assert "Choose by task:" in turn_context
     assert "discovery=find_files/search_text/find_symbols/query_code" in turn_context
     assert "search_text is regex by default" in turn_context
@@ -3121,7 +3134,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "edit=replace_text for unique text, edit_lines for anchored ranges/inserts" in turn_context
     assert "write_file for whole-file/generated content" in turn_context
     assert "thread/run history=thread_digest/run_digest/list_thread_digests" in turn_context
-    assert "Keep printed output bounded" in turn_context
+    assert "For large data, prefer selected fields, line ranges, heads/tails, or summaries" in turn_context
+    assert "Do not guess helper signatures" in turn_context
     assert "Search and symbol helpers return absolute paths" in turn_context
     assert "insert with start=end+1" in turn_context
     assert "pattern is regex by default, pass literal=True" in turn_context
@@ -3144,7 +3158,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "inspect returned instructions" in turn_context
     assert "Launch a nested uv-agent" in turn_context
     assert 'level="small"' not in prompt
-    assert "pathlib" in prompt
+    assert "pathlib" in turn_context
     assert "Mentions are plain-text hints only" in prompt
     assert "inspect it inside run_python using file helpers or Python standard library APIs" in prompt
     assert "read_text, write_text" not in prompt
