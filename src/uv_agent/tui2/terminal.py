@@ -28,6 +28,7 @@ class Terminal(AbstractContextManager["Terminal"]):
         self._old_input_mode: int | None = None
         self._old_output_mode: int | None = None
         self._windows = os.name == "nt"
+        self._raw_fd: int | None = None  # cached fd for unbuffered POSIX reads
 
     def __enter__(self) -> "Terminal":
         if self._windows:
@@ -37,6 +38,7 @@ class Terminal(AbstractContextManager["Terminal"]):
             import tty
 
             fd = self.stdin.fileno()
+            self._raw_fd = fd
             self._old_termios = termios.tcgetattr(fd)
             tty.setraw(fd)
         self.write("\x1b[?2004h")
@@ -166,7 +168,52 @@ class Terminal(AbstractContextManager["Terminal"]):
             import msvcrt
 
             return msvcrt.getwch()
+        if self._raw_fd is not None:
+            return self._read_char_posix()
         return self.stdin.read(1)
+
+    def _read_char_posix(self) -> str:
+        """Read one character from the raw fd, handling UTF-8 sequences.
+
+        Bypasses Python's TextIOWrapper buffering so that ``select``-based
+        readiness checks on the raw fd stay in sync with the actual stream
+        position.  CSI escape sequences (arrows, paste brackets, …) are all
+        single-byte ASCII and pass through directly.
+        """
+        try:
+            b = os.read(self._raw_fd, 1)
+        except OSError:
+            return ""
+        if not b:
+            return ""
+        byte = b[0]
+        # ASCII byte (ESC, CSI brackets/terminators, and printable 7-bit).
+        if byte < 0x80:
+            return chr(byte)
+        # Unexpected continuation byte without a leader – return as-is so
+        # the app can see the raw byte rather than silently dropping it.
+        if byte < 0xC0:
+            return chr(byte)
+        # Multi-byte UTF-8 leader: read the remaining continuation bytes.
+        if byte < 0xE0:
+            n_cont = 1
+        elif byte < 0xF0:
+            n_cont = 2
+        else:
+            n_cont = 3
+        rest = b""
+        for _ in range(n_cont):
+            try:
+                cb = os.read(self._raw_fd, 1)
+            except OSError:
+                break
+            if not cb:
+                break
+            rest += cb
+        try:
+            return (b + rest).decode("utf-8")
+        except UnicodeDecodeError:
+            return chr(byte)
 
     def _read_char_after_escape(self) -> str | None:
         """Read the next escape-sequence byte without making bare Esc sticky.
