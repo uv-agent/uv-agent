@@ -2780,10 +2780,10 @@ class AnsiUvAgentApp:
                     self._sync_attached_run_state(run_state)
                     self._apply_window_title()
                     self._safe_repaint()
-                return
-            self._complete_finished_run_display(run_state)
-            if self._is_attached_thread(thread_id):
-                self._safe_repaint()
+            else:
+                self._complete_finished_run_display(run_state)
+                if self._is_attached_thread(thread_id):
+                    self._safe_repaint()
 
     async def _start_turn_for_thread(
         self,
