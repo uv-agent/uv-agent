@@ -282,7 +282,7 @@ for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py
 <helper name="ask">
 <description>Launch a nested uv-agent for isolated or parallel investigation.</description>
 <signature>ask(prompt: str, *, level=None, model_level=None, cwd=None, env=None, executable=None, timeout_s=300, check=False, retain=True) -> SubagentResult</signature>
-<returns>SubagentResult(text, stdout, stderr, thread_id, returncode, timed_out, raise_for_error())</returns>
+<returns>SubagentResult(text: str, stdout: str, stderr: str, thread_id: str | None, returncode: int, timed_out: bool, raise_for_error())</returns>
 </helper>
 <helper name="add_dependency">
 <description>Add direct packages to the shared run_python uv project; added packages persist across later calls. Call before importing the package in the current script; do not use it to upgrade or replace a package already imported in that process.</description>
@@ -296,7 +296,7 @@ run_python_env_dir() -> Path</signature>
 <helper name="read_file">
 <description>Read text, metadata, or a bounded view. Select at most one of lines/head/tail/around.</description>
 <signature>read_file(path: str | Path, *, lines: tuple[int, int] | None = None, head: int | None = None, tail: int | None = None, around: str | None = None, context: int = 20, encoding: str = "utf-8") -> FileView</signature>
-<returns>FileView(path, exists, text, line_count, start_line, end_line, truncated, newline, final_newline, bom, size, kind, numbered())</returns>
+<returns>FileView(path: str, exists: bool, text: str, line_count: int, start_line: int, end_line: int, truncated: bool, newline: str, final_newline: bool, bom: bool, size: int | None, kind: str, numbered())</returns>
 </helper>
 <helper name="write_file">
 <description>Write generated or substantially transformed whole-file text while preserving or choosing text metadata.</description>
@@ -305,24 +305,24 @@ run_python_env_dir() -> Path</signature>
 <helper name="edit_lines">
 <description>Replace/delete 1-indexed closed line ranges, or insert with start=end+1, with optional stale-anchor checks.</description>
 <signature>edit_lines(path: str | Path, start: int, end: int, new_text: str, *, expect_first: str | None = None, expect_last: str | None = None, expect_mode: Literal["startswith", "contains", "exact", "regex"] = "startswith", strip_indent: bool = True, encoding: str | None = None, newline: Literal["preserve", "lf", "crlf", "cr"] = "preserve", final_newline: bool | None = None, bom: bool | None = None) -> EditResult</signature>
-<returns>EditResult(path, changed, replaced_text, line_count_before, line_count_after, line_delta)</returns>
+<returns>EditResult(path: str, changed: bool, replaced_text: str, line_count_before: int, line_count_after: int, line_delta: int)</returns>
 </helper>
 <helper name="replace_text">
 <description>Replace small, unique text in an existing file; logical newlines match the file's newline style by default.</description>
 <signature>replace_text(path: str | Path, old: str, new: str, *, count=1, newlines: Literal["logical", "raw"] = "logical") -> ReplacementResult</signature>
-<returns>ReplacementResult(path, replacements, changed, before, after). Its repr omits full file text.</returns>
+<returns>ReplacementResult(path: str, replacements: int, changed: bool, before: TextFile, after: TextFile). Its repr omits full file text.</returns>
 </helper>
 <helper name="run_process_text">
 <description>Run an external command with decoded stdout/stderr, timeout handling, env/env_patch, and optional check=True.</description>
 <signature>run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace", env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult</signature>
-<returns>CommandTextResult(args, returncode, stdout, stderr, timed_out, ok, raise_for_error())</returns>
+<returns>CommandTextResult(args: list[str], returncode: int, stdout: str, stderr: str, timed_out: bool, ok: bool, raise_for_error())</returns>
 </helper>
 <helper name="threads">
 <description>Inspect compact conversation and run summaries; these helpers do not switch the active TUI thread.</description>
 <signature>list_thread_digests(*, state_dir=None, limit=10, kind="thread", parent_thread_id=None, since_last_compaction=True, include_tools=False) -> list[dict[str, Any]]
 thread_digest(thread_id: str, *, state_dir=None, kind=None, since_last_compaction=True, include_tools=False) -> dict[str, Any]
 run_digest(run_id: str, *, state_dir=None, max_code_chars=4000, max_output_chars=4000, max_events=20, include_events=False) -> dict[str, Any]</signature>
-<returns>thread_digest/list_thread_digests return compact items; run_digest returns bounded code/stdout/stderr/helper_calls for one run_python execution.</returns>
+<returns>thread_digest -> dict[str, Any], list_thread_digests -> list[dict[str, Any]] (compact items); run_digest -> dict[str, Any] (bounded code/stdout/stderr/helper_calls for one run_python execution).</returns>
 </helper>
 <helper name="mcp">
 <description>Discover and call declared MCP servers from Python. Call client.initialize() first and inspect returned instructions before listing or calling tools.</description>
@@ -333,21 +333,21 @@ connect_url(url: str, *, transport="streamable_http", timeout_s=30) -> McpClient
 <helper name="search_text">
 <description>Grep-like content search with ripgrep; pattern is regex by default, pass literal=True for exact strings; supports context, globs/types, hidden/no_ignore, and max bounds.</description>
 <signature>search_text(pattern: str, *, root=".", roots=None, globs=None, file_types=None, ignore_case=False, case_sensitive=None, fixed_string=False, literal=None, multiline=False, word=False, before=0, after=0, context=None, max_count_per_file=None, max_total=None, hidden=False, no_ignore=False, extra_args=None) -> list[Match]</signature>
-<returns>Match(path, rel_path, line, column, text, submatches, context_before, context_after)</returns>
+<returns>Match(path: str, rel_path: str, line: int, column: int, text: str, submatches: list, context_before: list[tuple[int, str]], context_after: list[tuple[int, str]])</returns>
 </helper>
 <helper name="find_files">
 <description>Enumerate files via ripgrep while honoring .gitignore by default.</description>
 <signature>find_files(root=".", *, roots=None, globs=None, file_types=None, max_total=None, hidden=False, no_ignore=False, extra_args=None) -> list[str]</signature>
-<returns>Absolute paths.</returns>
+<returns>list[str] — absolute paths.</returns>
 </helper>
 <helper name="find_symbols">
 <description>Locate tree-sitter symbols. Built-in languages: c, cpp, go, java, javascript, python, ruby, rust, tsx, typescript.</description>
 <signature>find_symbols(root=".", *, languages=None, language=None, kinds=None, kind=None, name_pattern=None, name=None, contains=None, max_count=None, hidden=False, no_ignore=False, globs=None) -> list[Symbol]</signature>
-<returns>Symbol(kind, name, path, rel_path, language, start_line, end_line)</returns>
+<returns>Symbol(kind: str, name: str, path: str, rel_path: str, language: str, start_line: int, end_line: int)</returns>
 </helper>
 <helper name="query_code">
 <description>Run a custom tree-sitter query over one language across files.</description>
 <signature>query_code(query_text: str, *, language: str, root=".", globs=None, file_types=None, hidden=False, no_ignore=False, max_count=None) -> list[Capture]</signature>
-<returns>Capture(name, path, rel_path, language, start_line, start_col, end_line, end_col, text)</returns>
+<returns>Capture(name: str, path: str, rel_path: str, language: str, start_line: int, start_col: int, end_line: int, end_col: int, text: str)</returns>
 </helper>
 </runtime_helpers>"""
