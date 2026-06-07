@@ -1079,6 +1079,7 @@ def _validate_read_file_selection(
                 hints=(
                     "Use the partial_view attribute on this exception if you caught it in a script.",
                     "Use head=..., tail=..., around=..., or a range within the reported line_count.",
+                    "The file may have changed since you last read it – re-read with read_file to get the current line count.",
                 ),
             )
     if around is not None:
@@ -1093,7 +1094,10 @@ def _validate_read_file_selection(
                 preview_title=preview_title,
                 preview=preview_view.numbered() if preview_view else None,
                 partial_view=preview_view,
-                hints=("Use head=..., tail=..., or a known nearby string, then retry with a current line range.",),
+                hints=(
+                    "Use head=..., tail=..., or a known nearby string, then retry with a current line range.",
+                    "The file may have changed – re-read with read_file and use a string from the current content.",
+                ),
             )
 
 
@@ -1413,6 +1417,11 @@ def _replacement_missing_hints(
         first = needle.splitlines()[0] if needle.splitlines() else needle
         if first and any(first in line for line in before.text.splitlines()):
             hints.append("The first needle line exists nearby; re-read that preview or use edit_lines with anchors.")
+        elif found == 0:
+            hints.append(
+                "The target text is not present anywhere in the file. "
+                "Re-read the file with read_file to get the current content before retrying."
+            )
     hints.append("For insertion, use edit_lines(..., start=end+1, ...) instead of replace_text.")
     return tuple(hints)
 

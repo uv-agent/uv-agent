@@ -210,37 +210,51 @@ for p in related[:5]:
 ```
 </example>
 <example name="round-2-act">
-Phase 2 — edit and verify. Apply multiple changes across one or more files, then verify them together. Do not defer a known edit to the next turn. (Reference example; adapt the edits, paths, and test commands to your actual task.)
+Phase 2 — edit and verify. Confirm targets with a quick search, then apply changes and verify them together. Do not defer a known edit to the next turn. (Reference example; adapt the searches, edits, and test commands to your actual task.)
 ```python
-from uv_agent_runtime import replace_text, edit_lines, run_process_text
+from uv_agent_runtime import search_text, replace_text, edit_lines, run_process_text
 
 changes: list[str] = []
 
-# --- Change 1: fix the hardcoded redirect target ---
-r1 = replace_text(
-    "src/auth/handlers.py",
-    old='redirect("/old-dashboard")',
-    new='redirect(url_for("dashboard"))',
-)
-changes.append(f"handlers.py redirect: {r1.replacements} replacement(s)")
+# --- Confirm the target exists, then fix the hardcoded redirect ---
+hit = search_text('redirect("/old-dashboard")', file_types=["py"], literal=True, max_total=1)
+if hit:
+    r1 = replace_text(
+        hit.path,
+        old='redirect("/old-dashboard")',
+        new='redirect(url_for("dashboard"))',
+    )
+    changes.append(f"handlers.py redirect: {r1.replacements} replacement(s)")
+else:
+    changes.append("handlers.py redirect: target not found – may already be fixed")
 
-# --- Change 2: raise the rate-limit threshold ---
-r2 = replace_text(
-    "src/auth/handlers.py",
-    old="@RateLimiter(10, 60)",
-    new="@RateLimiter(20, 60)  # raised per review",
-)
-changes.append(f"handlers.py rate-limit: {r2.replacements} replacement(s)")
+# --- Confirm the config constant exists, then update it ---
+hit = search_text("MAX_LOGIN_ATTEMPTS = 3", file_types=["py"], literal=True, max_total=1)
+if hit:
+    r2 = replace_text(
+        hit.path,
+        old="MAX_LOGIN_ATTEMPTS = 3",
+        new="MAX_LOGIN_ATTEMPTS = 5",
+    )
+    changes.append(f"config/auth.py: {r2.replacements} replacement(s)")
+else:
+    changes.append("config/auth.py: constant not found – file may have changed")
 
-# --- Change 3: update the config constant ---
-r3 = replace_text(
+# --- Replace a line range with anchor guards on both ends ---
+r3 = edit_lines(
     "src/config/auth.py",
-    old="MAX_LOGIN_ATTEMPTS = 3",
-    new="MAX_LOGIN_ATTEMPTS = 5",
+    start=12, end=14,
+    new_text="MAX_LOGIN_ATTEMPTS = 5\nDEFAULT_ROLE = 'user'\n",
+    expect_first="MAX_LOGIN_ATTEMPTS",
+    expect_last="DEFAULT_ROLE",
+    expect_mode="startswith",
 )
-changes.append(f"config/auth.py: {r3.replacements} replacement(s)")
+if r3.changed:
+    changes.append(f"config/auth.py: replaced lines {r3.line_count_before}→{r3.line_count_after}")
+else:
+    changes.append("config/auth.py: anchor mismatch – file may have changed, re-read and retry")
 
-# --- Change 4: insert an import line at the top of handlers.py ---
+# --- Insert an import line at the top of handlers.py ---
 r4 = edit_lines(
     "src/auth/handlers.py",
     start=1, end=0,
