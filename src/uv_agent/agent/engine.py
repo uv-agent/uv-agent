@@ -1345,7 +1345,8 @@ class AgentEngine:
         # Build judge input: system + history + judge request (without the real user message).
         user_item = input_items.pop()  # real user message, saved for later
         judge_input = list(input_items)
-        judge_input.append(compaction_judge_request_item())
+        judge_req_item = compaction_judge_request_item()
+        judge_input.append(judge_req_item)
 
         _emit(self._publish_event({
             "type": "judge.started",
@@ -1353,6 +1354,8 @@ class AgentEngine:
             "turn_id": turn_id,
         }))
 
+        response = None
+        judge_responses: list[tuple[Any, list[dict[str, Any]]]] = []
         try:
             response = await self.model_client.create_response(
                 input_items=judge_input,
@@ -1366,8 +1369,9 @@ class AgentEngine:
                 if not tool_calls:
                     break
                 judge_input.extend(response.output)
+                tool_outputs: list[dict[str, Any]] = []
                 for call in tool_calls:
-                    judge_input.append(function_output(call, {
+                    synth = function_output(call, {
                         "returncode": 1,
                         "run_id": "(judge-guard)",
                         "timed_out": False,
@@ -1375,15 +1379,52 @@ class AgentEngine:
                         "truncated": False,
                         "stdout": "",
                         "stderr": "ERROR: Do not call tools during pre-turn judgement. Return only the JSON line.",
-                    }))
+                    })
+                    judge_input.append(synth)
+                    tool_outputs.append(synth)
+                judge_responses.append((response, tool_outputs))
                 response = await self.model_client.create_response(
                     input_items=judge_input,
                     level=judge_level,
                     tools=[PYTHON_TOOL],
                     instructions=system_instructions,
                 )
+            judge_responses.append((response, []))
         finally:
-            input_items.append(user_item)  # restore
+            if response is not None:
+                # Persist the judge round so the next turn shares the same prefix.
+                # Everything from judge_req_item onwards in judge_input is the full
+                # judge interaction (including any guard-loop artefacts).
+                req_idx = judge_input.index(judge_req_item)
+                judge_tail = judge_input[req_idx:]
+
+                # Persist judge request as a user message.
+                self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=judge_req_item)
+
+                # Persist all judge model responses and their tool outputs in order.
+                for resp, tool_outputs in judge_responses:
+                    self.thread_store.append(
+                        thread_id,
+                        "item.model_response",
+                        turn_id=turn_id,
+                        model_api=self._model_api_for_level(judge_level),
+                        response_id=resp.id,
+                        output=resp.output,
+                        usage=resp.usage,
+                        reasoning_text=resp.reasoning_text,
+                    )
+                    for tool_output in tool_outputs:
+                        self.thread_store.append(thread_id, "item.tool_output", turn_id=turn_id, item=tool_output)
+                    self._record_billing_charge(
+                        thread_id, turn_id, resp.usage, level=judge_level, source="judge",
+                    )
+
+                # Append the full judge interaction to the current turn's input_items
+                # so the main model call includes it in the prefix.
+                input_items.extend(judge_tail)
+
+            # Always restore the real user message last.
+            input_items.append(user_item)
             _emit(self._publish_event({
                 "type": "judge.completed",
                 "thread_id": thread_id,
