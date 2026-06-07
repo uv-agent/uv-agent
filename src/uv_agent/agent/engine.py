@@ -1323,16 +1323,36 @@ class AgentEngine:
                 compact_input,
                 context_window_tokens=compact_model.context_window_tokens,
             )
-        response = await self.model_client.create_response(
-            input_items=compact_input,
-            level=compact_level,
-            # Compaction is a pure summarization pass. Exposing run_python here
-            # lets tool-capable providers choose a function_call instead of a
-            # summary, which creates an empty checkpoint and a misleading TUI
-            # "conversation compacted" block.
-            tools=[],
-            instructions=instructions,
-        )
+        # Expose run_python so the request structure matches normal calls and
+        # preserves provider-side prompt caching. When a provider ignores the
+        # compaction prompt and emits a function_call anyway, retry with a
+        # synthetic error output until the model returns a summary.
+        response: ModelResponse | None = None
+        for _compaction_attempt in range(3):
+            response = await self.model_client.create_response(
+                input_items=compact_input,
+                level=compact_level,
+                tools=[PYTHON_TOOL],
+                instructions=instructions,
+            )
+            tool_calls = [item for item in response.output if item.get("type") == "function_call"]
+            if not tool_calls:
+                break
+            compact_input.extend(response.output)
+            for call in tool_calls:
+                compact_input.append(function_output(call, {
+                    "returncode": 1,
+                    "run_id": "(compaction-guard)",
+                    "timed_out": False,
+                    "interrupted": False,
+                    "truncated": False,
+                    "stdout": "",
+                    "stderr": (
+                        "ERROR: Tool calls are not allowed during context compaction. "
+                        "Return the compaction summary as plain prose text only."
+                    ),
+                }))
+        assert response is not None, "compaction retry loop must produce a response"  # type: ignore[unreachable]
         summary_text = compaction_response_summary_text(response)
         replacement_input = self._compaction_replacement_input(input_items, response)
         context_state = self._latest_context_state(thread_id)

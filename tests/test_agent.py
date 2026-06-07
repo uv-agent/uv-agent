@@ -556,7 +556,7 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
     compaction = next(event for event in stored if event["type"] == "item.compaction")
     assert compaction["replacement_input"]
     assert client.requests[1]["level"] == "small"
-    assert client.requests[1]["tools"] == []
+    assert client.requests[1]["tools"] == [PYTHON_TOOL]
     assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
     assert "context_compaction_request" in str(client.requests[1]["input"][-1])
     assert "CONTEXT CHECKPOINT COMPACTION" in str(client.requests[1]["input"][-1])
