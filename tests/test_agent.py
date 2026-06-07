@@ -3162,19 +3162,27 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "keep foreseeable follow-up parsing or fallback logic in the same script" in turn_context
     assert '<example name="round-1-find">' in turn_context
     assert "find and understand" in turn_context
-    assert "Batch related searches and reads" in turn_context
-    assert "stop when you have enough context to decide the next action" in turn_context
+    assert "Search for multiple patterns, read several files" in turn_context
+    assert "gather all the context needed before deciding what to change" in turn_context
+    assert "Reference example" in turn_context
     assert "edit and verify" in turn_context
+    assert "Apply multiple changes across one or more files" in turn_context
     assert "Do not defer a known edit to the next turn" in turn_context
-    assert "from uv_agent_runtime import search_text, read_file" in turn_context
+    assert "from uv_agent_runtime import search_text, find_files, read_file" in turn_context
     assert 'search_text("def handle_login"' in turn_context
-    assert "handle_login not found" in turn_context
-    assert 'read_file(hits[0].path, around="def handle_login"' in turn_context
-    assert "from uv_agent_runtime import replace_text, run_process_text" in turn_context
+    assert "handle_login not defined" in turn_context
+    assert 'search_text("handle_login("' in turn_context
+    assert "call_hits" in turn_context
+    assert "find_files(globs=" in turn_context
+    assert "from uv_agent_runtime import replace_text, edit_lines, run_process_text" in turn_context
     assert "replace_text(" in turn_context
     assert 'redirect("/old-dashboard")' in turn_context
     assert 'redirect(url_for("dashboard"))' in turn_context
-    assert '"uv", "run", "pytest", "tests/test_auth.py"' in turn_context
+    assert "MAX_LOGIN_ATTEMPTS" in turn_context
+    assert "@RateLimiter" in turn_context
+    assert "edit_lines(" in turn_context
+    assert "Changes applied" in turn_context
+    assert '"uv", "run", "pytest"' in turn_context
     assert "def section" not in turn_context
     assert "def bounded" not in turn_context
     assert "def command" not in turn_context

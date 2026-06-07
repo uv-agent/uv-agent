@@ -174,44 +174,97 @@ from uv_agent_runtime import (
 <rule>For skill files, read SKILL.md with read_file; for commands shown by skills or docs, run them with run_process_text and keep foreseeable follow-up parsing or fallback logic in the same script.</rule>
 </usage_pattern>
 <example name="round-1-find">
-Phase 1 — find and understand. Batch related searches and reads; stop when you have enough context to decide the next action.
+Phase 1 — find and understand. Search for multiple patterns, read several files, and gather all the context needed before deciding what to change. (Reference example; adapt the searches, globs, and reads to your actual task.)
 ```python
 from pathlib import Path
-from uv_agent_runtime import search_text, read_file
+from uv_agent_runtime import search_text, find_files, read_file
 
-# Locate the relevant code
-hits = search_text("def handle_login", file_types=["py"], max_total=5)
-if not hits:
-    print("handle_login not found – check the function name or search pattern")
+# --- Locate the target function ---
+fn_hits = search_text("def handle_login", file_types=["py"], literal=True, max_total=5)
+if not fn_hits:
+    print("handle_login not defined – check the function name")
     exit(0)
 
-# Read surrounding context; pick the best match when there are multiple hits
-view = read_file(hits[0].path, around="def handle_login", context=30)
-print(f"--- {Path(hits[0].path).name} lines {view.start_line}-{view.end_line} ---")
+# --- Also find its call sites ---
+call_hits = search_text("handle_login(", file_types=["py"], literal=True, max_total=10)
+print(f"Definition: {len(fn_hits)} hit(s), calls: {len(call_hits)} hit(s)")
+
+# --- Read the full definition with context ---
+view = read_file(fn_hits[0].path, around="def handle_login", context=40)
+print(f"\n=== {Path(fn_hits[0].path).name} lines {view.start_line}-{view.end_line} ===")
 print(view.text)
+
+# --- Read a couple of call sites to understand how it is used ---
+for hit in call_hits[:3]:
+    site = read_file(hit.path, around=hit.text.strip(), context=8)
+    print(f"\n=== Call at {Path(hit.path).name}:{hit.line} ===")
+    print(site.text)
+
+# --- Discover related config / test / middleware files ---
+related = find_files(globs=["**/auth*", "**/login*", "**/middleware*"], file_types=["py"], max_total=12)
+print(f"\nRelated files: {len(related)}")
+for p in related[:5]:
+    head = read_file(p, head=50)
+    print(f"\n--- {Path(p).name} lines {head.start_line}-{head.end_line} ---")
+    print(head.text)
 ```
 </example>
 <example name="round-2-act">
-Phase 2 — edit and verify. Once the change is clear from what you just read, apply and verify it in the same script. Do not defer a known edit to the next turn.
+Phase 2 — edit and verify. Apply multiple changes across one or more files, then verify them together. Do not defer a known edit to the next turn. (Reference example; adapt the edits, paths, and test commands to your actual task.)
 ```python
-from uv_agent_runtime import replace_text, run_process_text
+from uv_agent_runtime import replace_text, edit_lines, run_process_text
 
-# Apply the fix (path is known from the previous find step)
-result = replace_text(
+changes: list[str] = []
+
+# --- Change 1: fix the hardcoded redirect target ---
+r1 = replace_text(
     "src/auth/handlers.py",
     old='redirect("/old-dashboard")',
     new='redirect(url_for("dashboard"))',
 )
-print(f"Replaced: {result.replacements} change(s)")
+changes.append(f"handlers.py redirect: {r1.replacements} replacement(s)")
 
-# Quick verification – catch regressions immediately
-test = run_process_text(
-    ["uv", "run", "pytest", "tests/test_auth.py", "-x", "-q"],
-    timeout_s=60,
+# --- Change 2: raise the rate-limit threshold ---
+r2 = replace_text(
+    "src/auth/handlers.py",
+    old="@RateLimiter(10, 60)",
+    new="@RateLimiter(20, 60)  # raised per review",
 )
-print(f"Tests: rc={test.returncode}")
-if test.stdout:
-    print(test.stdout[-800:])
+changes.append(f"handlers.py rate-limit: {r2.replacements} replacement(s)")
+
+# --- Change 3: update the config constant ---
+r3 = replace_text(
+    "src/config/auth.py",
+    old="MAX_LOGIN_ATTEMPTS = 3",
+    new="MAX_LOGIN_ATTEMPTS = 5",
+)
+changes.append(f"config/auth.py: {r3.replacements} replacement(s)")
+
+# --- Change 4: insert an import line at the top of handlers.py ---
+r4 = edit_lines(
+    "src/auth/handlers.py",
+    start=1, end=0,
+    new_text="from urllib.parse import url_for\n",
+    expect_first="import os",
+    expect_mode="startswith",
+)
+changes.append(f"handlers.py import: changed={r4.changed}")
+
+print("Changes applied:")
+for c in changes:
+    print(f"  {c}")
+
+# --- Verify: run the affected test suites ---
+for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py"]:
+    test = run_process_text(
+        ["uv", "run", "pytest", suite, "-x", "-q"],
+        timeout_s=60,
+    )
+    print(f"\n{suite}: rc={test.returncode}")
+    if test.stdout:
+        print(test.stdout[-600:])
+    if test.returncode != 0:
+        print("!!! TESTS FAILED – review the changes above")
 ```
 </example>
 <helper_selection>
