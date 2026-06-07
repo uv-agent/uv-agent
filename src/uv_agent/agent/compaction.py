@@ -57,9 +57,23 @@ S_MIN = 500
 S_MAX = 8000
 
 
-def compaction_judge_request_item() -> dict[str, Any]:
-    """Return the user-role message that asks the model for a compaction judge JSON."""
-    return message_item("user", COMPACTION_JUDGE_REQUEST)
+def compaction_judge_request_item(upcoming_user_text: str | None = None) -> dict[str, Any]:
+    """Return the user-role message that asks the model for a compaction judge JSON.
+
+    The judge runs before the real user task is appended to the main turn.  A
+    bounded preview lets the judge estimate task complexity without turning the
+    actual user message into part of the historical context being compacted.
+    """
+
+    text = COMPACTION_JUDGE_REQUEST
+    if upcoming_user_text:
+        preview = truncate_text_to_estimated_tokens(upcoming_user_text.strip(), 2_000)
+        text += (
+            "\n<upcoming_user_task>\n"
+            + xml_text(preview)
+            + "\n</upcoming_user_task>\n"
+        )
+    return message_item("user", text)
 
 
 def parse_judge_response(text: str) -> dict[str, Any] | None:
@@ -120,55 +134,90 @@ def retain_recent_context(
     input_items: list[dict[str, Any]],
     K: int,
 ) -> list[dict[str, Any]]:
-    """Return the most recent items from *input_items* totalling up to K tokens.
+    """Return the most recent replay-safe context items totalling up to K tokens.
 
-    Items are taken from the tail forward, preferring whole items.  Only
-    user/assistant messages and tool outputs are eligible; system context
-    items (rules, env, skills) are skipped because they are re-emitted each
-    epoch.
+    Provider tool-call protocol items are converted to ordinary retained-history
+    messages.  Replaying raw ``function_call`` / ``function_call_output`` items
+    after a compaction can create an invalid or dangling tool-call sequence, but
+    the textual artefact is still useful as recent context for the model.
     """
     selected: list[dict[str, Any]] = []
     remaining = K
     for item in reversed(input_items):
-        typ = item.get("type")
-        # Keep ordinary messages and tool artefacts.
-        if typ not in ("message", "function_call", "function_call_output"):
+        candidate = _recent_context_candidate_item(item)
+        if candidate is None:
             continue
-        if typ == "message":
-            role = item.get("role")
-            if role not in ("user", "assistant"):
-                continue
-            text = message_item_text(item)
-            # Skip system-context user messages.
-            if (
-                "<runtime_environment>" in text
-                or "<model_levels>" in text
-                or "<runtime_helpers>" in text
-                or "<workspace_rules" in text
-                or "<workspace_rule_index>" in text
-                or "<active_cwd_notice>" in text
-                or "<goal_mode" in text
-                or "<worktree" in text
-                or "<conversation_summary>" in text
-                or "<available_skills>" in text
-                or "<available_mcp_servers>" in text
-                or "<context_update" in text
-                or "<retained_history" in text
-            ):
-                continue
-        tokens = estimate_tokens([item])
+        tokens = estimate_tokens([candidate])
         if tokens <= remaining:
-            selected.append(copy.deepcopy(item))
+            selected.append(candidate)
             remaining -= tokens
         else:
-            # Partial inclusion: truncate text content.
-            text = message_item_text(item)
+            text = message_item_text(candidate)
             if remaining > 0 and text:
                 truncated = truncate_text_to_estimated_tokens(text, remaining)
-                selected.append(message_item(item.get("role") or "user", truncated))
+                selected.append(message_item(str(candidate.get("role") or "user"), truncated))
             break
     selected.reverse()
     return selected
+
+
+def _recent_context_candidate_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a replay-safe item suitable for verbatim recent-history retention."""
+
+    typ = item.get("type")
+    if typ == "message":
+        role = item.get("role")
+        if role not in ("user", "assistant"):
+            return None
+        text = message_item_text(item)
+        # Skip system/context scaffolding that is re-emitted each epoch, and skip
+        # judge prompts so they do not become long-lived user-looking history.
+        if (
+            "<runtime_environment>" in text
+            or "<model_levels>" in text
+            or "<runtime_helpers>" in text
+            or "<workspace_rules" in text
+            or "<workspace_rule_index>" in text
+            or "<active_cwd_notice>" in text
+            or "<goal_mode" in text
+            or "<worktree" in text
+            or "<conversation_summary>" in text
+            or "<available_skills>" in text
+            or "<available_mcp_servers>" in text
+            or "<context_update" in text
+            or "<retained_history" in text
+            or "<compaction_judge_request>" in text
+        ):
+            return None
+        return copy.deepcopy(item)
+    if typ in {"function_call", "function_call_output"}:
+        text = _tool_artifact_history_text(item)
+        if text:
+            return message_item("user", text)
+    return None
+
+
+def _tool_artifact_history_text(item: dict[str, Any]) -> str:
+    """Render a tool protocol item as inert retained-history text."""
+
+    typ = item.get("type")
+    call_id = xml_text(str(item.get("call_id") or ""))
+    if typ == "function_call":
+        name = xml_text(str(item.get("name") or "tool"))
+        arguments = xml_text(str(item.get("arguments") or ""))
+        return (
+            f'<retained_tool_call name="{name}" call_id="{call_id}">\n'
+            f"{arguments}\n"
+            "</retained_tool_call>"
+        )
+    if typ == "function_call_output":
+        output = xml_text(str(item.get("output") or ""))
+        return (
+            f'<retained_tool_output call_id="{call_id}">\n'
+            f"{output}\n"
+            "</retained_tool_output>"
+        )
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +433,7 @@ def retain_item_after_compaction(item: dict[str, Any]) -> bool:
         or "<available_skills>" in text
         or "<available_mcp_servers>" in text
         or "<context_update" in text
+        or "<compaction_judge_request>" in text
     )
 
 

@@ -19,7 +19,7 @@ from uv_agent.agent import (
     tool_attachment_context_items,
     usage_token_count,
 )
-from uv_agent.agent.compaction import compaction_response_summary_text, retain_item_after_compaction
+from uv_agent.agent.compaction import compaction_response_summary_text, retain_item_after_compaction, retain_recent_context
 from uv_agent.agent.prompts import BRANCH_NAME_GENERATION_PROMPT, POST_TOOL_COMPACTION_BRIDGE
 from uv_agent.billing import billing_charge_for_usage, billing_token_breakdown, format_billing_total
 from uv_agent.config import (
@@ -586,6 +586,210 @@ def test_compaction_summary_falls_back_to_message_text_when_tool_call_is_present
     )
 
     assert compaction_response_summary_text(response) == "summary before stray tool"
+
+
+def test_retain_recent_context_converts_tool_protocol_items_to_messages() -> None:
+    retained = retain_recent_context(
+        [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_python",
+                "arguments": '{"code":"print(1)"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "stdout text",
+            },
+        ],
+        K=1_000,
+    )
+
+    assert retained
+    assert {item["type"] for item in retained} == {"message"}
+    retained_text = "\n".join(message_item_text(item) for item in retained)
+    assert "<retained_tool_call" in retained_text
+    assert "<retained_tool_output" in retained_text
+    assert "function_call" not in {item.get("type") for item in retained}
+
+
+@pytest.mark.asyncio
+async def test_cache_aware_judge_replays_completed_judge_before_user_without_counting_as_user(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        compression=CompressionConfig(
+            enabled=True,
+            cache_aware=True,
+            judge_min_context_ratio=0.0,
+            min_gain=999_999.0,
+        ),
+        pricing=PricingConfig(unit="token", models={"fake": ModelPricingConfig(input=1.0, output=1.0, cached_input=0.5)}),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_judge",
+                "output_text": '{"remaining_calls_bucket":"60_plus","history_dependency":"low"}',
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"remaining_calls_bucket":"60_plus","history_dependency":"low"}',
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": "resp_main",
+                "output_text": "answered",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "answered"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="fresh task")]
+    thread_id = events[-1]["thread_id"]
+    stored = engine.thread_store.read(thread_id)
+    main_input = client.requests[1]["input"]
+    main_texts = [message_item_text(item) for item in main_input if item.get("type") == "message"]
+
+    assert [event["type"] for event in events if event["type"].startswith("judge.")] == [
+        "judge.started",
+        "judge.completed",
+    ]
+    assert [event["type"] for event in stored].count("item.user") == 1
+    assert any(event["type"] == "item.judge_request" for event in stored)
+    assert any(event["type"] == "item.judge_response" for event in stored)
+    assert "<compaction_judge_request>" in "\n".join(main_texts)
+    assert '{"remaining_calls_bucket":"60_plus"' in str(main_input)
+    assert main_texts[-1] == "fresh task"
+
+
+@pytest.mark.asyncio
+async def test_cache_aware_judge_can_compact_below_threshold_and_keeps_current_user_fresh(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        context_window_tokens=10_000,
+        compression=CompressionConfig(
+            enabled=True,
+            cache_aware=True,
+            trigger_ratio=0.95,
+            min_tokens=1,
+            judge_min_context_ratio=0.0,
+            min_gain=0.0,
+            margin=0.0,
+        ),
+        pricing=PricingConfig(unit="token", models={"fake": ModelPricingConfig(input=1.0, output=1.0, cached_input=0.5)}),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_judge",
+                "output_text": '{"remaining_calls_bucket":"60_plus","history_dependency":"low"}',
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"remaining_calls_bucket":"60_plus","history_dependency":"low"}',
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "history summary",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "history summary"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_main",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            },
+        ]
+    )
+    thread_store = ThreadStore(tmp_path / "state")
+    thread_id = thread_store.create_thread("Existing")
+    thread_store.append(thread_id, "turn.started", turn_id="old")
+    thread_store.append(thread_id, "item.user", turn_id="old", item=message_item("user", "old request"))
+    thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="old",
+        model_api="responses",
+        response_id="resp_old",
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "old assistant detail " * 1_000}],
+            }
+        ],
+        usage={},
+    )
+    thread_store.append(thread_id, "turn.completed", turn_id="old", final_text="old assistant detail")
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=thread_store,
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="new work", thread_id=thread_id)]
+    stored = engine.thread_store.read(thread_id)
+    main_input = client.requests[2]["input"]
+    main_texts = [message_item_text(item) for item in main_input if item.get("type") == "message"]
+
+    assert any(event["type"] == "compaction.completed" for event in events)
+    assert any(event["type"] == "item.compaction" for event in stored)
+    assert client.requests[1]["input"][-1]  # compaction request ran before main response
+    assert "<conversation_summary>" in "\n".join(main_texts)
+    assert "history summary" in "\n".join(main_texts)
+    assert "<compaction_judge_request>" not in "\n".join(main_texts)
+    assert main_texts[-1] == "new work"
+    assert engine.last_judge_summary()["compacted"] is True
 
 
 @pytest.mark.asyncio
@@ -4889,7 +5093,8 @@ def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_p
     assert "kept request" in texts[retained_index]
     assert texts[retained_index - 1].startswith("<context_update")
     assert retained_index < summary_index
-    assert texts[-1] == "new request"
+    assert message_item_text(prelude.user_item) == "new request"
+    assert "new request" not in texts
 
 
 @pytest.mark.asyncio

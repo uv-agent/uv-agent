@@ -33,7 +33,13 @@ from uv_agent.agent.compaction import (
     retain_item_after_compaction,
     retained_user_messages_after_compaction,
 )
-from uv_agent.billing import billing_charge_for_usage, billing_total_from_metadata, decimal_to_string
+from uv_agent.billing import (
+    billing_charge_for_usage,
+    billing_total_from_metadata,
+    decimal_to_string,
+    pricing_for_model,
+    unit_divisor,
+)
 from uv_agent.config import AppConfig
 from uv_agent.agent.context_builder import (
     context_fingerprint,
@@ -351,6 +357,7 @@ class RunTurnPrelude:
     input_items: list[dict[str, Any]]
     request_input_items: list[dict[str, Any]]
     turn_started_event: dict[str, Any]
+    user_item: dict[str, Any]
     image_events: list[dict[str, Any]]
 
 
@@ -517,22 +524,19 @@ class AgentEngine:
             input_items = prelude.input_items
             request_input_items = prelude.request_input_items
             turn_started_event = prelude.turn_started_event
-            title_task = self._start_title_generation_task(
-                thread_id,
-                user_text,
-                should_generate=prelude.should_generate_title,
-                level=level,
-            )
+            title_task: asyncio.Task[str | None] | None = None
             yield self._publish_event({
                 "type": "turn.started",
                 "thread_id": thread_id,
                 "turn_id": turn_id,
                 "turn_started_at": turn_started_event.get("created_at"),
             })
-            for event in prelude.image_events:
-                yield self._publish_event(event)
 
             # ---- cache-aware compaction judge ----
+            # The prelude intentionally leaves the current user message out of
+            # the replay input.  The optional judge/compaction operates on prior
+            # history only; the real user task is appended afterwards so it stays
+            # a fresh instruction rather than retained-history text.
             compacted_this_turn = False
             if (
                 self.config.runtime.compression.cache_aware
@@ -543,7 +547,8 @@ class AgentEngine:
                     turn_id=turn_id,
                     input_items=input_items,
                     turn_input=turn_input,
-                    request_input_items=request_input_items,
+                    user_item=prelude.user_item,
+                    image_events=prelude.image_events,
                     system_instructions=system_instructions,
                     level=level,
                     cancel_event=cancel_event,
@@ -551,8 +556,23 @@ class AgentEngine:
                 for event in judge_result.events:
                     yield event
                 compacted_this_turn = judge_result.compacted
-                # Re-read after potential compaction.
-                request_input_items = turn_input.request_input_items()
+
+            self._append_current_user_items(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                turn_input=turn_input,
+                user_item=prelude.user_item,
+                image_events=prelude.image_events,
+            )
+            request_input_items = turn_input.request_input_items()
+            for event in prelude.image_events:
+                yield self._publish_event(event)
+            title_task = self._start_title_generation_task(
+                thread_id,
+                user_text,
+                should_generate=prelude.should_generate_title,
+                level=level,
+            )
 
             final_text = ""
             stream_state = StreamResponseState()
@@ -770,7 +790,6 @@ class AgentEngine:
         pre_user_items = self._pre_user_context_items(thread_id)
         turn_started_event = self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
         user_item = message_item("user", user_text)
-        self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
 
         # ``_reconstruct_input`` already places persisted post-compaction
         # context ahead of the compacted history. If this turn emits additional
@@ -786,10 +805,6 @@ class AgentEngine:
             input_items.extend(pre_user_items)
             request_input_items.extend(pre_user_items)
         turn_input.pending_items.extend(pre_user_items)
-        input_items.append(user_item)
-        request_input_items.append(user_item)
-        turn_input.pending_items.append(user_item)
-
         image_events: list[dict[str, Any]] = []
         for image_path in image_paths or []:
             attachment = self.attachments.register_image(
@@ -799,16 +814,6 @@ class AgentEngine:
                 note="pasted from clipboard",
             )
             payload = attachment.to_event_payload()
-            self.thread_store.append(
-                thread_id,
-                "item.image_attachment",
-                turn_id=turn_id,
-                attachment=payload,
-            )
-            image_item = image_message_item(payload)
-            input_items.append(image_item)
-            request_input_items.append(image_item)
-            turn_input.pending_items.append(image_item)
             image_events.append(
                 {
                     "type": "image.attachment",
@@ -832,8 +837,37 @@ class AgentEngine:
             input_items=input_items,
             request_input_items=request_input_items,
             turn_started_event=turn_started_event,
+            user_item=user_item,
             image_events=image_events,
         )
+
+    def _append_current_user_items(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        turn_input: TurnInputState,
+        user_item: dict[str, Any],
+        image_events: list[dict[str, Any]],
+    ) -> None:
+        """Persist and append the real user task after optional pre-turn work."""
+
+        self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
+        turn_input.input_items.append(user_item)
+        turn_input.pending_items.append(copy.deepcopy(user_item))
+        for event in image_events:
+            attachment = event.get("attachment") if isinstance(event, dict) else None
+            if not isinstance(attachment, dict):
+                continue
+            self.thread_store.append(
+                thread_id,
+                "item.image_attachment",
+                turn_id=turn_id,
+                attachment=attachment,
+            )
+            image_item = image_message_item(attachment)
+            turn_input.input_items.append(image_item)
+            turn_input.pending_items.append(copy.deepcopy(image_item))
 
     def _warm_model_backend_for_level(self, level: str | None) -> None:
         if not self._model_client_uses_builtin_lazy_provider_imports():
@@ -1316,12 +1350,13 @@ class AgentEngine:
         turn_id: str,
         input_items: list[dict[str, Any]],
         turn_input: TurnInputState,
-        request_input_items: list[dict[str, Any]],
+        user_item: dict[str, Any],
+        image_events: list[dict[str, Any]],
         system_instructions: str,
         level: str | None,
         cancel_event: asyncio.Event | None,
     ) -> JudgeResult:
-        """Run a cache-aware judge round before the turn and compact if warranted."""
+        """Run a cache-aware judge round before the user task and compact if warranted."""
         out_events: list[dict[str, Any]] = []
 
         def _emit(event: dict[str, Any]) -> None:
@@ -1335,18 +1370,27 @@ class AgentEngine:
         judge_level = self.config.runtime.compression.judge_model_level or compact_level
         ctx = compact_model.context_window_tokens
 
-        # Cheap gate: skip when context is below the judge threshold.
-        total_tokens = estimate_tokens(input_items + [message_item("system", system_instructions)])
+        image_items = [
+            image_message_item(event["attachment"])
+            for event in image_events
+            if isinstance(event.get("attachment"), dict)
+        ]
+        # Cheap gate: include the incoming user payload in the estimate without
+        # adding it to the historical input that may be compacted.
+        total_tokens = estimate_tokens(
+            input_items + [user_item, *image_items, message_item("system", system_instructions)]
+        )
         if total_tokens < int(ctx * self.config.runtime.compression.judge_min_context_ratio):
-            self._record_judge({"skipped": True, "reason": "below_threshold",
-                               "total_tokens": total_tokens})
+            self._record_judge({
+                "skipped": True,
+                "reason": "below_threshold",
+                "total_tokens": total_tokens,
+            })
             return _done()
 
-        # Build judge input: system + history + judge request (without the real user message).
-        user_item = input_items.pop()  # real user message, saved for later
-        judge_input = list(input_items)
-        judge_req_item = compaction_judge_request_item()
-        judge_input.append(judge_req_item)
+        judge_req_item = compaction_judge_request_item(message_item_text(user_item))
+        judge_input = copy.deepcopy(input_items)
+        judge_input.append(copy.deepcopy(judge_req_item))
 
         _emit(self._publish_event({
             "type": "judge.started",
@@ -1354,8 +1398,8 @@ class AgentEngine:
             "turn_id": turn_id,
         }))
 
-        response = None
-        judge_responses: list[tuple[Any, list[dict[str, Any]]]] = []
+        judge_responses: list[tuple[ModelResponse, list[dict[str, Any]]]] = []
+        response: ModelResponse | None = None
         try:
             response = await self.model_client.create_response(
                 input_items=judge_input,
@@ -1363,9 +1407,11 @@ class AgentEngine:
                 tools=[PYTHON_TOOL],
                 instructions=system_instructions,
             )
-            # Guard against stray tool calls during judge.
+            # Guard against stray tool calls during judge. The synthetic outputs
+            # are persisted and replayed as part of the completed judge exchange
+            # when no compaction checkpoint supersedes it.
             for _attempt in range(2):
-                tool_calls = [i for i in response.output if i.get("type") == "function_call"]
+                tool_calls = [item for item in response.output if item.get("type") == "function_call"]
                 if not tool_calls:
                     break
                 judge_input.extend(response.output)
@@ -1390,86 +1436,80 @@ class AgentEngine:
                     instructions=system_instructions,
                 )
             judge_responses.append((response, []))
-        finally:
-            if response is not None:
-                # Persist the judge round so the next turn shares the same prefix.
-                # Everything from judge_req_item onwards in judge_input is the full
-                # judge interaction (including any guard-loop artefacts).
-                req_idx = judge_input.index(judge_req_item)
-                judge_tail = judge_input[req_idx:]
-
-                # Persist judge request as a user message.
-                self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=judge_req_item)
-
-                # Persist all judge model responses and their tool outputs in order.
-                for resp, tool_outputs in judge_responses:
-                    self.thread_store.append(
-                        thread_id,
-                        "item.model_response",
-                        turn_id=turn_id,
-                        model_api=self._model_api_for_level(judge_level),
-                        response_id=resp.id,
-                        output=resp.output,
-                        usage=resp.usage,
-                        reasoning_text=resp.reasoning_text,
-                    )
-                    for tool_output in tool_outputs:
-                        self.thread_store.append(thread_id, "item.tool_output", turn_id=turn_id, item=tool_output)
-                    self._record_billing_charge(
-                        thread_id, turn_id, resp.usage, level=judge_level, source="judge",
-                    )
-
-                # Append the full judge interaction to the current turn's input_items
-                # so the main model call includes it in the prefix.
-                input_items.extend(judge_tail)
-
-            # Always restore the real user message last.
-            input_items.append(user_item)
+        except (asyncio.CancelledError, TurnInterrupted):
+            raise
+        except Exception as exc:
+            self._record_judge({
+                "skipped": True,
+                "reason": "judge_error",
+                "error_type": exc.__class__.__name__,
+            })
             _emit(self._publish_event({
                 "type": "judge.completed",
                 "thread_id": thread_id,
                 "turn_id": turn_id,
             }))
+            return _done()
 
+        self._persist_judge_interaction(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            judge_level=judge_level,
+            judge_req_item=judge_req_item,
+            judge_responses=judge_responses,
+        )
+        judge_history_items = self._judge_history_items(judge_req_item, judge_responses)
+        _emit(self._publish_event({
+            "type": "judge.completed",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+        }))
+
+        assert response is not None, "judge response must exist after successful judge call"
         judge = parse_judge_response(response.output_text)
         if judge is None:
+            self._append_judge_history_to_input(turn_input, input_items, judge_history_items)
             self._record_judge({"skipped": True, "reason": "parse_failed"})
             return _done()
 
         dependency = str(judge.get("history_dependency") or "")
         if dependency == "exact" or dependency not in DEPENDENCY_PARAMS:
-            self._record_judge({"skipped": True, "reason": "dependency",
-                               "dependency": dependency})
+            self._append_judge_history_to_input(turn_input, input_items, judge_history_items)
+            self._record_judge({
+                "skipped": True,
+                "reason": "dependency",
+                "dependency": dependency,
+            })
             return _done()
 
         N = N_BUCKET_MAP.get(str(judge.get("remaining_calls_bucket") or ""))
         if N is None:
-            self._record_judge({"skipped": True, "reason": "unknown_bucket",
-                               "bucket": str(judge.get("remaining_calls_bucket") or "")})
+            self._append_judge_history_to_input(turn_input, input_items, judge_history_items)
+            self._record_judge({
+                "skipped": True,
+                "reason": "unknown_bucket",
+                "bucket": str(judge.get("remaining_calls_bucket") or ""),
+            })
             return _done()
 
         S_ratio, K_min_pct = DEPENDENCY_PARAMS[dependency]
 
-        # Pricing (per token, currency matches pricing.currency).
-        pricing = self.config.pricing
-        model_name = compact_model.name
-        model_pricing = pricing.models.get(model_name) if pricing else None
+        pricing_level = compact_level or level or self.config.runtime.default_level
+        model_pricing = pricing_for_model(self.config, compact_model, level=pricing_level)
         if model_pricing is not None:
-            P_write = (model_pricing.input or 0.0) / 1_000_000.0
-            if model_pricing.cached_input is not None:
-                P_read = model_pricing.cached_input / 1_000_000.0
-            else:
-                P_read = P_write
-            # When cache reads are priced at zero the NetGain formula
-            # cannot generate positive savings (save = replaced*N*0 = 0).
-            # Use a small fraction of P_write as a conservative floor so
-            # cache-aware compaction can still fire for these models.
+            divisor = float(unit_divisor(model_pricing.unit or self.config.pricing.unit))
+            P_write = (model_pricing.input or 0.0) / divisor
+            P_read = (model_pricing.cached_input or 0.0) / divisor
+            # When cache reads are priced at zero the NetGain formula cannot
+            # generate positive savings (save = replaced*N*0 = 0). Use a small
+            # fraction of P_write as a conservative floor so cache-aware
+            # compaction can still fire for these models.
             if P_read == 0.0:
                 P_read = P_write * 0.01
-            P_summary_out = (model_pricing.output or 0.0) / 1_000_000.0
+            P_summary_out = (model_pricing.output or 0.0) / divisor
         else:
             P_write = P_read = P_summary_out = 0.0
-        P_summary_in = P_write  # summary call uses the same input pricing
+        P_summary_in = P_write
 
         # Enumerate K candidates (percentage of context window).
         K_min = max(500, int(K_min_pct * ctx))
@@ -1480,11 +1520,15 @@ class AgentEngine:
                 K_candidates.append(k)
         K_candidates.sort()
 
-        # D = total compressible tokens (rough: input_items minus epoch context).
-        D = estimate_tokens(input_items)  # includes system context items
-
-        # U = retained old user messages under existing logic.
-        U = estimate_tokens(retained_user_messages_after_compaction(input_items))
+        # D/U are based on prior replayable history only. Dynamic epoch context
+        # is re-emitted after compaction and should not make Path A summarize an
+        # otherwise empty thread.
+        history_items = [
+            item for item in input_items
+            if not self._is_pre_user_context_item(item)
+        ]
+        D = estimate_tokens(history_items)
+        U = estimate_tokens(retained_user_messages_after_compaction(history_items))
 
         best_gain = 0.0
         best_K: int | None = None
@@ -1509,8 +1553,15 @@ class AgentEngine:
                 best_S = S
 
         if best_K is None:
-            self._record_judge({"skipped": True, "reason": "no_valid_K",
-                               "D": D, "U": U, "N": N, "dependency": dependency})
+            self._append_judge_history_to_input(turn_input, input_items, judge_history_items)
+            self._record_judge({
+                "skipped": True,
+                "reason": "no_valid_K",
+                "D": D,
+                "U": U,
+                "N": N,
+                "dependency": dependency,
+            })
             return _done()
 
         threshold = max(
@@ -1522,13 +1573,21 @@ class AgentEngine:
         )
 
         if best_gain <= threshold:
-            self._record_judge({"triggered": False,
-                               "dependency": dependency, "N": N,
-                               "D": D, "U": U, "best_K": best_K, "best_S": best_S,
-                               "net_gain": best_gain, "threshold": threshold})
+            self._append_judge_history_to_input(turn_input, input_items, judge_history_items)
+            self._record_judge({
+                "triggered": False,
+                "dependency": dependency,
+                "N": N,
+                "D": D,
+                "U": U,
+                "best_K": best_K,
+                "best_S": best_S,
+                "net_gain": best_gain,
+                "threshold": threshold,
+            })
             return _done()
 
-        # Run compaction with the chosen K.
+        _emit(self._publish_event(self._compaction_started_event(thread_id, turn_id)))
         compact_result = await self._compact_if_needed(
             thread_id,
             turn_id,
@@ -1536,28 +1595,110 @@ class AgentEngine:
             level=level,
             instructions=system_instructions,
             retain_K=best_K,
+            force=True,
         )
+        if compact_result.token_warning_event is not None:
+            _emit(self._publish_event(self._public_event(compact_result.token_warning_event)))
         if compact_result.result is not None:
             input_items[:] = self._input_after_compaction(thread_id, compact_result.result)
             turn_input.input_items = input_items
             turn_input.previous_response_id = None
             turn_input.use_previous_response_id = False
             turn_input.pending_items.clear()
-            request_input_items[:] = turn_input.request_input_items()
             _emit(self._publish_event(self._compaction_completed_event(
                 thread_id, turn_id, compact_result.result,
             )))
-            self._record_judge({"triggered": True, "compacted": True,
-                               "dependency": dependency, "N": N,
-                               "D": D, "U": U, "best_K": best_K, "best_S": best_S,
-                               "net_gain": best_gain, "threshold": threshold})
+            self._record_judge({
+                "triggered": True,
+                "compacted": True,
+                "dependency": dependency,
+                "N": N,
+                "D": D,
+                "U": U,
+                "best_K": best_K,
+                "best_S": best_S,
+                "net_gain": best_gain,
+                "threshold": threshold,
+            })
             return _done(compacted=True)
 
-        self._record_judge({"triggered": True, "compacted": False,
-                           "dependency": dependency, "N": N,
-                           "D": D, "U": U, "best_K": best_K, "best_S": best_S,
-                           "net_gain": best_gain, "threshold": threshold})
+        # Should be rare with force=True, but if compaction is skipped we must
+        # replay the already-persisted judge exchange in the main request.
+        self._append_judge_history_to_input(turn_input, input_items, judge_history_items)
+        self._record_judge({
+            "triggered": True,
+            "compacted": False,
+            "dependency": dependency,
+            "N": N,
+            "D": D,
+            "U": U,
+            "best_K": best_K,
+            "best_S": best_S,
+            "net_gain": best_gain,
+            "threshold": threshold,
+        })
         return _done()
+
+    def _persist_judge_interaction(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        judge_level: str | None,
+        judge_req_item: dict[str, Any],
+        judge_responses: list[tuple[ModelResponse, list[dict[str, Any]]]],
+    ) -> None:
+        """Persist a completed judge exchange without counting it as user chat."""
+
+        self.thread_store.append(thread_id, "item.judge_request", turn_id=turn_id, item=judge_req_item)
+        for resp, tool_outputs in judge_responses:
+            self.thread_store.append(
+                thread_id,
+                "item.judge_response",
+                turn_id=turn_id,
+                model_api=self._model_api_for_level(judge_level),
+                response_id=resp.id,
+                output=resp.output,
+                usage=resp.usage,
+                reasoning_text=resp.reasoning_text,
+            )
+            for tool_output in tool_outputs:
+                self.thread_store.append(
+                    thread_id,
+                    "item.judge_tool_output",
+                    turn_id=turn_id,
+                    item=tool_output,
+                )
+            self._record_billing_charge(
+                thread_id, turn_id, resp.usage, level=judge_level, source="judge",
+            )
+
+    @staticmethod
+    def _judge_history_items(
+        judge_req_item: dict[str, Any],
+        judge_responses: list[tuple[ModelResponse, list[dict[str, Any]]]],
+    ) -> list[dict[str, Any]]:
+        """Return model-input items representing the completed judge exchange."""
+
+        items = [copy.deepcopy(judge_req_item)]
+        for resp, tool_outputs in judge_responses:
+            items.extend(copy.deepcopy(resp.output))
+            items.extend(copy.deepcopy(tool_outputs))
+        return items
+
+    @staticmethod
+    def _append_judge_history_to_input(
+        turn_input: TurnInputState,
+        input_items: list[dict[str, Any]],
+        judge_history_items: list[dict[str, Any]],
+    ) -> None:
+        """Replay a persisted judge exchange and force a full next request."""
+
+        input_items.extend(copy.deepcopy(judge_history_items))
+        turn_input.input_items = input_items
+        turn_input.previous_response_id = None
+        turn_input.use_previous_response_id = False
+        turn_input.pending_items.clear()
 
     def _compaction_should_run(
         self,
@@ -1590,6 +1731,7 @@ class AgentEngine:
         allow_last_tool_output_truncation: bool = False,
         pre_compaction_event: dict[str, Any] | None = None,
         retain_K: int = 0,
+        force: bool = False,
     ) -> CompactionDecision:
         if not self.config.runtime.compression.enabled:
             return CompactionDecision()
@@ -1612,10 +1754,11 @@ class AgentEngine:
                 threshold_tokens=trigger_tokens,
                 context_window_tokens=active_model.context_window_tokens,
             )
-        if token_count.tokens < self.config.runtime.compression.min_tokens:
-            return CompactionDecision(token_warning_event=token_warning_event)
-        if token_count.tokens < trigger_tokens:
-            return CompactionDecision(token_warning_event=token_warning_event)
+        if not force:
+            if token_count.tokens < self.config.runtime.compression.min_tokens:
+                return CompactionDecision(token_warning_event=token_warning_event)
+            if token_count.tokens < trigger_tokens:
+                return CompactionDecision(token_warning_event=token_warning_event)
         if pre_compaction_event is not None:
             event_type = str(pre_compaction_event.get("type") or "")
             payload = {key: value for key, value in pre_compaction_event.items() if key != "type"}
@@ -1949,6 +2092,9 @@ class AgentEngine:
             "item.model_response",
             "item.tool_output",
             "item.image_attachment",
+            "item.judge_request",
+            "item.judge_response",
+            "item.judge_tool_output",
             "turn.interrupted",
         }
 
@@ -2763,6 +2909,17 @@ class AgentEngine:
             if pre_user_item is not None:
                 flush_tool_attachments()
                 pending_pre_user.append(pre_user_item)
+            elif event.get("type") == "item.judge_request":
+                flush_tool_attachments()
+                input_items.extend(pending_pre_user)
+                pending_pre_user.clear()
+                input_items.append(copy.deepcopy(event["item"]))
+            elif event.get("type") == "item.judge_response":
+                flush_tool_attachments()
+                input_items.extend(copy.deepcopy(event.get("output") or []))
+            elif event.get("type") == "item.judge_tool_output":
+                flush_tool_attachments()
+                input_items.append(copy.deepcopy(event["item"]))
             elif event.get("type") == "item.user":
                 flush_tool_attachments()
                 input_items.extend(pending_pre_user)
@@ -2854,6 +3011,17 @@ class AgentEngine:
             if pre_user_item is not None:
                 flush_tool_attachments()
                 pending_pre_user.append(pre_user_item)
+            elif event.get("type") == "item.judge_request":
+                flush_tool_attachments()
+                input_items.extend(pending_pre_user)
+                pending_pre_user.clear()
+                input_items.append(copy.deepcopy(event["item"]))
+            elif event.get("type") == "item.judge_response":
+                flush_tool_attachments()
+                input_items.extend(copy.deepcopy(event.get("output") or []))
+            elif event.get("type") == "item.judge_tool_output":
+                flush_tool_attachments()
+                input_items.append(copy.deepcopy(event["item"]))
             elif event.get("type") == "item.user":
                 flush_tool_attachments()
                 input_items.extend(pending_pre_user)
