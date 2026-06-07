@@ -16,13 +16,22 @@ from typing import Any, Callable
 
 from uv_agent.attachments import AttachmentStore, image_message_item
 from uv_agent.agent.compaction import (
+    DEPENDENCY_PARAMS,
+    K_CANDIDATE_PCTS,
+    N_BUCKET_MAP,
+    S_MAX,
+    S_MIN,
+    compaction_judge_request_item,
     compaction_response_summary_text,
     compaction_summary_item,
     compaction_replacement_input,
     compaction_trigger_item,
+    compute_net_gain,
+    estimate_compact_cost,
     normalize_compaction_replacement_input,
-    retained_user_messages_after_compaction,
+    parse_judge_response,
     retain_item_after_compaction,
+    retained_user_messages_after_compaction,
 )
 from uv_agent.billing import billing_charge_for_usage, billing_total_from_metadata, decimal_to_string
 from uv_agent.config import AppConfig
@@ -309,6 +318,14 @@ class CompactionResult:
 
 
 @dataclass(frozen=True)
+class JudgeResult:
+    """Result of a cache-aware pre-turn judge + optional compaction."""
+
+    compacted: bool = False
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class CompactionDecision:
     """Outcome of checking whether a thread should be compacted now."""
 
@@ -506,8 +523,29 @@ class AgentEngine:
             for event in prelude.image_events:
                 yield self._publish_event(event)
 
-            final_text = ""
+            # ---- cache-aware compaction judge ----
             compacted_this_turn = False
+            if (
+                self.config.runtime.compression.cache_aware
+                and self.config.runtime.compression.enabled
+            ):
+                judge_result = await self._maybe_judge_and_compact(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    input_items=input_items,
+                    turn_input=turn_input,
+                    request_input_items=request_input_items,
+                    system_instructions=system_instructions,
+                    level=level,
+                    cancel_event=cancel_event,
+                )
+                for event in judge_result.events:
+                    yield event
+                compacted_this_turn = judge_result.compacted
+                # Re-read after potential compaction.
+                request_input_items = turn_input.request_input_items()
+
+            final_text = ""
             stream_state = StreamResponseState()
             try:
                 for round_index in range(self.config.runtime.max_agent_rounds):
@@ -1197,6 +1235,12 @@ class AgentEngine:
         bridged_input = copy.deepcopy(input_items)
         bridge_item = assistant_output_item(POST_TOOL_COMPACTION_BRIDGE)
         bridged_input.append(bridge_item)
+        # Mid-turn threshold-triggered compaction: retain 25% of the context
+        # window verbatim as a safety net against context overflow.
+        compact_model = self.config.model_for_level(
+            self.config.runtime.compression.model_level or level
+        )
+        mid_retain_K = int(0.25 * compact_model.context_window_tokens)
         result = await self._compact_if_needed(
             thread_id,
             turn_id,
@@ -1204,6 +1248,7 @@ class AgentEngine:
             level=level,
             instructions=instructions,
             allow_last_tool_output_truncation=True,
+            retain_K=mid_retain_K,
             pre_compaction_event={
                 "type": "item.assistant",
                 "turn_id": turn_id,
@@ -1255,6 +1300,185 @@ class AgentEngine:
             instructions=instructions,
         )
 
+    async def _maybe_judge_and_compact(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        input_items: list[dict[str, Any]],
+        turn_input: TurnInputState,
+        request_input_items: list[dict[str, Any]],
+        system_instructions: str,
+        level: str | None,
+        cancel_event: asyncio.Event | None,
+    ) -> JudgeResult:
+        """Run a cache-aware judge round before the turn and compact if warranted."""
+        out_events: list[dict[str, Any]] = []
+
+        def _emit(event: dict[str, Any]) -> None:
+            out_events.append(event)
+
+        def _done(compacted: bool = False) -> JudgeResult:
+            return JudgeResult(compacted=compacted, events=out_events)
+
+        compact_level = self.config.runtime.compression.model_level or level
+        compact_model = self.config.model_for_level(compact_level)
+        judge_level = self.config.runtime.compression.judge_model_level or compact_level
+        ctx = compact_model.context_window_tokens
+
+        # Cheap gate: skip when context is below the judge threshold.
+        total_tokens = estimate_tokens(input_items + [message_item("system", system_instructions)])
+        if total_tokens < int(ctx * self.config.runtime.compression.judge_min_context_ratio):
+            return _done()
+
+        # Build judge input: system + history + judge request (without the real user message).
+        user_item = input_items.pop()  # real user message, saved for later
+        judge_input = list(input_items)
+        judge_input.append(compaction_judge_request_item())
+
+        _emit(self._publish_event({
+            "type": "judge.started",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+        }))
+
+        try:
+            response = await self.model_client.create_response(
+                input_items=judge_input,
+                level=judge_level,
+                tools=[PYTHON_TOOL],
+                instructions=system_instructions,
+            )
+            # Guard against stray tool calls during judge.
+            for _attempt in range(2):
+                tool_calls = [i for i in response.output if i.get("type") == "function_call"]
+                if not tool_calls:
+                    break
+                judge_input.extend(response.output)
+                for call in tool_calls:
+                    judge_input.append(function_output(call, {
+                        "returncode": 1,
+                        "run_id": "(judge-guard)",
+                        "timed_out": False,
+                        "interrupted": False,
+                        "truncated": False,
+                        "stdout": "",
+                        "stderr": "ERROR: Do not call tools during pre-turn judgement. Return only the JSON line.",
+                    }))
+                response = await self.model_client.create_response(
+                    input_items=judge_input,
+                    level=judge_level,
+                    tools=[PYTHON_TOOL],
+                    instructions=system_instructions,
+                )
+        finally:
+            input_items.append(user_item)  # restore
+            _emit(self._publish_event({
+                "type": "judge.completed",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+            }))
+
+        judge = parse_judge_response(response.output_text)
+        if judge is None:
+            return _done()
+
+        dependency = str(judge.get("history_dependency") or "")
+        if dependency == "exact" or dependency not in DEPENDENCY_PARAMS:
+            return _done()
+
+        N = N_BUCKET_MAP.get(str(judge.get("remaining_calls_bucket") or ""))
+        if N is None:
+            return _done()
+
+        S_ratio, K_min_pct = DEPENDENCY_PARAMS[dependency]
+
+        # Pricing (USD per token).
+        pricing = self.config.pricing
+        model_name = compact_model.name
+        model_pricing = pricing.models.get(model_name) if pricing else None
+        if model_pricing is not None:
+            P_write = (model_pricing.input or 0.0) / 1_000_000.0
+            P_read = (model_pricing.cached_input or P_write * 1_000_000.0) / 1_000_000.0
+            P_summary_out = (model_pricing.output or 0.0) / 1_000_000.0
+        else:
+            P_write = P_read = P_summary_out = 0.0
+        P_summary_in = P_write  # summary call uses the same input pricing
+
+        # Enumerate K candidates (percentage of context window).
+        K_min = max(500, int(K_min_pct * ctx))
+        K_candidates: list[int] = []
+        for pct in K_CANDIDATE_PCTS:
+            k = max(K_min, int(pct * ctx))
+            if k not in K_candidates:
+                K_candidates.append(k)
+        K_candidates.sort()
+
+        # D = total compressible tokens (rough: input_items minus epoch context).
+        D = estimate_tokens(input_items)  # includes system context items
+
+        # U = retained old user messages under existing logic.
+        U = estimate_tokens(retained_user_messages_after_compaction(input_items))
+
+        best_gain = 0.0
+        best_K: int | None = None
+        best_S: int | None = None
+
+        for K in K_candidates:
+            S = max(S_MIN, min(S_MAX, int((D - U) * S_ratio)))
+            compact_cost = estimate_compact_cost(
+                D=D,
+                S=S,
+                P_summary_in=P_summary_in,
+                P_summary_out=P_summary_out,
+            )
+            gain = compute_net_gain(
+                D=D, U=U, K=K, S=S, N=N,
+                P_read=P_read, P_write=P_write,
+                compact_cost=compact_cost,
+            )
+            if gain > best_gain:
+                best_gain = gain
+                best_K = K
+                best_S = S
+
+        if best_K is None:
+            return _done()
+
+        threshold = max(
+            self.config.runtime.compression.min_gain_usd,
+            estimate_compact_cost(
+                D=D, S=best_S or S_MIN,
+                P_summary_in=P_summary_in, P_summary_out=P_summary_out,
+            ) * self.config.runtime.compression.margin,
+        )
+
+        if best_gain <= threshold:
+            return _done()
+
+        # Run compaction with the chosen K.
+        compact_result = await self._compact_if_needed(
+            thread_id,
+            turn_id,
+            input_items,
+            level=level,
+            instructions=system_instructions,
+            retain_K=best_K,
+        )
+        if compact_result.result is not None:
+            input_items[:] = self._input_after_compaction(thread_id, compact_result.result)
+            turn_input.input_items = input_items
+            turn_input.previous_response_id = None
+            turn_input.use_previous_response_id = False
+            turn_input.pending_items.clear()
+            request_input_items[:] = turn_input.request_input_items()
+            _emit(self._publish_event(self._compaction_completed_event(
+                thread_id, turn_id, compact_result.result,
+            )))
+            return _done(compacted=True)
+
+        return _done()
+
     def _compaction_should_run(
         self,
         thread_id: str,
@@ -1285,6 +1509,7 @@ class AgentEngine:
         instructions: str,
         allow_last_tool_output_truncation: bool = False,
         pre_compaction_event: dict[str, Any] | None = None,
+        retain_K: int = 0,
     ) -> CompactionDecision:
         if not self.config.runtime.compression.enabled:
             return CompactionDecision()
@@ -1354,7 +1579,7 @@ class AgentEngine:
                 }))
         assert response is not None, "compaction retry loop must produce a response"  # type: ignore[unreachable]
         summary_text = compaction_response_summary_text(response)
-        replacement_input = self._compaction_replacement_input(input_items, response)
+        replacement_input = self._compaction_replacement_input(input_items, response, K=retain_K)
         context_state = self._latest_context_state(thread_id)
         self.thread_store.append(
             thread_id,
@@ -1556,8 +1781,10 @@ class AgentEngine:
         self,
         input_items: list[dict[str, Any]],
         response: ModelResponse,
+        *,
+        K: int = 0,
     ) -> list[dict[str, Any]]:
-        return compaction_replacement_input(input_items, response)
+        return compaction_replacement_input(input_items, response, K=K)
 
     def _retained_user_messages_after_compaction(self, input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return retained_user_messages_after_compaction(input_items)

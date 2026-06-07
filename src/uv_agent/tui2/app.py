@@ -2910,6 +2910,10 @@ class AnsiUvAgentApp:
             attachment = event.get("attachment") or {}
             path = attachment.get("path") or attachment.get("original_path") or "image"
             self._flush(TranscriptCell("image", text=f"image attached: {path}"))
+        elif event_type == "judge.started":
+            self.state.status_message = self._text("judging")
+        elif event_type == "judge.completed":
+            self.state.status_message = self._text("working")
         elif event_type == "compaction.started":
             self.state.status_message = self._text("compacting")
             self._flush(TranscriptCell("event", text="compaction started"))
