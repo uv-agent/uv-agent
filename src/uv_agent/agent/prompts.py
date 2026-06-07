@@ -282,7 +282,7 @@ for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py
 <helper name="ask">
 <description>Launch a nested uv-agent for isolated or parallel investigation.</description>
 <signature>ask(prompt: str, *, level=None, model_level=None, cwd=None, env=None, executable=None, timeout_s=300, check=False, retain=True) -> SubagentResult</signature>
-<returns>SubagentResult(text: str, stdout: str, stderr: str, thread_id: str | None, returncode: int, timed_out: bool, raise_for_error())</returns>
+<returns>SubagentResult(text: str, stdout: str, stderr: str, thread_id: str | None, returncode: int, timed_out: bool, raise_for_error() -> SubagentResult)</returns>
 </helper>
 <helper name="add_dependency">
 <description>Add direct packages to the shared run_python uv project; added packages persist across later calls. Call before importing the package in the current script; do not use it to upgrade or replace a package already imported in that process.</description>
@@ -296,7 +296,7 @@ run_python_env_dir() -> Path</signature>
 <helper name="read_file">
 <description>Read text, metadata, or a bounded view. Select at most one of lines/head/tail/around.</description>
 <signature>read_file(path: str | Path, *, lines: tuple[int, int] | None = None, head: int | None = None, tail: int | None = None, around: str | None = None, context: int = 20, encoding: str = "utf-8") -> FileView</signature>
-<returns>FileView(path: str, exists: bool, text: str, line_count: int, start_line: int, end_line: int, truncated: bool, newline: str, final_newline: bool, bom: bool, size: int | None, kind: str, numbered())</returns>
+<returns>FileView(path: str, exists: bool, text: str, line_count: int, start_line: int, end_line: int, truncated: bool, newline: Literal["lf", "crlf", "cr", "mixed", "none"], final_newline: bool, bom: bool, size: int | None, kind: Literal["file", "dir", "missing", "other"], numbered() -> str)</returns>
 </helper>
 <helper name="write_file">
 <description>Write generated or substantially transformed whole-file text while preserving or choosing text metadata.</description>
@@ -315,7 +315,7 @@ run_python_env_dir() -> Path</signature>
 <helper name="run_process_text">
 <description>Run an external command with decoded stdout/stderr, timeout handling, env/env_patch, and optional check=True.</description>
 <signature>run_process_text(args: Sequence[str], *, cwd=None, encoding="utf-8", errors="replace", env=None, env_patch=None, timeout_s=None, check=False) -> CommandTextResult</signature>
-<returns>CommandTextResult(args: list[str], returncode: int, stdout: str, stderr: str, timed_out: bool, ok: bool, raise_for_error())</returns>
+<returns>CommandTextResult(args: list[str], returncode: int, stdout: str, stderr: str, timed_out: bool, ok: bool, raise_for_error() -> CommandTextResult)</returns>
 </helper>
 <helper name="threads">
 <description>Inspect compact conversation and run summaries; these helpers do not switch the active TUI thread.</description>
