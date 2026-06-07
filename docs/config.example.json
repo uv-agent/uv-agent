@@ -93,7 +93,12 @@
       "enabled": true,
       "model_level": "small",
       "trigger_ratio": 0.7,
-      "min_tokens": 5000
+      "min_tokens": 5000,
+      "cache_aware": false,
+      "margin": 1.5,
+      "min_gain_usd": 0.0001,
+      "judge_model_level": null,
+      "judge_min_context_ratio": 0.20
     },
     "title_generation": {
       "enabled": true,

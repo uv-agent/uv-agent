@@ -249,8 +249,30 @@ Compression options:
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Automatically compress thread context near the trigger threshold. |
 | `model_level` | string or null | `null` | Optional level used to **perform** the compression summary. `null` uses the active/default level. The trigger threshold is always computed against the **active turn's** model context window, not this level's. |
-| `trigger_ratio` | number | `0.7` | Compress when estimated context usage reaches this ratio of the active turn's model context window. |
+| `trigger_ratio` | number | `0.7` | Compress when estimated context usage reaches this ratio of the active turn's model context window. Also serves as the mid-turn safety-net threshold (Path B). |
 | `min_tokens` | integer | `5000` | Do not compress below this estimated token count. |
+| `cache_aware` | boolean | `false` | Enable cache-aware NetGain pre-turn judge compaction (Path A). When off, only the threshold-based trigger (Path B) runs. |
+| `margin` | number | `1.5` | Safety margin multiplier for the NetGain formula: compression only fires when `NetGain > max(MinGain, CompactCost * Margin)`. |
+| `min_gain_usd` | number | `0.0001` | Minimum net gain in USD required to trigger cache-aware compaction. |
+| `judge_model_level` | string or null | `null` | Optional level for the pre-turn judge call. `null` reuses `model_level` (or the active level if that is also null). |
+| `judge_min_context_ratio` | number | `0.20` | Skip the judge round when estimated context tokens are below this ratio of the active model's context window. |
+
+Compression follows two independent paths:
+
+**Path A – Cache-aware pre-turn judge** (`cache_aware: true`).  Before each
+turn a lightweight judge round asks the model for two semantic parameters:
+`remaining_calls_bucket` (projected future rounds) and `history_dependency`
+(low / medium / high / exact).  A local NetGain formula then computes
+whether the estimated future cache-read savings outweigh the cost of
+generating a summary, accounting for the cache-rebuild penalty on the
+retained recent context.  The judge round appears briefly in the TUI status
+bar ("Judging / 判断中") but does not add a transcript cell.
+
+**Path B – Threshold-triggered safety net.**  When `cache_aware` is off, or
+during mid-turn tool loops regardless of the judge outcome, compaction
+fires when the token count reaches `trigger_ratio` of the context window.
+Mid-turn compaction retains the most recent 25% of the context window
+verbatim alongside the summary.
 
 Title generation options:
 
