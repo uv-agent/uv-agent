@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="docs/t2.png" alt="uv-agent tui2 screenshot" width="600">
-</p>
-
 # uv-agent
+
+<img align="right" src="docs/t2.png" alt="uv-agent tui2 screenshot" width="300">
 
 [简体中文](README.zh-CN.md)
 
