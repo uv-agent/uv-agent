@@ -89,9 +89,9 @@ def compute_net_gain(
     N: int,          # projected remaining calls
     P_read: float,   # cache read price per token
     P_write: float,  # write / uncached input price per token
-    compact_cost: float,  # estimated cost of the summary-generation call (USD)
+    compact_cost: float,  # estimated cost of the summary-generation call
 ) -> float:
-    """Return the estimated net gain in USD of compacting now with parameters K, S.
+    """Return the estimated net gain of compacting now with parameters K, S.
 
     Simplified MVP: D_c = D-U, D_n = 0, K_c = K+U.
     """

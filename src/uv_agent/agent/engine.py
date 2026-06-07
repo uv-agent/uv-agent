@@ -1446,7 +1446,7 @@ class AgentEngine:
             return _done()
 
         threshold = max(
-            self.config.runtime.compression.min_gain_usd,
+            self.config.runtime.compression.min_gain,
             estimate_compact_cost(
                 D=D, S=best_S or S_MIN,
                 P_summary_in=P_summary_in, P_summary_out=P_summary_out,

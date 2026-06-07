@@ -123,7 +123,7 @@ class CompressionConfig:
     # inside tool loops as a safety net (K = 0.25 * context_window).
     cache_aware: bool = False
     margin: float = 1.5
-    min_gain_usd: float = 0.0001
+    min_gain: float = 0.0001  # currency-agnostic; matches pricing.currency
     judge_model_level: str | None = None  # None = reuse compact model_level
     judge_min_context_ratio: float = 0.20  # skip judge when context < 20%
 

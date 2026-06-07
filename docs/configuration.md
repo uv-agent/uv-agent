@@ -253,7 +253,7 @@ Compression options:
 | `min_tokens` | integer | `5000` | Do not compress below this estimated token count. |
 | `cache_aware` | boolean | `false` | Enable cache-aware NetGain pre-turn judge compaction (Path A). When off, only the threshold-based trigger (Path B) runs. |
 | `margin` | number | `1.5` | Safety margin multiplier for the NetGain formula: compression only fires when `NetGain > max(MinGain, CompactCost * Margin)`. |
-| `min_gain_usd` | number | `0.0001` | Minimum net gain in USD required to trigger cache-aware compaction. |
+| `min_gain` | number | `0.0001` | Minimum net gain (in `pricing.currency`) required to trigger cache-aware compaction. |
 | `judge_model_level` | string or null | `null` | Optional level for the pre-turn judge call. `null` reuses `model_level` (or the active level if that is also null). |
 | `judge_min_context_ratio` | number | `0.20` | Skip the judge round when estimated context tokens are below this ratio of the active model's context window. |
 
