@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import json as _json
+import re as _re
 from typing import Any
 
 from uv_agent.context import estimate_tokens
@@ -12,6 +14,166 @@ from uv_agent.agent.prompts import (
     POST_TOOL_COMPACTION_BRIDGE,
 )
 from uv_agent.model.types import ModelResponse
+
+# ---------------------------------------------------------------------------
+# Cache-aware NetGain compaction judge
+# ---------------------------------------------------------------------------
+
+COMPACTION_JUDGE_REQUEST = (
+    "<compaction_judge_request>\n"
+    "You are about to receive a user task. Before answering, output a\n"
+    "one-line JSON judgement about the conversation state. Return ONLY the\n"
+    "JSON line, no backticks, no explanation:\n\n"
+    '{"remaining_calls_bucket":"<0_10|10_30|30_60|60_plus>",'
+    '"history_dependency":"<low|medium|high|exact>"}\n'
+    "\n"
+    "remaining_calls_bucket: how many more model calls will this task need?\n"
+    "history_dependency: how much does the task depend on exact original\n"
+    "  wording in the conversation above? 'low' for general continuation,\n"
+    "  'medium' for moderate dependence, 'high' for strong dependence on\n"
+    "  specific details, 'exact' when every word matters (diffs, error\n"
+    "  messages, config values, exact quotes).\n"
+    "</compaction_judge_request>\n"
+)
+
+N_BUCKET_MAP: dict[str, int] = {
+    "0_10": 5,
+    "10_30": 10,
+    "30_60": 30,
+    "60_plus": 60,
+}
+
+# history_dependency -> (S_ratio, K_min_pct)
+DEPENDENCY_PARAMS: dict[str, tuple[float, float]] = {
+    "low":    (0.04, 0.02),
+    "medium": (0.08, 0.04),
+    "high":   (0.15, 0.10),
+    # "exact" means skip compaction entirely
+}
+
+K_CANDIDATE_PCTS = [0.02, 0.05, 0.10, 0.15, 0.25]
+
+S_MIN = 500
+S_MAX = 8000
+
+
+def compaction_judge_request_item() -> dict[str, Any]:
+    """Return the user-role message that asks the model for a compaction judge JSON."""
+    return message_item("user", COMPACTION_JUDGE_REQUEST)
+
+
+def parse_judge_response(text: str) -> dict[str, Any] | None:
+    """Extract a compaction judge JSON object from model output text.
+
+    Returns None when the model did not produce a valid judge block.
+    """
+    if not text:
+        return None
+    # Look for a JSON object on its own line (possibly surrounded by other text).
+    for match in _re.finditer(r'\{[^}]+\}', text):
+        try:
+            obj = _json.loads(match.group())
+        except (_json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict) and "history_dependency" in obj:
+            return obj
+    return None
+
+
+def compute_net_gain(
+    *,
+    D: int,          # compressible tokens being replaced
+    U: int,          # retained old user-message tokens (existing logic)
+    K: int,          # retained recent context tokens
+    S: int,          # estimated summary tokens
+    N: int,          # projected remaining calls
+    P_read: float,   # cache read price per token
+    P_write: float,  # write / uncached input price per token
+    compact_cost: float,  # estimated cost of the summary-generation call (USD)
+) -> float:
+    """Return the estimated net gain in USD of compacting now with parameters K, S.
+
+    Simplified MVP: D_c = D-U, D_n = 0, K_c = K+U.
+    """
+    replaced = max(0, D - U)
+    retained = K + U
+    save = replaced * N * P_read
+    summary_cost = S * (P_write + (N - 1) * P_read)
+    cache_rebuild = retained * (P_write - P_read)
+    return save - summary_cost - cache_rebuild - compact_cost
+
+
+def estimate_compact_cost(
+    *,
+    D: int,
+    S: int,
+    instruction_tokens: int = 500,
+    P_summary_in: float = 0.0,
+    P_summary_out: float = 0.0,
+) -> float:
+    """Estimate the cost of the summary-generation model call in USD."""
+    input_tokens = D + instruction_tokens
+    return input_tokens * P_summary_in + S * P_summary_out
+
+
+def retain_recent_context(
+    input_items: list[dict[str, Any]],
+    K: int,
+) -> list[dict[str, Any]]:
+    """Return the most recent items from *input_items* totalling up to K tokens.
+
+    Items are taken from the tail forward, preferring whole items.  Only
+    user/assistant messages and tool outputs are eligible; system context
+    items (rules, env, skills) are skipped because they are re-emitted each
+    epoch.
+    """
+    selected: list[dict[str, Any]] = []
+    remaining = K
+    for item in reversed(input_items):
+        typ = item.get("type")
+        # Keep ordinary messages and tool artefacts.
+        if typ not in ("message", "function_call", "function_call_output"):
+            continue
+        if typ == "message":
+            role = item.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            text = message_item_text(item)
+            # Skip system-context user messages.
+            if (
+                "<runtime_environment>" in text
+                or "<model_levels>" in text
+                or "<runtime_helpers>" in text
+                or "<workspace_rules" in text
+                or "<workspace_rule_index>" in text
+                or "<active_cwd_notice>" in text
+                or "<goal_mode" in text
+                or "<worktree" in text
+                or "<conversation_summary>" in text
+                or "<available_skills>" in text
+                or "<available_mcp_servers>" in text
+                or "<context_update" in text
+                or "<retained_history" in text
+            ):
+                continue
+        tokens = estimate_tokens([item])
+        if tokens <= remaining:
+            selected.append(copy.deepcopy(item))
+            remaining -= tokens
+        else:
+            # Partial inclusion: truncate text content.
+            text = message_item_text(item)
+            if remaining > 0 and text:
+                truncated = truncate_text_to_estimated_tokens(text, remaining)
+                selected.append(message_item(item.get("role") or "user", truncated))
+            break
+    selected.reverse()
+    return selected
+
+
+# ---------------------------------------------------------------------------
+# Compaction trigger, replacement, and retention (existing)
+# ---------------------------------------------------------------------------
 
 COMPACTION_USER_MESSAGE_MAX_TOKENS = 20_000
 TEXT_CONTENT_TYPES = {"input_text", "output_text", "text", "refusal"}
@@ -36,8 +198,25 @@ def compaction_trigger_item() -> dict[str, Any]:
 def compaction_replacement_input(
     input_items: list[dict[str, Any]],
     response: ModelResponse,
+    *,
+    K: int = 0,
 ) -> list[dict[str, Any]]:
-    replacement = retained_history_items(retained_user_messages_after_compaction(input_items))
+    """Build the replacement for pre-compaction history.
+
+    When *K* > 0 the replacement contains three parts:
+      1. retained old user messages (XML-wrapped, existing logic)
+      2. retained recent context (K tokens of verbatim tail)
+      3. compaction summary
+
+    When *K* == 0 the behaviour matches the pre-cache-aware code path (used
+    by threshold-triggered mid-turn compaction).
+    """
+    retained_users = retained_user_messages_after_compaction(input_items)
+    replacement = retained_history_items(retained_users)
+    if K > 0:
+        recent = retain_recent_context(input_items, K)
+        # Don't double-count items already pulled into retained_users.
+        replacement.extend(_retained_history_item(item) for item in recent)
     summary = compaction_response_summary_text(response).strip() or "(no summary available)"
     replacement.append(compaction_summary_item(summary))
     return replacement
