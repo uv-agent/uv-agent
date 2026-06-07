@@ -428,7 +428,7 @@ def test_runtime_read_file_views_and_write_file_preserve_metadata(tmp_path: Path
     assert view.line_count == 3
     assert view.start_line == 1
     assert view.end_line == 3
-    assert view.text == "first\r\nsecond\r\nthird\r\n"
+    assert view.text == "first\nsecond\nthird\n"
     assert view.numbered().splitlines()[1].endswith(": second")
     assert view.newline == "crlf"
     assert view.bom is True
@@ -436,7 +436,7 @@ def test_runtime_read_file_views_and_write_file_preserve_metadata(tmp_path: Path
     tail = read_file(path, tail=1)
     assert tail.start_line == 3
     assert tail.truncated is True
-    assert tail.text == "third\r\n"
+    assert tail.text == "third\n"
 
     missing = read_file(tmp_path / "missing.txt")
     assert missing.exists is False

@@ -173,77 +173,45 @@ from uv_agent_runtime import (
 <rule>Translate shell habits into Python: use read_file instead of cat, search_text/find_files instead of ad-hoc grep/find when they fit, and run_process_text([...]) instead of raw subprocess or shell pipelines for ordinary commands.</rule>
 <rule>For skill files, read SKILL.md with read_file; for commands shown by skills or docs, run them with run_process_text and keep foreseeable follow-up parsing or fallback logic in the same script.</rule>
 </usage_pattern>
-<example name="work-unit-script">
-Pattern only; when the objective and next steps are clear, perform the related investigation in one script. Use Python functions, loops, parsing, timeouts, fallbacks, and output limits to keep the script robust and bounded.
+<example name="round-1-find">
+Phase 1 — find and understand. Batch related searches and reads; stop when you have enough context to decide the next action.
 ```python
-import json
 from pathlib import Path
+from uv_agent_runtime import search_text, read_file
 
-from uv_agent_runtime import find_files, read_file, run_process_text, search_text
+# Locate the relevant code
+hits = search_text("def handle_login", file_types=["py"], max_total=5)
+if not hits:
+    print("handle_login not found – check the function name or search pattern")
+    exit(0)
 
-summary: list[str] = []
+# Read surrounding context; pick the best match when there are multiple hits
+view = read_file(hits[0].path, around="def handle_login", context=30)
+print(f"--- {Path(hits[0].path).name} lines {view.start_line}-{view.end_line} ---")
+print(view.text)
+```
+</example>
+<example name="round-2-act">
+Phase 2 — edit and verify. Once the change is clear from what you just read, apply and verify it in the same script. Do not defer a known edit to the next turn.
+```python
+from uv_agent_runtime import replace_text, run_process_text
 
-
-def section(title: str) -> None:
-    summary.append(f"\\n=== {title} ===")
-
-
-def bounded(text: str, limit: int = 2000) -> str:
-    text = (text or "").strip()
-    if len(text) <= limit:
-        return text
-    return "...<truncated>...\\n" + text[-limit:]
-
-
-def command(args: list[str], *, timeout_s: int = 30) -> str:
-    result = run_process_text(args, timeout_s=timeout_s)
-    output = result.stdout or result.stderr
-    return "\\n".join([
-        f"$ {' '.join(args)}",
-        f"rc={result.returncode}",
-        bounded(output),
-    ])
-
-
-section("repository state")
-summary.append(command(["git", "status", "--short"]))
-summary.append(command(["git", "log", "--oneline", "-5"]))
-
-section("relevant config files")
-config_files = find_files(globs=["pyproject.toml", ".github/**/*.yml", ".github/**/*.yaml"], max_total=20)
-summary.append(f"config files found: {len(config_files)}")
-for path in config_files[:8]:
-    view = read_file(path, head=80)
-    summary.append(f"\\n--- {Path(path).as_posix()} lines {view.start_line}-{view.end_line} ---")
-    summary.append(bounded(view.text, 1200))
-
-section("test references")
-hits = search_text("pytest", globs=["pyproject.toml", ".github/**/*.yml", ".github/**/*.yaml"], literal=True, max_total=30)
-for hit in hits[:15]:
-    summary.append(f"{hit.rel_path}:{hit.line}: {hit.text.strip()[:180]}")
-
-section("optional CI status")
-ci = run_process_text(
-    ["gh", "run", "list", "--limit", "5", "--json", "databaseId,status,conclusion,displayTitle,headSha"],
-    timeout_s=30,
+# Apply the fix (path is known from the previous find step)
+result = replace_text(
+    "src/auth/handlers.py",
+    old='redirect("/old-dashboard")',
+    new='redirect(url_for("dashboard"))',
 )
-if ci.returncode == 0 and ci.stdout.strip():
-    try:
-        runs = json.loads(ci.stdout)
-    except json.JSONDecodeError as exc:
-        summary.append(f"Could not parse gh JSON: {exc}")
-        summary.append(bounded(ci.stdout))
-    else:
-        for item in runs:
-            state = item.get("conclusion") or item.get("status")
-            title = item.get("displayTitle") or "(untitled)"
-            sha = str(item.get("headSha") or "")[:8]
-            summary.append(f"{state}: {title} {sha}")
-else:
-    summary.append("gh run list unavailable or returned no data:")
-    summary.append(bounded(ci.stderr or ci.stdout))
+print(f"Replaced: {result.replacements} change(s)")
 
-print("\\n".join(summary))
+# Quick verification – catch regressions immediately
+test = run_process_text(
+    ["uv", "run", "pytest", "tests/test_auth.py", "-x", "-q"],
+    timeout_s=60,
+)
+print(f"Tests: rc={test.returncode}")
+if test.stdout:
+    print(test.stdout[-800:])
 ```
 </example>
 <helper_selection>

@@ -1025,9 +1025,17 @@ def _selected_line_range(
 
 
 def _slice_text_by_lines(text: str, start_line: int, end_line: int) -> str:
+    """Slice text by 1-indexed line range, normalizing all newlines to LF.
+
+    Original newline metadata is preserved separately in ``FileView.newline``
+    so ``write_file(like=...)`` can restore the correct style.  Normalizing
+    here avoids CRLF double-translation on Windows when scripts print the
+    returned text.
+    """
     if start_line == 0:
         return ""
-    return "".join(text.splitlines(keepends=True)[start_line - 1 : end_line])
+    parts = text.splitlines(keepends=True)[start_line - 1 : end_line]
+    return "".join(parts).replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _validate_read_file_selection(

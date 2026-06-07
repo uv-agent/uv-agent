@@ -3160,25 +3160,25 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "run_process_text([...]) instead of raw subprocess" in turn_context
     assert "For skill files, read SKILL.md with read_file" in turn_context
     assert "keep foreseeable follow-up parsing or fallback logic in the same script" in turn_context
-    assert '<example name="work-unit-script">' in turn_context
-    assert "when the objective and next steps are clear" in turn_context
-    assert "Use Python functions, loops, parsing, timeouts, fallbacks, and output limits" in turn_context
-    assert "keep the script robust and bounded" in turn_context
-    assert "safe next steps" not in turn_context
-    assert "Keep caution" not in turn_context
-    assert "from __future__ import annotations" not in turn_context
-    assert "import json" in turn_context
-    assert "from uv_agent_runtime import find_files, read_file, run_process_text, search_text" in turn_context
-    assert "def section(title: str) -> None" in turn_context
-    assert "def bounded(text: str, limit: int = 2000) -> str" in turn_context
-    assert "def command(args: list[str], *, timeout_s: int = 30) -> str" in turn_context
-    assert 'return "\\n".join([' in turn_context
-    assert "config_files = find_files" in turn_context
-    assert "for path in config_files[:8]" in turn_context
-    assert "json.loads(ci.stdout)" in turn_context
-    assert "except json.JSONDecodeError as exc" in turn_context
-    assert "gh run list unavailable or returned no data" in turn_context
-    assert 'print("\\n".join(summary))' in turn_context
+    assert '<example name="round-1-find">' in turn_context
+    assert "find and understand" in turn_context
+    assert "Batch related searches and reads" in turn_context
+    assert "stop when you have enough context to decide the next action" in turn_context
+    assert "edit and verify" in turn_context
+    assert "Do not defer a known edit to the next turn" in turn_context
+    assert "from uv_agent_runtime import search_text, read_file" in turn_context
+    assert 'search_text("def handle_login"' in turn_context
+    assert "handle_login not found" in turn_context
+    assert 'read_file(hits[0].path, around="def handle_login"' in turn_context
+    assert "from uv_agent_runtime import replace_text, run_process_text" in turn_context
+    assert "replace_text(" in turn_context
+    assert 'redirect("/old-dashboard")' in turn_context
+    assert 'redirect(url_for("dashboard"))' in turn_context
+    assert '"uv", "run", "pytest", "tests/test_auth.py"' in turn_context
+    assert "def section" not in turn_context
+    assert "def bounded" not in turn_context
+    assert "def command" not in turn_context
+    assert "json.loads" not in turn_context
     assert "<helper_selection>" in turn_context
     assert "Listed helpers are ordinary Python functions" in turn_context
     assert "combined with each other, standard library code, and control flow" in turn_context
