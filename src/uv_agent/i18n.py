@@ -7,6 +7,7 @@ TEXT = {
     "en": {
         "idle": "Idle",
         "working": "Working",
+        "judging": "Judging",
         "compacting": "Compacting",
         "sending": "Sending",
         "thinking_status": "Thinking",
@@ -314,6 +315,7 @@ TEXT = {
     "zh": {
         "idle": "空闲",
         "working": "工作中",
+        "judging": "判断中",
         "compacting": "压缩中",
         "sending": "发送中",
         "thinking_status": "思考中",

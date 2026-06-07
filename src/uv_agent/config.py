@@ -118,6 +118,14 @@ class CompressionConfig:
     model_level: str | None = None
     trigger_ratio: float = 0.7
     min_tokens: int = 5_000
+    # Cache-aware NetGain compaction (judge round before each turn).
+    # When enabled the simple trigger_ratio/min_tokens thresholds still apply
+    # inside tool loops as a safety net (K = 0.25 * context_window).
+    cache_aware: bool = False
+    margin: float = 1.5
+    min_gain_usd: float = 0.0001
+    judge_model_level: str | None = None  # None = reuse compact model_level
+    judge_min_context_ratio: float = 0.20  # skip judge when context < 20%
 
 
 @dataclass(frozen=True)
