@@ -402,6 +402,7 @@ class AgentEngine:
             rpc_server.register_method("helper.resolve", self.plugins.resolve_helper)
         self._plugins_started = False
         self._plugins_start_task: asyncio.Task[None] | None = None
+        self._last_judge: dict[str, Any] | None = None
 
     def close(self) -> None:
         """Release long-lived host resources owned by the engine."""
@@ -481,6 +482,14 @@ class AgentEngine:
             self.model_client.reload_config(self.config)  # type: ignore[attr-defined]
         self.runner.config = self.config.runner
         self._last_config_refresh_at = now
+
+    def _record_judge(self, data: dict[str, Any]) -> None:
+        """Store the most recent judge calculation for /status display."""
+        self._last_judge = data
+
+    def last_judge_summary(self) -> dict[str, Any] | None:
+        """Return the most recent cache-aware judge calculation, if any."""
+        return self._last_judge
 
     async def run_turn(
         self,
@@ -1329,6 +1338,8 @@ class AgentEngine:
         # Cheap gate: skip when context is below the judge threshold.
         total_tokens = estimate_tokens(input_items + [message_item("system", system_instructions)])
         if total_tokens < int(ctx * self.config.runtime.compression.judge_min_context_ratio):
+            self._record_judge({"skipped": True, "reason": "below_threshold",
+                               "total_tokens": total_tokens})
             return _done()
 
         # Build judge input: system + history + judge request (without the real user message).
@@ -1381,25 +1392,39 @@ class AgentEngine:
 
         judge = parse_judge_response(response.output_text)
         if judge is None:
+            self._record_judge({"skipped": True, "reason": "parse_failed"})
             return _done()
 
         dependency = str(judge.get("history_dependency") or "")
         if dependency == "exact" or dependency not in DEPENDENCY_PARAMS:
+            self._record_judge({"skipped": True, "reason": "dependency",
+                               "dependency": dependency})
             return _done()
 
         N = N_BUCKET_MAP.get(str(judge.get("remaining_calls_bucket") or ""))
         if N is None:
+            self._record_judge({"skipped": True, "reason": "unknown_bucket",
+                               "bucket": str(judge.get("remaining_calls_bucket") or "")})
             return _done()
 
         S_ratio, K_min_pct = DEPENDENCY_PARAMS[dependency]
 
-        # Pricing (USD per token).
+        # Pricing (per token, currency matches pricing.currency).
         pricing = self.config.pricing
         model_name = compact_model.name
         model_pricing = pricing.models.get(model_name) if pricing else None
         if model_pricing is not None:
             P_write = (model_pricing.input or 0.0) / 1_000_000.0
-            P_read = (model_pricing.cached_input or P_write * 1_000_000.0) / 1_000_000.0
+            if model_pricing.cached_input is not None:
+                P_read = model_pricing.cached_input / 1_000_000.0
+            else:
+                P_read = P_write
+            # When cache reads are priced at zero the NetGain formula
+            # cannot generate positive savings (save = replaced*N*0 = 0).
+            # Use a small fraction of P_write as a conservative floor so
+            # cache-aware compaction can still fire for these models.
+            if P_read == 0.0:
+                P_read = P_write * 0.01
             P_summary_out = (model_pricing.output or 0.0) / 1_000_000.0
         else:
             P_write = P_read = P_summary_out = 0.0
@@ -1443,6 +1468,8 @@ class AgentEngine:
                 best_S = S
 
         if best_K is None:
+            self._record_judge({"skipped": True, "reason": "no_valid_K",
+                               "D": D, "U": U, "N": N, "dependency": dependency})
             return _done()
 
         threshold = max(
@@ -1454,6 +1481,10 @@ class AgentEngine:
         )
 
         if best_gain <= threshold:
+            self._record_judge({"triggered": False,
+                               "dependency": dependency, "N": N,
+                               "D": D, "U": U, "best_K": best_K, "best_S": best_S,
+                               "net_gain": best_gain, "threshold": threshold})
             return _done()
 
         # Run compaction with the chosen K.
@@ -1475,8 +1506,16 @@ class AgentEngine:
             _emit(self._publish_event(self._compaction_completed_event(
                 thread_id, turn_id, compact_result.result,
             )))
+            self._record_judge({"triggered": True, "compacted": True,
+                               "dependency": dependency, "N": N,
+                               "D": D, "U": U, "best_K": best_K, "best_S": best_S,
+                               "net_gain": best_gain, "threshold": threshold})
             return _done(compacted=True)
 
+        self._record_judge({"triggered": True, "compacted": False,
+                           "dependency": dependency, "N": N,
+                           "D": D, "U": U, "best_K": best_K, "best_S": best_S,
+                           "net_gain": best_gain, "threshold": threshold})
         return _done()
 
     def _compaction_should_run(

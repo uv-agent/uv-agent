@@ -25,7 +25,7 @@ from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.tui.formatting import format_elapsed, short_block, short_thread
-from uv_agent.billing import billing_total_from_metadata, format_billing_total
+from uv_agent.billing import billing_total_from_metadata, currency_symbol, format_billing_total
 from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
 from uv_agent.tui2.events import (
@@ -2401,6 +2401,30 @@ class AnsiUvAgentApp:
         else:
             self._flush(TranscriptCell("event", text="cleared view · new thread"))
 
+    def _format_judge_line(self, judge: dict[str, Any]) -> str:
+        """Format the most recent cache-aware judge result for /status display."""
+        if judge.get("skipped"):
+            reason = judge.get("reason", "?")
+            detail = ""
+            if "total_tokens" in judge:
+                detail = f" ({judge["total_tokens"]} tokens)"
+            elif "dependency" in judge:
+                detail = f" (dep={judge["dependency"]})"
+            return f"judge: skipped · {reason}{detail}"
+        dep = judge.get("dependency", "?")
+        N = judge.get("N", "?")
+        D = judge.get("D", "?")
+        K = judge.get("best_K", "?")
+        S = judge.get("best_S", "?")
+        gain = judge.get("net_gain", 0.0)
+        thr = judge.get("threshold", 0.0)
+        triggered = "compacted" if judge.get("compacted") else ("triggered" if judge.get("triggered") else "skipped")
+        sym = currency_symbol(self.engine.config.pricing.currency)
+        return (
+            f"judge: dep={dep} N={N} D={D} K={K} S={S} "
+            f"gain={sym}{gain:.5f} thr={sym}{thr:.5f} → {triggered}"
+        )
+
     def _status_text(self) -> str:
         level_name = self.state.level or self.engine.config.runtime.default_level
         lines = [f"level: {level_name}"]
@@ -2418,6 +2442,12 @@ class AnsiUvAgentApp:
             lines.append(f"compression: trigger {stats.threshold_tokens} · headroom {stats.headroom_tokens}")
         except Exception as exc:
             lines.append(f"context: unavailable ({exc})")
+        try:
+            judge = self.engine.last_judge_summary()
+            if judge:
+                lines.append(self._format_judge_line(judge))
+        except Exception:
+            pass
         lines.append(f"thread: {short_thread(self.state.thread_id)}")
         if self.state.title:
             lines.append(f"title: {self.state.title}")
