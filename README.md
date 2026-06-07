@@ -1,81 +1,110 @@
-# uv-agent
+<p align="center">
+  <img src="docs/t2.png" alt="uv-agent tui2 screenshot" width="600">
+</p>
 
-<img align="right" src="docs/t2.png" alt="uv-agent tui2 screenshot" width="300">
+# uv-agent
 
 [简体中文](README.zh-CN.md)
 
-`uv-agent` is a Windows-first coding agent with an ANSI-first terminal TUI.
-It is designed
-around one external action surface: `run_python`. The model writes managed Python
-scripts, uv-agent runs them through `uv run`, and the runtime exposes focused
-helpers for editing files, running commands, searching code, using MCP, launching
-subagents, and attaching images.
+**Python-native coding agent — one `run_python` boundary. Every external action is
+auditable, replayable, and interruptible.**
 
-That single boundary keeps coding-agent work easier to inspect, replay, interrupt,
-and compact during long sessions. The design also makes it easy to port to any
-Python and uv environment. The project is still experimental, so public APIs,
-config fields, and runtime behavior may change.
+`uv-agent` channels all model capabilities through a single, well-defined exit: the
+model can only touch the outside world via `run_python`. Each call is a complete
+Python script executed in a `uv run`-managed isolated environment, using
+`uv_agent_runtime` helpers for file editing, command execution, code search, MCP,
+sub-agents, images, and more. With only one exit, you can replay any run and see
+exactly what happened and why.
 
-## Why uv-agent?
+The project is still experimental. Public APIs, config fields, and runtime behavior
+may change.
 
-- **Windows-first coding UI.** A terminal-native transcript with a multi-line
-  composer, command palette, model/tool timeline, file and thread mentions, image
-  attachments, and English or Chinese UI.
-- **One action boundary.** No direct shell, filesystem, browser, or MCP model
-  tools; external work flows through managed Python runs and one persistent event
-  stream.
-- **Long-task friendly.** Checkpoint compaction, workspace rules, skills, MCP
-  declarations, Goal state, and Worktree state are replayed as structured context
-  when needed.
-- **Practical coding workflows.** `/goal` adds lightweight per-thread
-  checklist/notes for longer tasks; Worktree mode creates an isolated Git branch
-  worktree for task-focused changes.
-- **Extensible runtime.** Plugins can add `uv_agent_runtime` helpers, subscribe
-  to agent events, and submit turns from external systems without adding extra
-  model-visible tools.
+## Features
+
+- **Single tool boundary** — no shell, filesystem, browser, or MCP model tools. The
+  model writes Python; the managed runtime executes it. Every external action is an
+  auditable script.
+- **Cache-aware NetGain compaction** — long conversations no longer trigger blind
+  compression. A pre-turn lightweight judge round lets the model estimate remaining
+  calls and history dependency, then computes the net gain of compaction via an
+  economic formula. Compression fires only when cache savings outweigh information
+  loss. Recent context is retained verbatim (K tokens) to avoid losing key details.
+- **Python managed runtime** — scripts run in a project-shared `uv` environment.
+  `uv_agent_runtime` provides helpers for read/write/edit, ripgrep search,
+  subprocesses, dependency installation, sub-agents, MCP clients, and more.
+  Scripts serve as documentation — no opaque shell commands.
+- **Plugin system** — plain Python packages discovered via `uv_agent.plugins` entry
+  point. Register runtime helpers, subscribe to events, submit turns from external
+  systems. `uvx --with your-plugin uv-agent` and you're set.
+- **Self-bootstrapping** — uv-agent is developed using uv-agent. Reading, editing,
+  testing, and iterating on the project are done with uv-agent itself.
+- **Progressive context disclosure** — skills, MCP servers, and workspace rules are
+  not dumped into the prompt all at once. The model receives an index first; full
+  content is disclosed only when needed. Removed capabilities are explicitly marked
+  to prevent stale-context errors.
+- **Goal mode durable memory** — `/goal` creates a per-thread checklist/notes layer
+  independent of the chat transcript. After compaction or resume, the model consults
+  Goal files rather than relying solely on summarized history.
+- **Agent View parallel workspaces** — dispatch bug investigations, implementation
+  experiments, and test fixes to isolated Git worktree background sessions. Track
+  them all from a single dashboard.
+- **Prompt-cache-friendly design** — the system prompt prefix is guaranteed
+  byte-identical within an epoch. Compaction requests share the same prefix structure
+  as normal calls, maximizing provider-side cache hits. Cache reads are nearly free.
+
+## Cache-Aware Compaction
+
+The cache-aware compaction introduced in v0.16.0 is uv-agent's core optimization for
+long-running sessions. Unlike traditional "compress when context hits N%," uv-agent
+makes an economic decision before every turn:
+
+1. The model estimates how many more conversation rounds are needed
+   (`remaining_calls_bucket`) and how strongly the task depends on history
+   (`history_dependency`).
+2. It enumerates K retention candidates and evaluates the NetGain for each: future
+   cache savings minus compaction call cost, cache invalidation loss, information
+   distortion penalty, plus context quality improvement gain.
+3. Compaction fires only when the best net gain exceeds a margin-scaled threshold;
+   otherwise it skips, avoiding wasted compression for short tasks.
+
+Compaction requests share the exact same prefix structure as normal calls (system
+prompt → tools → messages), ensuring provider-side prompt prefix caches stay warm.
+Over 90% of input tokens in a typical compaction call are billed at cached rates
+(typically 1%–10% of the normal input price).
+
+This design draws on the DP compaction algorithm from
+[bash-agent](https://github.com/lloydzhou/bash-agent), with thanks.
 
 ## Quick Start
 
-Install the required tools:
+Prerequisites:
 
 - **uv** — https://docs.astral.sh/uv/getting-started/installation/
 - **ripgrep** — https://github.com/BurntSushi/ripgrep#installation
 - **Git** — needed for normal coding workflows and Worktree mode.
 
-Run the latest published package:
-
 ```powershell
+# Run the latest published release
 uvx uv-agent@latest
-```
 
-Run from a local checkout:
-
-```powershell
+# Run from a local checkout
 uv run uv-agent
-```
 
-Ask a single prompt without opening the TUI:
+# Single-turn question (no TUI)
+uvx uv-agent@latest ask "Summarize the project structure"
 
-```powershell
-uvx uv-agent@latest ask "Reply with exactly: ok"
-```
-
-Resume an existing thread:
-
-```powershell
-uvx uv-agent@latest ask --thread thr_xxx "Continue from here"
+# Resume an existing thread
+uvx uv-agent@latest ask --thread thr_xxx "Continue where we left off"
 ```
 
 ## Model Configuration
 
-uv-agent does not ship a real provider configuration. Configure at least one
-provider, model, and level before making model calls.
+uv-agent ships with no real provider configuration. Configure at least one provider,
+model, and level in `~/.uv-agent/config.json` (or project-level
+`.uv-agent/config.json`). Keep API keys in environment variables or git-ignored
+local config.
 
-Config is loaded from `~/.uv-agent/config.json`, then optional project overrides
-from `.uv-agent/config.json`. The project-local `.uv-agent/` directory is ignored
-by git. Prefer environment variables or ignored local config for API keys.
-
-Supported model API formats:
+Supported API formats:
 
 | `api` value | Format |
 | --- | --- |
@@ -218,121 +247,67 @@ Supported model API formats:
 
 </details>
 
-Use `/config` in the TUI to switch user-facing settings such as default level,
-language, completion notification, and automatic compression. See
-[configuration](docs/configuration.md) for every supported option and
-[config.example.json](docs/config.example.json) for a detailed standalone example.
+Use `/config` in the TUI to switch default level, language, and compression
+settings. See [configuration](docs/configuration.md) for every option and
+[config.example.json](docs/config.example.json) for a standalone example.
 
 ## Everyday Workflow
 
-- Type normally and press `Enter` to send. Use `Ctrl+Enter` or `Ctrl+J` when you
-  want to insert a newline in the composer.
-- Type `/` from an empty composer to open the tui2 command palette; continue
-  typing to filter commands.
-- Use `@` for file mentions, `@@` for thread mentions, and `/threads` to resume
-  past work.
-- Use `/level <name>` (or `/model <name>`) to switch model level; the selected
-  level is remembered per thread.
-- Use `/goal enable [objective]` for durable checklist/notes. It can be enabled
-  before the first message and will initialize when the thread starts.
-- Use Agent View when you want to delegate work into background worktree
-  sessions; see [Agent View](#agent-view) for how it fits into the workflow.
-- Use `/status`, `/mcp`, and `/skills` to inspect runtime state and available
-  capabilities.
-- To use the original Textual-only panels such as `/config`, `/models`, Worktree
-  management, or clipboard image shortcuts, start the old UI with `uv-agent tui`.
+- Type and press `Enter` to send. Use `Ctrl+Enter` / `Ctrl+J` for newlines.
+- Type `/` from an empty composer to open the command palette; type to filter.
+  `@` for file mentions, `@@` for thread mentions.
+- `/level <name>` to switch models; `/status` to inspect runtime state including
+  cache compaction judge details.
+- `/goal enable [objective]` for durable task checklists across long sessions.
+- Agent View dispatches background tasks to isolated Git worktrees.
+- Use `uv-agent tui` for the legacy Textual panels (`/config`, `/models`, etc.).
 
-See [TUI and slash commands](docs/tui.md) for the full command and shortcut list.
-
-## Agent View
-
-Agent View is uv-agent's dashboard for supervising multiple agent sessions that
-run beside your main transcript. It is meant for work you want to delegate or
-parallelize without blocking the current conversation: bug investigations,
-implementation experiments, test fixes, review passes, or longer validation
-tasks.
-
-Tasks dispatched from Agent View run as background sessions in isolated Git
-worktrees with generated branches. That keeps each task's edits away
-from your current checkout while still making the result easy to inspect,
-compare, merge, or discard. The dashboard keeps those sessions in one place so
-you can track status, skim the latest output, continue a specific session, or
-bring it back into the main transcript when it needs direct attention.
-
-Agent View is a scoped work queue rather than a global thread list. Normal
-threads only appear there after they are explicitly joined, while worktree tasks
-created from Agent View are tracked automatically. This keeps the view focused on
-delegated work instead of every conversation in the project.
+See [TUI and slash commands](docs/tui.md) for the full list.
 
 ## TUI Interfaces
 
-uv-agent ships two interactive interfaces:
+- **tui2** (default, `uv-agent` or `uv-agent tui2`) — lightweight ANSI TUI rendered
+  directly in the terminal. Compact status rows, streaming events, Goal/Worktree
+  mode, and image attachments.
+- **Textual TUI** (`uv-agent tui`) — deprecated, kept for compatibility. The older
+  Textual widget-based interface. Screenshot: [docs/t1.png](docs/t1.png).
 
-- **tui2** — the default (`uv-agent` or `uv-agent tui2`). A lightweight ANSI TUI
-  that renders directly in the terminal, with compact status rows, command and
-  mention palettes, streaming model/tool events, Goal mode, Worktree mode, and
-  image attachments.
-- **Textual TUI** — the original widget-based interface (`uv-agent tui`). It keeps
-  the richer Textual layout and remains available when you prefer that UI. Its
-  screenshot is linked here: [docs/t1.png](docs/t1.png).
+## Agent View
+
+Agent View is a dashboard for managing multiple background agent sessions. Tasks
+run in isolated Git worktrees on auto-generated branches, keeping edits away from
+your current checkout. Track status, skim output, continue or discard tasks — all
+from one panel.
 
 ## Plugins
 
-Plugins are normal Python packages discovered through the `uv_agent.plugins`
-entry point group. They run in the uv-agent host process and can register runtime
-helpers, subscribe to events, or submit turns from external systems.
-
-For a one-off run with an extra plugin package, add it beside the app launched by
-`uvx`:
+Plugins are Python packages discovered via the `uv_agent.plugins` entry point. They
+run in the uv-agent host process and can register runtime helpers, subscribe to
+events, and submit turns from external systems.
 
 ```powershell
 uvx --with your-uv-agent-plugin uv-agent@latest
 ```
 
-Disable installed plugins with `plugins.disabled` in config. See
-[Plugin system](docs/plugins.md) for the plugin API, event bus, helper
-registration, and examples.
+See [Plugin system](docs/plugins.md) for details.
 
-## Runtime And Context
+## Runtime & Context
 
-Every model-visible turn is built from a stable system prompt plus replayable
-pre-user context items. The system prompt stays compact and rarely changes;
-project and runtime details are delivered as structured messages immediately
-before the user turn.
+Every model turn = stable system prompt + on-demand structured context.
 
-- **Managed runtime.** `run_python` is the only external action surface. Managed
-  scripts run in the project-shared uv environment at
-  `~/.uv-agent/projects/<project-id>/runner/scriptenv/` and import
-  `uv_agent_runtime` helpers for file edits, search, subprocesses, dependency
-  installation, subagents, image context, MCP clients, plugin helpers, and more.
-  The script uv environment and the active working directory are separate; the
-  cwd can move with `enter_dir` or Worktree mode.
-- **Incremental runtime context.** Runtime environment, model levels, helper
-  lists, direct script-environment dependencies, skills, MCP servers, and plugin
-  helpers are split into fingerprinted context parts. uv-agent sends only
-  changed parts inside `<context_update ...>` envelopes and explicitly marks
-  removed skills or MCP servers so the model does not rely on stale capabilities.
-- **Workspace and thread context.** Workspace rules are disclosed progressively:
-  the model first receives a rule index, then full AGENTS.md content when it
-  enters a relevant directory. Active cwd changes, image attachments, Worktree
-  notices, tool results, run logs, and thread metadata are persisted in the same
-  event stream and replayed when reconstructing a turn.
-- **Goal mode durable memory.** `/goal` adds a per-thread memory layer under
-  `~/.uv-agent/projects/<project-id>/goals/<thread-id>/` with `goal.json`,
-  `checklist.md`, and `notes.md`. When Goal mode is active, uv-agent replays a
-  `<goal_mode>` notice containing those paths and maintenance rules. The model
-  uses `checklist.md` for acceptance criteria, progress, blockers, and next
-  steps, and `notes.md` for decisions, investigation notes, constraints, and
-  handoff context. The `goal_paths()` runtime helper lets managed scripts find
-  those files without hard-coding paths.
-- **Compaction and resume.** Checkpoint compaction summarizes the conversation
-  while excluding reloadable runtime context, workspace rules, Goal notices, and
-  Worktree notices from retained history. A new epoch replays current structured
-  context before retained history, and Goal files remain the preferred source for
-  long-running task progress after compaction or resume.
-
-Thread state, run logs, shared script dependencies, attachments, Goal files, and
-other project runtime data live under `~/.uv-agent/projects/<project-id>/`.
+- `run_python` is the only external action surface. Scripts execute in a
+  project-shared uv environment and import `uv_agent_runtime` helpers. The uv
+  environment and working directory are separate; the cwd can change via
+  `enter_dir` or Worktree mode.
+- Runtime context (helper lists, skills, MCP servers, etc.) uses fingerprinted
+  incremental updates — only changed parts are injected, and removed capabilities
+  are explicitly marked.
+- Workspace rules are disclosed progressively: index first, full AGENTS.md only
+  when entering the relevant directory.
+- Goal mode provides a durable checklist/notes layer independent of the chat
+  transcript, preserving task progress across compaction and resume.
+- Checkpoint compaction summarizes the conversation while excluding reloadable
+  runtime context. New epochs replay structured context before retained history.
 
 ## Documentation
 
@@ -344,15 +319,21 @@ other project runtime data live under `~/.uv-agent/projects/<project-id>/`.
 
 ## Development
 
-uv-agent is developed in a self-bootstrapping style: the project is routinely
-read, edited, tested, and refined with uv-agent itself.
+uv-agent is self-bootstrapping — it is developed using uv-agent itself for reading,
+editing, testing, and iterating.
 
 ```powershell
 uv run pytest
 ```
 
-Local debug state, screenshots, config, scripts, runs, and thread data belong in
-`.uv-agent/` and should stay out of git.
+Local debug state, screenshots, config, and run data belong in `.uv-agent/` and
+should stay out of git.
+
+## Acknowledgments
+
+The cache-aware compaction design draws on the DP compaction algorithm and cache
+alignment approach from [bash-agent](https://github.com/lloydzhou/bash-agent),
+with thanks.
 
 ## License
 
