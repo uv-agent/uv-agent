@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from uv_agent.ids import new_id
+from uv_agent.prompts import IMAGE_ATTACHMENT_NOTE_TEMPLATE, IMAGE_ATTACHMENT_TEXT_TEMPLATE
 
 
 SUPPORTED_IMAGE_MIME_TYPES = {
@@ -98,12 +99,12 @@ def image_message_item(attachment: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(attachment["stored_path"]))
     mime_type = str(attachment["mime_type"])
     data_url = image_data_url(path, mime_type)
-    text = (
-        "Image attached with uv_agent_runtime.look_at"
-        f" ({attachment.get('attachment_id')}, {path.name})."
+    text = IMAGE_ATTACHMENT_TEXT_TEMPLATE.format(
+        attachment_id=attachment.get("attachment_id"),
+        filename=path.name,
     )
     if note:
-        text += f"\nUser note: {note}"
+        text += "\n" + IMAGE_ATTACHMENT_NOTE_TEMPLATE.format(note=note)
     return {
         "type": "message",
         "role": "user",

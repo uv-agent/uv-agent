@@ -10,10 +10,25 @@ from uv_agent.time import utc_now_iso
 
 from uv_agent.prompts import (
     GOAL_MODE_ACTIVE,
+    GOAL_MODE_ACTIVE_RULES,
+    GOAL_MODE_CHECKLIST_FILE_TEMPLATE,
     GOAL_MODE_CHECKLIST_TEMPLATE,
+    GOAL_MODE_CLOSE,
     GOAL_MODE_DISABLED,
+    GOAL_MODE_DISABLED_OPEN,
     GOAL_MODE_DISABLED_RULES,
+    GOAL_MODE_ENABLED_OPEN,
+    GOAL_MODE_FIELD_CHECKLIST,
+    GOAL_MODE_FIELD_DOCUMENT,
+    GOAL_MODE_FIELD_OBJECTIVE,
+    GOAL_MODE_FIELD_STATE,
+    GOAL_MODE_FILES_CLOSE,
+    GOAL_MODE_FILES_OPEN,
+    GOAL_MODE_NOTES_FILE_TEMPLATE,
     GOAL_MODE_NOTES_HINT,
+    GOAL_MODE_RULES_CLOSE,
+    GOAL_MODE_RULES_OPEN,
+    XML_ELEMENT_TEMPLATE,
 )
 
 GoalModeStatus = Literal["enabled", "disabled"]
@@ -25,6 +40,10 @@ GOAL_NOTES_FILENAME = "notes.md"
 
 def _xml_text(value: object) -> str:
     return xml_escape(str(value), quote=False)
+
+
+def _xml_element(tag: str, value: object) -> str:
+    return XML_ELEMENT_TEMPLATE.format(tag=tag, value=_xml_text(value))
 
 
 @dataclass(frozen=True)
@@ -130,48 +149,42 @@ def render_goal_mode_notice(state: GoalState, *, status: GoalModeStatus) -> str:
     if status == "disabled":
         return "\n".join(
             [
-                '<goal_mode status="disabled">',
+                GOAL_MODE_DISABLED_OPEN,
                 GOAL_MODE_DISABLED,
                 "",
-                "<files>",
-                f"<state>{_xml_text(state.paths.state)}</state>",
-                f"<checklist>{_xml_text(state.paths.checklist)}</checklist>",
-                f"<document>{_xml_text(state.paths.notes)}</document>",
-                "</files>",
+                GOAL_MODE_FILES_OPEN,
+                _xml_element(GOAL_MODE_FIELD_STATE, state.paths.state),
+                _xml_element(GOAL_MODE_FIELD_CHECKLIST, state.paths.checklist),
+                _xml_element(GOAL_MODE_FIELD_DOCUMENT, state.paths.notes),
+                GOAL_MODE_FILES_CLOSE,
                 "",
                 GOAL_MODE_DISABLED_RULES,
-                "</goal_mode>",
+                GOAL_MODE_CLOSE,
             ]
         )
 
     lines = [
-        '<goal_mode status="enabled">',
+        GOAL_MODE_ENABLED_OPEN,
         GOAL_MODE_ACTIVE,
     ]
     if state.objective.strip():
-        lines.extend(["", f"<objective>{_xml_text(state.objective.strip())}</objective>"])
+        lines.extend(["", _xml_element(GOAL_MODE_FIELD_OBJECTIVE, state.objective.strip())])
     lines.extend(
         [
             "",
-            "<files>",
-            f"<state>{_xml_text(state.paths.state)}</state>",
-            f"<checklist>{_xml_text(state.paths.checklist)}</checklist>",
-            f"<document>{_xml_text(state.paths.notes)}</document>",
-            "</files>",
+            GOAL_MODE_FILES_OPEN,
+            _xml_element(GOAL_MODE_FIELD_STATE, state.paths.state),
+            _xml_element(GOAL_MODE_FIELD_CHECKLIST, state.paths.checklist),
+            _xml_element(GOAL_MODE_FIELD_DOCUMENT, state.paths.notes),
+            GOAL_MODE_FILES_CLOSE,
             "",
-            "<rules>",
-            "<rule>Use these files as durable external memory for this thread goal.</rule>",
-            "<rule>Maintain checklist.md for acceptance criteria, tasks, progress, blockers, and the next step.</rule>",
-            "<rule>Maintain notes.md for decisions, investigation notes, constraints, and handoff context.</rule>",
-            "<rule>Read or update the files with run_python when goal progress changes or when resuming from unclear context.</rule>",
-            "<rule>Do not paste full goal files into chat unless the user asks or it is necessary.</rule>",
-            "<rule>During compaction or resume, prefer these files over conversation memory for goal progress.</rule>",
-            "</rules>",
-            "</goal_mode>",
+            GOAL_MODE_RULES_OPEN,
+            GOAL_MODE_ACTIVE_RULES,
+            GOAL_MODE_RULES_CLOSE,
+            GOAL_MODE_CLOSE,
         ]
     )
     return "\n".join(lines)
-
 
 def _read_goal_json(path: Path) -> dict[str, Any]:
     try:
@@ -187,43 +200,11 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 
 def _checklist_template(objective: str) -> str:
     objective_line = objective.strip() or GOAL_MODE_CHECKLIST_TEMPLATE
-    return f"""# Goal Checklist
-
-Objective: {objective_line}
-
-## Acceptance Criteria
-
-- [ ] Define what complete means for this goal.
-
-## Tasks
-
-- [ ] Capture the first concrete task.
-
-## Current Next Step
-
-- Decide the next action.
-
-## Blockers
-
-- None recorded.
-"""
-
+    return GOAL_MODE_CHECKLIST_FILE_TEMPLATE.format(objective=objective_line)
 
 def _notes_template(objective: str) -> str:
     objective_line = objective.strip() or GOAL_MODE_CHECKLIST_TEMPLATE
-    return f"""# Goal Notes
-
-Objective: {objective_line}
-
-## Decisions
-
-- None recorded.
-
-## Investigation Notes
-
-- None recorded.
-
-## Handoff Context
-
-{GOAL_MODE_NOTES_HINT}
-"""
+    return GOAL_MODE_NOTES_FILE_TEMPLATE.format(
+        objective=objective_line,
+        handoff_hint=GOAL_MODE_NOTES_HINT,
+    )

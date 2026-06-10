@@ -210,6 +210,11 @@ TOOL_OUTPUT_TRUNCATED_MARKER = "[tool output truncated for context compaction]"
 
 TOOL_OUTPUT_OMITTED_NOTE = "Tool output was omitted to fit the context compaction request."
 
+TOOL_OUTPUT_SHORTENED_NOTE = (
+    "Tool output was shortened to fit the context compaction request. "
+    "Only a head/tail excerpt of large text fields may be present."
+)
+
 # ---------------------------------------------------------------------------
 # Goal mode prompts (extracted from goal_mode.py)
 # ---------------------------------------------------------------------------
@@ -304,6 +309,488 @@ SUBAGENT_LEGACY_UNAVAILABLE = (
     "The legacy ask helper is unavailable. Use workflow.start(...).agent(...).wait() "
     "or workflow.agent(...), then inspect checkpoints/results through the workflow API."
 )
+
+
+# ===========================================================================
+# Shared model-visible context markers and render templates
+# ===========================================================================
+# Purpose: canonical XML-ish block names used in generated model context.
+# Renderers and retention filters import these constants so a prompt/tag rename
+# can be made in one place without leaving stale detection logic elsewhere.
+
+RUNTIME_ENVIRONMENT_TAG = "runtime_environment"
+MODEL_LEVELS_TAG = "model_levels"
+RUNTIME_HELPERS_TAG = "runtime_helpers"
+WORKSPACE_RULES_TAG = "workspace_rules"
+WORKSPACE_RULE_INDEX_TAG = "workspace_rule_index"
+ACTIVE_CWD_NOTICE_TAG = "active_cwd_notice"
+GOAL_MODE_TAG = "goal_mode"
+WORKTREE_TAG = "worktree"
+WORKFLOW_CONTEXT_TAG = "workflow_context"
+CONVERSATION_SUMMARY_TAG = "conversation_summary"
+AVAILABLE_SKILLS_TAG = "available_skills"
+AVAILABLE_MCP_SERVERS_TAG = "available_mcp_servers"
+CONTEXT_UPDATE_TAG = "context_update"
+RETAINED_HISTORY_TAG = "retained_history"
+COMPACTION_JUDGE_REQUEST_TAG = "compaction_judge_request"
+CONTEXT_COMPACTION_REQUEST_TAG = "context_compaction_request"
+PLUGIN_RUNTIME_HELPERS_TAG = "plugin_runtime_helpers"
+
+# Purpose: markers for synthetic pre-user context. These messages are regenerated
+# at context epoch boundaries and should not be retained as ordinary conversation
+# history during compaction or replay.
+PRE_USER_CONTEXT_MARKERS = (
+    f"<{RUNTIME_ENVIRONMENT_TAG}>",
+    f"<{MODEL_LEVELS_TAG}>",
+    f"<{RUNTIME_HELPERS_TAG}>",
+    f"<{WORKSPACE_RULES_TAG}",
+    f"<{WORKSPACE_RULE_INDEX_TAG}>",
+    f"<{ACTIVE_CWD_NOTICE_TAG}>",
+    f"<{GOAL_MODE_TAG}",
+    f"<{WORKTREE_TAG}",
+    f"<{WORKFLOW_CONTEXT_TAG}",
+    f"<{AVAILABLE_SKILLS_TAG}>",
+    f"<{AVAILABLE_MCP_SERVERS_TAG}>",
+    f"<{CONTEXT_UPDATE_TAG}",
+)
+
+# Purpose: extra wrappers used only by compaction. They distinguish summaries,
+# retained history, and compaction judge requests from fresh user instructions.
+COMPACTION_CONTEXT_MARKERS = (
+    f"<{CONVERSATION_SUMMARY_TAG}>",
+    f"<{RETAINED_HISTORY_TAG}",
+    f"<{COMPACTION_JUDGE_REQUEST_TAG}>",
+)
+CONTEXT_SCAFFOLD_MARKERS = PRE_USER_CONTEXT_MARKERS + COMPACTION_CONTEXT_MARKERS
+
+# Purpose: model-visible snippets that describe the current execution/runtime
+# environment. Values are dynamic, while labels/rules are prompt text.
+RUNTIME_ENVIRONMENT_TEMPLATE = """<runtime_environment>
+<workspace>{workspace}</workspace>
+<user_state>{user_state}</user_state>
+<project_state>{project_state}</project_state>
+<run_python_environment>
+<directory>{scriptenv_dir}</directory>
+<pyproject>{scriptenv_pyproject}</pyproject>
+{uv_project_rule}
+<direct_dependencies>
+{dependencies}
+</direct_dependencies>
+</run_python_environment>
+<host>{host}</host>
+<user_language>{user_language}</user_language>
+{persistence}
+</runtime_environment>"""
+RUNTIME_ENVIRONMENT_DEPENDENCIES_EMPTY = '<dependency_list empty="true" />'
+RUNTIME_ENVIRONMENT_DEPENDENCY_TEMPLATE = "<dependency>{dependency}</dependency>"
+RUNTIME_ENVIRONMENT_UV_PROJECT_RULE = (
+    "<rule>This is the uv project environment used by run_python; "
+    "it is not the workspace or active cwd.</rule>"
+)
+RUNTIME_ENVIRONMENT_PERSISTENCE = (
+    "<persistence>Persisted scripts, runs, and threads live under the project state directory.</persistence>"
+)
+MODEL_LEVELS_TEMPLATE = """<model_levels>
+<default>{default}</default>{workflow_default}
+<available>
+{levels}
+</available>
+{rule}
+</model_levels>"""
+MODEL_LEVELS_WORKFLOW_DEFAULT_TEMPLATE = "\n<workflow_default>{workflow_default}</workflow_default>"
+MODEL_LEVELS_LEVEL_TEMPLATE = "<level>{level}</level>"
+MODEL_LEVELS_RULE = (
+    "<rule>level and model_level values are configuration-defined; use only an available name, "
+    "or omit them to use the default.</rule>"
+)
+
+# Purpose: project-rule context prose and structural labels. These blocks tell
+# the model which AGENTS files were loaded and which additional rule files exist
+# without duplicating contents already present in earlier context.
+PROJECT_RULES_DEFAULT_TAG = WORKSPACE_RULES_TAG
+PROJECT_RULES_OPEN_TEMPLATE = "<{heading}{attrs}>"
+PROJECT_RULES_CLOSE_TEMPLATE = "</{heading}>"
+PROJECT_RULE_CONTEXT_PATH_ATTR_TEMPLATE = 'path="{path}"'
+PROJECT_RULE_TRUNCATED_ATTR = 'truncated="true"'
+PROJECT_RULE_OMITTED_FILES_ATTR_TEMPLATE = 'omitted_files="{count}"'
+PROJECT_RULE_ENTRY_OPEN_TEMPLATE = "\n<rule {attrs}>"
+PROJECT_RULE_ENTRY_CLOSE = "</rule>"
+PROJECT_RULE_FILE_ATTR_TEMPLATE = 'file="{file}"'
+PROJECT_RULE_TRUNCATED_SUFFIX = "\n...[truncated]"
+PROJECT_RULE_INDEX_OPEN = f"<{WORKSPACE_RULE_INDEX_TAG}>"
+PROJECT_RULE_INDEX_CLOSE = f"</{WORKSPACE_RULE_INDEX_TAG}>"
+PROJECT_RULE_INDEX_SCAN_DEPTH_TEMPLATE = "scan_depth: {depth}"
+PROJECT_RULE_INDEX_MAX_ENTRIES_TEMPLATE = "max_entries: {max_entries}"
+PROJECT_RULE_INDEX_TRUNCATED_TEMPLATE = "truncated: {truncated}"
+PROJECT_RULE_INDEX_DEPTH_LIMIT_REACHED = (
+    "depth_limit_reached: directories below the scan depth may contain additional rule files."
+)
+PROJECT_RULE_INDEX_ENTRY_LIMIT_REACHED = (
+    "entry_limit_reached: only the first listed rule files are shown."
+)
+
+# Purpose: goal-mode notice and durable-memory file templates. The notice tells
+# the model when goal mode is enabled/disabled; the markdown templates seed the
+# external memory files the model maintains while goal mode is active.
+XML_ELEMENT_TEMPLATE = "<{tag}>{value}</{tag}>"
+GOAL_MODE_DISABLED_OPEN = '<goal_mode status="disabled">'
+GOAL_MODE_ENABLED_OPEN = '<goal_mode status="enabled">'
+GOAL_MODE_CLOSE = "</goal_mode>"
+GOAL_MODE_FILES_OPEN = "<files>"
+GOAL_MODE_FILES_CLOSE = "</files>"
+GOAL_MODE_RULES_OPEN = "<rules>"
+GOAL_MODE_RULES_CLOSE = "</rules>"
+GOAL_MODE_FIELD_STATE = "state"
+GOAL_MODE_FIELD_CHECKLIST = "checklist"
+GOAL_MODE_FIELD_DOCUMENT = "document"
+GOAL_MODE_FIELD_OBJECTIVE = "objective"
+GOAL_MODE_ENABLED_STATUS_FRAGMENT = 'status="enabled"'
+GOAL_MODE_ACTIVE_RULES = (
+    "<rule>Use these files as durable external memory for this thread goal.</rule>\n"
+    "<rule>Maintain checklist.md for acceptance criteria, tasks, progress, blockers, and the next step.</rule>\n"
+    "<rule>Maintain notes.md for decisions, investigation notes, constraints, and handoff context.</rule>\n"
+    "<rule>Read or update the files with run_python when goal progress changes or when resuming from unclear context.</rule>\n"
+    "<rule>Do not paste full goal files into chat unless the user asks or it is necessary.</rule>\n"
+    "<rule>During compaction or resume, prefer these files over conversation memory for goal progress.</rule>"
+)
+GOAL_MODE_CHECKLIST_FILE_TEMPLATE = """# Goal Checklist
+
+Objective: {objective}
+
+## Acceptance Criteria
+
+- [ ] Define what complete means for this goal.
+
+## Tasks
+
+- [ ] Capture the first concrete task.
+
+## Current Next Step
+
+- Decide the next action.
+
+## Blockers
+
+- None recorded.
+"""
+GOAL_MODE_NOTES_FILE_TEMPLATE = """# Goal Notes
+
+Objective: {objective}
+
+## Decisions
+
+- None recorded.
+
+## Investigation Notes
+
+- None recorded.
+
+## Handoff Context
+
+{handoff_hint}
+"""
+
+# Purpose: worktree-mode notice structure. It tells the model which branch/path
+# should be used for filesystem, git, build, and test operations.
+WORKTREE_DELETED_OPEN = '<worktree status="deleted">'
+WORKTREE_ACTIVE_OPEN = '<worktree status="active">'
+WORKTREE_CLOSE = "</worktree>"
+WORKTREE_WORKSPACE_OPEN = "<workspace>"
+WORKTREE_WORKSPACE_CLOSE = "</workspace>"
+WORKTREE_RULES_OPEN = "<rules>"
+WORKTREE_RULES_CLOSE = "</rules>"
+WORKTREE_FIELD_BRANCH = "branch"
+WORKTREE_FIELD_PATH = "path"
+WORKTREE_FIELD_ORIGIN = "origin"
+WORKTREE_FIELD_CURRENT_CWD = "current_cwd"
+WORKTREE_FIELD_BASE_REF = "base_ref"
+WORKTREE_FIELD_HEAD = "head"
+WORKTREE_FIELD_CREATED_AT = "created_at"
+WORKTREE_FIELD_DELETED_AT = "deleted_at"
+WORKTREE_FIELD_DELETED_HEAD = "deleted_head"
+WORKTREE_FIELD_DELETED_GIT_STATUS = "deleted_git_status"
+WORKTREE_ACTIVE_STATUS_FRAGMENT = 'status="active"'
+
+# Purpose: image attachments are represented as a short text lead-in plus the
+# binary image. The lead-in lets the model identify the source and user note.
+IMAGE_ATTACHMENT_TEXT_TEMPLATE = (
+    "Image attached with uv_agent_runtime.look_at ({attachment_id}, {filename})."
+)
+IMAGE_ATTACHMENT_NOTE_TEMPLATE = "User note: {note}"
+
+# Purpose: skills and MCP declarations are dynamic capabilities exposed as
+# model-readable XML entries. Discovery and escaping stay in the owning modules.
+SKILL_DEFAULT_DESCRIPTION = "No description"
+SKILL_ENTRY_TEMPLATE = '<skill name="{name}" scope="{scope}" path="{path}">{description}</skill>'
+SKILLS_OMITTED_TEMPLATE = '<omitted_skills count="{count}" />'
+AVAILABLE_SKILLS_FOOTER = f"</{AVAILABLE_SKILLS_TAG}>"
+MCP_NONE_DECLARED = "None declared."
+MCP_DEFAULT_DESCRIPTION = "No description"
+MCP_SERVER_INLINE_TEMPLATE = '<mcp_server {attrs}>{description}</mcp_server>'
+MCP_SERVER_OPEN_TEMPLATE = '<mcp_server {attrs}>'
+MCP_SERVER_DESCRIPTION_TEMPLATE = '<description>{description}</description>'
+MCP_SERVER_INSTRUCTIONS_TEMPLATE = '<instructions truncated="{truncated}">{instructions}</instructions>'
+MCP_SERVER_CLOSE = "</mcp_server>"
+MCP_OMITTED_TEMPLATE = '<omitted_mcp_servers count="{count}" />'
+AVAILABLE_MCP_SERVERS_FOOTER = f"</{AVAILABLE_MCP_SERVERS_TAG}>"
+
+# Purpose: plugin-provided runtime helpers are appended after the built-in helper
+# block so the model knows which additional callables can be imported in run_python.
+PLUGIN_HELPER_ENTRY_TEMPLATE = '<helper name="{name}" plugin="{plugin}">{doc}</helper>'
+PLUGIN_HELPERS_FOOTER = f"</{PLUGIN_RUNTIME_HELPERS_TAG}>"
+
+# Purpose: dynamic-context removal notices name skills/MCP servers that were
+# available earlier in the epoch but are no longer present.
+REMOVED_SKILL_TEMPLATE = '\n<removed_skill name="{name}" scope="{scope}" path="{path}" />'
+REMOVED_MCP_SERVER_TEMPLATE = '\n<removed_mcp_server name="{name}" scope="{scope}" config="{config}" />'
+
+# Purpose: compaction wrappers distinguish summaries, retained history, and tool
+# artifacts from fresh user instructions while still preserving content after a
+# context checkpoint.
+UPCOMING_USER_TASK_TEMPLATE = "<upcoming_user_task>\n{task}\n</upcoming_user_task>\n"
+CONTEXT_COMPACTION_REQUEST_TEMPLATE = (
+    "<context_compaction_request>\n{prompt}</context_compaction_request>\n\n{return_only_instruction}"
+)
+CONVERSATION_SUMMARY_TEMPLATE = (
+    "<conversation_summary>\n{summary}\n</conversation_summary>\n{continuation}"
+)
+CONVERSATION_SUMMARY_OPEN = f"<{CONVERSATION_SUMMARY_TAG}>"
+CONVERSATION_SUMMARY_CLOSE = f"</{CONVERSATION_SUMMARY_TAG}>"
+RETAINED_HISTORY_MARKER = f"<{RETAINED_HISTORY_TAG}"
+RETAINED_TOOL_FALLBACK_NAME = "tool"
+RETAINED_TOOL_CALL_TEMPLATE = (
+    '<retained_tool_call name="{name}" call_id="{call_id}">\n{arguments}\n</retained_tool_call>'
+)
+RETAINED_TOOL_OUTPUT_TEMPLATE = '<retained_tool_output call_id="{call_id}">\n{output}\n</retained_tool_output>'
+RETAINED_HISTORY_MESSAGE_TEMPLATE = '<retained_history_message role="{role}">\n{text}\n</retained_history_message>'
+RETAINED_HISTORY_EMPTY_MESSAGE_TEMPLATE = '<retained_history_message role="{role}" />'
+
+# Purpose: active workflow summaries are injected into compaction handoff text so
+# a resumed main agent can reconnect to outstanding workflow graphs.
+ACTIVE_WORKFLOWS_SECTION_TITLE = "## Active workflows"
+ACTIVE_WORKFLOW_NO_NODES = "no nodes"
+ACTIVE_WORKFLOW_STATUS_LINE_TEMPLATE = "- `{workflow_id}` status={status} objective={objective}"
+ACTIVE_WORKFLOW_PROGRESS_LINE_TEMPLATE = "  - Progress: {progress}"
+ACTIVE_WORKFLOW_CHECKPOINT_LINE_TEMPLATE = "  - Current checkpoint: {checkpoint} ({reason})"
+ACTIVE_WORKFLOW_NO_REASON_RECORDED = "no reason recorded"
+ACTIVE_WORKFLOW_COMPLETED_INSPECTABLE_LINE_TEMPLATE = "  - Completed inspectable nodes: {refs}"
+ACTIVE_WORKFLOW_RESUME_LINE_TEMPLATE = (
+    '  - Resume: from uv_agent_runtime import workflow; wf = workflow.resume("{workflow_id}")'
+)
+
+# ===========================================================================
+# Workflow context prompt
+# ===========================================================================
+# Purpose: main-agent-only guidance for using persistent workflow task graphs.
+# It is emitted as dynamic pre-user context, not as part of the stable system
+# prompt, so workflow instructions can evolve independently of provider prompt
+# caching.
+
+WORKFLOW_CONTEXT_TEXT = """<workflow_context scope="main_agent" status="current">
+<purpose>
+Workflow is available to the main Agent only. Use it to build, wait on,
+inspect, and adjust persistent task graphs for independent or long-running work.
+</purpose>
+<rules>
+<rule>Workflow operations return immediately unless wait(), join(), or result() is called explicitly.</rule>
+<rule>wait() runs until completion, failure, timeout, interruption, or checkpoint.</rule>
+<rule>checkpoint returns control to the main Agent for direction adjustment.</rule>
+<rule>Use graph() or describe_graph() to review task graph settings.</rule>
+<rule>Use inspect(node) to view a node's final model output.</rule>
+<rule>Use graph modification APIs to adjust pending tasks after checkpoints.</rule>
+</rules>
+<model_level_policy>
+<rule>Pass model_level on a node, default_model_level on workflow.start(), or omit both to use the configured workflow/global default.</rule>
+<rule>If model_levels contains workflow_default, it is the configured default for workflow nodes.</rule>
+</model_level_policy>
+<state_policy>
+<rule>Current workflow state is not updated in this block.</rule>
+<rule>Use wait(), snapshot(), graph(), inspect(), or list() for current workflow state.</rule>
+<rule>Active workflow snapshots are restored through the compaction summary section named "## Active workflows".</rule>
+</state_policy>
+<node_prompting>
+<rule>Workflow node agents do not receive this workflow_context block.</rule>
+<rule>Write node prompts as normal natural-language task details.</rule>
+<rule>Make node prompts self-contained: include goal, scope, constraints, expected output, and whether edits are allowed.</rule>
+</node_prompting>
+<examples>
+<example name="create_investigation_graph">
+<description>Create a suitable task graph for a long task, then wait until the first checkpoint.</description>
+<code>
+from uv_agent_runtime import workflow
+
+wf = workflow.start(
+    objective="Design and prepare a plugin system for uv-agent",
+    default_model_level="deepseek-pro",
+)
+architecture = wf.agent(
+    '''Design the plugin system architecture for uv-agent.
+
+## Objective and task
+- Read src/uv_agent/, src/uv_agent_runtime/, and AGENTS.md to understand the host/runtime split.
+- Compare plugin mechanisms that fit a Python coding agent with a single run_python action surface.
+- Recommend the two most suitable architecture options for this repository.
+
+## Requirements and notes
+- Do not edit files; this is an investigation node only.
+- Cover compatibility with skills, MCP discovery, runtime helpers, and project configuration.
+- Return trade-offs, risks, required dependencies, and source locations that constrain the design.''',
+    key="investigate.architecture",
+)
+hooks = wf.agent(
+    '''Map plugin hook points across uv-agent.
+
+## Objective and task
+- Inspect host, model client, session store, runner, context, and TUI modules.
+- List hook points where plugins could observe, modify, or extend behavior.
+- Include expected input/output contracts for each hook.
+
+## Requirements and notes
+- Do not edit files; this is an investigation node only.
+- Cite code with file:line references so the main Agent can jump directly to the relevant implementation.
+- Separate safe read-only hooks from hooks that can change execution behavior.''',
+    key="investigate.hooks",
+)
+runtime = wf.agent(
+    '''Assess runtime and packaging constraints for uv-agent plugins.
+
+## Objective and task
+- Inspect managed script execution, uv_agent_runtime exports, helper tracking, and project state storage.
+- Identify constraints for plugins that expose runtime helpers or interact with managed scripts.
+- Propose how plugin metadata should be discovered and persisted.
+
+## Requirements and notes
+- Do not edit files; this is an investigation node only.
+- Pay special attention to the run_python boundary, environment isolation, and prompt-cache stability.
+- Return risks, test targets, and any decisions that must be made by the main Agent.''',
+    key="investigate.runtime",
+)
+wf.checkpoint(
+    key="after_investigation",
+    after=[architecture, hooks, runtime],
+    reason="Review the investigation outputs before choosing the implementation graph.",
+    options=["continue", "revise graph", "branch alternative", "take over", "cancel"],
+    recommended_action="Inspect the investigation nodes, then decide whether to continue, modify, or branch the graph.",
+)
+result = wf.wait(timeout_s=1800)
+print(result.summary())
+</code>
+</example>
+<example name="inspect_first_checkpoint_and_extend_graph">
+<description>Resume at the first checkpoint, inspect completed nodes, then add the next task graph segment.</description>
+<code>
+from uv_agent_runtime import workflow
+
+wf = workflow.resume("wf_123")
+print(wf.describe_graph())
+print(wf.inspect("investigate.architecture"))
+print(wf.inspect("investigate.hooks"))
+print(wf.inspect("investigate.runtime"))
+
+# After inspecting the checkpoint, record the main-Agent decision and add the next segment.
+wf.continue_checkpoint(
+    "after_investigation",
+    resolution={
+        "decision": "continue with implementation and review nodes",
+        "reason": "the investigation outputs agree on a small host-side plugin manager plus explicit runtime helper registration",
+    },
+)
+host_impl = wf.agent(
+    '''Implement the host-side plugin manager for uv-agent.
+
+## Objective and task
+- Implement the approved plugin discovery and lifecycle design in the host application.
+- Add focused tests for configuration loading, plugin registration, and failure isolation.
+- Keep the implementation consistent with the investigation outputs inspected by the main Agent.
+
+## Requirements and notes
+- Edit only source and tests needed for the host-side plugin manager.
+- Do not change TUI rendering or runtime helper exports in this node.
+- Return changed files, important design choices, verification commands, and remaining risks.''',
+    key="implement.host",
+    after=["investigate.architecture", "investigate.hooks", "investigate.runtime"],
+)
+runtime_impl = wf.agent(
+    '''Implement runtime-helper integration for approved plugins.
+
+## Objective and task
+- Add the minimal runtime-side integration needed for plugin-provided helpers.
+- Preserve the managed run_python boundary and avoid relying on repository checkout import paths.
+- Add focused tests for helper discovery, helper context rendering, and helper-call tracking.
+
+## Requirements and notes
+- Edit only runtime/helper integration code and focused tests.
+- Do not introduce network calls or plugin execution outside the managed Python boundary.
+- Return changed files, verification commands, compatibility risks, and any required follow-up.''',
+    key="implement.runtime",
+    after=["investigate.architecture", "investigate.runtime"],
+)
+review = wf.review(
+    key="review.integration",
+    after=[host_impl, runtime_impl],
+    prompt='''Review the plugin implementation before final verification.
+
+## Objective and task
+- Check whether the host and runtime changes match the approved graph and investigation constraints.
+- Look for context pollution, unsafe plugin execution, migration gaps, and missing tests.
+- Decide whether the main Agent should verify, adjust the graph, or take over.
+
+## Requirements and notes
+- Do not edit files; this is a review node only.
+- Return exactly one recommendation: approve, request changes, or change the graph.
+- If you request graph changes, name the node to update, replace, or add.''',
+)
+wf.checkpoint(
+    key="before_final_verification",
+    after=review,
+    reason="Review implementation results before final verification.",
+    options=["continue", "replace node", "branch alternative", "take over", "cancel"],
+    recommended_action="Inspect review.integration, then decide whether to verify or adjust the graph.",
+)
+result = wf.wait(timeout_s=3600)
+print(result.summary())
+</code>
+</example>
+<example name="inspect_review_checkpoint_and_finalize">
+<description>Inspect a later checkpoint, optionally adjust pending work, then add final verification.</description>
+<code>
+from uv_agent_runtime import workflow
+
+wf = workflow.resume("wf_123")
+print(wf.describe_graph())
+print(wf.inspect("review.integration"))
+
+# If the review asks for changes, modify the graph before continuing instead of adding verification.
+# For example, add a corrective node and another checkpoint, or replace a completed node with a revised prompt.
+
+wf.continue_checkpoint(
+    "before_final_verification",
+    resolution={
+        "decision": "run final verification",
+        "reason": "review.integration approved the implementation with no blocking changes",
+    },
+)
+verify = wf.agent(
+    '''Verify the plugin-system changes for uv-agent.
+
+## Objective and task
+- Run the focused plugin tests first, then the broader test suite if focused tests pass.
+- Investigate failures and apply only minimal fixes needed to make verification meaningful.
+- Summarize whether the main Agent should commit, revise the graph, or take over manually.
+
+## Requirements and notes
+- Keep edits minimal and directly tied to verification failures.
+- Report every command run and whether it passed, failed, or timed out.
+- Return final status, residual risks, and recommended next action for the main Agent.''',
+    key="verify.final",
+    after="before_final_verification",
+)
+result = wf.wait(timeout_s=3600, until="completed")
+print(result.summary())
+</code>
+</example>
+</examples>
+</workflow_context>"""
 
 # ===========================================================================
 # System prompt (the main instruction template)

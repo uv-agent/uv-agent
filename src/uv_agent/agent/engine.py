@@ -90,6 +90,18 @@ from uv_agent.prompts import (
     PLUGIN_HELPERS_HEADER,
     TOOL_OUTPUT_TRUNCATED_MARKER,
     TOOL_OUTPUT_OMITTED_NOTE,
+    AVAILABLE_MCP_SERVERS_FOOTER,
+    AVAILABLE_SKILLS_FOOTER,
+    GOAL_MODE_ENABLED_STATUS_FRAGMENT,
+    MCP_OMITTED_TEMPLATE,
+    PLUGIN_HELPER_ENTRY_TEMPLATE,
+    PLUGIN_HELPERS_FOOTER,
+    PRE_USER_CONTEXT_MARKERS,
+    REMOVED_MCP_SERVER_TEMPLATE,
+    REMOVED_SKILL_TEMPLATE,
+    SKILLS_OMITTED_TEMPLATE,
+    TOOL_OUTPUT_SHORTENED_NOTE,
+    WORKTREE_ACTIVE_STATUS_FRAGMENT,
 )
 from uv_agent.project_rules import (
     ProjectRuleContext,
@@ -190,11 +202,19 @@ def _removed_context_text(removed: list[str], previous_parts: dict[str, dict[str
         path = metadata.get("path") or metadata.get("config")
         if kind == "skill" and name and scope:
             lines.append(
-                f'\n<removed_skill name="{_xml_attr(name)}" scope="{_xml_attr(scope)}" path="{_xml_attr(path or "")}" />'
+                REMOVED_SKILL_TEMPLATE.format(
+                    name=_xml_attr(name),
+                    scope=_xml_attr(scope),
+                    path=_xml_attr(path or ""),
+                )
             )
         elif kind == "mcp" and name and scope:
             lines.append(
-                f'\n<removed_mcp_server name="{_xml_attr(name)}" scope="{_xml_attr(scope)}" config="{_xml_attr(path or "")}" />'
+                REMOVED_MCP_SERVER_TEMPLATE.format(
+                    name=_xml_attr(name),
+                    scope=_xml_attr(scope),
+                    config=_xml_attr(path or ""),
+                )
             )
     return "".join(lines)
 
@@ -2099,20 +2119,7 @@ class AgentEngine:
         if item.get("type") != "message" or item.get("role") != "user":
             return False
         text = message_item_text(item)
-        return (
-            "<runtime_environment>" in text
-            or "<model_levels>" in text
-            or "<runtime_helpers>" in text
-            or "<workspace_rules" in text
-            or "<workspace_rule_index>" in text
-            or "<active_cwd_notice>" in text
-            or "<goal_mode" in text
-            or "<worktree" in text
-            or "<workflow_context" in text
-            or "<available_skills>" in text
-            or "<available_mcp_servers>" in text
-            or "<context_update" in text
-        )
+        return any(marker in text for marker in PRE_USER_CONTEXT_MARKERS)
 
     @staticmethod
     def _is_replayable_input_event(event: dict[str, Any]) -> bool:
@@ -3294,7 +3301,7 @@ class AgentEngine:
         notice = self._goal_mode_notice_text(thread_id)
         if not notice:
             return []
-        status = "enabled" if 'status="enabled"' in notice else "disabled"
+        status = "enabled" if GOAL_MODE_ENABLED_STATUS_FRAGMENT in notice else "disabled"
         self.thread_store.append(
             thread_id,
             "item.goal_mode_notice",
@@ -3350,7 +3357,7 @@ class AgentEngine:
         notice = self._worktree_notice_text(thread_id)
         if not notice:
             return []
-        status = "active" if 'status="active"' in notice else "deleted"
+        status = "active" if WORKTREE_ACTIVE_STATUS_FRAGMENT in notice else "deleted"
         self.thread_store.append(
             thread_id,
             "item.worktree_notice",
@@ -3772,11 +3779,11 @@ class AgentEngine:
                 ContextPart(
                     "skills/omitted",
                     "skills",
-                    f'<omitted_skills count="{len(skills) - 10}" />',
+                    SKILLS_OMITTED_TEMPLATE.format(count=len(skills) - 10),
                     dynamic=True,
                 )
             )
-        parts.append(ContextPart("skills/footer", "skills", "</available_skills>"))
+        parts.append(ContextPart("skills/footer", "skills", AVAILABLE_SKILLS_FOOTER))
         return parts
 
     def _mcp_context_parts(
@@ -3828,11 +3835,11 @@ class AgentEngine:
                 ContextPart(
                     "mcp/omitted",
                     "mcp",
-                    f'<omitted_mcp_servers count="{len(servers) - 10}" />',
+                    MCP_OMITTED_TEMPLATE.format(count=len(servers) - 10),
                     dynamic=True,
                 )
             )
-        parts.append(ContextPart("mcp/footer", "mcp", "</available_mcp_servers>"))
+        parts.append(ContextPart("mcp/footer", "mcp", AVAILABLE_MCP_SERVERS_FOOTER))
         return parts
 
     def project_rule_context(self) -> ProjectRuleContext:
@@ -3944,8 +3951,14 @@ class AgentEngine:
         # refresh is enough for now.
         for helper in helpers:
             doc = xml_text(helper.doc or "")
-            lines.append(f'<helper name="{xml_text(helper.name)}" plugin="{xml_text(helper.plugin)}">{doc}</helper>')
-        lines.append("</plugin_runtime_helpers>")
+            lines.append(
+                PLUGIN_HELPER_ENTRY_TEMPLATE.format(
+                    name=xml_text(helper.name),
+                    plugin=xml_text(helper.plugin),
+                    doc=doc,
+                )
+            )
+        lines.append(PLUGIN_HELPERS_FOOTER)
         return "\n".join(lines)
 
 def tool_attachment_context_items(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3985,10 +3998,7 @@ def truncate_tool_output_for_compaction(raw_output: str, max_chars: int) -> str:
 
     truncated = copy.deepcopy(payload)
     truncated["truncated_for_context_compaction"] = True
-    truncated["truncation_note"] = (
-        "Tool output was shortened to fit the context compaction request. "
-        "Only a head/tail excerpt of large text fields may be present."
-    )
+    truncated["truncation_note"] = TOOL_OUTPUT_SHORTENED_NOTE
     original_lengths = {
         key: len(value)
         for key, value in payload.items()

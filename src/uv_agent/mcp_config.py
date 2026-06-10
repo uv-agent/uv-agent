@@ -6,6 +6,17 @@ from html import escape as xml_escape
 from pathlib import Path
 from typing import Any, Mapping
 
+from uv_agent.prompts import (
+    MCP_DEFAULT_DESCRIPTION,
+    MCP_NONE_DECLARED,
+    MCP_OMITTED_TEMPLATE,
+    MCP_SERVER_CLOSE,
+    MCP_SERVER_DESCRIPTION_TEMPLATE,
+    MCP_SERVER_INLINE_TEMPLATE,
+    MCP_SERVER_INSTRUCTIONS_TEMPLATE,
+    MCP_SERVER_OPEN_TEMPLATE,
+)
+
 
 @dataclass(frozen=True)
 class McpServerSummary:
@@ -50,7 +61,7 @@ def discover_mcp_servers(project_root: Path, *, home: Path | None = None) -> lis
                     scope=scope,
                     transport=transport_summary(value),
                     endpoint=endpoint_summary(value),
-                    description=str(value.get("description") or "No description"),
+                    description=str(value.get("description") or MCP_DEFAULT_DESCRIPTION),
                     path=path,
                 )
             )
@@ -95,12 +106,12 @@ def render_mcp_summary(
 ) -> str:
     """Render MCP declarations for the system prompt."""
     if not servers:
-        return "None declared."
+        return MCP_NONE_DECLARED
     lines = []
     for server in servers[:limit]:
         lines.append(render_mcp_entry(server, instructions.get(server.key) if instructions else None))
     if len(servers) > limit:
-        lines.append(f'<omitted_mcp_servers count="{len(servers) - limit}" />')
+        lines.append(MCP_OMITTED_TEMPLATE.format(count=len(servers) - limit))
     return "\n".join(lines)
 
 
@@ -113,14 +124,14 @@ def render_mcp_entry(
         f'config="{_xml_attr(server.path)}"'
     )
     if instructions is None:
-        return f"<mcp_server {attrs}>{_xml_text(server.description)}</mcp_server>"
+        return MCP_SERVER_INLINE_TEMPLATE.format(attrs=attrs, description=_xml_text(server.description))
     truncated = "true" if instructions.truncated else "false"
     return "\n".join(
         [
-            f"<mcp_server {attrs}>",
-            f"<description>{_xml_text(server.description)}</description>",
-            f'<instructions truncated="{truncated}">{_xml_text(instructions.text)}</instructions>',
-            "</mcp_server>",
+            MCP_SERVER_OPEN_TEMPLATE.format(attrs=attrs),
+            MCP_SERVER_DESCRIPTION_TEMPLATE.format(description=_xml_text(server.description)),
+            MCP_SERVER_INSTRUCTIONS_TEMPLATE.format(truncated=truncated, instructions=_xml_text(instructions.text)),
+            MCP_SERVER_CLOSE,
         ]
     )
 

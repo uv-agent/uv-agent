@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from html import escape as xml_escape
 from pathlib import Path
 
-from uv_agent.prompts import SKILLS_NONE_DISCOVERED
+from uv_agent.prompts import (
+    SKILL_DEFAULT_DESCRIPTION,
+    SKILL_ENTRY_TEMPLATE,
+    SKILLS_NONE_DISCOVERED,
+    SKILLS_OMITTED_TEMPLATE,
+)
 
 @dataclass(frozen=True)
 class SkillSummary:
@@ -75,7 +80,7 @@ def extract_description(path: Path) -> str:
         if not stripped or stripped.startswith("#"):
             continue
         return stripped[:180]
-    return "No description"
+    return SKILL_DEFAULT_DESCRIPTION
 
 
 def _read_frontmatter_description(lines: list[str]) -> str:
@@ -119,14 +124,16 @@ def render_skill_summary(skills: list[SkillSummary], *, limit: int = 10) -> str:
     for skill in skills[:limit]:
         lines.append(render_skill_entry(skill))
     if len(skills) > limit:
-        lines.append(f'<omitted_skills count="{len(skills) - limit}" />')
+        lines.append(SKILLS_OMITTED_TEMPLATE.format(count=len(skills) - limit))
     return "\n".join(lines)
 
 
 def render_skill_entry(skill: SkillSummary) -> str:
-    return (
-        f'<skill name="{_xml_attr(skill.name)}" scope="{_xml_attr(skill.scope)}" '
-        f'path="{_xml_attr(skill.path)}">{_xml_text(skill.description)}</skill>'
+    return SKILL_ENTRY_TEMPLATE.format(
+        name=_xml_attr(skill.name),
+        scope=_xml_attr(skill.scope),
+        path=_xml_attr(skill.path),
+        description=_xml_text(skill.description),
     )
 
 

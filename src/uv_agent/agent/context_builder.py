@@ -8,7 +8,18 @@ from typing import Any
 
 from uv_agent.config import AppConfig
 from uv_agent.environment import UserLanguage, host_environment_line
-from uv_agent.prompts import RUNTIME_HELPERS_CONTEXT
+from uv_agent.prompts import (
+    MODEL_LEVELS_LEVEL_TEMPLATE,
+    MODEL_LEVELS_RULE,
+    MODEL_LEVELS_TEMPLATE,
+    MODEL_LEVELS_WORKFLOW_DEFAULT_TEMPLATE,
+    RUNTIME_ENVIRONMENT_DEPENDENCIES_EMPTY,
+    RUNTIME_ENVIRONMENT_DEPENDENCY_TEMPLATE,
+    RUNTIME_ENVIRONMENT_PERSISTENCE,
+    RUNTIME_ENVIRONMENT_TEMPLATE,
+    RUNTIME_ENVIRONMENT_UV_PROJECT_RULE,
+    RUNTIME_HELPERS_CONTEXT,
+)
 
 
 def runtime_environment_context(
@@ -22,51 +33,40 @@ def runtime_environment_context(
     user_language: UserLanguage,
 ) -> str:
     dependencies = "\n".join(
-        f"<dependency>{xml_text(dependency)}</dependency>"
+        RUNTIME_ENVIRONMENT_DEPENDENCY_TEMPLATE.format(dependency=xml_text(dependency))
         for dependency in scriptenv_dependencies
         if not _is_uv_agent_dependency(dependency)
     )
     if not dependencies:
-        dependencies = '<dependency_list empty="true" />'
-    return "\n".join(
-        [
-            "<runtime_environment>",
-            f"<workspace>{xml_text(project_root)}</workspace>",
-            f"<user_state>{xml_text(user_state)}</user_state>",
-            f"<project_state>{xml_text(project_state)}</project_state>",
-            "<run_python_environment>",
-            f"<directory>{xml_text(scriptenv_dir)}</directory>",
-            f"<pyproject>{xml_text(scriptenv_dir / 'pyproject.toml')}</pyproject>",
-            "<rule>This is the uv project environment used by run_python; it is not the workspace or active cwd.</rule>",
-            "<direct_dependencies>",
-            dependencies,
-            "</direct_dependencies>",
-            "</run_python_environment>",
-            f"<host>{xml_text(host_environment_line(host_environment))}</host>",
-            f"<user_language>{xml_text(user_language.name)}</user_language>",
-            "<persistence>Persisted scripts, runs, and threads live under the project state directory.</persistence>",
-            "</runtime_environment>",
-        ]
+        dependencies = RUNTIME_ENVIRONMENT_DEPENDENCIES_EMPTY
+    return RUNTIME_ENVIRONMENT_TEMPLATE.format(
+        workspace=xml_text(project_root),
+        user_state=xml_text(user_state),
+        project_state=xml_text(project_state),
+        scriptenv_dir=xml_text(scriptenv_dir),
+        scriptenv_pyproject=xml_text(scriptenv_dir / "pyproject.toml"),
+        uv_project_rule=RUNTIME_ENVIRONMENT_UV_PROJECT_RULE,
+        dependencies=dependencies,
+        host=xml_text(host_environment_line(host_environment)),
+        user_language=xml_text(user_language.name),
+        persistence=RUNTIME_ENVIRONMENT_PERSISTENCE,
     )
 
 
 def model_levels_context(config: AppConfig) -> str:
-    lines = [
-        "<model_levels>",
-        f"<default>{xml_text(config.runtime.default_level)}</default>",
-    ]
+    workflow_default = ""
     workflow_default_level = config.runtime.workflow_default_level
     if workflow_default_level:
-        lines.append(f"<workflow_default>{xml_text(workflow_default_level)}</workflow_default>")
-    lines.append("<available>")
-    for name in config.levels:
-        lines.append(f"<level>{xml_text(name)}</level>")
-    lines.append("</available>")
-    lines.append(
-        "<rule>level and model_level values are configuration-defined; use only an available name, or omit them to use the default.</rule>"
+        workflow_default = MODEL_LEVELS_WORKFLOW_DEFAULT_TEMPLATE.format(
+            workflow_default=xml_text(workflow_default_level)
+        )
+    levels = "\n".join(MODEL_LEVELS_LEVEL_TEMPLATE.format(level=xml_text(name)) for name in config.levels)
+    return MODEL_LEVELS_TEMPLATE.format(
+        default=xml_text(config.runtime.default_level),
+        workflow_default=workflow_default,
+        levels=levels,
+        rule=MODEL_LEVELS_RULE,
     )
-    lines.append("</model_levels>")
-    return "\n".join(lines)
 
 
 def runtime_helpers_context() -> str:

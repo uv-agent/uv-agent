@@ -10,10 +10,28 @@ from uv_agent.paths import ensure_project_local_dir
 from uv_agent.time import utc_now_iso
 
 from uv_agent.prompts import (
+    WORKTREE_ACTIVE_OPEN,
     WORKTREE_ACTIVE_RULES,
+    WORKTREE_CLOSE,
     WORKTREE_CLOSED_RULES,
+    WORKTREE_DELETED_OPEN,
+    WORKTREE_FIELD_BASE_REF,
+    WORKTREE_FIELD_BRANCH,
+    WORKTREE_FIELD_CREATED_AT,
+    WORKTREE_FIELD_CURRENT_CWD,
+    WORKTREE_FIELD_DELETED_AT,
+    WORKTREE_FIELD_DELETED_GIT_STATUS,
+    WORKTREE_FIELD_DELETED_HEAD,
+    WORKTREE_FIELD_HEAD,
+    WORKTREE_FIELD_ORIGIN,
+    WORKTREE_FIELD_PATH,
     WORKTREE_MODE_ACTIVE,
     WORKTREE_MODE_CLOSED,
+    WORKTREE_RULES_CLOSE,
+    WORKTREE_RULES_OPEN,
+    WORKTREE_WORKSPACE_CLOSE,
+    WORKTREE_WORKSPACE_OPEN,
+    XML_ELEMENT_TEMPLATE,
 )
 
 
@@ -107,57 +125,57 @@ def render_worktree_notice(metadata: Mapping[str, Any], *, status: WorktreeNotic
 
     if status == "deleted":
         lines = [
-            '<worktree status="deleted">',
+            WORKTREE_DELETED_OPEN,
             WORKTREE_MODE_CLOSED,
             "",
-            "<workspace>",
-            f"<branch>{_xml_text(branch)}</branch>",
-            f"<path>{_xml_text(path)}</path>",
-            f"<origin>{_xml_text(origin)}</origin>",
-            f"<current_cwd>{_xml_text(current_cwd)}</current_cwd>",
+            WORKTREE_WORKSPACE_OPEN,
+            _xml_element(WORKTREE_FIELD_BRANCH, branch),
+            _xml_element(WORKTREE_FIELD_PATH, path),
+            _xml_element(WORKTREE_FIELD_ORIGIN, origin),
+            _xml_element(WORKTREE_FIELD_CURRENT_CWD, current_cwd),
         ]
         if deleted_at:
-            lines.append(f"<deleted_at>{_xml_text(deleted_at)}</deleted_at>")
+            lines.append(_xml_element(WORKTREE_FIELD_DELETED_AT, deleted_at))
         if head:
-            lines.append(f"<deleted_head>{_xml_text(head)}</deleted_head>")
+            lines.append(_xml_element(WORKTREE_FIELD_DELETED_HEAD, head))
         if deleted_status:
-            lines.append(f"<deleted_git_status>{_xml_text(deleted_status)}</deleted_git_status>")
+            lines.append(_xml_element(WORKTREE_FIELD_DELETED_GIT_STATUS, deleted_status))
         lines.extend(
             [
-                "</workspace>",
+                WORKTREE_WORKSPACE_CLOSE,
                 "",
-                "<rules>",
+                WORKTREE_RULES_OPEN,
                 WORKTREE_CLOSED_RULES,
-                "</rules>",
-                "</worktree>",
+                WORKTREE_RULES_CLOSE,
+                WORKTREE_CLOSE,
             ]
         )
         return "\n".join(lines)
 
     lines = [
-        '<worktree status="active">',
+        WORKTREE_ACTIVE_OPEN,
         WORKTREE_MODE_ACTIVE,
         "",
-        "<workspace>",
-        f"<branch>{_xml_text(branch)}</branch>",
-        f"<path>{_xml_text(path)}</path>",
-        f"<origin>{_xml_text(origin)}</origin>",
-        f"<current_cwd>{_xml_text(current_cwd)}</current_cwd>",
+        WORKTREE_WORKSPACE_OPEN,
+        _xml_element(WORKTREE_FIELD_BRANCH, branch),
+        _xml_element(WORKTREE_FIELD_PATH, path),
+        _xml_element(WORKTREE_FIELD_ORIGIN, origin),
+        _xml_element(WORKTREE_FIELD_CURRENT_CWD, current_cwd),
     ]
     if base_ref:
-        lines.append(f"<base_ref>{_xml_text(base_ref)}</base_ref>")
+        lines.append(_xml_element(WORKTREE_FIELD_BASE_REF, base_ref))
     if head:
-        lines.append(f"<head>{_xml_text(head)}</head>")
+        lines.append(_xml_element(WORKTREE_FIELD_HEAD, head))
     if created_at:
-        lines.append(f"<created_at>{_xml_text(created_at)}</created_at>")
+        lines.append(_xml_element(WORKTREE_FIELD_CREATED_AT, created_at))
     lines.extend(
         [
-            "</workspace>",
+            WORKTREE_WORKSPACE_CLOSE,
             "",
-            "<rules>",
+            WORKTREE_RULES_OPEN,
             WORKTREE_ACTIVE_RULES,
-            "</rules>",
-            "</worktree>",
+            WORKTREE_RULES_CLOSE,
+            WORKTREE_CLOSE,
         ]
     )
     return "\n".join(lines)
@@ -173,6 +191,10 @@ def _metadata_value(metadata: Mapping[str, Any], key: str) -> str:
 
 def _xml_text(value: object) -> str:
     return xml_escape(str(value), quote=False)
+
+
+def _xml_element(tag: str, value: object) -> str:
+    return XML_ELEMENT_TEMPLATE.format(tag=tag, value=_xml_text(value))
 
 
 def validate_worktree_branch_name(branch: str) -> str:

@@ -5,8 +5,25 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from uv_agent.prompts import (
-    PROJECT_RULES_LOADED_HEADER,
+    PROJECT_RULE_CONTEXT_PATH_ATTR_TEMPLATE,
+    PROJECT_RULE_ENTRY_CLOSE,
+    PROJECT_RULE_ENTRY_OPEN_TEMPLATE,
+    PROJECT_RULE_FILE_ATTR_TEMPLATE,
+    PROJECT_RULE_INDEX_CLOSE,
+    PROJECT_RULE_INDEX_DEPTH_LIMIT_REACHED,
+    PROJECT_RULE_INDEX_ENTRY_LIMIT_REACHED,
     PROJECT_RULE_INDEX_HEADER,
+    PROJECT_RULE_INDEX_MAX_ENTRIES_TEMPLATE,
+    PROJECT_RULE_INDEX_OPEN,
+    PROJECT_RULE_INDEX_SCAN_DEPTH_TEMPLATE,
+    PROJECT_RULE_INDEX_TRUNCATED_TEMPLATE,
+    PROJECT_RULE_OMITTED_FILES_ATTR_TEMPLATE,
+    PROJECT_RULE_TRUNCATED_ATTR,
+    PROJECT_RULE_TRUNCATED_SUFFIX,
+    PROJECT_RULES_CLOSE_TEMPLATE,
+    PROJECT_RULES_DEFAULT_TAG,
+    PROJECT_RULES_LOADED_HEADER,
+    PROJECT_RULES_OPEN_TEMPLATE,
 )
 
 
@@ -60,36 +77,36 @@ class ProjectRuleContext:
         root: Path | None = None,
         base_path: Path | None = None,
         context_path: str | None = None,
-        heading: str = "workspace_rules",
+        heading: str = PROJECT_RULES_DEFAULT_TAG,
     ) -> str:
         """Render loaded rules as a compact context block for model input."""
         if not self.rules:
             return ""
         attrs = []
         if context_path is not None:
-            attrs.append(f'path="{xml_attr(context_path)}"')
+            attrs.append(PROJECT_RULE_CONTEXT_PATH_ATTR_TEMPLATE.format(path=xml_attr(context_path)))
         if self.truncated:
-            attrs.append('truncated="true"')
+            attrs.append(PROJECT_RULE_TRUNCATED_ATTR)
         if self.omitted_files:
-            attrs.append(f'omitted_files="{self.omitted_files}"')
-        open_tag = f"<{heading}{(' ' + ' '.join(attrs)) if attrs else ''}>"
+            attrs.append(PROJECT_RULE_OMITTED_FILES_ATTR_TEMPLATE.format(count=self.omitted_files))
+        open_tag = PROJECT_RULES_OPEN_TEMPLATE.format(heading=heading, attrs=(" " + " ".join(attrs)) if attrs else "")
         lines = [
             open_tag,
             PROJECT_RULES_LOADED_HEADER,
         ]
         for rule in self.rules:
             rel = display_path(rule.path, root=base_path or root)
-            rule_attrs = [f'file="{xml_attr(rel)}"']
+            rule_attrs = [PROJECT_RULE_FILE_ATTR_TEMPLATE.format(file=xml_attr(rel))]
             if rule.truncated:
-                rule_attrs.append('truncated="true"')
+                rule_attrs.append(PROJECT_RULE_TRUNCATED_ATTR)
             lines.extend(
                 [
-                    f"\n<rule {' '.join(rule_attrs)}>",
+                    PROJECT_RULE_ENTRY_OPEN_TEMPLATE.format(attrs=" ".join(rule_attrs)),
                     rule.text.strip(),
-                    "</rule>",
+                    PROJECT_RULE_ENTRY_CLOSE,
                 ]
             )
-        lines.append(f"</{heading}>")
+        lines.append(PROJECT_RULES_CLOSE_TEMPLATE.format(heading=heading))
         return "\n".join(lines)
 
 
@@ -108,7 +125,7 @@ class WorkspaceRuleIndex:
         if not self.paths:
             return ""
         lines = [
-            "<workspace_rule_index>",
+            PROJECT_RULE_INDEX_OPEN,
             PROJECT_RULE_INDEX_HEADER.format(label=label),
         ]
         for path in self.paths:
@@ -117,16 +134,16 @@ class WorkspaceRuleIndex:
         lines.extend(
             [
                 "",
-                f"scan_depth: {self.max_depth}",
-                f"max_entries: {self.max_entries}",
-                f"truncated: {str(truncated).lower()}",
+                PROJECT_RULE_INDEX_SCAN_DEPTH_TEMPLATE.format(depth=self.max_depth),
+                PROJECT_RULE_INDEX_MAX_ENTRIES_TEMPLATE.format(max_entries=self.max_entries),
+                PROJECT_RULE_INDEX_TRUNCATED_TEMPLATE.format(truncated=str(truncated).lower()),
             ]
         )
         if self.depth_limited:
-            lines.append("depth_limit_reached: directories below the scan depth may contain additional rule files.")
+            lines.append(PROJECT_RULE_INDEX_DEPTH_LIMIT_REACHED)
         if self.truncated_entries:
-            lines.append("entry_limit_reached: only the first listed rule files are shown.")
-        lines.append("</workspace_rule_index>")
+            lines.append(PROJECT_RULE_INDEX_ENTRY_LIMIT_REACHED)
+        lines.append(PROJECT_RULE_INDEX_CLOSE)
         return "\n".join(lines)
 
 
@@ -170,7 +187,7 @@ def load_project_rules(
         clipped = text[:limit]
         total += len(clipped)
         if truncated_file:
-            clipped = clipped.rstrip() + "\n...[truncated]"
+            clipped = clipped.rstrip() + PROJECT_RULE_TRUNCATED_SUFFIX
             truncated_context = True
         rules.append(ProjectRule(path=resolved, scope=scope, text=clipped, truncated=truncated_file))
 
@@ -206,7 +223,7 @@ def load_directory_rules(
         clipped = text[:limit]
         total += len(clipped)
         if truncated_file:
-            clipped = clipped.rstrip() + "\n...[truncated]"
+            clipped = clipped.rstrip() + PROJECT_RULE_TRUNCATED_SUFFIX
             truncated_context = True
         rules.append(
             ProjectRule(

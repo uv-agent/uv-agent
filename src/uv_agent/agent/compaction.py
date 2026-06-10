@@ -10,14 +10,26 @@ from uv_agent.agent.context_builder import xml_text
 from uv_agent.agent.messages import message_item, message_item_text
 from uv_agent.prompts import (
     COMPACTED_CONTEXT_CONTINUATION,
+    COMPACTION_JUDGE_REQUEST,
     COMPACTION_NO_SUMMARY_FALLBACK,
     COMPACTION_RETURN_ONLY_INSTRUCTION,
     COMPACTION_SUMMARIZATION_PROMPT,
     COMPACTION_TRUNCATION_SUFFIX,
+    CONTEXT_COMPACTION_REQUEST_TEMPLATE,
+    CONTEXT_SCAFFOLD_MARKERS,
+    CONVERSATION_SUMMARY_CLOSE,
+    CONVERSATION_SUMMARY_OPEN,
+    CONVERSATION_SUMMARY_TEMPLATE,
     POST_TOOL_COMPACTION_BRIDGE,
+    RETAINED_HISTORY_EMPTY_MESSAGE_TEMPLATE,
+    RETAINED_HISTORY_MARKER,
+    RETAINED_HISTORY_MESSAGE_TEMPLATE,
+    RETAINED_TOOL_CALL_TEMPLATE,
+    RETAINED_TOOL_FALLBACK_NAME,
+    RETAINED_TOOL_OUTPUT_TEMPLATE,
+    UPCOMING_USER_TASK_TEMPLATE,
 )
 from uv_agent.model.types import ModelResponse
-from uv_agent.prompts import COMPACTION_JUDGE_REQUEST
 
 # ---------------------------------------------------------------------------
 # Cache-aware NetGain compaction judge
@@ -56,11 +68,7 @@ def compaction_judge_request_item(upcoming_user_text: str | None = None) -> dict
     text = COMPACTION_JUDGE_REQUEST
     if upcoming_user_text:
         preview = truncate_text_to_estimated_tokens(upcoming_user_text.strip(), 2_000)
-        text += (
-            "\n<upcoming_user_task>\n"
-            + xml_text(preview)
-            + "\n</upcoming_user_task>\n"
-        )
+        text += "\n" + UPCOMING_USER_TASK_TEMPLATE.format(task=xml_text(preview))
     return message_item("user", text)
 
 
@@ -160,23 +168,7 @@ def _recent_context_candidate_item(item: dict[str, Any]) -> dict[str, Any] | Non
         text = message_item_text(item)
         # Skip system/context scaffolding that is re-emitted each epoch, and skip
         # judge prompts so they do not become long-lived user-looking history.
-        if (
-            "<runtime_environment>" in text
-            or "<model_levels>" in text
-            or "<runtime_helpers>" in text
-            or "<workspace_rules" in text
-            or "<workspace_rule_index>" in text
-            or "<active_cwd_notice>" in text
-            or "<goal_mode" in text
-            or "<worktree" in text
-            or "<workflow_context" in text
-            or "<conversation_summary>" in text
-            or "<available_skills>" in text
-            or "<available_mcp_servers>" in text
-            or "<context_update" in text
-            or "<retained_history" in text
-            or "<compaction_judge_request>" in text
-        ):
+        if any(marker in text for marker in CONTEXT_SCAFFOLD_MARKERS):
             return None
         return copy.deepcopy(item)
     if typ in {"function_call", "function_call_output"}:
@@ -192,20 +184,16 @@ def _tool_artifact_history_text(item: dict[str, Any]) -> str:
     typ = item.get("type")
     call_id = xml_text(str(item.get("call_id") or ""))
     if typ == "function_call":
-        name = xml_text(str(item.get("name") or "tool"))
+        name = xml_text(str(item.get("name") or RETAINED_TOOL_FALLBACK_NAME))
         arguments = xml_text(str(item.get("arguments") or ""))
-        return (
-            f'<retained_tool_call name="{name}" call_id="{call_id}">\n'
-            f"{arguments}\n"
-            "</retained_tool_call>"
+        return RETAINED_TOOL_CALL_TEMPLATE.format(
+            name=name,
+            call_id=call_id,
+            arguments=arguments,
         )
     if typ == "function_call_output":
         output = xml_text(str(item.get("output") or ""))
-        return (
-            f'<retained_tool_output call_id="{call_id}">\n'
-            f"{output}\n"
-            "</retained_tool_output>"
-        )
+        return RETAINED_TOOL_OUTPUT_TEMPLATE.format(call_id=call_id, output=output)
     return ""
 
 
@@ -220,11 +208,10 @@ TEXT_CONTENT_TYPES = {"input_text", "output_text", "text", "refusal"}
 def compaction_trigger_item() -> dict[str, Any]:
     return message_item(
         "user",
-        "<context_compaction_request>\n"
-        + COMPACTION_SUMMARIZATION_PROMPT
-        + "</context_compaction_request>"
-        + "\n\n"
-        + COMPACTION_RETURN_ONLY_INSTRUCTION
+        CONTEXT_COMPACTION_REQUEST_TEMPLATE.format(
+            prompt=COMPACTION_SUMMARIZATION_PROMPT,
+            return_only_instruction=COMPACTION_RETURN_ONLY_INSTRUCTION,
+        ),
     )
 
 
@@ -282,10 +269,10 @@ def compaction_summary_item(summary: str) -> dict[str, Any]:
 
     return message_item(
         "user",
-        "<conversation_summary>\n"
-        + summary
-        + "\n</conversation_summary>\n"
-        + COMPACTED_CONTEXT_CONTINUATION,
+        CONVERSATION_SUMMARY_TEMPLATE.format(
+            summary=summary,
+            continuation=COMPACTED_CONTEXT_CONTINUATION,
+        ),
     )
 
 
@@ -313,7 +300,7 @@ def normalize_compaction_replacement_input(items: list[dict[str, Any]]) -> list[
     saw_summary = False
     for item in items:
         text = message_item_text(item)
-        if not saw_summary and "<conversation_summary>" in text:
+        if not saw_summary and CONVERSATION_SUMMARY_OPEN in text:
             normalized.append(compaction_summary_item(_conversation_summary_text(text) or text))
             saw_summary = True
             continue
@@ -329,13 +316,13 @@ def _should_wrap_retained_history_item(item: dict[str, Any]) -> bool:
     return (
         item.get("type") == "message"
         and item.get("role") in {"user", "assistant"}
-        and "<retained_history" not in text
+        and RETAINED_HISTORY_MARKER not in text
     )
 
 
 def _conversation_summary_text(text: str) -> str:
-    start_tag = "<conversation_summary>"
-    end_tag = "</conversation_summary>"
+    start_tag = CONVERSATION_SUMMARY_OPEN
+    end_tag = CONVERSATION_SUMMARY_CLOSE
     start = text.find(start_tag)
     if start < 0:
         return ""
@@ -355,10 +342,9 @@ def _retained_history_item(item: dict[str, Any]) -> dict[str, Any]:
             continue
         saw_text = True
         text = str(content.get("text") or "")
-        content["text"] = (
-            f'<retained_history_message role="{xml_text(role)}">\n'
-            f"{xml_text(text)}\n"
-            "</retained_history_message>"
+        content["text"] = RETAINED_HISTORY_MESSAGE_TEMPLATE.format(
+            role=xml_text(role),
+            text=xml_text(text),
         )
     if not saw_text:
         # Rare, but keeps even text-free retained items visibly inside the
@@ -369,7 +355,7 @@ def _retained_history_item(item: dict[str, Any]) -> dict[str, Any]:
             0,
             {
                 "type": content_type,
-                "text": f'<retained_history_message role="{xml_text(role)}" />',
+                "text": RETAINED_HISTORY_EMPTY_MESSAGE_TEMPLATE.format(role=xml_text(role)),
             },
         )
     return wrapped
@@ -400,26 +386,11 @@ def retain_item_after_compaction(item: dict[str, Any]) -> bool:
     if item.get("type") != "message" or item.get("role") not in {"user", "assistant"}:
         return False
     text = message_item_text(item)
-    if "<retained_history" in text:
+    if RETAINED_HISTORY_MARKER in text:
         return False
     if item.get("role") == "assistant":
         return POST_TOOL_COMPACTION_BRIDGE in text
-    return not (
-        "<runtime_environment>" in text
-        or "<model_levels>" in text
-        or "<runtime_helpers>" in text
-        or "<workspace_rules" in text
-        or "<workspace_rule_index>" in text
-        or "<active_cwd_notice>" in text
-        or "<goal_mode" in text
-        or "<worktree" in text
-        or "<workflow_context" in text
-        or "<conversation_summary>" in text
-        or "<available_skills>" in text
-        or "<available_mcp_servers>" in text
-        or "<context_update" in text
-        or "<compaction_judge_request>" in text
-    )
+    return not any(marker in text for marker in CONTEXT_SCAFFOLD_MARKERS)
 
 
 def truncate_text_to_estimated_tokens(text: str, max_tokens: int) -> str:
