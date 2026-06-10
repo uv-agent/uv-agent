@@ -4594,6 +4594,19 @@ def test_workflow_context_xml_has_compact_prompt_format() -> None:
     assert "  <" not in context
     assert "\n\n<" not in context
 
+    import re
+
+    examples = re.findall(r"<example name=\"([^\"]+)\">", context)
+    code_blocks = re.findall(r"<code>\n(.*?)\n</code>", context, flags=re.S)
+    assert examples == [
+        "create_investigation_graph",
+        "inspect_first_checkpoint_and_extend_graph",
+        "inspect_review_checkpoint_and_finalize",
+    ]
+    assert len(code_blocks) == 3
+    for code in code_blocks:
+        compile(code, "<workflow_context_example>", "exec")
+
 
 def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
@@ -4612,8 +4625,11 @@ def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -
     repeated = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
 
     assert '<workflow_context scope="main_agent" status="current">' in first
-    assert "long_task_control_flow" in first
-    assert "investigate the runner/runtime side of the refactor" in first
+    assert 'example name="create_investigation_graph"' in first
+    assert 'example name="inspect_first_checkpoint_and_extend_graph"' in first
+    assert 'example name="inspect_review_checkpoint_and_finalize"' in first
+    assert "## Objective and task" in first
+    assert "## Requirements and notes" in first
     assert "wf.continue_checkpoint" in first
     assert "Workflow " + "replaces " + "ask" not in first
     assert "verify.final" in first
