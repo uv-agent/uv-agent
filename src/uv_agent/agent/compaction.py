@@ -8,33 +8,21 @@ from typing import Any
 from uv_agent.context import estimate_tokens
 from uv_agent.agent.context_builder import xml_text
 from uv_agent.agent.messages import message_item, message_item_text
-from uv_agent.agent.prompts import (
+from uv_agent.prompts import (
     COMPACTED_CONTEXT_CONTINUATION,
+    COMPACTION_NO_SUMMARY_FALLBACK,
+    COMPACTION_RETURN_ONLY_INSTRUCTION,
     COMPACTION_SUMMARIZATION_PROMPT,
+    COMPACTION_TRUNCATION_SUFFIX,
     POST_TOOL_COMPACTION_BRIDGE,
 )
 from uv_agent.model.types import ModelResponse
+from uv_agent.prompts import COMPACTION_JUDGE_REQUEST
 
 # ---------------------------------------------------------------------------
 # Cache-aware NetGain compaction judge
 # ---------------------------------------------------------------------------
 
-COMPACTION_JUDGE_REQUEST = (
-    "<compaction_judge_request>\n"
-    "You are about to receive a user task. Before answering, output a\n"
-    "one-line JSON judgement about the conversation state. Return ONLY the\n"
-    "JSON line, no backticks, no explanation:\n\n"
-    '{"remaining_calls_bucket":"<0_10|10_30|30_60|60_plus>",'
-    '"history_dependency":"<low|medium|high|exact>"}\n'
-    "\n"
-    "remaining_calls_bucket: how many more model calls will this task need?\n"
-    "history_dependency: how much does the task depend on exact original\n"
-    "  wording in the conversation above? 'low' for general continuation,\n"
-    "  'medium' for moderate dependence, 'high' for strong dependence on\n"
-    "  specific details, 'exact' when every word matters (diffs, error\n"
-    "  messages, config values, exact quotes).\n"
-    "</compaction_judge_request>\n"
-)
 
 N_BUCKET_MAP: dict[str, int] = {
     "0_10": 5,
@@ -236,12 +224,7 @@ def compaction_trigger_item() -> dict[str, Any]:
         + COMPACTION_SUMMARIZATION_PROMPT
         + "</context_compaction_request>"
         + "\n\n"
-        + "Return only the continuation summary as plain prose, with no code fences "
-        + "or tool-call markup. Preserve user intent, decisions, file changes, "
-        + "tool results, and unresolved tasks. Summarize tool calls by what was "
-        + "done and learned; do not reproduce invocation payloads, scripts, JSON, "
-        + "DSML/XML protocol blocks, stdout wrappers, or run IDs. Do not restate "
-        + "AGENTS directory rules; they are reloaded automatically when needed.\n",
+        + COMPACTION_RETURN_ONLY_INSTRUCTION
     )
 
 
@@ -267,7 +250,7 @@ def compaction_replacement_input(
         recent = retain_recent_context(input_items, K)
         # Don't double-count items already pulled into retained_users.
         replacement.extend(_retained_history_item(item) for item in recent)
-    summary = compaction_response_summary_text(response).strip() or "(no summary available)"
+    summary = compaction_response_summary_text(response).strip() or COMPACTION_NO_SUMMARY_FALLBACK
     replacement.append(compaction_summary_item(summary))
     return replacement
 
@@ -445,6 +428,6 @@ def truncate_text_to_estimated_tokens(text: str, max_tokens: int) -> str:
     max_chars = max_tokens * 4
     if len(text) <= max_chars:
         return text
-    suffix = "\n[truncated during context compaction]"
+    suffix = COMPACTION_TRUNCATION_SUFFIX
     keep = max(0, max_chars - len(suffix))
     return text[:keep].rstrip() + suffix

@@ -4,6 +4,11 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from uv_agent.prompts import (
+    PROJECT_RULES_LOADED_HEADER,
+    PROJECT_RULE_INDEX_HEADER,
+)
+
 
 RULE_FILE_NAMES = ("AGENTS.md",)
 RULE_FILE_GLOB = "AGENTS.*.md"
@@ -70,7 +75,7 @@ class ProjectRuleContext:
         open_tag = f"<{heading}{(' ' + ' '.join(attrs)) if attrs else ''}>"
         lines = [
             open_tag,
-            "The following directory instruction files were loaded automatically. Follow them when relevant; newer user messages still define the immediate task.",
+            PROJECT_RULES_LOADED_HEADER,
         ]
         for rule in self.rules:
             rel = display_path(rule.path, root=base_path or root)
@@ -104,7 +109,7 @@ class WorkspaceRuleIndex:
             return ""
         lines = [
             "<workspace_rule_index>",
-            f"Rule files were found under the active {label}. Files whose contents are already inlined in any <workspace_rules> block above are considered loaded; do not re-read them. Use enter_dir only for entries whose contents are not present above.",
+            PROJECT_RULE_INDEX_HEADER.format(label=label),
         ]
         for path in self.paths:
             lines.append(f"- {display_path(path, root=self.root)}")

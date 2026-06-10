@@ -1,4 +1,20 @@
+"""
+Single source of truth for uv-agent prompt strings.
+
+LLM-facing prompt constants live here. Modules import from this file
+to avoid duplication and circular imports (this module has zero internal
+uv_agent dependencies).
+
+Consolidated from the legacy agent/prompts.py plus prompt strings that were
+previously duplicated inline across compaction, engine, goal mode, worktree,
+project rules, skills, and runtime subagent helpers.
+"""
+
 from __future__ import annotations
+
+# ===========================================================================
+# Tool definition
+# ===========================================================================
 
 PYTHON_TOOL = {
     "type": "function",
@@ -39,6 +55,31 @@ PYTHON_TOOL = {
     },
     "strict": True,
 }
+
+# ===========================================================================
+# Compaction judge request
+# ===========================================================================
+
+COMPACTION_JUDGE_REQUEST = (
+    "<compaction_judge_request>\n"
+    "You are about to receive a user task. Before answering, output a\n"
+    "one-line JSON judgement about the conversation state. Return ONLY the\n"
+    "JSON line, no backticks, no explanation:\n\n"
+    '{"remaining_calls_bucket":"<0_10|10_30|30_60|60_plus>",'
+    '"history_dependency":"<low|medium|high|exact>"}\n'
+    "\n"
+    "remaining_calls_bucket: how many more model calls will this task need?\n"
+    "history_dependency: how much does the task depend on exact original\n"
+    "  wording in the conversation above? 'low' for general continuation,\n"
+    "  'medium' for moderate dependence, 'high' for strong dependence on\n"
+    "  specific details, 'exact' when every word matters (diffs, error\n"
+    "  messages, config values, exact quotes).\n"
+    "</compaction_judge_request>\n"
+)
+
+# ===========================================================================
+# Core prompts
+# ===========================================================================
 
 COMPACTION_SUMMARIZATION_PROMPT = (
     "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for "
@@ -86,6 +127,187 @@ INTERRUPTED_TOOL_CONTEXT_BRIDGE = (
 INTERRUPTED_STREAM_CONTEXT_BRIDGE = (
     "An assistant response did not complete. Continue from the available context."
 )
+
+
+# ---------------------------------------------------------------------------
+# Engine-level inline prompts (extracted from engine.py)
+# ---------------------------------------------------------------------------
+
+BRANCH_SLUG_INSTRUCTION = (
+    "Generate a short git branch slug. Return only the slug."
+)
+
+THREAD_TITLE_INSTRUCTION = (
+    "Generate a short thread title. Return only the title."
+)
+
+PRE_TURN_JUDGE_ERROR_STDERR = (
+    "ERROR: Do not call tools during pre-turn judgement. Return only the JSON line."
+)
+
+TOKEN_ESTIMATION_WARNING = (
+    "Provider token usage is unavailable; context compaction is "
+    "using a local estimate and may fail calls or compact too late."
+)
+
+COMPACTION_TOOL_ERROR_STDERR = (
+    "ERROR: Tool calls are not allowed during context compaction. "
+    "Return the compaction summary as plain prose text only."
+)
+
+INTERRUPTED_TOOL_ERROR = (
+    "Tool call did not complete because the user interrupted this turn. "
+    "Do not assume the tool ran successfully."
+)
+
+ACTIVE_CWD_NOTICE_TEMPLATE = (
+    "<active_cwd_notice>\n"
+    "The active working directory for run_python is now {active_cwd_rel}. "
+    "The thread opened at {initial_cwd_rel}. "
+    "Relative paths and automatic directory rules follow the active working directory.\n"
+    "</active_cwd_notice>"
+)
+
+CONTEXT_REMOVED_ALL = (
+    "<context_update id=\"runtime_context\" status=\"removed\">\n"
+    "Previously available runtime context is no longer present. "
+    "Do not rely on older runtime context unless it appears again.\n"
+    "</context_update>"
+)
+
+CONTEXT_REMOVED_SOME_PREFIX = (
+    "\n\n<context_update_removed id=\"runtime_context\">\n"
+    "Some previously available runtime context is no longer present. "
+    "Do not rely on older appended content for removed skills or MCP servers unless they appear again.\n"
+)
+
+CONTEXT_REMOVED_SOME_SUFFIX = "\n</context_update_removed>"
+
+CONTEXT_UPDATE_CURRENT_PREFIX = (
+    "<context_update id=\"runtime_context\" status=\"current\">\n"
+    "The following runtime context is current. It updates only the listed content; "
+    "prior runtime context remains current within this epoch unless explicitly removed.\n"
+    "</context_update>"
+)
+
+SKILLS_HEADER = (
+    "<available_skills>\n"
+    "Use these skills when one matches the task; read the listed SKILL.md with Python before applying it."
+)
+
+MCP_SERVERS_HEADER = (
+    "<available_mcp_servers>\n"
+    "Use these MCP servers when they fit the task; inspect and call them through uv_agent_runtime MCP helpers from Python."
+)
+
+PLUGIN_HELPERS_HEADER = (
+    "<plugin_runtime_helpers>\n"
+    "These helpers are provided by installed uv-agent plugins and can be imported from uv_agent_runtime in run_python.\n"
+    "Use the helper name attribute as the Python import/callable name; the plugin attribute identifies the provider plugin only."
+)
+
+TOOL_OUTPUT_TRUNCATED_MARKER = "[tool output truncated for context compaction]"
+
+TOOL_OUTPUT_OMITTED_NOTE = "Tool output was omitted to fit the context compaction request."
+
+# ---------------------------------------------------------------------------
+# Goal mode prompts (extracted from goal_mode.py)
+# ---------------------------------------------------------------------------
+
+GOAL_MODE_DISABLED = "Goal mode is now disabled for this thread."
+
+GOAL_MODE_DISABLED_RULES = (
+    "<rule>The existing goal files are preserved, but they are no longer active durable memory "
+    "unless goal mode is enabled again.</rule>"
+)
+
+GOAL_MODE_ACTIVE = "Goal mode is active for this thread."
+
+GOAL_MODE_CHECKLIST_TEMPLATE = "Describe the goal here."
+
+GOAL_MODE_NOTES_HINT = (
+    "- Keep this section updated with concise context needed after compaction or resume."
+)
+
+# ---------------------------------------------------------------------------
+# Worktree mode prompts (extracted from worktree.py)
+# ---------------------------------------------------------------------------
+
+WORKTREE_MODE_CLOSED = "Worktree mode was closed for this thread."
+
+WORKTREE_CLOSED_RULES = (
+    "<rule>The worktree directory and local branch have been removed; "
+    "do not rely on the deleted path or branch.</rule>\n"
+    "<rule>The thread active cwd is now the current_cwd shown above, "
+    "usually the main project root.</rule>\n"
+    "<rule>If goal mode is also active, continue following the goal-mode memory rules; "
+    "worktree closure does not disable goal mode.</rule>"
+)
+
+WORKTREE_MODE_ACTIVE = "Worktree mode is active for this thread."
+
+WORKTREE_ACTIVE_RULES = (
+    "<rule>Perform this thread's filesystem, Git, build, and test work inside the "
+    "worktree path/current_cwd above, not in the origin workspace, unless the user explicitly asks otherwise.</rule>\n"
+    "<rule>Call enter_dir with the worktree path early when using run_python "
+    "so subsequent commands operate in the worktree.</rule>\n"
+    "<rule>Worktree mode is independent from goal mode; if goal mode is also active, "
+    "follow both worktree and goal-mode instructions.</rule>\n"
+    "<rule>Do not merge, delete, or clean up this worktree/branch automatically "
+    "unless the user explicitly asks; the Worktree panel manages cleanup.</rule>"
+)
+
+# ---------------------------------------------------------------------------
+# Project rules prompts (extracted from project_rules.py)
+# ---------------------------------------------------------------------------
+
+PROJECT_RULES_LOADED_HEADER = (
+    "The following directory instruction files were loaded automatically. "
+    "Follow them when relevant; newer user messages still define the immediate task."
+)
+
+PROJECT_RULE_INDEX_HEADER = (
+    "Rule files were found under the active {label}. "
+    "Files whose contents are already inlined in any <workspace_rules> block above "
+    "are considered loaded; do not re-read them. Use enter_dir only for entries "
+    "whose contents are not present above."
+)
+
+# ---------------------------------------------------------------------------
+# Compaction inline prompts (extracted from compaction.py)
+# ---------------------------------------------------------------------------
+
+COMPACTION_RETURN_ONLY_INSTRUCTION = (
+    "Return only the continuation summary as plain prose, with no code fences "
+    "or tool-call markup. Preserve user intent, decisions, file changes, "
+    "tool results, and unresolved tasks. Summarize tool calls by what was "
+    "done and learned; do not reproduce invocation payloads, scripts, JSON, "
+    "DSML/XML protocol blocks, stdout wrappers, or run IDs. Do not restate "
+    "AGENTS directory rules; they are reloaded automatically when needed."
+)
+
+COMPACTION_NO_SUMMARY_FALLBACK = "(no summary available)"
+
+COMPACTION_TRUNCATION_SUFFIX = "\n[truncated during context compaction]"
+
+# ---------------------------------------------------------------------------
+# Skills/MCP fallback (extracted from skills.py)
+# ---------------------------------------------------------------------------
+
+SKILLS_NONE_DISCOVERED = "None discovered."
+
+# ---------------------------------------------------------------------------
+# Subagent fallback (extracted from subagent.py)
+# ---------------------------------------------------------------------------
+
+SUBAGENT_LEGACY_UNAVAILABLE = (
+    "The legacy ask helper is unavailable. Use workflow.start(...).agent(...).wait() "
+    "or workflow.agent(...), then inspect checkpoints/results through the workflow API."
+)
+
+# ===========================================================================
+# System prompt (the main instruction template)
+# ===========================================================================
 
 SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 <identity>
@@ -140,6 +362,10 @@ You are uv-agent, a general-purpose agent. You interact with the outside world b
 </context_updates>
 </uv_agent_system_prompt>
 """
+
+# ===========================================================================
+# Runtime helpers context
+# ===========================================================================
 
 RUNTIME_HELPERS_CONTEXT = """<runtime_helpers>
 <imports>

@@ -9,6 +9,13 @@ from typing import Any, Literal, Mapping, Protocol
 from uv_agent.paths import ensure_project_local_dir
 from uv_agent.time import utc_now_iso
 
+from uv_agent.prompts import (
+    WORKTREE_ACTIVE_RULES,
+    WORKTREE_CLOSED_RULES,
+    WORKTREE_MODE_ACTIVE,
+    WORKTREE_MODE_CLOSED,
+)
+
 
 WorktreeNoticeStatus = Literal["active", "deleted"]
 
@@ -101,7 +108,7 @@ def render_worktree_notice(metadata: Mapping[str, Any], *, status: WorktreeNotic
     if status == "deleted":
         lines = [
             '<worktree status="deleted">',
-            "Worktree mode was closed for this thread.",
+            WORKTREE_MODE_CLOSED,
             "",
             "<workspace>",
             f"<branch>{_xml_text(branch)}</branch>",
@@ -120,9 +127,7 @@ def render_worktree_notice(metadata: Mapping[str, Any], *, status: WorktreeNotic
                 "</workspace>",
                 "",
                 "<rules>",
-                "<rule>The worktree directory and local branch have been removed; do not rely on the deleted path or branch.</rule>",
-                "<rule>The thread active cwd is now the current_cwd shown above, usually the main project root.</rule>",
-                "<rule>If goal mode is also active, continue following the goal-mode memory rules; worktree closure does not disable goal mode.</rule>",
+                WORKTREE_CLOSED_RULES,
                 "</rules>",
                 "</worktree>",
             ]
@@ -131,7 +136,7 @@ def render_worktree_notice(metadata: Mapping[str, Any], *, status: WorktreeNotic
 
     lines = [
         '<worktree status="active">',
-        "Worktree mode is active for this thread.",
+        WORKTREE_MODE_ACTIVE,
         "",
         "<workspace>",
         f"<branch>{_xml_text(branch)}</branch>",
@@ -150,10 +155,7 @@ def render_worktree_notice(metadata: Mapping[str, Any], *, status: WorktreeNotic
             "</workspace>",
             "",
             "<rules>",
-            "<rule>Perform this thread's filesystem, Git, build, and test work inside the worktree path/current_cwd above, not in the origin workspace, unless the user explicitly asks otherwise.</rule>",
-            "<rule>Call enter_dir with the worktree path early when using run_python so subsequent commands operate in the worktree.</rule>",
-            "<rule>Worktree mode is independent from goal mode; if goal mode is also active, follow both worktree and goal-mode instructions.</rule>",
-            "<rule>Do not merge, delete, or clean up this worktree/branch automatically unless the user explicitly asks; the Worktree panel manages cleanup.</rule>",
+            WORKTREE_ACTIVE_RULES,
             "</rules>",
             "</worktree>",
         ]

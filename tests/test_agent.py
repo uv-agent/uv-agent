@@ -20,7 +20,7 @@ from uv_agent.agent import (
     usage_token_count,
 )
 from uv_agent.agent.compaction import compaction_response_summary_text, retain_item_after_compaction, retain_recent_context
-from uv_agent.agent.prompts import BRANCH_NAME_GENERATION_PROMPT, POST_TOOL_COMPACTION_BRIDGE
+from uv_agent.prompts import BRANCH_NAME_GENERATION_PROMPT, POST_TOOL_COMPACTION_BRIDGE
 from uv_agent.billing import billing_charge_for_usage, billing_token_breakdown, format_billing_total
 from uv_agent.config import (
     AppConfig,

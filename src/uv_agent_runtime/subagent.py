@@ -3,12 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-ASK_REPLACED_MESSAGE = (
-    "The legacy ask helper is unavailable. Use workflow.start(...).agent(...).wait() "
-    "or workflow.agent(...), then inspect checkpoints/results through the workflow API."
-)
-# Backward-compatible constant name for older imports; the helper itself no longer delegates.
-NESTED_ASK_BLOCKED_MESSAGE = ASK_REPLACED_MESSAGE
+from uv_agent.prompts import SUBAGENT_LEGACY_UNAVAILABLE
+
+# Backward-compatible constant names for older imports.
+ASK_REPLACED_MESSAGE = SUBAGENT_LEGACY_UNAVAILABLE
+NESTED_ASK_BLOCKED_MESSAGE = SUBAGENT_LEGACY_UNAVAILABLE
 
 
 @dataclass(frozen=True)

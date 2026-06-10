@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from html import escape as xml_escape
 from pathlib import Path
 
+from uv_agent.prompts import SKILLS_NONE_DISCOVERED
 
 @dataclass(frozen=True)
 class SkillSummary:
@@ -113,7 +114,7 @@ def _read_frontmatter_description(lines: list[str]) -> str:
 def render_skill_summary(skills: list[SkillSummary], *, limit: int = 10) -> str:
     """Render discovered skills for the system prompt."""
     if not skills:
-        return "None discovered."
+        return SKILLS_NONE_DISCOVERED
     lines = []
     for skill in skills[:limit]:
         lines.append(render_skill_entry(skill))

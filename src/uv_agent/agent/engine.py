@@ -65,7 +65,7 @@ from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
 from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn
 from uv_agent.plugins.helpers import RuntimeHelperRegistry
-from uv_agent.agent.prompts import (
+from uv_agent.prompts import (
     BRANCH_NAME_GENERATION_PROMPT,
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
     INTERRUPTED_TOOL_CONTEXT_BRIDGE,
@@ -74,6 +74,22 @@ from uv_agent.agent.prompts import (
     SYSTEM_INSTRUCTIONS_TEMPLATE,
     TITLE_GENERATION_PROMPT,
     TOOL_ATTACHMENT_CONTEXT_BRIDGE,
+    BRANCH_SLUG_INSTRUCTION,
+    THREAD_TITLE_INSTRUCTION,
+    PRE_TURN_JUDGE_ERROR_STDERR,
+    TOKEN_ESTIMATION_WARNING,
+    COMPACTION_TOOL_ERROR_STDERR,
+    INTERRUPTED_TOOL_ERROR,
+    ACTIVE_CWD_NOTICE_TEMPLATE,
+    CONTEXT_REMOVED_ALL,
+    CONTEXT_REMOVED_SOME_PREFIX,
+    CONTEXT_REMOVED_SOME_SUFFIX,
+    CONTEXT_UPDATE_CURRENT_PREFIX,
+    SKILLS_HEADER,
+    MCP_SERVERS_HEADER,
+    PLUGIN_HELPERS_HEADER,
+    TOOL_OUTPUT_TRUNCATED_MARKER,
+    TOOL_OUTPUT_OMITTED_NOTE,
 )
 from uv_agent.project_rules import (
     ProjectRuleContext,
@@ -1195,7 +1211,7 @@ class AgentEngine:
             ],
             level=title_level,
             tools=[],
-            instructions="Generate a short thread title. Return only the title.",
+            instructions=THREAD_TITLE_INSTRUCTION,
         )
         self._record_billing_charge(
             thread_id,
@@ -1235,7 +1251,7 @@ class AgentEngine:
                 ],
                 level=branch_level,
                 tools=[],
-                instructions="Generate a short git branch slug. Return only the slug.",
+                instructions=BRANCH_SLUG_INSTRUCTION,
             ),
             timeout=max(0.1, self.config.runtime.branch_name_generation.timeout_s),
         )
@@ -1425,7 +1441,7 @@ class AgentEngine:
                         "interrupted": False,
                         "truncated": False,
                         "stdout": "",
-                        "stderr": "ERROR: Do not call tools during pre-turn judgement. Return only the JSON line.",
+                        "stderr": PRE_TURN_JUDGE_ERROR_STDERR,
                     })
                     judge_input.append(synth)
                     tool_outputs.append(synth)
@@ -1748,8 +1764,7 @@ class AgentEngine:
                 "thread.token_estimation_warning",
                 turn_id=turn_id,
                 message=(
-                    "Provider token usage is unavailable; context compaction is "
-                    "using a local estimate and may fail calls or compact too late."
+                    TOKEN_ESTIMATION_WARNING
                 ),
                 used_tokens=token_count.tokens,
                 threshold_tokens=trigger_tokens,
@@ -1797,8 +1812,7 @@ class AgentEngine:
                     "truncated": False,
                     "stdout": "",
                     "stderr": (
-                        "ERROR: Tool calls are not allowed during context compaction. "
-                        "Return the compaction summary as plain prose text only."
+                        COMPACTION_TOOL_ERROR_STDERR
                     ),
                 }))
         assert response is not None, "compaction retry loop must produce a response"  # type: ignore[unreachable]
@@ -3132,8 +3146,7 @@ class AgentEngine:
                     call,
                     {
                         "error": (
-                            "Tool call did not complete because the user interrupted this turn. "
-                            "Do not assume the tool ran successfully."
+                            INTERRUPTED_TOOL_ERROR
                         )
                     },
                 )
@@ -3462,12 +3475,9 @@ class AgentEngine:
             return ""
         if state.cwd_notice_cwd == active_cwd:
             return ""
-        text = (
-            "<active_cwd_notice>\n"
-            f"The active working directory for run_python is now {xml_text(self._relative_to_project(active_cwd))}. "
-            f"The thread opened at {xml_text(self._relative_to_project(initial_cwd))}. "
-            "Relative paths and automatic directory rules follow the active working directory.\n"
-            "</active_cwd_notice>"
+        text = ACTIVE_CWD_NOTICE_TEMPLATE.format(
+            active_cwd_rel=xml_text(self._relative_to_project(active_cwd)),
+            initial_cwd_rel=xml_text(self._relative_to_project(initial_cwd)),
         )
         state.cwd_notice_cwd = active_cwd
         self.thread_store.append(
@@ -3670,29 +3680,17 @@ class AgentEngine:
                 "fingerprint": fingerprint,
                 "state": {"fingerprint": fingerprint, "parts": state_parts},
                 "removed": removed or sorted(previous_parts),
-                "text": (
-                    "<context_update id=\"runtime_context\" status=\"removed\">\n"
-                    "Previously available runtime context is no longer present. "
-                    "Do not rely on older runtime context unless it appears again.\n"
-                    "</context_update>"
-                ),
+                "text": CONTEXT_REMOVED_ALL,
             }
         if removed:
             removed_text = (
-                "\n\n<context_update_removed id=\"runtime_context\">\n"
-                "Some previously available runtime context is no longer present. "
-                "Do not rely on older appended content for removed skills or MCP servers unless they appear again.\n"
+                CONTEXT_REMOVED_SOME_PREFIX
                 + _removed_context_text(removed, previous_parts)
-                + "\n"
-                "</context_update_removed>"
+                + CONTEXT_REMOVED_SOME_SUFFIX
             )
         else:
             removed_text = ""
-        prefix = (
-            "<context_update id=\"runtime_context\" status=\"current\">\n"
-            "The following runtime context is current. It updates only the listed content; prior runtime context remains current within this epoch unless explicitly removed.\n"
-            + "</context_update>"
-        )
+        prefix = CONTEXT_UPDATE_CURRENT_PREFIX
         text = prefix + removed_text + ("\n\n" + rendered if rendered else "")
         return {
             "fingerprint": fingerprint,
@@ -3750,8 +3748,7 @@ class AgentEngine:
                 "skills/header",
                 "skills",
                 (
-                    "<available_skills>\n"
-                    "Use these skills when one matches the task; read the listed SKILL.md with Python before applying it."
+                    SKILLS_HEADER
                 ),
             )
         ]
@@ -3794,8 +3791,7 @@ class AgentEngine:
                 "mcp/header",
                 "mcp",
                 (
-                    "<available_mcp_servers>\n"
-                    "Use these MCP servers when they fit the task; inspect and call them through uv_agent_runtime MCP helpers from Python."
+                    MCP_SERVERS_HEADER
                 ),
             )
         ]
@@ -3940,9 +3936,7 @@ class AgentEngine:
         if not helpers:
             return ""
         lines = [
-            "<plugin_runtime_helpers>",
-            "These helpers are provided by installed uv-agent plugins and can be imported from uv_agent_runtime in run_python.",
-            "Use the helper name attribute as the Python import/callable name; the plugin attribute identifies the provider plugin only.",
+            PLUGIN_HELPERS_HEADER,
         ]
         # TODO: When plugins can load or unload after startup, split this into
         # per-plugin context parts so runtime context updates can mention only
@@ -3976,16 +3970,14 @@ def truncate_tool_output_for_compaction(raw_output: str, max_chars: int) -> str:
     try:
         payload = json.loads(raw_output)
     except json.JSONDecodeError:
-        return _head_tail_truncate_text(raw_output, max_chars, marker="[tool output truncated for context compaction]")
+        return _head_tail_truncate_text(raw_output, max_chars, marker=TOOL_OUTPUT_TRUNCATED_MARKER)
     if not isinstance(payload, dict):
-        return _head_tail_truncate_text(raw_output, max_chars, marker="[tool output truncated for context compaction]")
+        return _head_tail_truncate_text(raw_output, max_chars, marker=TOOL_OUTPUT_TRUNCATED_MARKER)
     if max_chars <= 0:
         return json.dumps(
             {
                 "truncated_for_context_compaction": True,
-                "truncation_note": (
-                    "Tool output was omitted to fit the context compaction request."
-                ),
+                "truncation_note": TOOL_OUTPUT_OMITTED_NOTE,
                 "original_json_length": len(raw_output),
             },
             ensure_ascii=False,
@@ -4007,7 +3999,7 @@ def truncate_tool_output_for_compaction(raw_output: str, max_chars: int) -> str:
 
     large_keys = [key for key in ("stdout", "stderr", "output") if isinstance(truncated.get(key), str)]
     if not large_keys:
-        return _head_tail_truncate_text(raw_output, max_chars, marker="[tool output truncated for context compaction]")
+        return _head_tail_truncate_text(raw_output, max_chars, marker=TOOL_OUTPUT_TRUNCATED_MARKER)
 
     for key in large_keys:
         truncated[key] = str(truncated.get(key) or "")

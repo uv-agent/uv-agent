@@ -8,6 +8,14 @@ from typing import Any, Literal
 
 from uv_agent.time import utc_now_iso
 
+from uv_agent.prompts import (
+    GOAL_MODE_ACTIVE,
+    GOAL_MODE_CHECKLIST_TEMPLATE,
+    GOAL_MODE_DISABLED,
+    GOAL_MODE_DISABLED_RULES,
+    GOAL_MODE_NOTES_HINT,
+)
+
 GoalModeStatus = Literal["enabled", "disabled"]
 
 GOAL_STATE_FILENAME = "goal.json"
@@ -123,7 +131,7 @@ def render_goal_mode_notice(state: GoalState, *, status: GoalModeStatus) -> str:
         return "\n".join(
             [
                 '<goal_mode status="disabled">',
-                "Goal mode is now disabled for this thread.",
+                GOAL_MODE_DISABLED,
                 "",
                 "<files>",
                 f"<state>{_xml_text(state.paths.state)}</state>",
@@ -131,14 +139,14 @@ def render_goal_mode_notice(state: GoalState, *, status: GoalModeStatus) -> str:
                 f"<document>{_xml_text(state.paths.notes)}</document>",
                 "</files>",
                 "",
-                "<rule>The existing goal files are preserved, but they are no longer active durable memory unless goal mode is enabled again.</rule>",
+                GOAL_MODE_DISABLED_RULES,
                 "</goal_mode>",
             ]
         )
 
     lines = [
         '<goal_mode status="enabled">',
-        "Goal mode is active for this thread.",
+        GOAL_MODE_ACTIVE,
     ]
     if state.objective.strip():
         lines.extend(["", f"<objective>{_xml_text(state.objective.strip())}</objective>"])
@@ -178,7 +186,7 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _checklist_template(objective: str) -> str:
-    objective_line = objective.strip() or "Describe the goal here."
+    objective_line = objective.strip() or GOAL_MODE_CHECKLIST_TEMPLATE
     return f"""# Goal Checklist
 
 Objective: {objective_line}
@@ -202,7 +210,7 @@ Objective: {objective_line}
 
 
 def _notes_template(objective: str) -> str:
-    objective_line = objective.strip() or "Describe the goal here."
+    objective_line = objective.strip() or GOAL_MODE_CHECKLIST_TEMPLATE
     return f"""# Goal Notes
 
 Objective: {objective_line}
@@ -217,5 +225,5 @@ Objective: {objective_line}
 
 ## Handoff Context
 
-- Keep this section updated with concise context needed after compaction or resume.
+{GOAL_MODE_NOTES_HINT}
 """
