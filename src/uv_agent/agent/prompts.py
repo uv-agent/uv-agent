@@ -294,7 +294,7 @@ for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py
 <signature>enter_dir(path: str | Path) -> Path</signature>
 </helper>
 <helper name="workflow">
-<description>Build persistent task graphs for independent or long-running model work. Workflow replaces ask: create nodes, call wait() explicitly, inspect checkpoints/results, and modify pending graph when direction changes.</description>
+<description>Build persistent task graphs for independent or long-running model work. Create nodes, call wait() explicitly, inspect checkpoints/results, and modify pending graph when direction changes.</description>
 <signature>from uv_agent_runtime import workflow
 workflow.start(objective: str, *, key=None, default_model_level=None, metadata=None) -> WorkflowHandle
 workflow.resume(workflow_id: str) -> WorkflowHandle

@@ -15,7 +15,6 @@ Workflow is available to the main Agent only. Use it to build, wait on,
 inspect, and adjust persistent task graphs for independent or long-running work.
 </purpose>
 <rules>
-<rule>Workflow replaces ask.</rule>
 <rule>Workflow operations return immediately unless wait(), join(), or result() is called explicitly.</rule>
 <rule>wait() runs until completion, failure, timeout, interruption, or checkpoint.</rule>
 <rule>checkpoint returns control to the main Agent for direction adjustment.</rule>
@@ -38,37 +37,116 @@ inspect, and adjust persistent task graphs for independent or long-running work.
 <rule>Make node prompts self-contained: include goal, scope, constraints, expected output, and whether edits are allowed.</rule>
 </node_prompting>
 <examples>
-<example name="create_graph_and_wait_to_checkpoint">
-<description>Create a workflow, add agent nodes and a checkpoint, then wait until the next yield point.</description>
+<example name="long_task_control_flow">
+<description>Coordinate investigation, implementation, review, checkpoints, graph adjustment, and final verification for a long task.</description>
 <code>
 from uv_agent_runtime import workflow
 
-wf = workflow.start(objective="Implement workflow support")
-scan = wf.agent_many(
-    ["Investigate runner", "Investigate context", "Investigate TUI"],
-    key="investigation",
-    prompt=lambda item: f"{item}. Return findings and risks; do not edit files.",
-    concurrency=3,
+wf = workflow.start(
+    objective="Ship a multi-area refactor with investigation, implementation, review, and verification",
+    default_model_level="deepseek-pro",
+)
+runtime = wf.agent(
+    '''Goal: investigate the runner/runtime side of the refactor.
+Scope: inspect src/uv_agent_runtime, src/uv_agent/runner, and tests that cover managed scripts.
+Do not edit files. Identify exact files/functions, risks, migration constraints, and focused tests.
+Return: a concise implementation plan with blockers, edge cases, and confidence level.''',
+    key="investigate.runtime",
+)
+context = wf.agent(
+    '''Goal: investigate prompt, context, and compaction effects for the refactor.
+Scope: inspect context builders, compaction filters, and tests; do not edit files.
+Return: required context changes, cache-stability risks, and exact tests that should prove the behavior.
+Call out any wording that would pollute model context or create stale instructions.''',
+    key="investigate.context",
+)
+ui = wf.agent(
+    '''Goal: investigate how the TUI should surface progress for this long task.
+Scope: inspect tui2 rendering plus legacy formatting helpers; do not edit files.
+Return: the compact transcript events to show, what should stay hidden, and tests to update.
+Keep the recommendation compatible with a single transcript and bottom composer.''',
+    key="investigate.ui",
 )
 wf.checkpoint(
     key="after_investigation",
-    after=scan,
-    reason="Let the main Agent review direction before implementation.",
-    options=["continue", "review", "branch", "takeover", "abort"],
+    after=[runtime, context, ui],
+    reason="Review investigation outputs before choosing the implementation path.",
+    options=["continue", "revise graph", "branch alternative", "take over", "cancel"],
+    recommended_action="Inspect investigation nodes, adjust pending graph if needed, then continue.",
 )
-result = wf.wait()
-print(result.summary())
-</code>
-</example>
-<example name="resume_and_continue">
-<description>Resume a workflow after accepting the checkpoint direction.</description>
-<code>
-from uv_agent_runtime import workflow
+first = wf.wait(timeout_s=1800)
+print(first.summary())
 
-wf = workflow.resume("wf_123")
-wf.continue_checkpoint("after_investigation")
-result = wf.wait()
-print(result.summary())
+if first.status == "checkpoint":
+    print(wf.describe_graph())
+    print(wf.inspect("investigate.runtime"))
+    print(wf.inspect("investigate.context"))
+    print(wf.inspect("investigate.ui"))
+    wf.continue_checkpoint(
+        "after_investigation",
+        resolution={"decision": "implement runtime and context first, then add UI display"},
+    )
+    implementation = wf.agent_many(
+        [
+            {
+                "area": "runtime",
+                "prompt": '''Goal: implement the runtime/store portion of the approved plan.
+Allowed edits: source and focused tests only.
+Use the investigation findings reviewed by the main Agent as constraints.
+Return: changed files, rationale, verification command, and remaining risks.''',
+            },
+            {
+                "area": "context",
+                "prompt": '''Goal: implement prompt/context/compaction changes for the approved plan.
+Allowed edits: source and focused tests only.
+Preserve prompt-cache stability and avoid adding stale state to stable context.
+Return: changed files, rationale, verification command, and remaining risks.''',
+            },
+            {
+                "area": "ui",
+                "prompt": '''Goal: implement compact TUI progress display for the approved plan.
+Allowed edits: tui2/formatting code and focused tests only.
+Do not duplicate model protocol or runner logic inside the UI.
+Return: changed files, display behavior, verification command, and remaining risks.''',
+            },
+        ],
+        key="implement",
+        prompt=lambda item: item["prompt"],
+        concurrency=2,
+        after=[runtime, context, ui],
+    )
+    review = wf.review(
+        key="review.integration",
+        after=implementation,
+        prompt='''Goal: review the integrated implementation.
+Check correctness, context stability, migration compatibility, UI compactness, and test coverage.
+Do not edit files. Return approve, request changes, or propose a replacement node with exact reasons.''',
+    )
+    wf.checkpoint(
+        key="before_final_verification",
+        after=review,
+        reason="Review the implementation and decide whether to patch, branch, or verify.",
+        options=["continue", "replace node", "branch alternative", "take over", "cancel"],
+        recommended_action="Inspect review.integration, modify pending graph if needed, then continue.",
+    )
+    second = wf.wait(timeout_s=3600)
+    print(second.summary())
+    if second.status == "checkpoint":
+        print(wf.inspect("review.integration"))
+        wf.continue_checkpoint(
+            "before_final_verification",
+            resolution={"decision": "run final verification and summarize remaining risk"},
+        )
+        verify = wf.agent(
+            '''Goal: run final verification for the integrated changes.
+Scope: run focused tests first, then the broader suite if focused tests pass.
+Allowed edits: only minimal fixes for verification failures; report unexpected design drift before large rewrites.
+Return: commands run, pass/fail summary, residual risks, and whether the main Agent should commit.''',
+            key="verify.final",
+            after="before_final_verification",
+        )
+        final = wf.wait(timeout_s=3600, until="completed")
+        print(final.summary())
 </code>
 </example>
 </examples>

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 ASK_REPLACED_MESSAGE = (
-    "ask has been replaced by workflow. Use workflow.start(...).agent(...).wait() "
+    "The legacy ask helper is unavailable. Use workflow.start(...).agent(...).wait() "
     "or workflow.agent(...), then inspect checkpoints/results through the workflow API."
 )
 # Backward-compatible constant name for older imports; the helper itself no longer delegates.

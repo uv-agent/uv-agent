@@ -3442,6 +3442,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "inspect returned instructions" in turn_context
     assert '<helper name="workflow"' in turn_context
     assert "Build persistent task graphs" in turn_context
+    assert "replaces " + "ask" not in turn_context
     assert 'level="small"' not in prompt
     assert "pathlib" in turn_context
     assert "Mentions are plain-text hints only" in prompt
@@ -4611,7 +4612,11 @@ def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -
     repeated = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
 
     assert '<workflow_context scope="main_agent" status="current">' in first
-    assert "Workflow replaces ask." in first
+    assert "long_task_control_flow" in first
+    assert "investigate the runner/runtime side of the refactor" in first
+    assert "wf.continue_checkpoint" in first
+    assert "Workflow " + "replaces " + "ask" not in first
+    assert "verify.final" in first
     assert '<workflow_context scope="main_agent" status="current">' not in repeated
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
