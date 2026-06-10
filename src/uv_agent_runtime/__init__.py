@@ -109,6 +109,7 @@ _SUBMODULES = {
     "threads",
     "transport",
     "vision",
+    "workflow",
 }
 
 __all__ = sorted([*_EXPORTS, *_SUBMODULES])

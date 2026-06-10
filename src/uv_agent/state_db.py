@@ -6,7 +6,7 @@ from pathlib import Path
 from uv_agent.time import utc_now_iso
 
 DB_FILENAME = "uv-agent.sqlite3"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SQLITE_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
 
@@ -47,17 +47,26 @@ def connect_state_db(data_dir: Path, *, check_same_thread: bool = True) -> sqlit
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
-    """Create the v1 schema or reject databases from a different future schema."""
+    """Create or migrate the project state schema to the current version."""
 
     _ensure_wal(connection)
     existing_version = _read_schema_version(connection)
     if existing_version == str(SCHEMA_VERSION):
         return
-    if existing_version is not None:
-        raise StateDbError(
-            f"Unsupported state database schema version {existing_version}; "
-            f"expected {SCHEMA_VERSION}"
-        )
+    if existing_version is None:
+        _create_schema(connection)
+        return
+    if existing_version == "1":
+        _migrate_v1_to_v2(connection)
+        return
+    raise StateDbError(
+        f"Unsupported state database schema version {existing_version}; "
+        f"expected {SCHEMA_VERSION}"
+    )
+
+
+def _create_schema(connection: sqlite3.Connection) -> None:
+    """Create the full schema for a new project state database."""
 
     with connection:
         connection.executescript(
@@ -177,23 +186,108 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
               ON run_events(run_id, event_id);
             """
         )
-        version = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-        if version is None:
-            connection.execute(
-                "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
-            connection.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES ('created_at', ?)",
-                (utc_now_iso(),),
-            )
-            return
-        if version["value"] != str(SCHEMA_VERSION):
-            raise StateDbError(
-                f"Unsupported state database schema version {version['value']}; "
-                f"expected {SCHEMA_VERSION}"
-            )
+        _create_workflow_schema(connection)
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES ('created_at', ?)",
+            (utc_now_iso(),),
+        )
 
+
+def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+    """Add workflow persistence tables to an existing v1 project database."""
+
+    with connection:
+        _create_workflow_schema(connection)
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+
+
+def _create_workflow_schema(connection: sqlite3.Connection) -> None:
+    """Create workflow task-graph tables and indexes."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS workflows (
+          workflow_id TEXT PRIMARY KEY,
+          parent_thread_id TEXT,
+          parent_turn_id TEXT,
+          parent_run_id TEXT,
+          objective TEXT NOT NULL,
+          status TEXT NOT NULL,
+          default_model_level TEXT,
+          current_checkpoint_id TEXT,
+          state_json TEXT NOT NULL DEFAULT '{}',
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS workflow_nodes (
+          node_id TEXT PRIMARY KEY,
+          workflow_id TEXT NOT NULL,
+          key TEXT,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          dependencies_json TEXT NOT NULL DEFAULT '[]',
+          prompt TEXT,
+          model_level TEXT,
+          thread_id TEXT,
+          run_id TEXT,
+          result_summary TEXT,
+          result_json TEXT NOT NULL DEFAULT '{}',
+          error_json TEXT NOT NULL DEFAULT '{}',
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          started_at TEXT,
+          completed_at TEXT,
+          FOREIGN KEY(workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+          checkpoint_id TEXT PRIMARY KEY,
+          workflow_id TEXT NOT NULL,
+          node_id TEXT NOT NULL,
+          key TEXT NOT NULL,
+          status TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          options_json TEXT NOT NULL DEFAULT '[]',
+          recommended_action TEXT,
+          snapshot_json TEXT NOT NULL DEFAULT '{}',
+          resolution_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          resolved_at TEXT,
+          FOREIGN KEY(workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE,
+          FOREIGN KEY(node_id) REFERENCES workflow_nodes(node_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS workflow_events (
+          event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          workflow_id TEXT NOT NULL,
+          node_id TEXT,
+          type TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          FOREIGN KEY(workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workflow_nodes_workflow_status
+          ON workflow_nodes(workflow_id, status);
+        CREATE INDEX IF NOT EXISTS idx_workflow_nodes_workflow_key
+          ON workflow_nodes(workflow_id, key);
+        CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_workflow_status
+          ON workflow_checkpoints(workflow_id, status);
+        CREATE INDEX IF NOT EXISTS idx_workflow_events_workflow_id
+          ON workflow_events(workflow_id, event_id);
+        CREATE INDEX IF NOT EXISTS idx_workflows_parent_thread
+          ON workflows(parent_thread_id, status);
+        """
+    )
 
 def _ensure_wal(connection: sqlite3.Connection) -> None:
     """Switch to WAL only when needed so normal opens stay read-mostly."""

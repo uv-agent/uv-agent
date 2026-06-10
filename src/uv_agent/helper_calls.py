@@ -78,6 +78,7 @@ RUNTIME_SUBMODULE_NAMES: frozenset[str] = frozenset(
         "threads",
         "transport",
         "vision",
+        "workflow",
     }
 )
 

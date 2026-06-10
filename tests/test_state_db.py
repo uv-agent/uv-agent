@@ -32,6 +32,10 @@ def test_state_db_initializes_schema_and_pragmas(tmp_path: Path) -> None:
         "thread_locks",
         "runs",
         "run_events",
+        "workflows",
+        "workflow_nodes",
+        "workflow_checkpoints",
+        "workflow_events",
     } <= tables
 
 
@@ -43,3 +47,22 @@ def test_state_db_initialization_is_idempotent(tmp_path: Path) -> None:
         row = db.execute("SELECT value FROM meta WHERE key = 'custom'").fetchone()
 
     assert row["value"] == "kept"
+
+
+
+def test_state_db_migrates_v1_database_to_workflows(tmp_path: Path) -> None:
+    db_path = state_db_path(tmp_path)
+    with connect_state_db(tmp_path) as db:
+        db.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+        db.execute("DROP TABLE workflow_events")
+        db.execute("DROP TABLE workflow_checkpoints")
+        db.execute("DROP TABLE workflow_nodes")
+        db.execute("DROP TABLE workflows")
+
+    with connect_state_db(tmp_path) as db:
+        version = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        workflow_table = db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'workflows'").fetchone()
+
+    assert db_path.exists()
+    assert version["value"] == str(SCHEMA_VERSION)
+    assert workflow_table is not None

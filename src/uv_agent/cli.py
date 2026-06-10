@@ -13,21 +13,23 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["tui2", "tui", "ask"],
+        choices=["tui2", "tui", "ask", "workflow-node"],
         default="tui2",
-        help="Run the default ANSI TUI, Textual TUI, or ask a single question.",
+        help="Run the default ANSI TUI, Textual TUI, ask a single question, or execute a workflow node.",
     )
     parser.add_argument("--level", default=None, help="Model level to use for ask mode.")
     parser.add_argument("--thread", default=None, help="Thread id to resume in ask mode.")
     parser.add_argument(
         "--thread-kind",
         default="thread",
-        choices=["thread", "subagent"],
+        choices=["thread", "subagent", "workflow_node"],
         help="Thread storage kind for ask mode.",
     )
     parser.add_argument("--parent-thread", default=None, help="Parent thread id for subagent ask mode.")
     parser.add_argument("--parent-turn", default=None, help="Parent turn id for subagent ask mode.")
     parser.add_argument("--parent-run", default=None, help="Parent run id for subagent ask mode.")
+    parser.add_argument("--workflow-id", default=None, help="Workflow id for workflow-node mode.")
+    parser.add_argument("--node-id", default=None, help="Workflow node id for workflow-node mode.")
     parser.add_argument(
         "--project-state-dir",
         default=None,
@@ -40,6 +42,25 @@ def main() -> None:
         from uv_agent.tui2.app import AnsiUvAgentApp
 
         AnsiUvAgentApp(project_root=Path.cwd()).run()
+        return
+    if args.command == "workflow-node":
+        prompt = " ".join(args.prompt).strip()
+        if not prompt:
+            raise SystemExit("workflow-node mode requires a prompt")
+        asyncio.run(
+            _workflow_node(
+                prompt,
+                args.level,
+                args.thread,
+                stream=not args.no_stream,
+                parent_thread_id=args.parent_thread,
+                parent_turn_id=args.parent_turn,
+                parent_run_id=args.parent_run,
+                workflow_id=args.workflow_id,
+                node_id=args.node_id,
+                project_state_dir=Path(args.project_state_dir) if args.project_state_dir else None,
+            )
+        )
         return
     if args.command == "ask":
         prompt = " ".join(args.prompt).strip()
@@ -99,6 +120,102 @@ async def _ask(
                 parent_run_id=parent_run_id,
             )
             print(f"[subagent-thread] {thread_id}", file=sys.stderr)
+        saw_delta = False
+        async for event in engine.run_turn(user_text=prompt, thread_id=thread_id, level=level):
+            event_type = event["type"]
+            if event_type == "assistant.delta":
+                if stream:
+                    print(event["text"], end="", flush=True)
+                saw_delta = True
+            elif event_type == "tool.started" and stream:
+                call = event.get("call") or {}
+                print(
+                    f"\n\n[python] {call.get('name', 'run_python')} started "
+                    f"({call.get('call_id') or 'call'})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif event_type == "tool.partial" and stream:
+                payload = parse_tool_payload(event.get("output") or {}) or {}
+                stdout = str(payload.get("stdout") or "").strip()
+                stderr = str(payload.get("stderr") or "").strip()
+                summary = stdout.splitlines()[-1] if stdout else stderr.splitlines()[-1] if stderr else ""
+                if len(summary) > 140:
+                    summary = summary[:137].rstrip() + "..."
+                status = payload.get("partial_reason") or "running"
+                print(
+                    f"[python] {status} run={payload.get('run_id')} {summary}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif event_type == "tool.output" and stream:
+                payload = parse_tool_payload(event.get("output") or {}) or {}
+                stdout = str(payload.get("stdout") or "").strip()
+                stderr = str(payload.get("stderr") or "").strip()
+                summary = stdout.splitlines()[-1] if stdout else stderr.splitlines()[-1] if stderr else ""
+                if len(summary) > 140:
+                    summary = summary[:137].rstrip() + "..."
+                print(
+                    f"[python] rc={payload.get('returncode')} run={payload.get('run_id')} {summary}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif event_type == "turn.completed":
+                if not stream or not saw_delta:
+                    print(event["final_text"])
+                elif stream:
+                    print()
+                print(f"[thread] {short_thread(event['thread_id'])}", file=sys.stderr)
+            elif event_type == "turn.error":
+                message = str(event.get("message") or "turn failed")
+                error_type = str(event.get("error_type") or "TurnError")
+                print(f"[{error_type}] {message}", file=sys.stderr)
+                raise SystemExit(1)
+    finally:
+        await engine.aclose()
+
+
+async def _workflow_node(
+    prompt: str,
+    level: str | None,
+    thread_id: str | None,
+    *,
+    stream: bool,
+    parent_thread_id: str | None = None,
+    parent_turn_id: str | None = None,
+    parent_run_id: str | None = None,
+    workflow_id: str | None = None,
+    node_id: str | None = None,
+    project_state_dir: Path | None = None,
+) -> None:
+    """Execute one workflow node in an isolated thread and print its final answer."""
+
+    from uv_agent.app_factory import create_engine
+
+    engine = create_engine(Path.cwd(), data_dir=project_state_dir)
+    try:
+        if level is None:
+            workflow_default = getattr(engine.config.runtime, "workflow_default_level", None)
+            if workflow_default:
+                level = workflow_default
+        if thread_id is None:
+            title = prompt.splitlines()[0].strip()
+            if len(title) > 80:
+                title = title[:77].rstrip() + "..."
+            thread_id = engine.thread_store.create_thread(
+                f"Workflow node: {title or node_id or 'task'}",
+                kind="workflow_node",
+                parent_thread_id=parent_thread_id,
+                parent_turn_id=parent_turn_id,
+                parent_run_id=parent_run_id,
+            )
+            engine.thread_store.append(
+                thread_id,
+                "thread.workflow_node_bound",
+                workflow_id=workflow_id,
+                node_id=node_id,
+            )
+            print(f"[workflow-node-thread] {thread_id}", file=sys.stderr)
         saw_delta = False
         async for event in engine.run_turn(user_text=prompt, thread_id=thread_id, level=level):
             event_type = event["type"]
