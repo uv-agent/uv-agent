@@ -181,6 +181,7 @@ def _recent_context_candidate_item(item: dict[str, Any]) -> dict[str, Any] | Non
             or "<active_cwd_notice>" in text
             or "<goal_mode" in text
             or "<worktree" in text
+            or "<workflow_context" in text
             or "<conversation_summary>" in text
             or "<available_skills>" in text
             or "<available_mcp_servers>" in text
@@ -429,6 +430,7 @@ def retain_item_after_compaction(item: dict[str, Any]) -> bool:
         or "<active_cwd_notice>" in text
         or "<goal_mode" in text
         or "<worktree" in text
+        or "<workflow_context" in text
         or "<conversation_summary>" in text
         or "<available_skills>" in text
         or "<available_mcp_servers>" in text

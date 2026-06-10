@@ -89,6 +89,7 @@ from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.agent.tool_results import function_output, model_tool_payload
 from uv_agent.helper_calls import extract_runtime_helper_calls
 from uv_agent.worktree import render_worktree_notice
+from uv_agent.workflow_context import active_workflows_compaction_section, render_workflow_context
 
 
 async def _await_next_stream_event(awaitable: Awaitable[Any]) -> Any:
@@ -1801,7 +1802,10 @@ class AgentEngine:
                     ),
                 }))
         assert response is not None, "compaction retry loop must produce a response"  # type: ignore[unreachable]
-        summary_text = compaction_response_summary_text(response)
+        summary_text = self._compaction_summary_with_active_workflows(
+            thread_id,
+            compaction_response_summary_text(response),
+        )
         replacement_input = self._compaction_replacement_input(input_items, response, K=retain_K)
         context_state = self._latest_context_state(thread_id)
         self.thread_store.append(
@@ -1830,6 +1834,19 @@ class AgentEngine:
             ),
             token_warning_event=token_warning_event,
         )
+
+
+    def _compaction_summary_with_active_workflows(self, thread_id: str, summary_text: str) -> str:
+        if not self._is_main_agent_thread(thread_id):
+            return summary_text
+        section = active_workflows_compaction_section(
+            self.thread_store.data_dir,
+            parent_thread_id=thread_id,
+        )
+        if not section:
+            return summary_text
+        base = summary_text.rstrip()
+        return f"{base}\n\n{section}" if base else section
 
     @staticmethod
     def _compaction_started_event(thread_id: str, turn_id: str) -> dict[str, Any]:
@@ -2077,6 +2094,7 @@ class AgentEngine:
             or "<active_cwd_notice>" in text
             or "<goal_mode" in text
             or "<worktree" in text
+            or "<workflow_context" in text
             or "<available_skills>" in text
             or "<available_mcp_servers>" in text
             or "<context_update" in text
@@ -3075,6 +3093,8 @@ class AgentEngine:
             text = str(event.get("text") or "")
         elif event_type == "item.worktree_notice":
             text = str(event.get("text") or "")
+        elif event_type == "item.workflow_context":
+            text = str(event.get("text") or "")
         elif event_type == "item.rules_loaded" and event.get("source") in {
             "project",
             "active_cwd",
@@ -3156,8 +3176,29 @@ class AgentEngine:
             items.append(message_item("user", text))
         items.extend(self._goal_context_items(thread_id))
         items.extend(self._worktree_context_items(thread_id))
+        items.extend(self._workflow_context_items(thread_id))
         items.extend(self._runtime_context_items(thread_id))
         return items
+
+
+    def _workflow_context_items(self, thread_id: str) -> list[dict[str, Any]]:
+        if not self._is_main_agent_thread(thread_id):
+            return []
+        if self.thread_store.has_event_after_latest_compaction(
+            thread_id,
+            event_types={"item.workflow_context"},
+        ):
+            return []
+        text = render_workflow_context()
+        self.thread_store.append(thread_id, "item.workflow_context", text=text)
+        return [message_item("user", text)]
+
+    def _is_main_agent_thread(self, thread_id: str) -> bool:
+        try:
+            kind = str(self.thread_store.thread_metadata(thread_id).get("kind") or "thread")
+        except FileNotFoundError:
+            return False
+        return kind == "thread"
 
     def enable_goal_mode(self, thread_id: str, *, objective: str = "") -> GoalState:
         """Enable per-thread goal mode and preserve any existing goal files."""

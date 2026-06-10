@@ -4571,6 +4571,97 @@ async def test_run_turn_waits_for_plugin_start_before_context_update(tmp_path: P
     assert '<helper name="delayed_helper" plugin="delayed-plugin">Delayed helper.</helper>' in request_text
 
 
+
+def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+
+    first = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
+    repeated = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
+
+    assert '<workflow_context scope="main_agent" status="current">' in first
+    assert "Workflow replaces ask." in first
+    assert '<workflow_context scope="main_agent" status="current">' not in repeated
+
+    engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
+    after_compaction = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
+    assert '<workflow_context scope="main_agent" status="current">' in after_compaction
+
+
+def test_workflow_context_is_not_sent_to_workflow_node_threads(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    parent = engine.thread_store.create_thread()
+    node_thread = engine.thread_store.create_thread("Node", kind="workflow_node", parent_thread_id=parent)
+
+    text = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(node_thread))
+
+    assert "<workflow_context" not in text
+
+
+def test_workflow_context_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    workflow_item = next(
+        item for item in engine._pre_user_context_items(thread_id) if "<workflow_context" in message_item_text(item)
+    )
+
+    assert engine._is_pre_user_context_item(workflow_item)
+    assert retain_item_after_compaction(workflow_item) is False
+
+
+def test_compaction_summary_appends_active_workflows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from uv_agent_runtime import workflow
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    state_dir = tmp_path / "state"
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=state_dir, config=config.runner),
+        thread_store=ThreadStore(state_dir),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", thread_id)
+    wf = workflow.start("Long task", state_dir=state_dir)
+    wf.agent("Do the first part", key="first")
+
+    summary = engine._compaction_summary_with_active_workflows(thread_id, "Conversation summary")
+
+    assert summary.startswith("Conversation summary")
+    assert "## Active workflows" in summary
+    assert wf.workflow_id in summary
+    assert "workflow.resume" in summary
+
 def test_goal_mode_notice_emits_once_per_epoch_and_after_disable(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
