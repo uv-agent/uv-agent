@@ -10,7 +10,14 @@ from rich.markdown import Markdown
 from uv_agent.environment import UserLanguage, normalize_language
 from uv_agent.helper_calls import extract_runtime_helper_calls, format_helper_call
 from uv_agent.i18n import tr
-from uv_agent.tui.formatting import format_elapsed, short_block, short_thread
+from uv_agent.tui.formatting import (
+    format_elapsed,
+    renderable_plain,
+    short_block,
+    short_thread,
+    strip_runtime_event_lines,
+    structured_event_markup,
+)
 from uv_agent.tui2.ansi import strip_ansi, truncate_visible, visible_len, wrap_plain
 from uv_agent.tui2.events import (
     AGENT_VIEW_STATUS_ORDER,
@@ -175,6 +182,7 @@ def render_message_cell(
 _TOOL_STDOUT_MAX_LINES = 5
 _TOOL_STDERR_MAX_LINES = 3
 _TOOL_HELPER_MAX_LINES = 6
+_TOOL_EVENT_MAX_LINES = 5
 
 
 def _rule(label: str, width: int, style: str, theme: AnsiTheme) -> str:
@@ -282,17 +290,27 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
         # Keep live tool cells at a *constant* height during their entire run.
         # Header text + helpers list are both static (helpers are parsed from
         # the call code once; the title text only changes the elapsed counter
-        # in place).  Skipping the stdout/stderr block here means the live
-        # frame never grows between repaints, which is the only height change
-        # that could push the frame's top row out of the viewport and leave a
-        # leaked ``── ⠿ run_python · running…`` header in scrollback.  The
-        # completed cell flushed below by ``_flush`` still includes the full
-        # stdout/stderr block, so users still see all output in scrollback.
+        # in place).  Skipping dynamic event/stdout/stderr blocks here means the
+        # live frame never grows between repaints, which is the only height
+        # change that could push the frame's top row out of the viewport and
+        # leave a leaked ``── ⠿ run_python · running…`` header in scrollback.
+        # The completed cell flushed below by ``_flush`` still includes the full
+        # timeline and output, so users still see all details in scrollback.
         return lines
-    stdout = short_block(str(payload.get("stdout") or ""), max_lines=_TOOL_STDOUT_MAX_LINES, max_chars=1000)
+    events = payload.get("events")
+    event_items = [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
+    for event in event_items[:_TOOL_EVENT_MAX_LINES]:
+        event_text = renderable_plain(structured_event_markup(event)) or ""
+        if event_text:
+            lines.append(_indented(event_text, width, theme.muted))
+    if len(event_items) > _TOOL_EVENT_MAX_LINES:
+        lines.append(_indented(f"… more events +{len(event_items) - _TOOL_EVENT_MAX_LINES}", width, theme.muted))
+    run_id_filter = str(payload.get("run_id") or "")
+    stdout_raw = strip_runtime_event_lines(str(payload.get("stdout") or ""), run_id=run_id_filter)
+    stdout = short_block(stdout_raw, max_lines=_TOOL_STDOUT_MAX_LINES, max_chars=1000)
     stderr = short_block(str(payload.get("stderr") or ""), max_lines=_TOOL_STDERR_MAX_LINES, max_chars=700)
     if stdout or stderr:
-        if helper_calls or code:
+        if helper_calls or code or event_items:
             lines.append(sgr(theme.border, "  ─"))
         for block, style in ((stdout, theme.tool_output), (stderr, theme.error)):
             if not block:

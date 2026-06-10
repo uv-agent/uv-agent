@@ -507,16 +507,76 @@ def structured_event_markup(event: dict[str, Any]) -> Text:
         return line(prefix, markup("[cyan]result[/cyan] "), plain(json.dumps(event, ensure_ascii=False), style="dim"))
     if kind == "look_at":
         return line(prefix, markup("[cyan]look_at[/cyan] "), str(event.get("path") or ""))
+    if kind == "workflow.started":
+        workflow_id = _workflow_event_ref(event, key_name="key", id_name="workflow_id")
+        objective = _event_first_line(event.get("objective"), max_chars=80)
+        return line(
+            prefix,
+            markup("[magenta]workflow[/magenta] "),
+            plain(f"{workflow_id} started", style="dim"),
+            plain(f" {objective}" if objective else ""),
+        )
+    if kind == "workflow.node.started":
+        node = _workflow_event_ref(event, key_name="key", id_name="node_id")
+        node_kind = str(event.get("node_kind") or "node")
+        return line(
+            prefix,
+            markup("[magenta]workflow[/magenta] "),
+            plain(f"node {node} started", style="dim"),
+            plain(f" {node_kind}" if node_kind and node_kind != "node" else "", style="dim"),
+        )
+    if kind in {"workflow.node.completed", "workflow.node.failed"}:
+        node = _workflow_event_ref(event, key_name="key", id_name="node_id")
+        status = "completed" if kind == "workflow.node.completed" else "failed"
+        detail = _workflow_node_result_detail(event)
+        return line(
+            prefix,
+            markup("[magenta]workflow[/magenta] "),
+            plain(f"node {node} {status}", style="dim"),
+            plain(f" {detail}" if detail else "", style="dim"),
+        )
+    if kind == "workflow.checkpoint.reached":
+        checkpoint = _workflow_event_ref(event, key_name="key", id_name="checkpoint_id")
+        return line(prefix, markup("[magenta]workflow[/magenta] "), plain(f"checkpoint {checkpoint} reached", style="dim"))
     if kind == "subagent.started":
         return line(prefix, markup("[magenta]subagent[/magenta] [dim]started[/dim]"))
     if kind == "subagent.completed":
         thread_id = str(event.get("thread_id") or "")
-        summary = str(event.get("summary") or "").splitlines()[0]
-        if len(summary) > 90:
-            summary = summary[:87].rstrip() + "..."
+        summary = _event_first_line(event.get("summary"), max_chars=90)
         detail = f" {short_thread(thread_id)}" if thread_id else ""
         return line(prefix, markup("[magenta]subagent[/magenta] "), plain(f"completed{detail}", style="dim"), " ", summary)
     return line(prefix, plain(kind, style="dim"), " ", plain(json.dumps(event, ensure_ascii=False), style="dim"))
+
+
+def _workflow_event_ref(event: dict[str, Any], *, key_name: str, id_name: str) -> str:
+    """Return the stable human label for a workflow event entity."""
+
+    key = str(event.get(key_name) or "").strip()
+    if key:
+        return key
+    identifier = str(event.get(id_name) or "").strip()
+    return short_thread(identifier) if identifier else "?"
+
+
+def _workflow_node_result_detail(event: dict[str, Any]) -> str:
+    details: list[str] = []
+    thread_id = str(event.get("thread_id") or "")
+    if thread_id:
+        details.append(f"thread {short_thread(thread_id)}")
+    if bool(event.get("timed_out")):
+        details.append("timeout")
+    else:
+        returncode = event.get("returncode")
+        if returncode not in (None, 0):
+            details.append(f"exit {returncode}")
+    return " · ".join(details)
+
+
+def _event_first_line(value: Any, *, max_chars: int) -> str:
+    text = str(value or "").strip().splitlines()[0] if str(value or "").strip() else ""
+    if len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
 
 
 def json_markup(value: object) -> Text:

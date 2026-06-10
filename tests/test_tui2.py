@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+from uv_agent.tui.formatting import RUNTIME_EVENT_EVENT_ID_KEY, RUNTIME_EVENT_RUN_ID_KEY, renderable_plain, structured_event_markup
 from uv_agent.tui2.ansi import strip_ansi, visible_len
 from uv_agent.session import ThreadLockedError
 from uv_agent.tui2.components import (
@@ -170,6 +171,66 @@ def test_tool_cell_uses_payload_helper_calls_without_source() -> None:
 
     assert 'replace_text("a.txt", "old", "new")' in plain
     assert "print(1)" not in plain
+
+
+def test_workflow_structured_event_markup_is_compact() -> None:
+    started = renderable_plain(
+        structured_event_markup(
+            {"kind": "workflow.node.started", "key": "investigate", "node_kind": "agent"}
+        )
+    )
+    completed = renderable_plain(
+        structured_event_markup(
+            {
+                "kind": "workflow.node.completed",
+                "key": "investigate",
+                "thread_id": "thr_12345678",
+                "returncode": 0,
+            }
+        )
+    )
+    failed = renderable_plain(
+        structured_event_markup(
+            {"kind": "workflow.node.failed", "node_id": "wfn_deadbeef", "returncode": 2}
+        )
+    )
+    checkpoint = renderable_plain(
+        structured_event_markup(
+            {"kind": "workflow.checkpoint.reached", "key": "after_investigation"}
+        )
+    )
+
+    assert started == "└─ workflow node investigate started agent"
+    assert completed == "└─ workflow node investigate completed thread 12345678"
+    assert failed == "└─ workflow node deadbeef failed exit 2"
+    assert checkpoint == "└─ workflow checkpoint after_investigation reached"
+
+
+def test_tool_cell_shows_workflow_events_without_runtime_json_stdout() -> None:
+    event = {
+        "kind": "workflow.node.completed",
+        "key": "investigate",
+        "thread_id": "thr_node12345678",
+        "returncode": 0,
+        RUNTIME_EVENT_EVENT_ID_KEY: "evt_1",
+        RUNTIME_EVENT_RUN_ID_KEY: "run_1",
+    }
+    payload = {
+        "run_id": "run_1",
+        "returncode": 0,
+        "stdout": "visible output\n" + json.dumps(event) + "\n",
+        "events": [event],
+    }
+
+    plain = "\n".join(
+        strip_ansi(line)
+        for line in render_tool_cell(TranscriptCell("tool", payload=payload), 100)
+    )
+
+    assert "workflow node investigate completed thread 12345678" in plain
+    assert "visible output" in plain
+    assert RUNTIME_EVENT_EVENT_ID_KEY not in plain
+    assert RUNTIME_EVENT_RUN_ID_KEY not in plain
 
 
 def test_tui2_compaction_event_shows_preview_only(monkeypatch) -> None:
