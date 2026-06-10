@@ -4582,6 +4582,18 @@ async def test_run_turn_waits_for_plugin_start_before_context_update(tmp_path: P
 
 
 
+def test_workflow_context_xml_has_compact_prompt_format() -> None:
+    from uv_agent.workflow_context import render_workflow_context
+
+    context = render_workflow_context()
+    lines = context.splitlines()
+
+    assert lines[0] == '<workflow_context scope="main_agent" status="current">'
+    assert lines[-1] == "</workflow_context>"
+    assert "  <" not in context
+    assert "\n\n<" not in context
+
+
 def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()

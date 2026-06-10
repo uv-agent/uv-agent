@@ -10,42 +10,37 @@ from uv_agent.state_db import connect_state_db
 ACTIVE_WORKFLOW_STATUSES = {"running", "checkpoint", "failed"}
 
 WORKFLOW_CONTEXT_TEXT = """<workflow_context scope="main_agent" status="current">
-  <purpose>
-    Workflow is available to the main Agent only. Use it to build, wait on,
-    inspect, and adjust persistent task graphs for independent or long-running work.
-  </purpose>
-
-  <rules>
-    <rule>Workflow replaces ask.</rule>
-    <rule>Workflow operations return immediately unless wait(), join(), or result() is called explicitly.</rule>
-    <rule>wait() runs until completion, failure, timeout, interruption, or checkpoint.</rule>
-    <rule>checkpoint returns control to the main Agent for direction adjustment.</rule>
-    <rule>Use graph() or describe_graph() to review task graph settings.</rule>
-    <rule>Use inspect(node) to view a node's final model output.</rule>
-    <rule>Use graph modification APIs to adjust pending tasks after checkpoints.</rule>
-  </rules>
-
-  <model_level_policy>
-    <rule>Pass model_level on a node, default_model_level on workflow.start(), or omit both to use the configured workflow/global default.</rule>
-    <rule>If model_levels contains workflow_default, it is the configured default for workflow nodes.</rule>
-  </model_level_policy>
-
-  <state_policy>
-    <rule>Current workflow state is not updated in this block.</rule>
-    <rule>Use wait(), snapshot(), graph(), inspect(), or list() for current workflow state.</rule>
-    <rule>Active workflow snapshots are restored through the compaction summary section named "## Active workflows".</rule>
-  </state_policy>
-
-  <node_prompting>
-    <rule>Workflow node agents do not receive this workflow_context block.</rule>
-    <rule>Write node prompts as normal natural-language task details.</rule>
-    <rule>Make node prompts self-contained: include goal, scope, constraints, expected output, and whether edits are allowed.</rule>
-  </node_prompting>
-
-  <examples>
-    <example name="create_graph_and_wait_to_checkpoint">
-      <description>Create a workflow, add agent nodes and a checkpoint, then wait until the next yield point.</description>
-      <code>
+<purpose>
+Workflow is available to the main Agent only. Use it to build, wait on,
+inspect, and adjust persistent task graphs for independent or long-running work.
+</purpose>
+<rules>
+<rule>Workflow replaces ask.</rule>
+<rule>Workflow operations return immediately unless wait(), join(), or result() is called explicitly.</rule>
+<rule>wait() runs until completion, failure, timeout, interruption, or checkpoint.</rule>
+<rule>checkpoint returns control to the main Agent for direction adjustment.</rule>
+<rule>Use graph() or describe_graph() to review task graph settings.</rule>
+<rule>Use inspect(node) to view a node's final model output.</rule>
+<rule>Use graph modification APIs to adjust pending tasks after checkpoints.</rule>
+</rules>
+<model_level_policy>
+<rule>Pass model_level on a node, default_model_level on workflow.start(), or omit both to use the configured workflow/global default.</rule>
+<rule>If model_levels contains workflow_default, it is the configured default for workflow nodes.</rule>
+</model_level_policy>
+<state_policy>
+<rule>Current workflow state is not updated in this block.</rule>
+<rule>Use wait(), snapshot(), graph(), inspect(), or list() for current workflow state.</rule>
+<rule>Active workflow snapshots are restored through the compaction summary section named "## Active workflows".</rule>
+</state_policy>
+<node_prompting>
+<rule>Workflow node agents do not receive this workflow_context block.</rule>
+<rule>Write node prompts as normal natural-language task details.</rule>
+<rule>Make node prompts self-contained: include goal, scope, constraints, expected output, and whether edits are allowed.</rule>
+</node_prompting>
+<examples>
+<example name="create_graph_and_wait_to_checkpoint">
+<description>Create a workflow, add agent nodes and a checkpoint, then wait until the next yield point.</description>
+<code>
 from uv_agent_runtime import workflow
 
 wf = workflow.start(objective="Implement workflow support")
@@ -63,21 +58,20 @@ wf.checkpoint(
 )
 result = wf.wait()
 print(result.summary())
-      </code>
-    </example>
-
-    <example name="resume_and_continue">
-      <description>Resume a workflow after accepting the checkpoint direction.</description>
-      <code>
+</code>
+</example>
+<example name="resume_and_continue">
+<description>Resume a workflow after accepting the checkpoint direction.</description>
+<code>
 from uv_agent_runtime import workflow
 
 wf = workflow.resume("wf_123")
 wf.continue_checkpoint("after_investigation")
 result = wf.wait()
 print(result.summary())
-      </code>
-    </example>
-  </examples>
+</code>
+</example>
+</examples>
 </workflow_context>"""
 
 
