@@ -41,7 +41,7 @@ def ensure_venv(scriptenv_dir: Path, *, index_url: str | None = None) -> Path:
         if ready_key in _READY_DIRS and python.exists():
             return python
         # Multiple uv-agent processes can share one project scriptenv. Serialize
-        # uv init/add/sync so concurrent ask subprocesses do not corrupt
+        # uv init/add/sync so concurrent runner subprocesses do not corrupt
         # pyproject.toml or uv.lock while the environment is being prepared.
         with _scriptenv_lock(resolved):
             ensure_project(resolved, index_url=requested_index_url)

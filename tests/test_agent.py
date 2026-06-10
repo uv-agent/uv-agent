@@ -2143,7 +2143,7 @@ async def test_agent_persists_model_stream_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cli_ask_exits_nonzero_on_turn_error(
+async def test_cli_workflow_node_exits_nonzero_on_turn_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2162,7 +2162,15 @@ async def test_cli_ask_exits_nonzero_on_turn_error(
     monkeypatch.setattr("uv_agent.app_factory.create_engine", lambda *_args, **_kwargs: engine)
 
     with pytest.raises(SystemExit) as exc_info:
-        await cli._ask("try provider", None, None, stream=False, project_state_dir=tmp_path / "state")
+        await cli._workflow_node(
+            "try provider",
+            None,
+            None,
+            stream=False,
+            workflow_id="wf_test",
+            node_id="wfn_test",
+            project_state_dir=tmp_path / "state",
+        )
 
     captured = capsys.readouterr()
     assert exc_info.value.code == 1
@@ -3269,9 +3277,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Prefer existing helpers and declared external capabilities" not in prompt
     assert "use simple Python for glue code or very small work" not in prompt
     assert "only when it materially helps" not in prompt
-    assert "Use ask for bounded, tedious, or independent investigation" in prompt
+    assert "Use workflow for independent or long-running model tasks" in prompt
     assert "Run independent work concurrently" in prompt
-    assert "multiple ask calls or independent helper operations inside run_python" in prompt
+    assert "workflow nodes or independent helper operations inside run_python" in prompt
     assert "overlapping file writes sequential" in prompt
     assert "Split into another run_python call only when prior output must change the plan" in prompt
     assert "a risky write/verification boundary is reached" in prompt
@@ -3432,7 +3440,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'connect_named("server-name")' not in turn_context
     assert "client.initialize()" in turn_context
     assert "inspect returned instructions" in turn_context
-    assert "Launch a nested uv-agent" in turn_context
+    assert '<helper name="workflow"' in turn_context
+    assert "Build persistent task graphs" in turn_context
     assert 'level="small"' not in prompt
     assert "pathlib" in turn_context
     assert "Mentions are plain-text hints only" in prompt
@@ -4485,8 +4494,9 @@ def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> N
     assert text.startswith('<context_update id="runtime_context" status="current">\n')
     assert text.index("<runtime_environment>") < text.index("<model_levels>")
     assert text.index("<model_levels>") < text.index("<runtime_helpers>")
-    assert text.index('name="enter_dir"') < text.index('name="ask"')
-    assert text.index('name="ask"') < text.index('name="look_at"')
+    assert text.index('name="enter_dir"') < text.index('name="workflow"')
+    assert text.index('name="workflow"') < text.index('name="add_dependency"')
+    assert text.index('name="add_dependency"') < text.index('name="look_at"')
     assert text.index('name="look_at"') < text.index('name="read_file"')
     assert text.index('name="read_file"') < text.index('name="write_file"')
     assert text.index('name="write_file"') < text.index('name="edit_lines"')

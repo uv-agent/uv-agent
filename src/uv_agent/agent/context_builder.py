@@ -55,9 +55,9 @@ def model_levels_context(config: AppConfig) -> str:
         "<model_levels>",
         f"<default>{xml_text(config.runtime.default_level)}</default>",
     ]
-    ask_default_level = config.runtime.ask_default_level
-    if ask_default_level:
-        lines.append(f"<ask_default>{xml_text(ask_default_level)}</ask_default>")
+    workflow_default_level = config.runtime.workflow_default_level
+    if workflow_default_level:
+        lines.append(f"<workflow_default>{xml_text(workflow_default_level)}</workflow_default>")
     lines.append("<available>")
     for name in config.levels:
         lines.append(f"<level>{xml_text(name)}</level>")

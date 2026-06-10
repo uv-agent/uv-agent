@@ -341,7 +341,7 @@ class WorkflowHandle:
             if running:
                 # A previous wait was interrupted after marking nodes running. The
                 # subprocesses are owned by that old run_python process, so the
-                # safest resumable state is to ask the main Agent to decide.
+                # safest resumable state is to return control to the main Agent for a decision.
                 error = {"running_nodes": [row["node_id"] for row in running]}
                 self._set_workflow_status("failed", error=error)
                 return WorkflowWaitResult(self.workflow_id, "failed", self.snapshot(), error=error)

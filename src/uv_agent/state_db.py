@@ -39,7 +39,7 @@ def connect_state_db(data_dir: Path, *, check_same_thread: bool = True) -> sqlit
     connection.row_factory = sqlite3.Row
     # ``timeout`` only affects locks encountered while opening the connection.
     # PRAGMA busy_timeout is per-connection and covers later statements, which
-    # matters when multiple ask subprocesses append to the same project DB.
+    # matters when multiple workflow-node subprocesses append to the same project DB.
     connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     connection.execute("PRAGMA foreign_keys=ON")
     _ensure_schema(connection)

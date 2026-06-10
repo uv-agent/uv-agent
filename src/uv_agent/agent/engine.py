@@ -2707,7 +2707,7 @@ class AgentEngine:
         thread_id: str,
         turn_id: str,
     ) -> None:
-        """Roll retained ask/subagent model costs into the parent thread total."""
+        """Roll nested model-call costs into the parent thread total."""
 
         subthread_id = str(event.get("thread_id") or "")
         if not subthread_id or subthread_id == thread_id:

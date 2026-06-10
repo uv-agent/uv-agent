@@ -15,7 +15,6 @@ from uv_agent_runtime import (
     add_dependency,
     apply_patch,
     apply_patch_any,
-    ask,
     clear_codequery_cache,
     CommandError,
     CommandTextResult,
@@ -63,7 +62,6 @@ from uv_agent_runtime import (
     write_json,
     write_text,
 )
-from uv_agent_runtime.subagent import NESTED_ASK_BLOCKED_MESSAGE, _extract_subagent_thread_id
 from uv_agent.session import ThreadStore
 
 
@@ -939,123 +937,11 @@ def test_runtime_mcp_connect_url_rejects_stdio_transport() -> None:
         connect_url("http://localhost:3001/mcp", transport="stdio")
 
 
-def test_runtime_subagent_ask_with_custom_executable() -> None:
-    result = ask(
-        "ignored",
-        executable=[sys.executable, "-c", "import sys; print(sys.argv[-1])"],
-        check=True,
-    )
+def test_runtime_ask_is_not_exported() -> None:
+    import uv_agent_runtime
 
-    assert result.text == "ignored"
-    assert result.timed_out is False
-
-
-def test_runtime_subagent_ask_exposes_timeout() -> None:
-    result = ask(
-        "ignored",
-        executable=[sys.executable, "-c", "import time; time.sleep(5)"],
-        timeout_s=0.1,
-    )
-
-    assert result.timed_out is True
-    assert result.returncode != 0
-    assert "timed_out=True" in repr(result)
-
-
-def test_runtime_subagent_accepts_model_level_alias() -> None:
-    result = ask(
-        "ignored",
-        model_level="small",
-        executable=[sys.executable, "-c", "import sys; print(' '.join(sys.argv[1:]))"],
-        check=True,
-    )
-
-    assert "--level small ask ignored" in result.text
-
-
-def test_runtime_subagent_default_executable_disables_stream(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_run_process_text(args: list[str], **kwargs: Any) -> CommandTextResult:
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return CommandTextResult(args=args, returncode=0, stdout="final\n", stderr="[subagent-thread] thr_child\n")
-
-    monkeypatch.setattr("uv_agent_runtime.subagent.run_process_text", fake_run_process_text)
-
-    result = ask("inspect", timeout_s=12, retain=False)
-
-    assert result.text == "final"
-    assert result.thread_id == "thr_child"
-    assert "--no-stream" in captured["args"]
-    assert captured["args"].index("--no-stream") < captured["args"].index("ask")
-    assert captured["kwargs"]["timeout_s"] == 12
-
-
-def test_runtime_subagent_ask_uses_temporary_project_state_without_host_state() -> None:
-    code = (
-        "import os; from pathlib import Path; "
-        "state = Path(os.environ['UV_AGENT_RUNTIME_PROJECT_STATE_DIR']); "
-        "(state / 'marker.txt').write_text('temporary', encoding='utf-8'); "
-        "print(state)"
-    )
-    result = ask("ignored", executable=[sys.executable, "-c", code], check=True)
-
-    assert result.text
-    assert not Path(result.text).exists()
-    assert "UV_AGENT_RUNTIME_PROJECT_STATE_DIR" not in os.environ
-
-
-def test_runtime_subagent_ask_retains_project_state_when_host_state_is_available(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    code = (
-        "import os; "
-        "print(os.environ['UV_AGENT_RUNTIME_PROJECT_STATE_DIR']); "
-        "import sys; print('[subagent-thread] thr_child', file=sys.stderr)"
-    )
-    monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
-    monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thr_parent")
-    monkeypatch.setenv("UV_AGENT_RUNTIME_TURN_ID", "turn_parent")
-    result = ask("ignored", executable=[sys.executable, "-c", code], check=True)
-
-    assert result.text == str(tmp_path)
-    assert result.thread_id == "thr_child"
-
-
-def test_runtime_subagent_ask_blocks_nested_subagent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_KIND", "subagent")
-    monkeypatch.setenv("UV_AGENT_RUNTIME_RUN_ID", "run_child")
-
-    result = ask(
-        "delegate again",
-        executable=[sys.executable, "-c", "raise SystemExit('should not run')"],
-    )
-
-    assert result.returncode == 2
-    assert result.stdout == ""
-    assert result.thread_id is None
-    assert result.stderr == NESTED_ASK_BLOCKED_MESSAGE
-
-
-def test_runtime_subagent_events_do_not_include_prompt(capsys, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("UV_AGENT_RUNTIME_RUN_ID", "run_parent")
-
-    result = ask(
-        "secret task text",
-        executable=[sys.executable, "-c", "import sys; print('done'); print('[subagent-thread] thr_child', file=sys.stderr)"],
-        check=True,
-    )
-    captured = capsys.readouterr()
-
-    assert result.text == "done"
-    assert result.thread_id == "thr_child"
-    assert captured.out == ""
-
-
-def test_extract_subagent_thread_id_from_stderr() -> None:
-    assert _extract_subagent_thread_id("noise\n[subagent-thread] thr_123\n") == "thr_123"
+    assert "ask" not in uv_agent_runtime.__all__
+    assert not hasattr(uv_agent_runtime, "ask")
 
 
 def test_runtime_thread_digest_reads_state_dir(tmp_path: Path) -> None:
