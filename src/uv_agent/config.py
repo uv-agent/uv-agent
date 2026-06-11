@@ -125,7 +125,7 @@ class CompressionConfig:
     margin: float = 1.5
     min_gain: float = 0.0001  # currency-agnostic; matches pricing.currency
     judge_model_level: str | None = None  # None = reuse compact model_level
-    judge_min_context_ratio: float = 0.20  # skip judge when context < 20%
+    judge_min_context_ratio: float = 0.50  # skip judge when context < 50%
 
 
 @dataclass(frozen=True)
