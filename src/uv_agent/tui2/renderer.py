@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from typing import TextIO
 
 from uv_agent.tui2.ansi import terminal_size, truncate_visible
-from uv_agent.tui2.components import render_cell, render_live_with_cursor
+from uv_agent.tui2.components import _needs_gap_between_cells, render_cell, render_live_with_cursor
 from uv_agent.tui2.events import TranscriptCell, Tui2State
 
 
@@ -49,27 +49,11 @@ class Renderer:
     # Low-level helpers
     # ------------------------------------------------------------------
 
-    # Kinds that delimit a turn boundary in the scrollback transcript.
-    _BOUNDARY_KINDS: frozenset[str] = frozenset({"user", "assistant"})
-    # Middle-process cells follow the user message and lead into the assistant
-    # response within a single turn.
-    _MIDDLE_PROCESS_KINDS: frozenset[str] = frozenset({
-        "reasoning", "tool", "event", "image",
-        "error", "compaction", "warning", "stream_retry",
-    })
-
     @staticmethod
     def _needs_gap_between(last_kind: str | None, current_kind: str) -> bool:
-        if last_kind is None:
-            return False
-        # Separate the user message from the following reasoning/tool chain.
-        if last_kind == "user" and current_kind in Renderer._MIDDLE_PROCESS_KINDS:
-            return True
-        # Boundary-to-boundary transitions separate turns, except user->assistant
-        # which is the start/end of the same turn.
-        if last_kind in Renderer._BOUNDARY_KINDS and current_kind in Renderer._BOUNDARY_KINDS:
-            return not (last_kind == "user" and current_kind == "assistant")
-        return False
+        # Share the rule with the live renderer so flushed scrollback and live
+        # show identical spacing.
+        return _needs_gap_between_cells(last_kind, current_kind)
 
     def _write(self, text: str) -> None:
         self.output.write(text)

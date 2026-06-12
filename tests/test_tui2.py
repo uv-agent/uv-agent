@@ -378,7 +378,7 @@ def test_live_region_keeps_blank_separator_between_cells_and_composer() -> None:
     assert plain[1].strip() == ""
     assert plain[-1].startswith("╰")
 
-def test_live_region_packs_cells_within_turn_before_composer() -> None:
+def test_live_region_separates_middle_from_assistant_before_composer() -> None:
     state = Tui2State(composer="hi")
     state.live.append(TranscriptCell("reasoning", text="thinking"))
     state.live.append(TranscriptCell("tool", call={"name": "run_python"}, payload={"returncode": 0}))
@@ -386,12 +386,16 @@ def test_live_region_packs_cells_within_turn_before_composer() -> None:
     lines, _, _ = render_live_with_cursor(state, 60, 0)
     plain = [strip_ansi(line) for line in lines]
 
-    # Cells inside a turn are packed together; only the chrome gap is blank.
+    # Reasoning and tool are compact; tool and assistant are separated; exactly
+    # one blank row separates the cell block from the composer.
     assert plain[0].startswith("·")
     assert plain[1].startswith("✓")
-    assert plain[2].startswith("✦")
-    assert plain[3].strip() == ""
+    assert plain[2].strip() == ""
+    assert plain[3].startswith("✦")
+    assert plain[4].strip() == ""
     assert plain[-1].startswith("╰")
+
+
 
 
 
@@ -713,10 +717,6 @@ def test_grown_paint_area_remembers_cursor_for_next_erase() -> None:
     erase = output.getvalue()
     assert f"\x1b[{expected_row}A" in erase
     assert "\x1b[J" in erase
-
-
-def test_flush_cell_separates_turn_boundaries_with_blank_line() -> None:
-    output = io.StringIO()
 def test_flush_cell_separates_user_from_middle_process_and_turns() -> None:
     output = io.StringIO()
     renderer = Renderer(output=output)
@@ -735,9 +735,10 @@ def test_flush_cell_separates_user_from_middle_process_and_turns() -> None:
     indices = [lines.index(row) for row in non_empty]
     # User message is separated from the following reasoning/tool chain.
     assert indices[1] - indices[0] == 2
-    # Reasoning, tool, and assistant are compact within the turn.
+    # Reasoning and tool are compact within the turn.
     assert indices[2] - indices[1] == 1
-    assert indices[3] - indices[2] == 1
+    # Tool chain and assistant final output are separated.
+    assert indices[3] - indices[2] == 2
     # A blank row separates the assistant from the next user turn.
     assert indices[4] - indices[3] == 2
 

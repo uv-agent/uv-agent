@@ -68,6 +68,22 @@ def _format_token_rate(value: float) -> str:
     if value >= 10:
         return f"{value:.1f} tok/s"
     return f"{value:.2f} tok/s"
+# Middle-process cells are rendered as a compact chain; every other adjacent
+# cell pair is separated by a blank row so the transcript spacing is stable.
+_MIDDLE_PROCESS_KINDS: frozenset[str] = frozenset({
+    "reasoning", "tool", "event", "image", "error", "compaction", "warning", "stream_retry",
+})
+
+
+def _needs_gap_between_cells(last_kind: str | None, current_kind: str) -> bool:
+    """Return True unless both adjacent cells are middle-process cells."""
+    if last_kind is None:
+        return False
+    return not (
+        last_kind in _MIDDLE_PROCESS_KINDS and current_kind in _MIDDLE_PROCESS_KINDS
+    )
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1160,8 +1176,12 @@ def render_live_with_cursor(
         )
 
     cell_lines: list[str] = []
+    last_kind: str | None = None
     for cell in state.live:
+        if cell_lines and _needs_gap_between_cells(last_kind, cell.kind):
+            cell_lines.append("")
         cell_lines.extend(render_cell(cell, width, theme, spinner_frame=spinner_frame))
+        last_kind = cell.kind
     status_lines = render_status_lines(state, width, spinner_frame, theme)
     composer_lines, row, col = render_composer_with_cursor(
         state.composer,
@@ -1183,10 +1203,8 @@ def render_live_with_cursor(
     )
 
     if max_height is not None and cell_lines:
-        gaps = sum(1 for group in (status_lines, palette_lines) if group)
-        reserved = len(composer_lines) + len(status_lines) + len(palette_lines) + gaps
-        if cell_lines:
-            reserved += 1
+        # Reserve one row for the stable blank between cells and chrome.
+        reserved = len(composer_lines) + len(status_lines) + len(palette_lines) + 1
         available = max(1, max_height - reserved)
         if len(cell_lines) > available:
             dropped = len(cell_lines) - available + 1
@@ -1195,12 +1213,14 @@ def render_live_with_cursor(
 
     lines: list[str] = list(cell_lines)
     if lines:
-        lines.append("")
+        # Ensure exactly one blank row between the cell block and chrome.
+        # If the last inter-cell gap already left a trailing blank, keep it;
+        # otherwise add one.
+        if lines[-1].strip():
+            lines.append("")
     if status_lines:
         lines.extend(status_lines)
     if palette_lines:
-        if lines:
-            lines.append("")
         lines.extend(palette_lines)
     cursor_row = len(lines) + row
     lines.extend(composer_lines)
