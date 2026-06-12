@@ -9,7 +9,15 @@ from typing import Any
 
 from uv_agent.config import ModelConfig, ProviderConfig
 from uv_agent.errors import EmptyModelStreamError
-from uv_agent.model.sdk import model_param_sources, object_dump, sdk_base_url, sdk_extra_body, sdk_kwargs, sdk_param_keys
+from uv_agent.model.sdk import (
+    default_headers,
+    model_param_sources,
+    object_dump,
+    sdk_base_url,
+    sdk_extra_body,
+    sdk_kwargs,
+    sdk_param_keys,
+)
 from uv_agent.model.types import ModelResponse, ModelStreamEvent, ToolCallDelta
 
 
@@ -251,7 +259,7 @@ def anthropic_client(provider: ProviderConfig) -> Any:
     kwargs = {
         "api_key": provider.resolved_api_key(),
         "base_url": anthropic_sdk_base_url(provider),
-        "default_headers": provider.headers or None,
+        "default_headers": default_headers(provider.headers),
     }
     if provider.timeout_s is not None:
         # Keep connection failures quick while allowing long model generation

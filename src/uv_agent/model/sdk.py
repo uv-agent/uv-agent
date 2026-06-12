@@ -4,6 +4,7 @@ import inspect
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
+from uv_agent import DEFAULT_USER_AGENT
 from uv_agent.config import ModelConfig, ProviderConfig
 
 
@@ -17,6 +18,15 @@ def sdk_base_url(provider: ProviderConfig, api: str, endpoint_suffix: str) -> st
     if endpoint_url.endswith(endpoint_suffix):
         return endpoint_url[: -len(endpoint_suffix)] or provider.base_url.rstrip("/")
     return provider.base_url
+
+
+def default_headers(provider_headers: dict[str, str] | None) -> dict[str, str] | None:
+    """Return default SDK headers merged with provider-configured headers."""
+
+    headers: dict[str, str] = {"User-Agent": DEFAULT_USER_AGENT}
+    if provider_headers:
+        headers.update(provider_headers)
+    return headers
 
 
 def sdk_kwargs(

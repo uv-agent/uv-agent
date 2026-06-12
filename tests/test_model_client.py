@@ -367,8 +367,35 @@ def test_openai_client_strips_sdk_owned_endpoint_path_and_passes_extra_headers()
     assert str(client.base_url) == "https://api.example.com/v1/"
     assert client.auth_headers == {"Authorization": "Bearer test-key"}
     assert client.default_headers["api-key"] == "test-key"
+    assert client.default_headers["User-Agent"].startswith("uv-agent/")
     assert client.timeout.read == 7200.0
     assert client.timeout.connect == 5.0
+
+
+def test_openai_client_allows_provider_user_agent_override() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com/v1",
+        api_key="test-key",
+        headers={"User-Agent": "custom-agent/1.0"},
+        responses=EndpointConfig(path="/responses"),
+    )
+
+    client = openai_client(provider, "responses", "/responses")
+
+    assert client.default_headers["User-Agent"] == "custom-agent/1.0"
+
+
+def test_anthropic_client_includes_default_user_agent() -> None:
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.anthropic.com",
+        api_key="test-key",
+    )
+
+    client = anthropic_client(provider)
+
+    assert client.default_headers["User-Agent"].startswith("uv-agent/")
 
 
 def test_openai_client_uses_configured_provider_timeout() -> None:

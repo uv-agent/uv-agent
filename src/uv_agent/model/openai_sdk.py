@@ -6,7 +6,7 @@ from openai import AsyncOpenAI
 from openai import Timeout
 
 from uv_agent.config import ProviderConfig
-from uv_agent.model.sdk import sdk_base_url
+from uv_agent.model.sdk import default_headers, sdk_base_url
 
 
 _openai_client_cache: dict[tuple[Any, ...], AsyncOpenAI] = {}
@@ -43,7 +43,7 @@ def openai_client(provider: ProviderConfig, api: str, endpoint_suffix: str) -> A
     kwargs = {
         "api_key": provider.resolved_api_key(),
         "base_url": sdk_base_url(provider, api, endpoint_suffix),
-        "default_headers": provider.headers or None,
+        "default_headers": default_headers(provider.headers),
     }
     if provider.timeout_s is not None:
         # Keep connection failures quick while allowing long model generation
