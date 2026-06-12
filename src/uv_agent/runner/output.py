@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import codecs
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,28 +9,26 @@ from uv_agent.time import utc_now_iso
 
 STREAM_READ_CHUNK_BYTES = 64 * 1024
 OUTPUT_TRUNCATION_MARKER = "\n[uv-agent runner output truncated]\n"
-# Bounded in-memory buffers keep long-running or high-output scripts from
-# accumulating unbounded chunk references while still preserving the final
-# joined output up to ``max_output_bytes``.
+# Coalesce many decoded chunks into a small number of strings without dropping
+# bytes. The runner may later truncate at ``max_output_bytes``, but chunk-count
+# management must never silently discard output because the model receives the
+# final joined stdout/stderr as the tool result.
 MAX_STDOUT_PARTS = 256
 MAX_STDERR_PARTS = 256
-MAX_STRUCTURED_EVENTS = 10_000
 
 
 @dataclass
 class OutputCapture:
-    stdout_parts: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_STDOUT_PARTS))
-    stderr_parts: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_STDERR_PARTS))
+    stdout_parts: list[str] = field(default_factory=list)
+    stderr_parts: list[str] = field(default_factory=list)
     structured_events: list[dict[str, Any]] = field(default_factory=list)
     byte_count: int = 0
     truncated: bool = False
 
     def append_structured_event(self, event: dict[str, Any]) -> None:
-        """Add a structured event and keep the in-memory list bounded."""
+        """Add a structured event without dropping semantic runtime output."""
 
         self.structured_events.append(event)
-        if len(self.structured_events) > MAX_STRUCTURED_EVENTS:
-            self.structured_events[:] = self.structured_events[-MAX_STRUCTURED_EVENTS:]
 
 
 async def pump_stream(
@@ -39,7 +36,7 @@ async def pump_stream(
     stream_name: str,
     stream,
     writer: EventWriter,
-    sink: deque[str],
+    sink: list[str],
     run_id: str,
     max_output_bytes: int,
     capture: OutputCapture,
@@ -114,12 +111,16 @@ def record_output_text(
     stream_name: str,
     text: str,
     writer: EventWriter,
-    sink: deque[str],
+    sink: list[str],
     run_id: str,
 ) -> None:
     if not text:
         return
     sink.append(text)
+    _coalesce_output_parts(
+        sink,
+        max_parts=MAX_STDOUT_PARTS if stream_name == "stdout" else MAX_STDERR_PARTS,
+    )
     writer.write(
         {
             "type": f"run.{stream_name}",
@@ -128,3 +129,10 @@ def record_output_text(
             "text": text,
         }
     )
+
+
+def _coalesce_output_parts(sink: list[str], *, max_parts: int) -> None:
+    """Bound chunk references without changing the joined output text."""
+
+    if len(sink) > max_parts:
+        sink[:] = ["".join(sink)]

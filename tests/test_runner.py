@@ -13,7 +13,7 @@ import pytest
 
 from uv_agent.config import RunnerConfig
 from uv_agent.runner import PythonRunRequest, PythonRunner
-from uv_agent.runner.output import OutputCapture
+from uv_agent.runner.output import MAX_STDOUT_PARTS, OutputCapture, record_output_text
 import uv_agent.runner.scriptenv as scriptenv
 from uv_agent.runner.scriptenv import direct_dependencies, ensure_venv
 
@@ -30,6 +30,14 @@ def make_runner(
         data_dir=tmp_path / ".uv-agent",
         config=config or RunnerConfig(default_timeout_s=30),
     )
+
+
+class RecordingEventWriter:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def write(self, event: dict[str, object]) -> None:
+        self.events.append(event)
 
 
 @pytest.mark.asyncio
@@ -705,11 +713,30 @@ def test_ensure_project_removes_checkout_source_for_installed_release(
     assert [call for call in calls if call[0] == scriptenv.uv_binary() and call[1] == "sync"]
 
 
-def test_output_capture_bounds_structured_events() -> None:
+def test_output_capture_keeps_structured_events_without_dropping() -> None:
     capture = OutputCapture()
     for i in range(10_005):
         capture.append_structured_event({"index": i})
 
-    assert len(capture.structured_events) == 10_000
-    assert capture.structured_events[0]["index"] == 5
+    assert len(capture.structured_events) == 10_005
+    assert capture.structured_events[0]["index"] == 0
     assert capture.structured_events[-1]["index"] == 10_004
+
+
+def test_output_capture_coalesces_stdout_without_dropping_text() -> None:
+    capture = OutputCapture()
+    writer = RecordingEventWriter()
+    chunks = [f"{index}\n" for index in range(MAX_STDOUT_PARTS + 10)]
+
+    for chunk in chunks:
+        record_output_text(
+            stream_name="stdout",
+            text=chunk,
+            writer=writer,
+            sink=capture.stdout_parts,
+            run_id="run_test",
+        )
+
+    assert "".join(capture.stdout_parts) == "".join(chunks)
+    assert len(capture.stdout_parts) <= MAX_STDOUT_PARTS
+    assert [event["text"] for event in writer.events] == chunks
