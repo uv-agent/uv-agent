@@ -31,6 +31,7 @@ class Renderer:
         self._frame_rows = 0
         self._has_frame = False
         self.spinner_frame = 0
+        self._last_flushed_kind: str | None = None
 
     # ------------------------------------------------------------------
     # Compat shims for existing call sites/tests.
@@ -47,6 +48,27 @@ class Renderer:
     # ------------------------------------------------------------------
     # Low-level helpers
     # ------------------------------------------------------------------
+
+    # Kinds that belong to the "middle" of a turn: reasoning, tool calls,
+    # events, warnings, etc.  They are rendered back-to-back without blank
+    # rows; blank rows are only inserted around user input and the final
+    # assistant response.
+    _MIDDLE_PROCESS_KINDS: frozenset[str] = frozenset({
+        "reasoning", "tool", "event", "image",
+        "error", "compaction", "warning", "stream_retry",
+    })
+
+    @staticmethod
+    def _needs_gap_between(last_kind: str | None, current_kind: str) -> bool:
+        if last_kind is None:
+            return False
+        last_is_middle = last_kind in Renderer._MIDDLE_PROCESS_KINDS
+        current_is_middle = current_kind in Renderer._MIDDLE_PROCESS_KINDS
+        # Middle-process cells are packed together; everything else is
+        # separated by a blank row to mark turn boundaries.
+        if last_is_middle and current_is_middle:
+            return False
+        return True
 
     def _write(self, text: str) -> None:
         self.output.write(text)
@@ -116,11 +138,15 @@ class Renderer:
             return
         self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)
         self._erase_frame()
-        # Trailing blank row gives a visual gap between flushed cells; this
-        # replaces the per-cell horizontal rule that previously cluttered the
-        # transcript.
-        self._write("\r\n".join(lines) + "\r\n\r\n")
+        # Insert a blank row around turn boundaries (user -> middle,
+        # middle -> assistant/user) but pack middle-process cells together.
+        if self._last_flushed_kind is not None and self._needs_gap_between(
+            self._last_flushed_kind, cell.kind
+        ):
+            self._write("\r\n")
+        self._write("\r\n".join(lines) + "\r\n")
         self._write(self._AUTOWRAP_ON + "\x1b[?2026l")
+        self._last_flushed_kind = cell.kind
 
     def flush_cells(self, cells: Iterable[TranscriptCell]) -> None:
         for cell in cells:
@@ -129,18 +155,23 @@ class Renderer:
     def flushed_cell_rows(self, cells: Iterable[TranscriptCell]) -> int:
         """Return how many terminal rows ``flush_cells`` will advance.
 
-        ``flush_cell`` prints rendered cell lines followed by one blank visual
-        row.  The app uses this after loading thread history so the first live
-        composer repaint can be padded down to the bottom of a mostly-empty
-        viewport instead of appearing directly under a short transcript.
+        Middle-process cells are packed without blank rows; blank rows are only
+        counted around turn boundaries.  The app uses this after loading thread
+        history so the first live composer repaint can be padded down to the
+        bottom of a mostly-empty viewport.
         """
 
         self.width = self._paint_width(terminal_size()[0])
         total = 0
+        last_kind: str | None = None
         for cell in cells:
             lines = render_cell(cell, self.width, spinner_frame=self.spinner_frame)
-            if lines:
-                total += len(lines) + 1
+            if not lines:
+                continue
+            if last_kind is not None and self._needs_gap_between(last_kind, cell.kind):
+                total += 1
+            total += len(lines) + 1
+            last_kind = cell.kind
         return total
 
     def pad_live_region_to_bottom(self, state: Tui2State, *, preceding_rows: int = 0) -> None:
@@ -186,6 +217,7 @@ class Renderer:
         self._has_frame = False
         self._frame_cursor_row = 0
         self._frame_rows = 0
+        self._last_flushed_kind = None
 
     def repaint(self, state: Tui2State) -> None:
         cols, rows = terminal_size()
@@ -224,3 +256,4 @@ class Renderer:
         # Always restore DECAWM so the shell the user returns to does not
         # inherit a nowrap terminal state.
         self._write(self._AUTOWRAP_ON + "\x1b[?2026l\x1b[0m")
+        self._last_flushed_kind = None

@@ -179,39 +179,6 @@ def render_message_cell(
 # Tool cells (lighter than the original double-border card)
 # ---------------------------------------------------------------------------
 
-
-
-
-def _rule(label: str, width: int, style: str, theme: AnsiTheme) -> str:
-    head = "── "
-    label_plain = strip_ansi(label).strip()
-    if label_plain:
-        text = head + label
-        text_width = visible_len(text)
-        fill = max(1, width - text_width - 1)
-        # Use a single colour for both the leading "── " and trailing fill so
-        # the rule reads as one continuous separator; the prior split between
-        # ``border_faint`` and ``style`` looked like a colour seam.
-        return sgr(style, head) + label + " " + sgr(style, "─" * fill)
-    return sgr(style, "─" * max(1, width))
-
-
-def _live_tool_rule(label: str, width: int, style: str, theme: AnsiTheme) -> str:
-    """Return a non-full-width rule for frequently repainted live tool rows.
-
-    Running tool headers repaint on every spinner tick.  A full-width rule is
-    fragile on Windows terminals when font fallback renders Braille/box/ambiguous
-    glyphs wider than our Python cell-width estimate: the physical row can wrap
-    by one line, so the renderer's later erase lands below the leaked header.
-    Keep generous right-side slack while the tool is live; the completed result
-    still uses the full-width rule when it is flushed once into scrollback.
-    """
-
-    head = "── "
-    label_width = max(1, width - visible_len(head) - 8)
-    return sgr(style, head) + truncate_visible(label, label_width)
-
-
 def _thin_rule(width: int, theme: AnsiTheme = DEFAULT_THEME) -> str:
     """Subtle separator used between live transcript and input chrome."""
 
@@ -222,10 +189,13 @@ def _thin_rule(width: int, theme: AnsiTheme = DEFAULT_THEME) -> str:
     return sgr(theme.border_accent, left) + sgr(theme.border_faint, right)
 
 
-def _indented(text: str, width: int, style: str) -> str:
-    inner = max(1, width - 2)
+def _tree_indented(text: str, width: int, style: str) -> str:
+    """Indent a tool call-chain line with a tree corner to show nesting."""
+
+    prefix = "  └─ "
+    inner = max(1, width - visible_len(prefix))
     clipped = truncate_visible(text.expandtabs(4), inner)
-    return "  " + sgr(style, clipped)
+    return prefix + sgr(style, clipped)
 
 
 def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAULT_THEME) -> list[str]:
@@ -243,17 +213,14 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
     if running:
         glyph = "⠿"
         status = f"running · {format_elapsed(cell.elapsed_s)}"
-        border_style = theme.border_accent
         glyph_style = theme.border_accent
     elif errored:
         glyph = "✗"
         status = "timeout" if timed_out else f"exit {returncode}"
-        border_style = theme.error
         glyph_style = theme.error
     else:
         glyph = "✓"
         status = f"exit {returncode}" if returncode is not None else "done"
-        border_style = theme.border
         glyph_style = theme.success
     run_id = str(payload.get("run_id") or (cell.call or {}).get("call_id") or "")
     suffix = f" · {run_id[-12:]}" if run_id else ""
@@ -264,15 +231,13 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
         + " "
         + sgr(theme.muted, "· " + status + suffix)
     )
-    lines = [
-        _live_tool_rule(title, width, border_style, theme)
-        if running
-        else _rule(title, width, border_style, theme)
-    ]
+    # No horizontal rule: the tool cell is just the title line plus an
+    # indented call-chain line prefixed with a tree corner.
+    lines = [truncate_visible(title, width)]
     chains = _tool_cell_import_chains(cell)
     if chains:
         compact = " · ".join(format_import_anchor_chains(chains))
-        lines.append(_indented(compact, width, theme.muted))
+        lines.append(_tree_indented(compact, width, theme.muted))
     return lines
 
 

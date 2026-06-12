@@ -111,20 +111,23 @@ def test_markdown_renderer_accepts_256_color() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_tool_cell_uses_rule_and_indented_output() -> None:
+def test_tool_cell_has_no_rule_and_tree_indented_chains() -> None:
     call = {
         "name": "run_python",
         "call_id": "call_123",
-        "arguments": '{"code":"from uv_agent_runtime import run_process_text\\nrun_process_text([\\"git\\", \\"status\\"])"}',
+        "arguments": '{"code":"from uv_agent_runtime import run_process_text\\nrun_process_text([])"}',
     }
     payload = {"returncode": 0, "run_id": "run_abcdef", "stdout": "one\ntwo"}
     lines = render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 60)
     plain_lines = [strip_ansi(line) for line in lines]
     plain = "\n".join(plain_lines)
 
-    assert plain_lines[0].startswith("── ")
+    # No horizontal rule on the title line.
+    assert not plain_lines[0].startswith("── ")
     assert "✓" in plain_lines[0] and "run_python" in plain_lines[0]
-    assert "print(1)" not in plain_lines[0]
+    assert "run_process_text([])" not in plain
+    # Call chains are prefixed with a tree corner.
+    assert any("└─" in line for line in plain_lines)
     assert "run_process_text" in plain
     assert "from uv_agent_runtime" not in plain
     # stdout/stderr are no longer inlined; use /show <run_id> for full output.
@@ -268,13 +271,22 @@ def test_running_tool_cell_uses_spinner_glyph() -> None:
     assert "running" in header
 
 
-def test_running_tool_header_keeps_right_edge_slack() -> None:
-    call = {"name": "run_python", "call_id": "call_" + "x" * 24, "arguments": "{}"}
+def test_running_tool_cell_has_no_rule_and_constant_height() -> None:
+    call = {
+        "name": "run_python",
+        "call_id": "call_" + "x" * 24,
+        "arguments": '{"code":"from uv_agent_runtime import path_info\\npath_info(\\".\\")"}',
+    }
     running = render_tool_cell(TranscriptCell("tool", status="running", call=call), 80)
     completed = render_tool_cell(TranscriptCell("tool", call=call, payload={"returncode": 0}), 80)
 
-    assert visible_len(running[0]) <= 72
-    assert visible_len(completed[0]) == 80
+    # Both running and completed tool cells are two lines without horizontal rules.
+    assert len(running) == 2
+    assert len(completed) == 2
+    assert not strip_ansi(running[0]).startswith("── ")
+    assert not strip_ansi(completed[0]).startswith("── ")
+    assert "⠿" in strip_ansi(running[0])
+    assert "running" in strip_ansi(running[0])
 
 
 def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
@@ -652,17 +664,41 @@ def test_grown_paint_area_remembers_cursor_for_next_erase() -> None:
     assert "\x1b[J" in erase
 
 
-def test_flush_cell_separates_cells_with_blank_line() -> None:
+def test_flush_cell_separates_turn_boundaries_with_blank_line() -> None:
     output = io.StringIO()
-    Renderer(output=output).flush_cell(TranscriptCell("user", text="hi"))
+    renderer = Renderer(output=output)
+    renderer.flush_cell(TranscriptCell("user", text="hi"))
+    renderer.flush_cell(TranscriptCell("user", text="again"))
     rendered = output.getvalue()
 
-    # Each flush ends with two CRLFs → one blank visual row between cells.
-    # Trailing escape sequences (autowrap restore + sync output close) are
-    # stripped before the layout assertion.
+    # A single flushed cell no longer trails a blank row; blank rows are only
+    # inserted between turn boundaries (e.g. user -> user, user -> tool).
     trailing_escapes = "\x1b[?7h\x1b[?2026l"
     assert rendered.endswith(trailing_escapes)
-    assert rendered[: -len(trailing_escapes)].endswith("\r\n\r\n")
+    body = rendered[: -len(trailing_escapes)]
+    # Two user cells are separated by one blank visual row.
+    lines = [strip_ansi(line).replace("\r", "") for line in body.split("\r\n")]
+    hi_index = next(i for i, line in enumerate(lines) if line.endswith("hi"))
+    again_index = next(i for i, line in enumerate(lines) if line.endswith("again"))
+    assert again_index - hi_index == 2  # hi, blank, again
+
+
+def test_flush_cell_packs_middle_process_cells_together() -> None:
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer.flush_cell(TranscriptCell("user", text="hi"))
+    renderer.flush_cell(TranscriptCell("reasoning", text="thinking"))
+    renderer.flush_cell(TranscriptCell("tool", call={"name": "run_python"}, payload={"returncode": 0}))
+    renderer.flush_cell(TranscriptCell("assistant", text="done"))
+    rendered = output.getvalue()
+
+    # Split into visual lines and verify grouping.
+    body = rendered[: -len("\x1b[?7h\x1b[?2026l")]
+    lines = [strip_ansi(line).replace("\r", "").rstrip() for line in body.split("\r\n")]
+    non_empty = [line for line in lines if line.strip()]
+
+    # user, reasoning, tool, assistant -> four content lines packed together.
+    assert non_empty == ["› hi", "· thinking", "✓ run_python · exit 0", "✦ done"]
 
 
 def test_flush_cell_only_uses_crlf_separators() -> None:
