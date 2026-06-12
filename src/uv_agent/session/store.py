@@ -251,7 +251,7 @@ class ThreadStore:
     ) -> None:
         """Merge extra metadata into an existing thread row.
 
-        ``updates`` is shallow-merged into the persisted ``metadata_json`` blob.
+        ``updates`` is shallow-merged into the persisted extra metadata blob.
         For more complex edits callers may pass ``remover``, which receives the
         current extra metadata dict and can mutate it in place.
         """
@@ -263,14 +263,15 @@ class ThreadStore:
                 kind=self._kind_for_thread(thread_id),
                 event={"created_at": utc_now_iso()},
             )
-            extra = _json_loads(metadata.get("metadata_json"), default={})
-            if not isinstance(extra, dict):
-                extra = {}
+            extra = {key: value for key, value in metadata.items() if key not in _METADATA_COLUMNS}
             if updates:
                 extra.update(updates)
             if remover is not None:
                 remover(extra)
-            metadata["metadata_json"] = _json_dumps(extra)
+            for key in list(metadata):
+                if key not in _METADATA_COLUMNS:
+                    del metadata[key]
+            metadata.update(extra)
             self._upsert_metadata(db, metadata)
 
     def snapshot(self, thread_id: str) -> ThreadSnapshot:

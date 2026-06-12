@@ -231,7 +231,7 @@ def _anthropic_client_key(provider: ProviderConfig) -> tuple[Any, ...]:
     headers = provider.headers or {}
     return (
         provider.name,
-        provider.base_url,
+        anthropic_sdk_base_url(provider),
         provider.resolved_api_key(),
         frozenset(headers.items()),
         provider.timeout_s,

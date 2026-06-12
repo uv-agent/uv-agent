@@ -18,7 +18,7 @@ def _openai_client_key(provider: ProviderConfig, api: str, endpoint_suffix: str)
     headers = provider.headers or {}
     return (
         provider.name,
-        provider.base_url,
+        sdk_base_url(provider, api, endpoint_suffix),
         api,
         endpoint_suffix,
         provider.resolved_api_key(),

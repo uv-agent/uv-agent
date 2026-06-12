@@ -566,3 +566,46 @@ def test_store_preserves_non_empty_legacy_jsonl_directories(tmp_path: Path) -> N
 
     assert (threads_dir / "legacy.jsonl").exists()
     assert (subthreads_dir / "legacy.jsonl").exists()
+
+def test_update_thread_metadata_persists_extra_metadata(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Metadata")
+    store.append(
+        thread_id,
+        "thread.goal_mode_updated",
+        enabled=True,
+        objective="ship it",
+        files={},
+    )
+
+    store.update_thread_metadata(
+        thread_id,
+        updates={"token_ratio": {"visible_units": 40, "output_tokens": 10}},
+    )
+    metadata = ThreadStore(tmp_path).thread_metadata(thread_id)
+
+    assert metadata["token_ratio"] == {"visible_units": 40, "output_tokens": 10}
+    assert metadata["goal_mode"]["objective"] == "ship it"
+    assert "metadata_json" not in metadata
+
+
+def test_update_thread_metadata_remover_edits_extra_metadata(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Metadata")
+    store.update_thread_metadata(
+        thread_id,
+        updates={
+            "token_ratio": {"visible_units": 40, "output_tokens": 10},
+            "custom_flag": True,
+        },
+    )
+
+    store.update_thread_metadata(
+        thread_id,
+        remover=lambda extra: extra.pop("token_ratio", None),
+    )
+    metadata = ThreadStore(tmp_path).thread_metadata(thread_id)
+
+    assert "token_ratio" not in metadata
+    assert metadata["custom_flag"] is True
+

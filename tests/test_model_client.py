@@ -1544,6 +1544,29 @@ def test_openai_client_creates_separate_instances_for_different_apis() -> None:
     assert responses_client is not chat_client
 
 
+def test_openai_client_cache_distinguishes_effective_endpoint_base_url() -> None:
+    from uv_agent.model.openai_sdk import _reset_openai_client_cache
+
+    _reset_openai_client_cache()
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com",
+        api_key="test-key",
+        responses=EndpointConfig(path="/v1/responses"),
+    )
+    reconfigured = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com",
+        api_key="test-key",
+        responses=EndpointConfig(path="/proxy/v1/responses"),
+    )
+
+    client1 = openai_client(provider, "responses", "/responses")
+    client2 = openai_client(reconfigured, "responses", "/responses")
+
+    assert client1 is not client2
+
+
 def test_anthropic_client_returns_cached_instance_for_same_provider() -> None:
     from uv_agent.model.anthropic import _reset_anthropic_client_cache
 
@@ -1558,6 +1581,29 @@ def test_anthropic_client_returns_cached_instance_for_same_provider() -> None:
     client2 = anthropic_client(provider)
 
     assert client1 is client2
+
+
+def test_anthropic_client_cache_distinguishes_effective_endpoint_base_url() -> None:
+    from uv_agent.model.anthropic import _reset_anthropic_client_cache
+
+    _reset_anthropic_client_cache()
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.anthropic.com",
+        api_key="test-key",
+        anthropic_messages=EndpointConfig(path="/v1/messages"),
+    )
+    reconfigured = ProviderConfig(
+        name="p",
+        base_url="https://api.anthropic.com",
+        api_key="test-key",
+        anthropic_messages=EndpointConfig(path="/proxy/v1/messages"),
+    )
+
+    client1 = anthropic_client(provider)
+    client2 = anthropic_client(reconfigured)
+
+    assert client1 is not client2
 
 
 @pytest.mark.asyncio
