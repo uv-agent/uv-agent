@@ -157,6 +157,13 @@ class Tui2State:
     language: UserLanguage = field(default_factory=_default_language)
     mode: Tui2Mode = "transcript"
     agent_view: AgentViewState = field(default_factory=AgentViewState)
+    # Run detail pager state (opened by /show <run_id>).
+    pager_open: bool = False
+    pager_run_id: str | None = None
+    pager_title: str = ""
+    pager_lines: list[str] = field(default_factory=list)
+    pager_scroll: int = 0
+    pager_total_lines: int = 0
 
     def status_label(self) -> str:
         parts = [f"thread {short_thread(self.thread_id)}"]

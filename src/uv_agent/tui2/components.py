@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from io import StringIO
 from pathlib import Path
@@ -8,15 +9,15 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from uv_agent.environment import UserLanguage, normalize_language
-from uv_agent.helper_calls import extract_runtime_helper_calls, format_helper_call
+from uv_agent.helper_calls import (
+    extract_import_anchor_chains,
+    format_import_anchor_chains,
+)
 from uv_agent.i18n import tr
 from uv_agent.tui.formatting import (
     format_elapsed,
     renderable_plain,
-    short_block,
     short_thread,
-    strip_runtime_event_lines,
-    structured_event_markup,
 )
 from uv_agent.tui2.ansi import strip_ansi, truncate_visible, visible_len, wrap_plain
 from uv_agent.tui2.events import (
@@ -179,10 +180,6 @@ def render_message_cell(
 # ---------------------------------------------------------------------------
 
 
-_TOOL_STDOUT_MAX_LINES = 5
-_TOOL_STDERR_MAX_LINES = 3
-_TOOL_HELPER_MAX_LINES = 6
-_TOOL_EVENT_MAX_LINES = 5
 
 
 def _rule(label: str, width: int, style: str, theme: AnsiTheme) -> str:
@@ -232,6 +229,12 @@ def _indented(text: str, width: int, style: str) -> str:
 
 
 def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAULT_THEME) -> list[str]:
+    """Compact two-line tool cell: status + imported call chains.
+
+    Full source, stdout/stderr, and events are intentionally omitted here;
+    use the ``/show <run_id>`` pager to inspect them.
+    """
+
     payload = cell.payload or {}
     running = cell.status == "running"
     returncode = payload.get("returncode")
@@ -266,58 +269,33 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
         if running
         else _rule(title, width, border_style, theme)
     ]
+    chains = _tool_cell_import_chains(cell)
+    if chains:
+        compact = " · ".join(format_import_anchor_chains(chains))
+        lines.append(_indented(compact, width, theme.muted))
+    return lines
+
+
+def _tool_cell_import_chains(cell: TranscriptCell) -> list[str]:
+    """Extract imported-name anchored call chains from a tool cell."""
+
+    payload = cell.payload or {}
+    payload_helpers = payload.get("helper_calls")
+    if isinstance(payload_helpers, list) and payload_helpers:
+        # Legacy payloads may store helper_calls as {"name": ..., "args": ...}.
+        # We only need the names and cannot reconstruct chains from these,
+        # so treat each as a single-chain item.
+        return [str(h.get("name") or "helper") for h in payload_helpers if isinstance(h, dict)]
     code = ""
     if cell.call:
-        import json
-
         try:
             args = json.loads(str(cell.call.get("arguments") or "{}"))
             code = str(args.get("code") or "").strip()
         except Exception:
             code = ""
-    payload_helpers = payload.get("helper_calls")
-    helper_calls = [helper for helper in payload_helpers if isinstance(helper, dict)] if isinstance(payload_helpers, list) else []
-    if not helper_calls and code:
-        helper_calls = extract_runtime_helper_calls(code)
-    if helper_calls:
-        for helper in helper_calls[:_TOOL_HELPER_MAX_LINES]:
-            lines.append(_indented(format_helper_call(helper), width, theme.muted))
-        if len(helper_calls) > _TOOL_HELPER_MAX_LINES:
-            lines.append(_indented(f"… more helpers +{len(helper_calls) - _TOOL_HELPER_MAX_LINES} calls", width, theme.muted))
-    elif code:
-        lines.append(_indented("(no uv_agent_runtime helpers)", width, theme.muted))
-    if running:
-        # Keep live tool cells at a *constant* height during their entire run.
-        # Header text + helpers list are both static (helpers are parsed from
-        # the call code once; the title text only changes the elapsed counter
-        # in place).  Skipping dynamic event/stdout/stderr blocks here means the
-        # live frame never grows between repaints, which is the only height
-        # change that could push the frame's top row out of the viewport and
-        # leave a leaked ``── ⠿ run_python · running…`` header in scrollback.
-        # The completed cell flushed below by ``_flush`` still includes the full
-        # timeline and output, so users still see all details in scrollback.
-        return lines
-    events = payload.get("events")
-    event_items = [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
-    for event in event_items[:_TOOL_EVENT_MAX_LINES]:
-        event_text = renderable_plain(structured_event_markup(event)) or ""
-        if event_text:
-            lines.append(_indented(event_text, width, theme.muted))
-    if len(event_items) > _TOOL_EVENT_MAX_LINES:
-        lines.append(_indented(f"… more events +{len(event_items) - _TOOL_EVENT_MAX_LINES}", width, theme.muted))
-    run_id_filter = str(payload.get("run_id") or "")
-    stdout_raw = strip_runtime_event_lines(str(payload.get("stdout") or ""), run_id=run_id_filter)
-    stdout = short_block(stdout_raw, max_lines=_TOOL_STDOUT_MAX_LINES, max_chars=1000)
-    stderr = short_block(str(payload.get("stderr") or ""), max_lines=_TOOL_STDERR_MAX_LINES, max_chars=700)
-    if stdout or stderr:
-        if helper_calls or code or event_items:
-            lines.append(sgr(theme.border, "  ─"))
-        for block, style in ((stdout, theme.tool_output), (stderr, theme.error)):
-            if not block:
-                continue
-            for raw in block.splitlines():
-                lines.append(_indented(raw, width, style))
-    return lines
+    if code:
+        return extract_import_anchor_chains(code)
+    return []
 
 
 def render_cell(
@@ -1105,6 +1083,66 @@ def render_composer(text: str, width: int, theme: AnsiTheme = DEFAULT_THEME) -> 
     return render_composer_with_cursor(text, width, theme)[0]
 
 
+def render_pager_with_cursor(
+    state: Tui2State,
+    width: int,
+    theme: AnsiTheme = DEFAULT_THEME,
+    *,
+    max_height: int,
+) -> tuple[list[str], int, int]:
+    """Render a read-only pager for /show <run_id> output.
+
+    The pager occupies the full live region.  The top border and footer are
+    fixed; the middle content scrolls with ``state.pager_scroll``.
+    """
+
+    width = max(20, width)
+    max_height = max(5, max_height)
+    # Borders + title row + footer row + at least one content row.
+    content_height = max(1, max_height - 3)
+
+    lines: list[str] = []
+    title = state.pager_title or "run detail"
+    header_inner = max(0, width - 2)
+    header_text = truncate_visible(f"─ {title} ", header_inner)
+    header_fill = "─" * max(0, header_inner - visible_len(header_text))
+    lines.append(sgr(theme.border_accent, "╭" + header_text + header_fill + "╮"))
+
+    total = max(len(state.pager_lines), state.pager_total_lines)
+    scroll = max(0, min(state.pager_scroll, max(0, total - content_height)))
+    visible_lines = state.pager_lines[scroll : scroll + content_height]
+    # Pad content to keep the footer in a predictable place.
+    while len(visible_lines) < content_height:
+        visible_lines.append("")
+
+    inner = max(0, width - 4)  # space between "│ " and " │"
+    for raw in visible_lines:
+        # Preserve ANSI in raw when it fits; truncate_visible strips ANSI only
+        # when the line overflows.
+        text = truncate_visible(raw, inner)
+        pad = " " * max(0, inner - visible_len(text))
+        lines.append(sgr(theme.border_accent, "│ ") + text + pad + sgr(theme.border_accent, " │"))
+
+    footer_text = f"{scroll + len(visible_lines)}/{total} · ↑↓/PgUpPgDn scroll · Ctrl+C=code · Ctrl+O=output · q=close"
+    footer_plain = truncate_visible(footer_text, inner)
+    footer_pad = " " * max(0, inner - visible_len(footer_plain))
+    lines.append(
+        sgr(theme.border_accent, "│ ")
+        + sgr(theme.muted, footer_plain)
+        + footer_pad
+        + sgr(theme.border_accent, " │")
+    )
+    lines.append(sgr(theme.border_accent, "╰" + "─" * (width - 2) + "╯"))
+
+    # Cursor is placed on the footer; callers that paint this frame will hide
+    # the real cursor inside the border characters.
+    cursor_row = len(lines) - 2
+    cursor_col = 2
+    return [truncate_visible(line, width) for line in lines], cursor_row, cursor_col
+
+
+
+
 def render_live_with_cursor(
     state: Tui2State,
     width: int,
@@ -1122,6 +1160,14 @@ def render_live_with_cursor(
     "duplicate scrollback" artefact, since once the live region scrolls
     out from under us our erase math can no longer reach the top.
     """
+
+    if state.pager_open:
+        return render_pager_with_cursor(
+            state,
+            width,
+            theme,
+            max_height=max_height or 30,
+        )
 
     if state.mode == "agent_view":
         return render_agent_view_with_cursor(

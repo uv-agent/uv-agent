@@ -127,9 +127,9 @@ def test_tool_cell_uses_rule_and_indented_output() -> None:
     assert "print(1)" not in plain_lines[0]
     assert "run_process_text" in plain
     assert "from uv_agent_runtime" not in plain
-    assert "┌" not in plain and "└" not in plain and "│" not in plain
-    assert any(line.startswith("  one") for line in plain_lines)
-    assert any(line.startswith("  two") for line in plain_lines)
+    # stdout/stderr are no longer inlined; use /show <run_id> for full output.
+    assert "one" not in plain and "two" not in plain
+    assert len(plain_lines) == 2
 
 
 def test_tool_cell_compresses_script_and_output_lines() -> None:
@@ -142,23 +142,10 @@ def test_tool_cell_compresses_script_and_output_lines() -> None:
     lines = render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 80)
     plain_lines = [strip_ansi(line) for line in lines]
 
-    assert [line.strip() for line in plain_lines if line.strip().startswith("path_info")] == [
-        'path_info("0")',
-        'path_info("1")',
-        'path_info("2")',
-        'path_info("3")',
-        'path_info("4")',
-        'path_info("5")',
-    ]
-    assert any("… more helpers +1 calls" in line for line in plain_lines)
-    assert [line.strip() for line in plain_lines if line.strip().startswith("out")] == [
-        "out0",
-        "out1",
-        "out2",
-        "out3",
-        "out4",
-    ]
-    assert any("... 3 more lines" in line for line in plain_lines)
+    # Only the compact imported-name chain is shown; stdout is omitted.
+    assert any("path_info x7" in line for line in plain_lines)
+    assert not any(line.strip().startswith("out") for line in plain_lines)
+    assert len(plain_lines) == 2
 
 
 def test_tool_cell_uses_payload_helper_calls_without_source() -> None:
@@ -170,8 +157,9 @@ def test_tool_cell_uses_payload_helper_calls_without_source() -> None:
 
     plain = "\n".join(strip_ansi(line) for line in render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 80))
 
-    assert 'replace_text("a.txt", "old", "new")' in plain
+    assert "replace_text" in plain
     assert "print(1)" not in plain
+    assert len([line for line in plain.splitlines() if line.strip()]) == 2
 
 
 def test_workflow_structured_event_markup_is_compact() -> None:
@@ -207,7 +195,7 @@ def test_workflow_structured_event_markup_is_compact() -> None:
     assert checkpoint == "└─ workflow checkpoint after_investigation reached"
 
 
-def test_tool_cell_shows_workflow_events_without_runtime_json_stdout() -> None:
+def test_tool_cell_omits_events_and_stdout_in_compact_view() -> None:
     event = {
         "kind": "workflow.node.completed",
         "key": "investigate",
@@ -228,10 +216,12 @@ def test_tool_cell_shows_workflow_events_without_runtime_json_stdout() -> None:
         for line in render_tool_cell(TranscriptCell("tool", payload=payload), 100)
     )
 
-    assert "workflow node investigate completed thread 12345678" in plain
-    assert "visible output" in plain
+    # Events and stdout are no longer inlined in the compact cell.
+    assert "workflow node investigate completed thread 12345678" not in plain
+    assert "visible output" not in plain
     assert RUNTIME_EVENT_EVENT_ID_KEY not in plain
     assert RUNTIME_EVENT_RUN_ID_KEY not in plain
+    assert "run_1" in plain
 
 
 def test_tui2_compaction_event_shows_preview_only(monkeypatch) -> None:
@@ -288,14 +278,13 @@ def test_running_tool_header_keeps_right_edge_slack() -> None:
 
 
 def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
-    """Live tool cells must not grow as stdout/stderr arrive.
+    """Live tool cells must stay at a constant two-line height.
 
     A growing live frame can push its top row out of the viewport on
     terminals that don't honour DECAWM, leaving leaked
-    ``── ⠿ run_python · running…`` rows in scrollback.  Keeping the
-    running cell's rendered height constant (header + static helpers list)
-    eliminates that class of bug.  The completed cell still renders the
-    full stdout/stderr block when it's flushed into scrollback.
+    ``── ⠿ run_python · running…`` rows in scrollback.  The compact cell
+    keeps only the header and the static imported-call chain, so payload
+    growth never changes the rendered height.
     """
 
     call = {
@@ -323,12 +312,12 @@ def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
         80,
     )
 
-    assert len(empty) == len(with_stdout) == len(with_both)
+    assert len(empty) == len(with_stdout) == len(with_both) == 2
     for lines in (empty, with_stdout, with_both):
         plain = "\n".join(strip_ansi(line) for line in lines)
         assert "line1" not in plain and "warn1" not in plain
         assert "waiting for run_python output" not in plain
-        assert "path_info" in plain  # helpers still shown for context
+        assert "path_info" in plain  # call chain still shown for context
 
     completed = render_tool_cell(
         TranscriptCell(
@@ -339,8 +328,9 @@ def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
         80,
     )
     completed_plain = "\n".join(strip_ansi(line) for line in completed)
-    assert "done-line" in completed_plain
-    assert "done-warn" in completed_plain
+    assert "done-line" not in completed_plain
+    assert "done-warn" not in completed_plain
+    assert "path_info" in completed_plain
 
 
 # ---------------------------------------------------------------------------
@@ -3168,3 +3158,131 @@ def test_retained_flushed_cell_truncates_long_text() -> None:
     assert len(retained.text) < len(long_text)
     assert "...[truncated]" in retained.text
     assert retained.text.startswith("x" * (TUI2_RETAINED_FLUSHED_TEXT_CHARS // 2))
+
+
+
+def test_tool_cell_shows_import_anchor_chains_with_method_calls() -> None:
+    call = {
+        "name": "run_python",
+        "call_id": "call_abc",
+        "arguments": json.dumps(
+            {
+                "code": (
+                    "from pathlib import Path\n"
+                    "from uv_agent_runtime import search_text, read_file\n"
+                    "import json\n\n"
+                    "hits = search_text(\"foo\")\n"
+                    "p = Path.home().resolve()\n"
+                    "data = json.loads(read_file(p).text)\n"
+                )
+            }
+        ),
+    }
+    lines = render_tool_cell(TranscriptCell("tool", call=call, payload={"returncode": 0}), 80)
+    plain = "\n".join(strip_ansi(line) for line in lines)
+
+    assert "search_text" in plain
+    assert "Path.home.resolve" in plain
+    assert "json.loads" in plain
+    assert "read_file" in plain
+
+
+def test_pager_renders_content_with_fixed_chrome() -> None:
+    state = Tui2State(pager_open=True, pager_title="test run", pager_lines=["line1", "line2", "line3"])
+    lines, cursor_row, cursor_col = render_live_with_cursor(state, 80, max_height=8)
+    plain = "\n".join(strip_ansi(line) for line in lines)
+
+    assert "test run" in plain
+    assert "line1" in plain
+    assert "line2" in plain
+    assert "line3" in plain
+    assert "q=close" in plain
+    # Footer is the second-to-last row inside the outer border.
+    assert cursor_row == len(lines) - 2
+
+
+def test_history_cells_merge_tool_call_and_result(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    thread_id = app.engine.thread_store.create_thread("tool merge test")
+
+    def fake_read_history_segment(thread_id, *, event_types=None):
+        from uv_agent.session.store import ThreadHistorySegment
+
+        return ThreadHistorySegment(
+            events=[
+                {
+                    "type": "item.model_response",
+                    "thread_id": thread_id,
+                    "turn_id": "turn_1",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_123",
+                            "name": "run_python",
+                            "arguments": json.dumps({"code": "print(1)"}),
+                        }
+                    ],
+                },
+                {
+                    "type": "item.runner_result",
+                    "thread_id": thread_id,
+                    "turn_id": "turn_1",
+                    "call_id": "call_123",
+                    "result": {
+                        "run_id": "run_abc",
+                        "returncode": 0,
+                        "stdout": "ok",
+                    },
+                },
+            ],
+            start_event_id=0,
+            end_event_id=2,
+            has_more=False,
+        )
+
+    monkeypatch.setattr(app.engine.thread_store, "read_history_segment", fake_read_history_segment)
+
+    cells = app._history_cells_for_thread(thread_id)
+    tool_cells = [cell for cell in cells if cell.kind == "tool"]
+
+    assert len(tool_cells) == 1
+    assert tool_cells[0].call is not None
+    assert tool_cells[0].call.get("call_id") == "call_123"
+    assert tool_cells[0].payload is not None
+    assert tool_cells[0].payload.get("run_id") == "run_abc"
+
+
+def test_show_command_opens_pager_for_matching_run(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    thread_id = app.engine.thread_store.create_thread("show test")
+    app.state.thread_id = thread_id
+
+    def fake_read_events(thread_id, *, event_types=None):
+        return [
+            {
+                "type": "item.runner_result",
+                "thread_id": thread_id,
+                "call": {
+                    "call_id": "call_show",
+                    "name": "run_python",
+                    "arguments": json.dumps({"code": "print(1)"}),
+                },
+                "result": {
+                    "run_id": "run_showme",
+                    "returncode": 0,
+                    "stdout": "one",
+                    "stderr": "",
+                    "events": [],
+                },
+            }
+        ]
+
+    monkeypatch.setattr(app.engine.thread_store, "read_events", fake_read_events)
+
+    app._handle_command("/show run_showme")
+
+    assert app.state.pager_open
+    assert app.state.pager_run_id is not None
+    plain = "\n".join(strip_ansi(line) for line in app.state.pager_lines)
+    assert "print(1)" in plain
+    assert "one" in plain

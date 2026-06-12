@@ -641,7 +641,7 @@ class ThreadTimelineState:
             items.append(TimelineItem(
                 id=_tool_result_id(result, call_id, turn_id or ""),
                 kind="tool_result",
-                content={"payload": dict(result)},
+                content={"payload": dict(result), "call": dict(call) if call else None},
                 turn_id=turn_id,
                 event_id=event_id,
                 process_group=turn_id if turn_id else None,

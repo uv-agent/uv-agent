@@ -227,3 +227,135 @@ def _truncate(value: str, max_chars: int) -> str:
     if len(value) <= max_chars:
         return value
     return value[: max_chars - 1].rstrip() + "…"
+
+
+
+def extract_import_anchor_chains(source: str, *, max_calls: int = 80) -> list[str]:
+    """Return call chains anchored by imported names, in import order.
+
+    A chain starts at a name that was imported into the module (e.g.
+    ``search_text``, ``Path``, or ``json``) and follows attribute access and
+    call expressions that use that name directly.  For example:
+
+        from pathlib import Path
+        from uv_agent_runtime import search_text
+        import json
+
+        search_text("foo")
+        Path.home().resolve()
+        json.loads(s)
+
+    produces ``["search_text", "Path.home.resolve", "json.loads"]``.
+
+    This is intentionally best-effort and literal: it does not trace variables
+    assigned from imported objects, so ``p = Path.home(); p.resolve()`` is not
+    recognised as ``Path.home.resolve``.  It also stops at non-import names,
+    so ``foo().bar()`` without an imported anchor is skipped.
+    """
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    visitor = _ImportAnchorChainVisitor(source, max_calls=max_calls)
+    visitor.visit(tree)
+    return visitor.chains
+
+
+def format_import_anchor_chains(chains: list[str]) -> list[str]:
+    """Deduplicate chains while preserving import order, adding ``xN`` suffixes."""
+
+    counts: dict[str, int] = {}
+    ordered: list[str] = []
+    for chain in chains:
+        counts[chain] = counts.get(chain, 0) + 1
+        if counts[chain] == 1:
+            ordered.append(chain)
+    return [f"{chain} x{counts[chain]}" if counts[chain] > 1 else chain for chain in ordered]
+
+
+class _ImportAnchorChainVisitor(ast.NodeVisitor):
+    def __init__(self, source: str, *, max_calls: int) -> None:
+        self.source = source
+        self.max_calls = max_calls
+        self.chains: list[str] = []
+        # imported name -> import order index
+        self.imported: dict[str, int] = {}
+        self._next_order = 0
+        self._star_imported_runtime = False
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802 - ast API
+        for alias in node.names:
+            local = alias.asname or alias.name.split(".")[0]
+            self.imported.setdefault(local, self._next_order)
+            self._next_order += 1
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802 - ast API
+        module = node.module or ""
+        if module == "uv_agent_runtime":
+            for alias in node.names:
+                if alias.name == "*":
+                    self._star_imported_runtime = True
+                    continue
+                local = alias.asname or alias.name
+                self.imported.setdefault(local, self._next_order)
+                self._next_order += 1
+        elif module:
+            for alias in node.names:
+                if alias.name == "*":
+                    # We do not know the module's exports, so record the
+                    # module name as a fallback anchor when it is imported
+                    # explicitly elsewhere, but otherwise ignore star imports
+                    # from unknown modules.
+                    continue
+                local = alias.asname or alias.name
+                self.imported.setdefault(local, self._next_order)
+                self._next_order += 1
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 - ast API
+        if len(self.chains) < self.max_calls:
+            chain = self._call_chain(node.func)
+            if chain:
+                self.chains.append(chain)
+        self.generic_visit(node)
+
+    def _call_chain(self, func: ast.expr) -> str | None:
+        # Unwrap decorators/context-managers such as @workflow.agent(...) if
+        # the call is syntactically a call on a callable attribute chain.
+        if isinstance(func, ast.Name):
+            if func.id in self.imported:
+                return func.id
+            if self._star_imported_runtime and func.id in RUNTIME_HELPER_NAMES:
+                return func.id
+            return None
+        if isinstance(func, ast.Attribute):
+            anchor = self._attribute_anchor(func.value)
+            if anchor is not None:
+                return f"{anchor}.{func.attr}"
+            return None
+        return None
+
+    def _attribute_anchor(self, expr: ast.expr) -> str | None:
+        """Return the imported-anchored prefix of an attribute/call chain."""
+
+        if isinstance(expr, ast.Call):
+            inner = self._call_chain(expr.func)
+            if inner is not None:
+                return inner
+            # The call's func is not itself imported, but its callee might be
+            # an attribute chain anchored by an import (e.g. Path.home().x()).
+            return self._attribute_anchor(expr.func)
+        if isinstance(expr, ast.Attribute):
+            prefix = self._attribute_anchor(expr.value)
+            if prefix is not None:
+                return f"{prefix}.{expr.attr}"
+            return None
+        if isinstance(expr, ast.Name):
+            if expr.id in self.imported:
+                return expr.id
+            if self._star_imported_runtime and expr.id in RUNTIME_HELPER_NAMES:
+                return expr.id
+            return None
+        return None

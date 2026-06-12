@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from math import exp
@@ -15,7 +16,7 @@ from typing import Any
 
 from uv_agent.atomic import atomic_replace
 from uv_agent.environment import detect_user_language
-from uv_agent.helper_calls import extract_runtime_helper_calls
+
 from uv_agent.ids import new_id
 from uv_agent.i18n import tr
 from uv_agent.mcp_config import discover_mcp_servers
@@ -160,6 +161,7 @@ TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
     CommandSuggestion("/clear", "clear view and start a new thread"),
     CommandSuggestion("/threads", "choose a thread to resume"),
     CommandSuggestion("/status", "show model/context/thread status"),
+    CommandSuggestion("/show ", "show full run script and output"),
     CommandSuggestion("/skills", "list skills and insert @skill mentions"),
     CommandSuggestion("/mcp", "list MCP servers and insert @mcp mentions"),
     CommandSuggestion("/image", "attach clipboard image as [Image #N]"),
@@ -421,6 +423,8 @@ class AnsiUvAgentApp:
         self._image_status_message: str | None = None
         self._agent_view_local_threads: set[str] = set()
         self._agent_view_join_pending_persist: set[str] = set()
+        self._pager_code: str = ""
+        self._pager_output: str = ""
     @property
     def _running_task(self) -> asyncio.Task[None] | None:
         """Compatibility view of the attached thread's running task."""
@@ -825,6 +829,8 @@ class AnsiUvAgentApp:
     # ------------------------------------------------------------------
 
     async def handle_key(self, key: str) -> bool:
+        if self.state.pager_open:
+            return self._handle_pager_key(key)
         if self.state.mode == "agent_view":
             return await self._handle_agent_view_key(key)
 
@@ -2388,6 +2394,8 @@ class AnsiUvAgentApp:
             self._open_thread_picker()
         elif command == "/status":
             self._show_status()
+        elif command == "/show" and arg:
+            self._show_run_detail(arg.strip())
         elif command == "/skills":
             self._open_skill_picker()
         elif command == "/mcp":
@@ -2526,6 +2534,228 @@ class AnsiUvAgentApp:
         self._refresh_context_percent()
         self._flush(TranscriptCell("event", text=self._status_text()))
 
+    # ------------------------------------------------------------------
+    # Run detail pager
+    # ------------------------------------------------------------------
+
+    def _show_run_detail(self, query: str) -> None:
+        """Open the pager with full source and output for a run."""
+
+        thread_id = self.state.thread_id
+        event = self._find_run_event(thread_id, query)
+        if event is None:
+            # Fall back to searching all visible threads if the user gave a
+            # run id without a current thread.
+            for thread in self.engine.thread_store.list_threads()[:50]:
+                candidate = str(thread.get("thread_id") or "")
+                if not candidate:
+                    continue
+                event = self._find_run_event(candidate, query)
+                if event is not None:
+                    thread_id = candidate
+                    break
+        if event is None:
+            self._flush(TranscriptCell("error", text=f"run not found: {query}"))
+            return
+
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        call = event.get("call") if isinstance(event.get("call"), dict) else {}
+        if not call and isinstance(result.get("call"), dict):
+            call = dict(result["call"])
+
+        try:
+            args = json.loads(str(call.get("arguments") or "{}"))
+        except Exception:
+            args = {}
+        code = str(args.get("code") or "").rstrip()
+
+        run_id = str(result.get("run_id") or query)
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "")
+        events = result.get("events") if isinstance(result.get("events"), list) else []
+
+        lines = self._build_run_pager_lines(code, stdout, stderr, events)
+        title = f"run {short_thread(run_id)}"
+        if thread_id:
+            title += f" in thread {short_thread(thread_id)}"
+        self._open_run_pager(title, lines, code=code, output=self._run_output_text(stdout, stderr, events))
+
+    def _find_run_event(self, thread_id: str | None, query: str) -> dict[str, Any] | None:
+        """Find the ``item.runner_result`` event matching ``query`` (run_id or call_id)."""
+
+        if not thread_id:
+            return None
+        query = query.strip()
+        try:
+            events = self.engine.thread_store.read_events(
+                thread_id,
+                event_types={"item.runner_result"},
+            )
+        except Exception:
+            return None
+        for event in events:
+            result = event.get("result") if isinstance(event.get("result"), dict) else {}
+            call = event.get("call") if isinstance(event.get("call"), dict) else {}
+            if not call and isinstance(result.get("call"), dict):
+                call = result["call"]
+            run_id = str(result.get("run_id") or "")
+            call_id = str(call.get("call_id") or result.get("call_id") or "")
+            if query in (run_id, call_id, run_id[-12:], call_id[-12:]):
+                return event
+        return None
+
+    def _run_output_text(self, stdout: str, stderr: str, events: list[Any]) -> str:
+        parts: list[str] = []
+        if stdout.strip():
+            parts.append(stdout)
+        if stderr.strip():
+            parts.append(stderr)
+        if events:
+            try:
+                parts.append(json.dumps(events, ensure_ascii=False, indent=2))
+            except Exception:
+                parts.append(str(events))
+        return "\n".join(parts)
+
+    def _build_run_pager_lines(
+        self,
+        code: str,
+        stdout: str,
+        stderr: str,
+        events: list[Any],
+    ) -> list[str]:
+        """Assemble pager lines with highlighted code and output sections."""
+
+        lines: list[str] = []
+        if code:
+            lines.append("script")
+            highlighted = self._highlight_python(code)
+            lines.extend(highlighted.splitlines())
+            lines.append("")
+        if stdout.strip():
+            lines.append("stdout")
+            lines.extend(stdout.rstrip().splitlines())
+            lines.append("")
+        if stderr.strip():
+            lines.append("stderr")
+            lines.extend(stderr.rstrip().splitlines())
+            lines.append("")
+        if events:
+            lines.append("events")
+            for event in events:
+                try:
+                    lines.append(json.dumps(event, ensure_ascii=False))
+                except Exception:
+                    lines.append(str(event))
+            lines.append("")
+        if not lines:
+            lines.append("(no content)")
+        return lines
+
+    @staticmethod
+    def _highlight_python(code: str) -> str:
+        """Best-effort Python syntax highlighting into ANSI escape sequences."""
+
+        if not code:
+            return ""
+        try:
+            from pygments import highlight
+            from pygments.lexers.python import PythonLexer
+            from pygments.formatters.terminal256 import Terminal256Formatter
+
+            return highlight(code, PythonLexer(), Terminal256Formatter(style="default"))
+        except Exception:
+            return code
+
+    def _open_run_pager(self, title: str, lines: list[str], *, code: str, output: str) -> None:
+        self._close_command_palette()
+        self.state.pager_open = True
+        self.state.pager_run_id = title
+        self.state.pager_title = title
+        self.state.pager_lines = lines
+        self.state.pager_scroll = 0
+        self.state.pager_total_lines = len(lines)
+        self._pager_code = code
+        self._pager_output = output
+        self._safe_repaint()
+
+    def _close_pager(self) -> None:
+        self.state.pager_open = False
+        self.state.pager_run_id = None
+        self.state.pager_title = ""
+        self.state.pager_lines = []
+        self.state.pager_scroll = 0
+        self.state.pager_total_lines = 0
+        self._pager_code = ""
+        self._pager_output = ""
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        """Copy text to the platform clipboard, falling back to a temp file."""
+
+        import shutil
+        import subprocess
+        import tempfile
+
+        copied = False
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["clip"], input=text, text=True, check=True, timeout=5)
+                copied = True
+            elif sys.platform == "darwin":
+                subprocess.run(["pbcopy"], input=text, text=True, check=True, timeout=5)
+                copied = True
+            else:
+                for cmd in (
+                    ["xclip", "-selection", "clipboard"],
+                    ["wl-copy"],
+                ):
+                    if shutil.which(cmd[0]):
+                        subprocess.run(cmd, input=text, text=True, check=True, timeout=5)
+                        copied = True
+                        break
+        except Exception:
+            copied = False
+
+        if copied:
+            self.state.status_message = "copied to clipboard"
+        else:
+            try:
+                tmp = Path(tempfile.gettempdir()) / f"uv-agent-run-{short_thread(self.state.pager_run_id or 'copy')}.txt"
+                tmp.write_text(text, encoding="utf-8")
+                self.state.status_message = f"copied to {tmp}"
+            except Exception as exc:
+                self.state.status_message = f"copy failed: {exc}"
+        self._safe_repaint()
+
+    def _scroll_pager(self, delta: int) -> None:
+        if not self.state.pager_open:
+            return
+        self.state.pager_scroll = max(0, self.state.pager_scroll + delta)
+
+    def _handle_pager_key(self, key: str) -> bool:
+        """Handle keys while the run-detail pager is open."""
+
+        if key in {"q", "Q", "\x1b"}:
+            self._close_pager()
+            return True
+        if key in {"\x03"}:  # Ctrl+C in pager copies code, does not quit.
+            self._copy_to_clipboard(self._pager_code)
+            return True
+        if key in {"\x0f", "o", "O"}:  # Ctrl+O or o copies output.
+            self._copy_to_clipboard(self._pager_output)
+            return True
+        if key in {"<H>", "<UP>", "k"}:
+            self._scroll_pager(-1)
+        elif key in {"<P>", "<DOWN>", "j"}:
+            self._scroll_pager(1)
+        elif key in {"<I>", "<PAGEUP>"}:
+            self._scroll_pager(-10)
+        elif key in {"<Q>", "<PAGEDOWN>"}:
+            self._scroll_pager(10)
+        self._safe_repaint()
+        return True
+
+
     def _thread_metadata(self, thread_id: str) -> dict[str, Any]:
         listed: dict[str, Any] = {}
         for item in self.engine.thread_store.list_threads():
@@ -2659,9 +2889,10 @@ class AnsiUvAgentApp:
             thread_id,
             event_types=VISIBLE_HISTORY_EVENT_TYPES | {"turn.started", "turn.completed"},
         )
+        merged_events = self._merge_history_tool_events(segment.events)
         timeline = ThreadTimelineState(thread_id)
         timeline.load_history_segment(
-            segment.events,
+            merged_events,
             start_event_id=segment.start_event_id,
             end_event_id=segment.end_event_id,
             has_older=segment.has_more,
@@ -2678,6 +2909,61 @@ class AnsiUvAgentApp:
             )
         return cells
 
+    def _merge_history_tool_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Merge paired ``item.model_response`` function_call + ``item.runner_result`` events.
+
+        Persisted history stores a model function_call and its runner result as
+        two separate events.  Rendering them as two cells produces a duplicated
+        ``python`` block when a thread is resumed, so we attach the ``call``
+        metadata to the runner result and drop the bare function_call event.
+        """
+
+        calls_by_id: dict[str, dict[str, Any]] = {}
+        result_indices: dict[str, int] = {}
+        for index, event in enumerate(events):
+            event_type = event.get("type")
+            if event_type == "item.model_response":
+                for output_item in event.get("output") or []:
+                    if isinstance(output_item, dict) and output_item.get("type") == "function_call":
+                        call_id = str(output_item.get("call_id") or "").strip()
+                        if call_id:
+                            calls_by_id[call_id] = dict(output_item)
+            elif event_type == "item.runner_result":
+                call_id = str(event.get("call_id") or "").strip()
+                if call_id:
+                    result_indices[call_id] = index
+
+        if not calls_by_id or not result_indices:
+            return list(events)
+
+        merged: list[dict[str, Any]] = []
+        consumed_model_response: set[int] = set()
+        for index, event in enumerate(events):
+            event_type = event.get("type")
+            if event_type == "item.model_response":
+                output = event.get("output") or []
+                merged_call_ids = {
+                    str(item.get("call_id") or "").strip()
+                    for item in output
+                    if isinstance(item, dict)
+                    and item.get("type") == "function_call"
+                    and str(item.get("call_id") or "").strip() in result_indices
+                }
+                if merged_call_ids:
+                    consumed_model_response.add(index)
+                    continue
+                merged.append(event)
+            elif event_type == "item.runner_result":
+                call_id = str(event.get("call_id") or "").strip()
+                call = calls_by_id.get(call_id)
+                if call is not None and not event.get("call"):
+                    merged.append({**event, "call": call})
+                else:
+                    merged.append(event)
+            else:
+                merged.append(event)
+        return merged
+
     def _timeline_item_cell(self, item: TimelineItem) -> TranscriptCell | None:
         content = item.content or {}
         if item.kind in {"user", "assistant", "reasoning"}:
@@ -2689,7 +2975,8 @@ class AnsiUvAgentApp:
             return TranscriptCell(item.kind, text=text) if text else None
         if item.kind == "tool_result":
             payload = content.get("payload") if isinstance(content.get("payload"), dict) else {}
-            return TranscriptCell("tool", payload=dict(payload))
+            call = content.get("call") if isinstance(content.get("call"), dict) else {}
+            return TranscriptCell("tool", payload=dict(payload), call=dict(call) if call else None)
         if item.kind == "tool_call":
             call = content.get("call") if isinstance(content.get("call"), dict) else {}
             status = str(content.get("status") or "done")
@@ -3274,8 +3561,6 @@ class AnsiUvAgentApp:
             cell.call = call
         payload = tool_payload_from_event(event)
         if payload is not None:
-            if "helper_calls" not in payload:
-                payload["helper_calls"] = extract_runtime_helper_calls(self._tool_call_code(cell.call))
             cell.payload = payload
         if not running:
             cell.status = "done"
