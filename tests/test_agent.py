@@ -459,11 +459,12 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert "活动 cwd" in PYTHON_TOOL["description"]
     assert "Python 原生控制流和 import" in PYTHON_TOOL["description"]
     assert "不是 shell 风格片段" in PYTHON_TOOL["description"]
-    assert "把一次调用视为一个工作单元脚本" in PYTHON_TOOL["description"]
-    assert "相关的命令、搜索、读取、编辑" in PYTHON_TOOL["description"]
+    assert "把一次调用视为一个完整的工作单元脚本" in PYTHON_TOOL["description"]
+    assert "用 Python 原生控制流把服务于同一目标的搜索、读取、计算、编辑、验证和条件回退编排在一起" in PYTHON_TOOL["description"]
     assert "条件回退" in PYTHON_TOOL["description"]
-    assert "有界摘要" in PYTHON_TOOL["description"]
-    assert "每个命令、每次文件读取或每个 helper 调用" in PYTHON_TOOL["description"]
+    assert "最后只输出一份摘要" in PYTHON_TOOL["description"]
+    assert "单个命令、单次读取或单个 helper" in PYTHON_TOOL["description"]
+    assert "结果会改变整体方向" in PYTHON_TOOL["description"]
     assert "优先使用 runtime helpers" in PYTHON_TOOL["description"]
     assert "普通外部命令" in PYTHON_TOOL["description"] and "run_process_text" in PYTHON_TOOL["description"]
     assert "运行命令、访问网络" in PYTHON_TOOL["description"]
@@ -3464,11 +3465,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert prompt.startswith("<uv_agent_system_prompt>")
     assert "</uv_agent_system_prompt>" in prompt
     assert "<response_style>" in prompt
-    assert "简洁、友好、易接近" in prompt
+    assert "简洁、友好、自然" in prompt
     assert "默认控制回答长度" in prompt
     assert "明确要求详细解释具体内容" in prompt
-    assert "当项目规则或用户指令没有另行要求时" in prompt
-    assert "倾向于更充分的代码内文档" in prompt
+    assert "当项目规则或用户指令未另行要求时" in prompt
+    assert "倾向于编写更充分的代码内文档" in prompt
     assert "改了什么、为什么改、如何验证" in prompt
     assert "Write comments generously" not in prompt
     assert "project-shared uv environment" not in prompt
@@ -3481,9 +3482,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "thread's active cwd" not in prompt
     assert "PEP 723" not in prompt
     assert "uv pip" not in prompt
-    assert "对于成熟领域问题" in prompt
+    assert "对于成熟领域的问题" in prompt
     assert "用 unidiff 解析 diffs" in prompt
-    assert "用 libcst 做 Python source transforms" in prompt
+    assert "用 libcst 进行 Python 源码转换" in prompt
     assert "你唯一的外部动作工具是 run_python" in prompt
     assert "必须由 run_python 调用中的 Python 代码发起" in prompt
     assert "Do not assume shell, filesystem, browser, network, or MCP model tools exist outside Python" not in prompt
@@ -3499,18 +3500,18 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "When running independent work concurrently inside run_python" not in prompt
     assert "在 Python 中可使用 asyncio、concurrent.futures 和 threading" in prompt
     assert "asyncio, concurrent.futures, threading, and subprocess" not in prompt
-    assert "确定性地收集结果" in prompt
+    assert "按确定顺序收集结果" in prompt
     assert "Do not guess helper signatures" not in prompt
     assert "系统不会替你截断过大的输出" in prompt
     assert "先过滤、限制或摘要" in prompt
     assert "<run_python_workflow>" in prompt
-    assert "小型 Python 程序" in prompt
+    assert "完整的 Python 程序" in prompt
     assert "不是 shell-command wrapper 或单个 helper wrapper" in prompt
-    assert "当前的有界目标或一个连贯阶段" in prompt
-    assert "不是一次文件读取、一个命令或一个 helper 调用" in prompt
+    assert "同一个目标下的多个搜索、读取、计算、编辑或验证" in prompt
+    assert "应尽量在同一个脚本内完成" in prompt
     assert "Python 原生控制流和常规 Python 语法" in prompt
     assert "imports、variables、functions、loops、conditionals、try/except" in prompt
-    assert "协调相关步骤、fallbacks、parsing、verification 和 summaries" in prompt
+    assert "编排相关步骤、回退处理、解析、验证和摘要" in prompt
     assert "Call enter_dir proactively whenever the task clearly belongs" not in prompt
     assert "including paths discovered during execution" not in prompt
     assert "<capability_use>" in prompt
@@ -3523,11 +3524,12 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "use simple Python for glue code or very small work" not in prompt
     assert "only when it materially helps" not in prompt
     assert "使用 workflow" in prompt and "独立或长时间运行模型任务" in prompt
-    assert "并发运行独立工作" in prompt
+    assert "并发运行相互独立的任务" in prompt
     assert "workflow nodes 或 run_python 内的独立 helper operations" in prompt
-    assert "重叠文件写入保持顺序执行" in prompt
-    assert "只有当先前输出必须改变计划" in prompt
-    assert "到达有风险的写入/验证边界" in prompt
+    assert "对同一文件的写入保持顺序执行" in prompt
+    assert "结果会改变整体方向" in prompt
+    assert "操作有破坏风险" in prompt
+    assert "只有当先前输出必须改变计划" not in prompt
     assert "Plan each run_python call as a complete work unit" not in prompt
     assert "Use one call for a complete work unit" not in prompt
     assert "batch related commands, searches, reads, edits" not in prompt
@@ -3542,7 +3544,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<context_updates>" in prompt
     assert "模型可见的 user messages" in prompt and "<context_update" in prompt
     assert "在当前 epoch 内" in prompt
-    assert "compaction 开启新 epoch 后会再次发送" in prompt
+    assert "compaction 开启新 epoch 后会重新发送" in prompt
     assert "Skills 和 MCP server declarations" in prompt and "追加" in prompt
     assert "如果某个 context section 被移除" in prompt
     assert "item.context_update is an internal persistence event" not in prompt
@@ -3607,11 +3609,13 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Helpers 是供工作单元脚本使用的 Python functions" in turn_context
     assert "不是独立工具模式" in turn_context
     assert "不要仅因为下一步要用另一个 helper" in turn_context
+    assert "对方向已经明确的后续步骤" in turn_context
     assert "用 Python 编排" in turn_context
     assert "根据 helper 结果分支" in turn_context
     assert "用 Python libraries 解析结构化输出" in turn_context
-    assert "收集一份有界摘要" in turn_context
-    assert "把 shell 习惯翻译成 Python" in turn_context
+    assert "收集一份摘要" in turn_context
+    assert "结果会改变整体方向" in turn_context
+    assert "把 shell 习惯转换成 Python 写法" in turn_context
     assert "用 read_file 代替 cat" in turn_context
     assert "用 search_text/find_files 代替临时 grep/find" in turn_context
     assert "用 run_process_text([...]) 代替 raw subprocess" in turn_context
@@ -3619,10 +3623,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "在同一脚本中处理可预见的后续 parsing 或 fallback logic" in turn_context
     assert '<example name="round-1-find">' in turn_context
     assert "查找并理解" in turn_context
-    assert "搜索多个 pattern、读取多个文件" in turn_context
-    assert "在决定修改前收集所需上下文" in turn_context
+    assert "并行搜索多个 pattern、一次读取多个相关文件" in turn_context
+    assert "在决定修改前收集上下文" in turn_context
     assert "参考示例" in turn_context
     assert "编辑并验证" in turn_context
+    assert "在目标、位置和修改方式已经明确后" in turn_context
     assert "先快速搜索确认目标，再一起应用变更并验证" in turn_context
     assert "不要把已知编辑推迟到下一轮" in turn_context
     assert "from uv_agent_runtime import search_text, find_files, read_file" in turn_context
@@ -3648,7 +3653,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<helper_selection>" in turn_context
     assert "列出的 helpers 是普通 Python functions" in turn_context
     assert "与标准库代码和控制流组合使用" in turn_context
-    assert "pathlib、os、json" in turn_context and "脚本内 glue" in turn_context
+    assert "pathlib、os、json" in turn_context and "脚本内做连接逻辑" in turn_context
     assert "适合时优先使用 helpers" in turn_context
     assert "newline style、BOM、final newline" in turn_context
     assert "按任务选择：" in turn_context
@@ -3657,14 +3662,14 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "精确代码字符串用 literal=True" in turn_context
     assert "rg type aliases 用 file_types" in turn_context
     assert "edit=用 replace_text 替换唯一小段文本，用 edit_lines 做 anchored ranges/inserts" in turn_context
-    assert "whole-file/generated content 用 write_file" in turn_context
+    assert "完整文件或生成的内容用 write_file" in turn_context
     assert "process=run_process_text for ordinary external commands" not in turn_context
     assert "对于普通外部命令" in turn_context
     assert "包括 skills 或 docs 中展示的 shell commands" in turn_context
     assert "优先用 run_process_text 而不是 raw subprocess" in turn_context
     assert "自定义进程控制" in turn_context
     assert "thread/run history=thread_digest/run_digest/list_thread_digests" in turn_context
-    assert "对于大数据，优先选取字段、行范围、head/tail 或摘要" in turn_context
+    assert "数据量较大时，优先提取字段、行范围、head/tail 或生成摘要" in turn_context
     assert "不要猜测 helper signatures" in turn_context
     assert "Search 和 symbol helpers 返回给 file helpers 使用的是绝对路径" in turn_context
     assert "start=end+1 插入" in turn_context
@@ -3691,7 +3696,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'level="small"' not in prompt
     assert "pathlib" in turn_context
     assert "这些 mentions 只是纯文本提示" in prompt
-    assert "在 run_python 中用 file helpers 或 Python 标准库 APIs 检查它" in prompt
+    assert "在 run_python 中使用 file helpers 或 Python 标准库 API 检查它" in prompt
     assert "read_text, write_text" not in prompt
     assert "list_files" not in prompt
     assert "run_command/check_command" not in prompt
