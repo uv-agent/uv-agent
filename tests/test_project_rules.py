@@ -68,7 +68,7 @@ def test_workspace_rule_index_is_bounded_and_reports_limits(tmp_path: Path) -> N
     assert [path.name for path in index.paths] == ["AGENTS.md", "AGENTS.md"]
     assert index.depth_limited is True
     assert "<workspace_rule_index>" in rendered
-    assert "active workspace" in rendered
+    assert "在活动 workspace 下发现" in rendered
     assert "scan_depth: 1" in rendered
     assert "max_entries: 2" in rendered
     assert "truncated: true" in rendered
@@ -82,8 +82,8 @@ def test_workspace_rule_index_can_render_active_working_directory_label(tmp_path
 
     rendered = discover_workspace_rule_index(project).render(label="working directory")
 
-    assert "active working directory" in rendered
-    assert "Use enter_dir" in rendered
+    assert "在活动 working directory 下发现" in rendered
+    assert "enter_dir" in rendered
 
 
 def test_load_directory_rules_only_loads_current_directory(tmp_path: Path) -> None:

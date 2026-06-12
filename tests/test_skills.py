@@ -75,4 +75,4 @@ def test_render_skill_summary_escapes_xml_text(tmp_path: Path) -> None:
     assert ">Research &amp; compare &lt;tools&gt;</skill>" in summary
 
 def test_render_skill_summary_empty() -> None:
-    assert render_skill_summary([]) == "None discovered."
+    assert render_skill_summary([]) == "未发现。"

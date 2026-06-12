@@ -20,7 +20,18 @@ from uv_agent.agent import (
     usage_token_count,
 )
 from uv_agent.agent.compaction import compaction_response_summary_text, retain_item_after_compaction, retain_recent_context
-from uv_agent.prompts import BRANCH_NAME_GENERATION_PROMPT, POST_TOOL_COMPACTION_BRIDGE
+from uv_agent.prompts import (
+    BRANCH_NAME_GENERATION_PROMPT,
+    BRANCH_SLUG_INSTRUCTION,
+    COMPACTED_CONTEXT_CONTINUATION,
+    COMPACTION_TRUNCATION_SUFFIX,
+    INTERRUPTED_STREAM_CONTEXT_BRIDGE,
+    INTERRUPTED_TOOL_CONTEXT_BRIDGE,
+    POST_TOOL_COMPACTION_BRIDGE,
+    THREAD_TITLE_INSTRUCTION,
+    TOKEN_ESTIMATION_WARNING,
+    TOOL_ATTACHMENT_CONTEXT_BRIDGE,
+)
 from uv_agent.billing import billing_charge_for_usage, billing_token_breakdown, format_billing_total
 from uv_agent.config import (
     AppConfig,
@@ -91,7 +102,7 @@ class RoutedModelClient(FakeModelClient):
             "stream": False,
         }
         instructions = str(kwargs.get("instructions") or "")
-        if "Generate a short thread title" in instructions and self.title is not None:
+        if THREAD_TITLE_INSTRUCTION in instructions and self.title is not None:
             self.requests.append(request)
             return parse_responses_response(self.title)
         self.requests.append(request)
@@ -426,27 +437,27 @@ def make_test_config(
 def test_agent_exposes_only_python_runner_tool() -> None:
     assert PYTHON_TOOL["name"] == "run_python"
     assert PYTHON_TOOL["type"] == "function"
-    assert "fresh Python process" in PYTHON_TOOL["description"]
-    assert "thread's active cwd" in PYTHON_TOOL["description"]
-    assert "Python-native control flow and imports" in PYTHON_TOOL["description"]
-    assert "not shell-style fragments" in PYTHON_TOOL["description"]
-    assert "Treat one call as a work-unit script" in PYTHON_TOOL["description"]
-    assert "batch related commands, searches, reads, edits" in PYTHON_TOOL["description"]
-    assert "conditional fallbacks" in PYTHON_TOOL["description"]
-    assert "one bounded summary" in PYTHON_TOOL["description"]
-    assert "one run_python call per command, file read, or helper call" in PYTHON_TOOL["description"]
-    assert "Prefer runtime helpers" in PYTHON_TOOL["description"]
-    assert "run_process_text for ordinary external commands" in PYTHON_TOOL["description"]
-    assert "run commands, access the network" in PYTHON_TOOL["description"]
+    assert "全新的 Python 进程" in PYTHON_TOOL["description"]
+    assert "活动 cwd" in PYTHON_TOOL["description"]
+    assert "Python 原生控制流和 import" in PYTHON_TOOL["description"]
+    assert "不是 shell 风格片段" in PYTHON_TOOL["description"]
+    assert "把一次调用视为一个工作单元脚本" in PYTHON_TOOL["description"]
+    assert "相关的命令、搜索、读取、编辑" in PYTHON_TOOL["description"]
+    assert "条件回退" in PYTHON_TOOL["description"]
+    assert "有界摘要" in PYTHON_TOOL["description"]
+    assert "每个命令、每次文件读取或每个 helper 调用" in PYTHON_TOOL["description"]
+    assert "优先使用 runtime helpers" in PYTHON_TOOL["description"]
+    assert "普通外部命令" in PYTHON_TOOL["description"] and "run_process_text" in PYTHON_TOOL["description"]
+    assert "运行命令、访问网络" in PYTHON_TOOL["description"]
     assert "call subprocesses" not in PYTHON_TOOL["description"]
     assert set(PYTHON_TOOL["parameters"]["properties"]) == {"code", "timeout_s"}
     code_description = PYTHON_TOOL["parameters"]["properties"]["code"]["description"]
-    assert "Complete, valid Python source" in code_description
-    assert "Use normal Python syntax" in code_description
-    assert "not shell-style pseudo-code" in code_description
-    assert "small Python program" in code_description
-    assert "variables, functions, loops, conditionals, try/except" in code_description
-    assert "uv_agent_runtime helper calls" in code_description
+    assert "完整、有效的 Python 源码" in code_description
+    assert "常规 Python 语法" in code_description
+    assert "不要使用 shell 风格伪代码" in code_description
+    assert "小型 Python 程序" in code_description
+    assert "变量、函数、循环、条件、try/except" in code_description
+    assert "uv_agent_runtime helper 调用" in code_description
     assert "script_args" not in PYTHON_TOOL["parameters"]["properties"]
     assert PYTHON_TOOL["parameters"]["required"] == ["code"]
 
@@ -561,7 +572,7 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
     assert "context_compaction_request" in str(client.requests[1]["input"][-1])
     assert "CONTEXT CHECKPOINT COMPACTION" in str(client.requests[1]["input"][-1])
     assert "Target length" not in str(client.requests[1]["input"][-1])
-    assert "Continue from this compacted context" in str(compaction["replacement_input"])
+    assert COMPACTED_CONTEXT_CONTINUATION in str(compaction["replacement_input"])
 
 
 def test_compaction_summary_falls_back_to_message_text_when_tool_call_is_present() -> None:
@@ -1018,7 +1029,7 @@ async def test_compaction_warns_when_trigger_uses_estimate(tmp_path: Path) -> No
     stored = engine.thread_store.read(events[-1]["thread_id"])
     warning = next(event for event in stored if event["type"] == "thread.token_estimation_warning")
 
-    assert "local estimate" in warning["message"]
+    assert warning["message"] == TOKEN_ESTIMATION_WARNING
     assert any(event["type"] == "item.compaction" for event in stored)
     assert [event["type"] for event in stored].index("thread.token_estimation_warning") < [
         event["type"] for event in stored
@@ -1128,9 +1139,9 @@ def test_compaction_replacement_keeps_recent_user_messages_with_budget(tmp_path:
     assert recent_text in text
     assert "workspace_rule_index" not in text
     assert "assistant output" not in text
-    assert "[truncated during context compaction]" in text
+    assert COMPACTION_TRUNCATION_SUFFIX.strip() in text
     assert "<retained_history_message" in text
-    assert "resume any unfinished task" in text
+    assert COMPACTED_CONTEXT_CONTINUATION in text
     assert "<compacted_context_continuation>" not in text
 
 
@@ -1403,7 +1414,7 @@ async def test_responses_interrupted_partial_stream_adds_bridge_and_uses_full_re
     request_input = follow_client.requests[0]["input"]
     assert any(
         item.get("role") == "assistant"
-        and "An assistant response did not complete" in message_item_text(item)
+        and INTERRUPTED_STREAM_CONTEXT_BRIDGE in message_item_text(item)
         for item in request_input
     )
     assert request_input[-1]["role"] == "user"
@@ -1518,10 +1529,10 @@ async def test_agent_generates_title_for_default_new_thread(tmp_path: Path) -> N
     assert any(event["type"] == "thread.title" for event in events)
     assert engine.thread_store.thread_digest(thread_id)["title"] == "Fix import error in runner"
     title_request = next(
-        request for request in client.requests if "Generate a short thread title" in str(request["instructions"])
+        request for request in client.requests if THREAD_TITLE_INSTRUCTION in str(request["instructions"])
     )
     assert title_request["level"] is None
-    assert "first message" in str(title_request["input"])
+    assert "用户第一条消息" in str(title_request["input"])
 
 
 @pytest.mark.asyncio
@@ -1630,7 +1641,7 @@ async def test_agent_generates_branch_slug_with_configured_level_and_billing(tmp
     assert slug == "fix-login-redirect"
     request = client.requests[-1]
     assert request["level"] == "small"
-    assert "Generate a short git branch slug" in str(request["instructions"])
+    assert BRANCH_SLUG_INSTRUCTION in str(request["instructions"])
     assert BRANCH_NAME_GENERATION_PROMPT in str(request["input"])
     billing = engine.thread_store.latest_event(thread_id, "thread.billing_accumulated")
     assert billing is not None
@@ -1743,7 +1754,7 @@ async def test_agent_uses_configured_title_generation_level(tmp_path: Path) -> N
     [event async for event in engine.run_turn(user_text="use custom title model")]
 
     title_request = next(
-        request for request in client.requests if "Generate a short thread title" in str(request["instructions"])
+        request for request in client.requests if THREAD_TITLE_INSTRUCTION in str(request["instructions"])
     )
     assert title_request["level"] == "title"
 
@@ -1792,7 +1803,7 @@ async def test_agent_generates_title_only_for_first_user_message(tmp_path: Path)
     title_requests = [
         request
         for request in client.requests
-        if "Generate a short thread title" in str(request.get("instructions") or "")
+        if THREAD_TITLE_INSTRUCTION in str(request.get("instructions") or "")
     ]
     assert len(title_requests) == 1
     assert engine.thread_store.thread_digest(thread_id)["title"] == "Generated title"
@@ -1856,7 +1867,7 @@ async def test_agent_title_generation_falls_back_to_current_level(tmp_path: Path
     [event async for event in engine.run_turn(user_text="use current title level", level="deep")]
 
     title_request = next(
-        request for request in client.requests if "Generate a short thread title" in str(request["instructions"])
+        request for request in client.requests if THREAD_TITLE_INSTRUCTION in str(request["instructions"])
     )
     assert title_request["level"] == "deep"
 
@@ -2572,7 +2583,7 @@ def test_reconstruct_input_closes_interrupted_pending_tool_call(tmp_path: Path) 
         "message",
     ]
     assert reconstructed[-1]["role"] == "assistant"
-    assert "A tool call did not produce a complete tool result" in message_item_text(reconstructed[-1])
+    assert INTERRUPTED_TOOL_CONTEXT_BRIDGE in message_item_text(reconstructed[-1])
 
     messages = chat_messages(reconstructed, instructions=None, model=config.model_for_level(None))
     assert [message["role"] for message in messages[-2:]] == ["tool", "assistant"]
@@ -2658,7 +2669,7 @@ async def test_tool_look_at_adds_assistant_bridge_before_image_context(tmp_path:
         "message",
     ]
     assert follow_up_input[-2]["role"] == "assistant"
-    assert "Additional visual context" in message_item_text(follow_up_input[-2])
+    assert TOOL_ATTACHMENT_CONTEXT_BRIDGE in message_item_text(follow_up_input[-2])
     assert follow_up_input[-1]["role"] == "user"
     assert any(content.get("type") == "input_image" for content in follow_up_input[-1]["content"])
 
@@ -2828,7 +2839,7 @@ def test_anthropic_tool_image_context_keeps_tool_result_before_bridge(tmp_path: 
 
     assert [message["role"] for message in messages] == ["assistant", "user", "assistant", "user"]
     assert messages[1]["content"][0]["type"] == "tool_result"
-    assert messages[2]["content"] == "Tool execution completed. Additional visual context produced by the tool is provided in the next user message."
+    assert messages[2]["content"] == TOOL_ATTACHMENT_CONTEXT_BRIDGE
     assert messages[3]["content"][1]["type"] == "image"
 
 
@@ -3219,12 +3230,12 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert prompt.startswith("<uv_agent_system_prompt>")
     assert "</uv_agent_system_prompt>" in prompt
     assert "<response_style>" in prompt
-    assert "reply concisely and with a friendly, approachable tone" in prompt
-    assert "Keep answers restrained in length by default" in prompt
-    assert "explicitly asks for a detailed explanation of specific content" in prompt
-    assert "When no project rules or user instructions say otherwise" in prompt
-    assert "lean toward fuller in-code documentation" in prompt
-    assert "what changed, why, and how it was verified" in prompt
+    assert "简洁、友好、易接近" in prompt
+    assert "默认控制回答长度" in prompt
+    assert "明确要求详细解释具体内容" in prompt
+    assert "当项目规则或用户指令没有另行要求时" in prompt
+    assert "倾向于更充分的代码内文档" in prompt
+    assert "改了什么、为什么改、如何验证" in prompt
     assert "Write comments generously" not in prompt
     assert "project-shared uv environment" not in prompt
     assert 'add_dependency("package-name")' not in prompt
@@ -3236,11 +3247,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "thread's active cwd" not in prompt
     assert "PEP 723" not in prompt
     assert "uv pip" not in prompt
-    assert "For mature domain problems" in prompt
-    assert "unidiff for parsing diffs" in prompt
-    assert "libcst for Python source transforms" in prompt
-    assert "Your only external action tool is run_python" in prompt
-    assert "must be initiated by Python code inside a run_python call" in prompt
+    assert "对于成熟领域问题" in prompt
+    assert "用 unidiff 解析 diffs" in prompt
+    assert "用 libcst 做 Python source transforms" in prompt
+    assert "你唯一的外部动作工具是 run_python" in prompt
+    assert "必须由 run_python 调用中的 Python 代码发起" in prompt
     assert "Do not assume shell, filesystem, browser, network, or MCP model tools exist outside Python" not in prompt
     assert "prefer uv_agent_runtime helpers when they fit" not in prompt
     assert "Consult the appended runtime helper guidance for operation-specific details" not in prompt
@@ -3252,37 +3263,37 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "ordinary in-script glue" not in prompt
     assert "prefer runtime file and edit helpers" not in prompt
     assert "When running independent work concurrently inside run_python" not in prompt
-    assert "inside Python, use standard facilities such as asyncio, concurrent.futures, and threading" in prompt
+    assert "在 Python 中可使用 asyncio、concurrent.futures 和 threading" in prompt
     assert "asyncio, concurrent.futures, threading, and subprocess" not in prompt
-    assert "Collect results deterministically" in prompt
+    assert "确定性地收集结果" in prompt
     assert "Do not guess helper signatures" not in prompt
-    assert "The system does not truncate oversized output for you" in prompt
-    assert "filter, limit, or summarize it in your Python code" in prompt
+    assert "系统不会替你截断过大的输出" in prompt
+    assert "先过滤、限制或摘要" in prompt
     assert "<run_python_workflow>" in prompt
-    assert "small Python program" in prompt
-    assert "not a shell-command wrapper or a single-helper wrapper" in prompt
-    assert "current bounded objective or coherent phase" in prompt
-    assert "not one file read, one command, or one helper call" in prompt
-    assert "Python-native control flow and normal Python syntax" in prompt
-    assert "imports, variables, functions, loops, conditionals, try/except" in prompt
-    assert "coordinate related steps, fallbacks, parsing, verification, and summaries" in prompt
+    assert "小型 Python 程序" in prompt
+    assert "不是 shell-command wrapper 或单个 helper wrapper" in prompt
+    assert "当前的有界目标或一个连贯阶段" in prompt
+    assert "不是一次文件读取、一个命令或一个 helper 调用" in prompt
+    assert "Python 原生控制流和常规 Python 语法" in prompt
+    assert "imports、variables、functions、loops、conditionals、try/except" in prompt
+    assert "协调相关步骤、fallbacks、parsing、verification 和 summaries" in prompt
     assert "Call enter_dir proactively whenever the task clearly belongs" not in prompt
     assert "including paths discovered during execution" not in prompt
     assert "<capability_use>" in prompt
-    assert "Use available capabilities when they reduce steps, time, or risk" in prompt
+    assert "当可用能力能减少步骤、时间或风险时" in prompt
     assert "Actively use available capabilities" not in prompt
     assert "Actively use available external capabilities" not in prompt
-    assert "runtime helpers, declared skills, declared MCP servers, and focused third-party packages" in prompt
+    assert "runtime helpers、declared skills、declared MCP servers" in prompt
     assert "subprocesses through Python" not in prompt
     assert "Prefer existing helpers and declared external capabilities" not in prompt
     assert "use simple Python for glue code or very small work" not in prompt
     assert "only when it materially helps" not in prompt
-    assert "Use workflow for independent or long-running model tasks" in prompt
-    assert "Run independent work concurrently" in prompt
-    assert "workflow nodes or independent helper operations inside run_python" in prompt
-    assert "overlapping file writes sequential" in prompt
-    assert "Split into another run_python call only when prior output must change the plan" in prompt
-    assert "a risky write/verification boundary is reached" in prompt
+    assert "使用 workflow" in prompt and "独立或长时间运行模型任务" in prompt
+    assert "并发运行独立工作" in prompt
+    assert "workflow nodes 或 run_python 内的独立 helper operations" in prompt
+    assert "重叠文件写入保持顺序执行" in prompt
+    assert "只有当先前输出必须改变计划" in prompt
+    assert "到达有风险的写入/验证边界" in prompt
     assert "Plan each run_python call as a complete work unit" not in prompt
     assert "Use one call for a complete work unit" not in prompt
     assert "batch related commands, searches, reads, edits" not in prompt
@@ -3295,11 +3306,11 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Occam's razor" not in prompt
     assert "capability explanations layered" not in prompt
     assert "<context_updates>" in prompt
-    assert "model-visible user messages wrapped in <context_update" in prompt
-    assert "stable within the current epoch" in prompt
-    assert "sent again after compaction starts a new epoch" in prompt
-    assert "Skills and MCP server declarations may be appended" in prompt
-    assert "A removed context section means older content" in prompt
+    assert "模型可见的 user messages" in prompt and "<context_update" in prompt
+    assert "在当前 epoch 内" in prompt
+    assert "compaction 开启新 epoch 后会再次发送" in prompt
+    assert "Skills 和 MCP server declarations" in prompt and "追加" in prompt
+    assert "如果某个 context section 被移除" in prompt
     assert "item.context_update is an internal persistence event" not in prompt
     assert "After compaction, current context updates are re-sent" not in prompt
     assert "Interrupted turns may appear in context" not in prompt
@@ -3318,7 +3329,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<user_language>" in turn_context
     assert str(project_root) in turn_context
     assert "<run_python_environment>" in turn_context
-    assert "This is the uv project environment used by run_python" in turn_context
+    assert "这是 run_python 使用的 uv project 环境" in turn_context
     assert str(runner.scriptenv_dir) in turn_context
     assert str(runner.scriptenv_dir / "pyproject.toml") in turn_context
     assert "uv-agent&gt;=0.6.2" not in turn_context
@@ -3328,7 +3339,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<level>small</level>" in turn_context
     assert "<level>medium</level>" in turn_context
     assert "</runtime_helpers>" in turn_context
-    assert "available from uv_agent_runtime, not preloaded globals" in turn_context
+    assert "它们来自 uv_agent_runtime，不是预加载 globals" in turn_context
     assert "read_file" in turn_context
     assert "write_file" in turn_context
     assert "edit_lines" in turn_context
@@ -3350,39 +3361,39 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "clear_codequery_cache" not in turn_context
     assert "run_process_text" in turn_context
     assert "add_dependency" in turn_context
-    assert "Add direct packages to the shared run_python uv project" in turn_context
-    assert "Call before importing the package in the current script" in turn_context
-    assert "already imported in that process" in turn_context
+    assert "向共享 run_python uv project 添加 direct packages" in turn_context
+    assert "在当前脚本 import 该 package 前调用" in turn_context
+    assert "该进程中已经 import 的 package" in turn_context
     assert "run_python_env_dir" in turn_context
     assert "context=None" in turn_context
     assert "max_total=None" in turn_context
     assert '<helper name="threads">' in turn_context
     assert "run_digest" in turn_context
     assert "<usage_pattern>" in turn_context
-    assert "Helpers are Python functions for work-unit scripts" in turn_context
-    assert "not separate tool modes" in turn_context
-    assert "Do not start a new run_python call just because the next step uses another helper" in turn_context
-    assert "use Python for orchestration" in turn_context
-    assert "branch on helper results" in turn_context
-    assert "parse structured output with Python libraries" in turn_context
-    assert "collect one bounded summary" in turn_context
-    assert "Translate shell habits into Python" in turn_context
-    assert "use read_file instead of cat" in turn_context
-    assert "search_text/find_files instead of ad-hoc grep/find" in turn_context
-    assert "run_process_text([...]) instead of raw subprocess" in turn_context
-    assert "For skill files, read SKILL.md with read_file" in turn_context
-    assert "keep foreseeable follow-up parsing or fallback logic in the same script" in turn_context
+    assert "Helpers 是供工作单元脚本使用的 Python functions" in turn_context
+    assert "不是独立工具模式" in turn_context
+    assert "不要仅因为下一步要用另一个 helper" in turn_context
+    assert "用 Python 编排" in turn_context
+    assert "根据 helper 结果分支" in turn_context
+    assert "用 Python libraries 解析结构化输出" in turn_context
+    assert "收集一份有界摘要" in turn_context
+    assert "把 shell 习惯翻译成 Python" in turn_context
+    assert "用 read_file 代替 cat" in turn_context
+    assert "用 search_text/find_files 代替临时 grep/find" in turn_context
+    assert "用 run_process_text([...]) 代替 raw subprocess" in turn_context
+    assert "对于 skill 文件，用 read_file 读取 SKILL.md" in turn_context
+    assert "在同一脚本中处理可预见的后续 parsing 或 fallback logic" in turn_context
     assert '<example name="round-1-find">' in turn_context
-    assert "find and understand" in turn_context
-    assert "Search for multiple patterns, read several files" in turn_context
-    assert "gather all the context needed before deciding what to change" in turn_context
-    assert "Reference example" in turn_context
-    assert "edit and verify" in turn_context
-    assert "Confirm targets with a quick search, then apply changes and verify them together" in turn_context
-    assert "Do not defer a known edit to the next turn" in turn_context
+    assert "查找并理解" in turn_context
+    assert "搜索多个 pattern、读取多个文件" in turn_context
+    assert "在决定修改前收集所需上下文" in turn_context
+    assert "参考示例" in turn_context
+    assert "编辑并验证" in turn_context
+    assert "先快速搜索确认目标，再一起应用变更并验证" in turn_context
+    assert "不要把已知编辑推迟到下一轮" in turn_context
     assert "from uv_agent_runtime import search_text, find_files, read_file" in turn_context
     assert 'search_text("def handle_login"' in turn_context
-    assert "handle_login not defined" in turn_context
+    assert "未定义 handle_login" in turn_context
     assert 'search_text("handle_login("' in turn_context
     assert "call_hits" in turn_context
     assert "find_files(globs=" in turn_context
@@ -3391,39 +3402,39 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'redirect("/old-dashboard")' in turn_context
     assert 'redirect(url_for("dashboard"))' in turn_context
     assert "MAX_LOGIN_ATTEMPTS" in turn_context
-    assert "target not found" in turn_context
-    assert "anchor mismatch" in turn_context
+    assert "未找到目标" in turn_context
+    assert "anchor 不匹配" in turn_context
     assert "edit_lines(" in turn_context
-    assert "Changes applied" in turn_context
+    assert "已应用变更" in turn_context
     assert '"uv", "run", "pytest"' in turn_context
     assert "def section" not in turn_context
     assert "def bounded" not in turn_context
     assert "def command" not in turn_context
     assert "json.loads" not in turn_context
     assert "<helper_selection>" in turn_context
-    assert "Listed helpers are ordinary Python functions" in turn_context
-    assert "combined with each other, standard library code, and control flow" in turn_context
-    assert "use modules such as pathlib, os, and json for in-script glue" in turn_context
-    assert "prefer helpers when they fit" in turn_context
-    assert "metadata such as newline style, BOM, final newline" in turn_context
-    assert "Choose by task:" in turn_context
+    assert "列出的 helpers 是普通 Python functions" in turn_context
+    assert "与标准库代码和控制流组合使用" in turn_context
+    assert "pathlib、os、json" in turn_context and "脚本内 glue" in turn_context
+    assert "适合时优先使用 helpers" in turn_context
+    assert "newline style、BOM、final newline" in turn_context
+    assert "按任务选择：" in turn_context
     assert "discovery=find_files/search_text/find_symbols/query_code" in turn_context
-    assert "search_text is regex by default" in turn_context
-    assert "use literal=True for exact code strings" in turn_context
-    assert "file_types for rg type aliases" in turn_context
-    assert "edit=replace_text for unique text, edit_lines for anchored ranges/inserts" in turn_context
-    assert "write_file for whole-file/generated content" in turn_context
+    assert "search_text 默认 regex" in turn_context
+    assert "精确代码字符串用 literal=True" in turn_context
+    assert "rg type aliases 用 file_types" in turn_context
+    assert "edit=用 replace_text 替换唯一小段文本，用 edit_lines 做 anchored ranges/inserts" in turn_context
+    assert "whole-file/generated content 用 write_file" in turn_context
     assert "process=run_process_text for ordinary external commands" not in turn_context
-    assert "For ordinary external commands" in turn_context
-    assert "including shell commands shown by skills or docs" in turn_context
-    assert "prefer run_process_text over raw subprocess" in turn_context
-    assert "custom process control" in turn_context
+    assert "对于普通外部命令" in turn_context
+    assert "包括 skills 或 docs 中展示的 shell commands" in turn_context
+    assert "优先用 run_process_text 而不是 raw subprocess" in turn_context
+    assert "自定义进程控制" in turn_context
     assert "thread/run history=thread_digest/run_digest/list_thread_digests" in turn_context
-    assert "For large data, prefer selected fields, line ranges, heads/tails, or summaries" in turn_context
-    assert "Do not guess helper signatures" in turn_context
-    assert "Search and symbol helpers return absolute paths" in turn_context
-    assert "insert with start=end+1" in turn_context
-    assert "pattern is regex by default, pass literal=True" in turn_context
+    assert "对于大数据，优先选取字段、行范围、head/tail 或摘要" in turn_context
+    assert "不要猜测 helper signatures" in turn_context
+    assert "Search 和 symbol helpers 返回给 file helpers 使用的是绝对路径" in turn_context
+    assert "start=end+1 插入" in turn_context
+    assert "pattern 默认是 regex，精确字符串传 literal=True" in turn_context
     assert "Prefer the smallest helper that directly matches the task" not in turn_context
     assert "uv-agent patch envelope shown below" not in turn_context
     assert turn_context.count("<description>") >= 15
@@ -3439,14 +3450,14 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "before.text.replace" not in turn_context
     assert 'connect_named("server-name")' not in turn_context
     assert "client.initialize()" in turn_context
-    assert "inspect returned instructions" in turn_context
+    assert "检查返回的 instructions" in turn_context
     assert '<helper name="workflow"' in turn_context
-    assert "Build persistent task graphs" in turn_context
+    assert "构建持久任务图" in turn_context
     assert "replaces " + "ask" not in turn_context
     assert 'level="small"' not in prompt
     assert "pathlib" in turn_context
-    assert "Mentions are plain-text hints only" in prompt
-    assert "inspect it inside run_python using file helpers or Python standard library APIs" in prompt
+    assert "这些 mentions 只是纯文本 hints" in prompt
+    assert "在 run_python 中用 file helpers 或 Python 标准库 APIs 检查它" in prompt
     assert "read_text, write_text" not in prompt
     assert "list_files" not in prompt
     assert "run_command/check_command" not in prompt
@@ -3460,8 +3471,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<description>Demo MCP</description>" in turn_context
     assert '<instructions truncated="false">Use demo tools carefully.</instructions>' in turn_context
     assert mcp_probe.started is True
-    assert "Use these skills when one matches the task" in turn_context
-    assert "Use these MCP servers when they fit the task" in turn_context
+    assert "当某个 skill 适合任务时使用它" in turn_context
+    assert "当某个 MCP server 适合任务时使用它" in turn_context
 
 
 def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_path: Path) -> None:
@@ -4529,8 +4540,8 @@ def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) ->
     text = update["text"]
     assert text.index("<runtime_helpers>") < text.index("<plugin_runtime_helpers>")
     assert (
-        "Use the helper name attribute as the Python import/callable name; "
-        "the plugin attribute identifies the provider plugin only."
+        "使用 helper 的 name 属性作为 Python import/callable 名称；"
+        "plugin 属性只标识提供方 plugin。"
     ) in text
     assert '<helper name="demo_helper" plugin="demo-plugin">Demo helper.</helper>' in text
 
@@ -4628,8 +4639,8 @@ def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -
     assert 'example name="create_investigation_graph"' in first
     assert 'example name="inspect_first_checkpoint_and_extend_graph"' in first
     assert 'example name="inspect_review_checkpoint_and_finalize"' in first
-    assert "## Objective and task" in first
-    assert "## Requirements and notes" in first
+    assert "## 目标和任务" in first
+    assert "## 要求和说明" in first
     assert "wf.continue_checkpoint" in first
     assert "Workflow " + "replaces " + "ask" not in first
     assert "verify.final" in first
@@ -4701,7 +4712,7 @@ def test_compaction_summary_appends_active_workflows(tmp_path: Path, monkeypatch
     summary = engine._compaction_summary_with_active_workflows(thread_id, "Conversation summary")
 
     assert summary.startswith("Conversation summary")
-    assert "## Active workflows" in summary
+    assert "## 活跃工作流" in summary
     assert wf.workflow_id in summary
     assert "workflow.resume" in summary
 
@@ -4862,7 +4873,7 @@ def test_worktree_notice_emits_once_per_epoch_and_after_delete(tmp_path: Path) -
     first_text = "\n".join(message_item_text(item) for item in first)
     assert '<worktree status="active">' in first_text
     assert str(worktree_path) in first_text
-    assert "not in the origin workspace" in first_text
+    assert "origin workspace" in first_text and "不是" in first_text
     assert '<worktree status="active">' not in str(repeated)
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})

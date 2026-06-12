@@ -61,11 +61,11 @@ def test_render_worktree_notice_describes_active_and_deleted_context(tmp_path: P
     )
 
     assert '<worktree status="active">' in active
-    assert "Worktree mode is active" in active
+    assert "此线程的 Worktree mode 处于活动状态" in active
     assert str(worktree) in active
-    assert "not in the origin workspace" in active
+    assert "origin workspace" in active and "不是" in active
     assert '<worktree status="deleted">' in deleted
-    assert "do not rely on the deleted path" in deleted
+    assert "不要依赖已删除的路径" in deleted
     assert "def456" in deleted
     assert " M file.py" in deleted
 
