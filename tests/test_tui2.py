@@ -717,23 +717,7 @@ def test_grown_paint_area_remembers_cursor_for_next_erase() -> None:
 
 def test_flush_cell_separates_turn_boundaries_with_blank_line() -> None:
     output = io.StringIO()
-    renderer = Renderer(output=output)
-    renderer.flush_cell(TranscriptCell("user", text="hi"))
-    renderer.flush_cell(TranscriptCell("user", text="again"))
-    rendered = output.getvalue()
-
-    # Every flushed cell is followed by a blank row so spacing is stable.
-    trailing_escapes = "[?7h[?2026l"
-    assert rendered.endswith(trailing_escapes)
-    body = rendered[: -len(trailing_escapes)]
-    # Two user cells are separated by one blank visual row.
-    lines = [strip_ansi(line).replace("\r", "") for line in body.split("\r\n")]
-    hi_index = next(i for i, line in enumerate(lines) if line.endswith("hi"))
-    again_index = next(i for i, line in enumerate(lines) if line.endswith("again"))
-    assert again_index - hi_index == 2  # hi, blank, again
-
-
-def test_flush_cell_packs_cells_within_turn_and_blanks_between_turns() -> None:
+def test_flush_cell_separates_user_from_middle_process_and_turns() -> None:
     output = io.StringIO()
     renderer = Renderer(output=output)
     renderer.flush_cell(TranscriptCell("user", text="hi"))
@@ -743,15 +727,15 @@ def test_flush_cell_packs_cells_within_turn_and_blanks_between_turns() -> None:
     renderer.flush_cell(TranscriptCell("user", text="next"))
     rendered = output.getvalue()
 
-    body = rendered[: -len("[?7h[?2026l")]
+    body = rendered[: -len("\x1b[?7h\x1b[?2026l")]
     lines = [strip_ansi(line).replace("\r", "").rstrip() for line in body.split("\r\n")]
     non_empty = [line for line in lines if line.strip()]
 
-    # user, reasoning, tool, assistant are compact within one turn.
     assert non_empty == ["› hi", "· thinking", "✓ run_python", "✦ done", "› next"]
     indices = [lines.index(row) for row in non_empty]
-    # Within the turn cells are adjacent (no blank rows).
-    assert indices[1] - indices[0] == 1
+    # User message is separated from the following reasoning/tool chain.
+    assert indices[1] - indices[0] == 2
+    # Reasoning, tool, and assistant are compact within the turn.
     assert indices[2] - indices[1] == 1
     assert indices[3] - indices[2] == 1
     # A blank row separates the assistant from the next user turn.

@@ -50,21 +50,26 @@ class Renderer:
     # ------------------------------------------------------------------
 
     # Kinds that delimit a turn boundary in the scrollback transcript.
-    # Middle-process cells (reasoning, tools, events, warnings, ...) are kept
-    # compact with the surrounding boundary cells of the same turn.
     _BOUNDARY_KINDS: frozenset[str] = frozenset({"user", "assistant"})
+    # Middle-process cells follow the user message and lead into the assistant
+    # response within a single turn.
+    _MIDDLE_PROCESS_KINDS: frozenset[str] = frozenset({
+        "reasoning", "tool", "event", "image",
+        "error", "compaction", "warning", "stream_retry",
+    })
 
     @staticmethod
     def _needs_gap_between(last_kind: str | None, current_kind: str) -> bool:
         if last_kind is None:
             return False
-        if last_kind not in Renderer._BOUNDARY_KINDS:
-            return False
-        if current_kind not in Renderer._BOUNDARY_KINDS:
-            return False
-        # Within a single turn the user message and the assistant response are
-        # adjacent; a blank row marks the boundary between two turns.
-        return not (last_kind == "user" and current_kind == "assistant")
+        # Separate the user message from the following reasoning/tool chain.
+        if last_kind == "user" and current_kind in Renderer._MIDDLE_PROCESS_KINDS:
+            return True
+        # Boundary-to-boundary transitions separate turns, except user->assistant
+        # which is the start/end of the same turn.
+        if last_kind in Renderer._BOUNDARY_KINDS and current_kind in Renderer._BOUNDARY_KINDS:
+            return not (last_kind == "user" and current_kind == "assistant")
+        return False
 
     def _write(self, text: str) -> None:
         self.output.write(text)
