@@ -500,7 +500,7 @@ from uv_agent_runtime import workflow
 
 wf = workflow.start(
     objective="为 uv-agent 设计并准备插件系统",
-    default_model_level="deepseek-pro",
+    default_model_level="xxx",
 )
 architecture = wf.agent(
     '''为 uv-agent 设计插件系统架构。
