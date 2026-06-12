@@ -197,6 +197,57 @@ def _tool_artifact_history_text(item: dict[str, Any]) -> str:
     return ""
 
 
+def strip_compaction_judge_history(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return compaction input without internal judge exchanges.
+
+    Ordinary replay intentionally keeps judge traffic so providers with long
+    prompt-cache lifetimes can reuse the same prefix. Compaction is different:
+    the model response becomes durable summary/retained history, so internal
+    judge prompts and JSON answers must not be summarized into the next epoch.
+    """
+
+    filtered: list[dict[str, Any]] = []
+    skipping_judge_exchange = False
+    for item in input_items:
+        if _is_compaction_judge_request_item(item):
+            skipping_judge_exchange = True
+            continue
+        if skipping_judge_exchange:
+            # Persisted judge items are inserted immediately before the real user
+            # item. Drop all model/tool protocol artifacts until that user item,
+            # then resume normal history so the actual task remains available.
+            if _is_non_judge_user_message(item):
+                skipping_judge_exchange = False
+            else:
+                continue
+        if _is_compaction_judge_response_item(item):
+            continue
+        filtered.append(copy.deepcopy(item))
+    return filtered
+
+
+def _is_compaction_judge_request_item(item: dict[str, Any]) -> bool:
+    if item.get("type") != "message" or item.get("role") != "user":
+        return False
+    return message_item_text(item).lstrip().startswith(COMPACTION_JUDGE_REQUEST.strip())
+
+
+def _is_non_judge_user_message(item: dict[str, Any]) -> bool:
+    return (
+        item.get("type") == "message"
+        and item.get("role") == "user"
+        and not _is_compaction_judge_request_item(item)
+    )
+
+
+def _is_compaction_judge_response_item(item: dict[str, Any]) -> bool:
+    return (
+        item.get("type") == "message"
+        and item.get("role") == "assistant"
+        and parse_judge_response(message_item_text(item)) is not None
+    )
+
+
 # ---------------------------------------------------------------------------
 # Compaction trigger, replacement, and retention (existing)
 # ---------------------------------------------------------------------------
@@ -294,11 +345,13 @@ def normalize_compaction_replacement_input(items: list[dict[str, Any]]) -> list[
     Older thread files may contain replacement inputs written before retained
     history had its own XML envelope. Normalizing on read lets resumed threads
     get the clearer prompt contract without changing the persisted event format.
+    It also drops legacy judge artifacts that were accidentally retained before
+    compaction started sanitizing its source history.
     """
 
     normalized: list[dict[str, Any]] = []
     saw_summary = False
-    for item in items:
+    for item in strip_compaction_judge_history(items):
         text = message_item_text(item)
         if not saw_summary and CONVERSATION_SUMMARY_OPEN in text:
             normalized.append(compaction_summary_item(_conversation_summary_text(text) or text))

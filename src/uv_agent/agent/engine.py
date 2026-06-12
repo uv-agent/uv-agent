@@ -32,6 +32,7 @@ from uv_agent.agent.compaction import (
     parse_judge_response,
     retain_item_after_compaction,
     retained_user_messages_after_compaction,
+    strip_compaction_judge_history,
 )
 from uv_agent.billing import (
     billing_charge_for_usage,
@@ -1576,7 +1577,7 @@ class AgentEngine:
         # is re-emitted after compaction and should not make Path A summarize an
         # otherwise empty thread.
         history_items = [
-            item for item in input_items
+            item for item in strip_compaction_judge_history(input_items)
             if not self._is_pre_user_context_item(item)
         ]
         D = estimate_tokens(history_items)
@@ -1818,7 +1819,11 @@ class AgentEngine:
             event_type = str(pre_compaction_event.get("type") or "")
             payload = {key: value for key, value in pre_compaction_event.items() if key != "type"}
             self.thread_store.append(thread_id, event_type, **payload)
-        compact_input = copy.deepcopy(input_items)
+        # Preserve ordinary replay (and provider cache prefixes), but keep
+        # internal judge prompts/JSON out of compaction summaries and retained
+        # post-compaction history.
+        compaction_source_items = strip_compaction_judge_history(input_items)
+        compact_input = copy.deepcopy(compaction_source_items)
         compact_input.append(self._compaction_trigger_item())
         truncated_last_tool_output = False
         if allow_last_tool_output_truncation:
@@ -1859,7 +1864,7 @@ class AgentEngine:
             thread_id,
             compaction_response_summary_text(response),
         )
-        replacement_input = self._compaction_replacement_input(input_items, response, K=retain_K)
+        replacement_input = self._compaction_replacement_input(compaction_source_items, response, K=retain_K)
         context_state = self._latest_context_state(thread_id)
         self.thread_store.append(
             thread_id,

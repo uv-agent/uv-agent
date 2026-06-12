@@ -19,7 +19,13 @@ from uv_agent.agent import (
     tool_attachment_context_items,
     usage_token_count,
 )
-from uv_agent.agent.compaction import compaction_response_summary_text, retain_item_after_compaction, retain_recent_context
+from uv_agent.agent.compaction import (
+    compaction_judge_request_item,
+    compaction_response_summary_text,
+    retain_item_after_compaction,
+    retain_recent_context,
+    strip_compaction_judge_history,
+)
 from uv_agent.prompts import (
     BRANCH_NAME_GENERATION_PROMPT,
     BRANCH_SLUG_INSTRUCTION,
@@ -637,6 +643,35 @@ def test_retain_recent_context_converts_tool_protocol_items_to_messages() -> Non
     assert "function_call" not in {item.get("type") for item in retained}
 
 
+def test_strip_compaction_judge_history_removes_internal_exchange_only() -> None:
+    judge_request = compaction_judge_request_item("fresh task")
+    judge_response = message_item(
+        "assistant",
+        '{"remaining_calls_bucket":"60_plus","history_dependency":"low"}',
+    )
+    real_user = message_item("user", "fresh task")
+    real_assistant = message_item("assistant", "real answer")
+
+    filtered = strip_compaction_judge_history(
+        [
+            message_item("user", "old request"),
+            judge_request,
+            judge_response,
+            real_user,
+            real_assistant,
+        ]
+    )
+    filtered_text = "\n".join(message_item_text(item) for item in filtered if item.get("type") == "message")
+
+    assert "<compaction_judge_request>" not in filtered_text
+    assert "remaining_calls_bucket" not in filtered_text
+    assert [message_item_text(item) for item in filtered if item.get("type") == "message"] == [
+        "old request",
+        "fresh task",
+        "real answer",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_cache_aware_judge_replays_completed_judge_before_user_without_counting_as_user(
     tmp_path: Path,
@@ -893,6 +928,114 @@ async def test_cache_aware_judge_can_compact_below_threshold_and_keeps_current_u
     assert main_texts[-1] == "new work"
     assert engine.last_judge_summary()["compacted"] is True
 
+
+
+@pytest.mark.asyncio
+async def test_compaction_sanitizes_prior_judge_history_without_changing_replay(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        api="chat_completions",
+        compression=CompressionConfig(enabled=True, trigger_ratio=0.0, min_tokens=1),
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_main",
+                "output_text": "new answer",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "new answer"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_compact",
+                "output_text": "clean summary",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "clean summary"}],
+                    }
+                ],
+            },
+        ]
+    )
+    thread_store = ThreadStore(tmp_path / "state")
+    thread_id = thread_store.create_thread("Existing")
+    thread_store.append(thread_id, "turn.started", turn_id="old")
+    thread_store.append(thread_id, "item.user", turn_id="old", item=message_item("user", "old request"))
+    thread_store.append(
+        thread_id,
+        "item.judge_request",
+        turn_id="old",
+        item=compaction_judge_request_item("historical task"),
+    )
+    thread_store.append(
+        thread_id,
+        "item.judge_response",
+        turn_id="old",
+        model_api="responses",
+        response_id="resp_judge_old",
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": '{"remaining_calls_bucket":"60_plus","history_dependency":"high"}',
+                    }
+                ],
+            }
+        ],
+        usage={},
+    )
+    thread_store.append(thread_id, "item.user", turn_id="old", item=message_item("user", "historical task"))
+    thread_store.append(
+        thread_id,
+        "item.model_response",
+        turn_id="old",
+        model_api="chat_completions",
+        response_id="resp_old",
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "historical answer"}],
+            }
+        ],
+        usage={},
+    )
+    thread_store.append(thread_id, "turn.completed", turn_id="old", final_text="historical answer")
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=thread_store,
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="new work", thread_id=thread_id)]
+    assert any(event["type"] == "compaction.completed" for event in events)
+
+    replay_text = "\n".join(str(item) for item in client.requests[0]["input"])
+    compact_text = "\n".join(str(item) for item in client.requests[1]["input"])
+    compaction = next(event for event in engine.thread_store.read(thread_id) if event.get("type") == "item.compaction")
+    replacement_text = "\n".join(str(item) for item in compaction.get("replacement_input") or [])
+
+    assert "<compaction_judge_request>" in replay_text
+    assert "remaining_calls_bucket" in replay_text
+    assert "<compaction_judge_request>" not in compact_text
+    assert "remaining_calls_bucket" not in compact_text
+    assert "<compaction_judge_request>" not in replacement_text
+    assert "remaining_calls_bucket" not in replacement_text
 
 @pytest.mark.asyncio
 async def test_agent_compaction_falls_back_to_current_level(tmp_path: Path) -> None:
