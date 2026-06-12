@@ -3456,7 +3456,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "replaces " + "ask" not in turn_context
     assert 'level="small"' not in prompt
     assert "pathlib" in turn_context
-    assert "这些 mentions 只是纯文本 hints" in prompt
+    assert "这些 mentions 只是纯文本提示" in prompt
     assert "在 run_python 中用 file helpers 或 Python 标准库 APIs 检查它" in prompt
     assert "read_text, write_text" not in prompt
     assert "list_files" not in prompt
