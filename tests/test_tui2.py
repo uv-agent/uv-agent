@@ -126,13 +126,16 @@ def test_tool_cell_has_no_rule_and_tree_indented_chains() -> None:
     assert not plain_lines[0].startswith("── ")
     assert "✓" in plain_lines[0] and "run_python" in plain_lines[0]
     assert "run_process_text([])" not in plain
-    # Call chains are prefixed with a tree corner.
-    assert any("└─" in line for line in plain_lines)
+    # Success omits exit code; run id is shortened to the last 6 characters.
+    assert "exit 0" not in plain
+    assert "abcdef" in plain
+    assert "run_abcdef" not in plain
     assert "run_process_text" in plain
     assert "from uv_agent_runtime" not in plain
     # stdout/stderr are no longer inlined; use /show <run_id> for full output.
     assert "one" not in plain and "two" not in plain
-    assert len(plain_lines) == 2
+    # At width 60 the chain fits on the title line.
+    assert len(plain_lines) == 1
 
 
 def test_tool_cell_compresses_script_and_output_lines() -> None:
@@ -148,7 +151,9 @@ def test_tool_cell_compresses_script_and_output_lines() -> None:
     # Only the compact imported-name chain is shown; stdout is omitted.
     assert any("path_info x7" in line for line in plain_lines)
     assert not any(line.strip().startswith("out") for line in plain_lines)
-    assert len(plain_lines) == 2
+    assert "exit 0" not in "\n".join(plain_lines)
+    # At width 80 the chain fits on the title line.
+    assert len(plain_lines) == 1
 
 
 def test_tool_cell_uses_payload_helper_calls_without_source() -> None:
@@ -162,7 +167,8 @@ def test_tool_cell_uses_payload_helper_calls_without_source() -> None:
 
     assert "replace_text" in plain
     assert "print(1)" not in plain
-    assert len([line for line in plain.splitlines() if line.strip()]) == 2
+    assert "exit 0" not in plain
+    assert len([line for line in plain.splitlines() if line.strip()]) == 1
 
 
 def test_workflow_structured_event_markup_is_compact() -> None:
@@ -280,17 +286,19 @@ def test_running_tool_cell_has_no_rule_and_constant_height() -> None:
     running = render_tool_cell(TranscriptCell("tool", status="running", call=call), 80)
     completed = render_tool_cell(TranscriptCell("tool", call=call, payload={"returncode": 0}), 80)
 
-    # Both running and completed tool cells are two lines without horizontal rules.
-    assert len(running) == 2
-    assert len(completed) == 2
+    # Running and completed tool cells stay one line; chain is omitted while
+    # running and inlined on completion when it fits.
+    assert len(running) == 1
+    assert len(completed) == 1
     assert not strip_ansi(running[0]).startswith("── ")
     assert not strip_ansi(completed[0]).startswith("── ")
     assert "⠿" in strip_ansi(running[0])
     assert "running" in strip_ansi(running[0])
+    assert "exit 0" not in strip_ansi(completed[0])
 
 
 def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
-    """Live tool cells must stay at a constant two-line height.
+    """Live tool cells must stay at a constant one-line height.
 
     A growing live frame can push its top row out of the viewport on
     terminals that don't honour DECAWM, leaving leaked
@@ -324,7 +332,7 @@ def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
         80,
     )
 
-    assert len(empty) == len(with_stdout) == len(with_both) == 2
+    assert len(empty) == len(with_stdout) == len(with_both) == 1
     for lines in (empty, with_stdout, with_both):
         plain = "\n".join(strip_ansi(line) for line in lines)
         assert "line1" not in plain and "warn1" not in plain
@@ -343,6 +351,33 @@ def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
     assert "done-line" not in completed_plain
     assert "done-warn" not in completed_plain
     assert "path_info" in completed_plain
+
+def test_tool_cell_wraps_chain_when_narrow() -> None:
+    call = {
+        "name": "run_python",
+        "call_id": "call_123",
+        "arguments": '{"code":"from uv_agent_runtime import path_info\\npath_info(\\".\\")\\npath_info(\\".\\")"}',
+    }
+    payload = {"returncode": 0}
+    lines = render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 20)
+    plain = [strip_ansi(line) for line in lines]
+
+    assert len(lines) == 2
+    assert "✓" in plain[0]
+    assert "└─" in plain[1]
+    assert "path_info" in plain[1]
+
+
+def test_live_region_keeps_blank_separator_between_cells_and_composer() -> None:
+    state = Tui2State(composer="hi")
+    state.live.append(TranscriptCell("reasoning", text="thinking"))
+    lines, _, _ = render_live_with_cursor(state, 60, 0)
+    plain = [strip_ansi(line) for line in lines]
+
+    assert plain[0].startswith("·")
+    assert plain[1].strip() == ""
+    assert plain[-1].startswith("╰")
+
 
 
 # ---------------------------------------------------------------------------
@@ -698,7 +733,7 @@ def test_flush_cell_packs_middle_process_cells_together() -> None:
     non_empty = [line for line in lines if line.strip()]
 
     # user, reasoning, tool, assistant -> four content lines packed together.
-    assert non_empty == ["› hi", "· thinking", "✓ run_python · exit 0", "✦ done"]
+    assert non_empty == ["› hi", "· thinking", "✓ run_python", "✦ done"]
 
 
 def test_flush_cell_only_uses_crlf_separators() -> None:

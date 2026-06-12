@@ -199,10 +199,12 @@ def _tree_indented(text: str, width: int, style: str) -> str:
 
 
 def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAULT_THEME) -> list[str]:
-    """Compact two-line tool cell: status + imported call chains.
+    """Compact tool cell: status, short run id, and optional call chain.
 
     Full source, stdout/stderr, and events are intentionally omitted here;
-    use the ``/show <run_id>`` pager to inspect them.
+    use the ``/show <run_id>`` pager to inspect them.  The call chain is kept
+    on the title line when it fits; otherwise it wraps to a second indented
+    line.
     """
 
     payload = cell.payload or {}
@@ -220,24 +222,38 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
         glyph_style = theme.error
     else:
         glyph = "✓"
-        status = f"exit {returncode}" if returncode is not None else "done"
+        status = ""
         glyph_style = theme.success
     run_id = str(payload.get("run_id") or (cell.call or {}).get("call_id") or "")
-    suffix = f" · {run_id[-12:]}" if run_id else ""
-    title = (
-        sgr(glyph_style, glyph)
-        + " "
-        + sgr(theme.tool_title, tool_title(cell.call))
-        + " "
-        + sgr(theme.muted, "· " + status + suffix)
-    )
-    # No horizontal rule: the tool cell is just the title line plus an
-    # indented call-chain line prefixed with a tree corner.
-    lines = [truncate_visible(title, width)]
+    run_id_short = run_id[-6:] if run_id else ""
+
+    title = sgr(glyph_style, glyph) + " " + sgr(theme.tool_title, tool_title(cell.call))
+    if status:
+        title += sgr(theme.muted, " · " + status)
+    if run_id_short and not running:
+        title += sgr(theme.muted, " · " + run_id_short)
+
     chains = _tool_cell_import_chains(cell)
-    if chains:
-        compact = " · ".join(format_import_anchor_chains(chains))
-        lines.append(_tree_indented(compact, width, theme.muted))
+    chain_text = " · ".join(format_import_anchor_chains(chains)) if chains else ""
+
+    title_plain_len = visible_len(strip_ansi(title))
+    lines: list[str] = []
+    if title_plain_len > width:
+        lines.append(truncate_visible(title, width))
+        if chain_text:
+            lines.append(_tree_indented(chain_text, width, theme.muted))
+        return lines
+
+    if chain_text:
+        inline = " · " + chain_text
+        if title_plain_len + visible_len(inline) <= width:
+            lines.append(title + sgr(theme.muted, inline))
+            return lines
+        lines.append(title)
+        lines.append(_tree_indented(chain_text, width, theme.muted))
+        return lines
+
+    lines.append(title)
     return lines
 
 
@@ -1169,6 +1185,8 @@ def render_live_with_cursor(
     if max_height is not None and cell_lines:
         gaps = sum(1 for group in (status_lines, palette_lines) if group)
         reserved = len(composer_lines) + len(status_lines) + len(palette_lines) + gaps
+        if cell_lines:
+            reserved += 1
         available = max(1, max_height - reserved)
         if len(cell_lines) > available:
             dropped = len(cell_lines) - available + 1
@@ -1176,9 +1194,9 @@ def render_live_with_cursor(
             cell_lines = [marker] + cell_lines[dropped:]
 
     lines: list[str] = list(cell_lines)
+    if lines:
+        lines.append("")
     if status_lines:
-        if lines:
-            lines.append("")
         lines.extend(status_lines)
     if palette_lines:
         if lines:
