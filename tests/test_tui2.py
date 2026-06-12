@@ -3288,6 +3288,75 @@ def test_history_cells_merge_tool_call_and_result(monkeypatch) -> None:
     assert tool_cells[0].payload.get("run_id") == "run_abc"
 
 
+def test_history_merge_preserves_reasoning_before_tool_calls(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    thread_id = app.engine.thread_store.create_thread("reasoning merge test")
+
+    def fake_read_history_segment(thread_id, *, event_types=None):
+        from uv_agent.session.store import ThreadHistorySegment
+
+        return ThreadHistorySegment(
+            events=[
+                {
+                    "type": "item.model_response",
+                    "thread_id": thread_id,
+                    "turn_id": "turn_1",
+                    "reasoning_text": "first thought",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "run_python",
+                            "arguments": json.dumps({"code": "print(1)"}),
+                        }
+                    ],
+                },
+                {
+                    "type": "item.runner_result",
+                    "thread_id": thread_id,
+                    "turn_id": "turn_1",
+                    "call_id": "call_1",
+                    "result": {"run_id": "run_1", "returncode": 0},
+                },
+                {
+                    "type": "item.model_response",
+                    "thread_id": thread_id,
+                    "turn_id": "turn_1",
+                    "reasoning_text": "second thought",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_2",
+                            "name": "run_python",
+                            "arguments": json.dumps({"code": "print(2)"}),
+                        }
+                    ],
+                },
+                {
+                    "type": "item.runner_result",
+                    "thread_id": thread_id,
+                    "turn_id": "turn_1",
+                    "call_id": "call_2",
+                    "result": {"run_id": "run_2", "returncode": 0},
+                },
+            ],
+            start_event_id=0,
+            end_event_id=4,
+            has_more=False,
+        )
+
+    monkeypatch.setattr(app.engine.thread_store, "read_history_segment", fake_read_history_segment)
+
+    cells = app._history_cells_for_thread(thread_id)
+    reasoning_cells = [cell for cell in cells if cell.kind == "reasoning"]
+    tool_cells = [cell for cell in cells if cell.kind == "tool"]
+
+    assert len(reasoning_cells) == 2
+    assert reasoning_cells[0].text == "first thought"
+    assert reasoning_cells[1].text == "second thought"
+    assert len(tool_cells) == 2
+
+
 def test_show_command_opens_pager_for_matching_run(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     thread_id = app.engine.thread_store.create_thread("show test")

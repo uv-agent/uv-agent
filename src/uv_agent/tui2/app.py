@@ -2950,6 +2950,16 @@ class AnsiUvAgentApp:
                     and str(item.get("call_id") or "").strip() in result_indices
                 }
                 if merged_call_ids:
+                    # If the model response also contained reasoning text, keep
+                    # it as a separate event so resumed threads still show the
+                    # reasoning that preceded each tool call.
+                    reasoning_text = str(event.get("reasoning_text") or "").strip()
+                    if reasoning_text:
+                        merged.append({
+                            **event,
+                            "output": [],
+                            "reasoning_text": reasoning_text,
+                        })
                     consumed_model_response.add(index)
                     continue
                 merged.append(event)
