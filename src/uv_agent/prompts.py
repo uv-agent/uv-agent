@@ -707,7 +707,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 <rule>同一个目标下的多个搜索、读取、计算、编辑或验证，应尽量在同一个脚本内完成；只有需要用户确认、操作有破坏风险、或结果会改变整体方向时，才拆成新的调用。</rule>
 <rule>在脚本内使用 Python 原生控制流和常规 Python 语法：imports、variables、functions、loops、conditionals、try/except、data structures、dependencies 和 uv_agent_runtime helpers，用它们编排相关步骤、回退处理、解析、验证和摘要。</rule>
 <rule>遇到多文件、多步骤、可预见的分支或失败处理时，先在脚本内用循环、条件、try/except 和数据结构解决，不要通过多次调用逐步推进。</rule>
-<rule>如果当前只是探索信息，可以只收集关键证据并返回简短摘要；方案明确时，应把执行和验证一并做完，不要故意拆成多轮。</rule>
+<rule>探索阶段也应尽量一次性收集足够信息：并行搜索多个 pattern、读取多个相关文件、解析结构化输出，然后返回摘要；方案明确时，应把执行和验证一并做完，不要故意拆成多轮。</rule>
 </run_python_workflow>
 
 <capability_use>
