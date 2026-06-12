@@ -49,26 +49,11 @@ class Renderer:
     # Low-level helpers
     # ------------------------------------------------------------------
 
-    # Kinds that belong to the "middle" of a turn: reasoning, tool calls,
-    # events, warnings, etc.  They are rendered back-to-back without blank
-    # rows; blank rows are only inserted around user input and the final
-    # assistant response.
-    _MIDDLE_PROCESS_KINDS: frozenset[str] = frozenset({
-        "reasoning", "tool", "event", "image",
-        "error", "compaction", "warning", "stream_retry",
-    })
-
     @staticmethod
     def _needs_gap_between(last_kind: str | None, current_kind: str) -> bool:
-        if last_kind is None:
-            return False
-        last_is_middle = last_kind in Renderer._MIDDLE_PROCESS_KINDS
-        current_is_middle = current_kind in Renderer._MIDDLE_PROCESS_KINDS
-        # Middle-process cells are packed together; everything else is
-        # separated by a blank row to mark turn boundaries.
-        if last_is_middle and current_is_middle:
-            return False
-        return True
+        # A blank row is inserted after every flushed cell so the transcript
+        # spacing is stable regardless of cell kind.
+        return last_kind is not None
 
     def _write(self, text: str) -> None:
         self.output.write(text)
@@ -155,10 +140,10 @@ class Renderer:
     def flushed_cell_rows(self, cells: Iterable[TranscriptCell]) -> int:
         """Return how many terminal rows ``flush_cells`` will advance.
 
-        Middle-process cells are packed without blank rows; blank rows are only
-        counted around turn boundaries.  The app uses this after loading thread
-        history so the first live composer repaint can be padded down to the
-        bottom of a mostly-empty viewport.
+        A blank row is counted after every flushed cell so spacing stays stable
+        across cell kinds.  The app uses this after loading thread history so the
+        first live composer repaint can be padded down to the bottom of a
+        mostly-empty viewport.
         """
 
         self.width = self._paint_width(terminal_size()[0])

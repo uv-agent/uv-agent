@@ -706,9 +706,8 @@ def test_flush_cell_separates_turn_boundaries_with_blank_line() -> None:
     renderer.flush_cell(TranscriptCell("user", text="again"))
     rendered = output.getvalue()
 
-    # A single flushed cell no longer trails a blank row; blank rows are only
-    # inserted between turn boundaries (e.g. user -> user, user -> tool).
-    trailing_escapes = "\x1b[?7h\x1b[?2026l"
+    # Every flushed cell is followed by a blank row so spacing is stable.
+    trailing_escapes = "[?7h[?2026l"
     assert rendered.endswith(trailing_escapes)
     body = rendered[: -len(trailing_escapes)]
     # Two user cells are separated by one blank visual row.
@@ -718,7 +717,7 @@ def test_flush_cell_separates_turn_boundaries_with_blank_line() -> None:
     assert again_index - hi_index == 2  # hi, blank, again
 
 
-def test_flush_cell_packs_middle_process_cells_together() -> None:
+def test_flush_cell_separates_all_cells_with_blank_rows() -> None:
     output = io.StringIO()
     renderer = Renderer(output=output)
     renderer.flush_cell(TranscriptCell("user", text="hi"))
@@ -727,13 +726,16 @@ def test_flush_cell_packs_middle_process_cells_together() -> None:
     renderer.flush_cell(TranscriptCell("assistant", text="done"))
     rendered = output.getvalue()
 
-    # Split into visual lines and verify grouping.
-    body = rendered[: -len("\x1b[?7h\x1b[?2026l")]
+    # Split into visual lines and verify every cell is separated by a blank row.
+    body = rendered[: -len("[?7h[?2026l")]
     lines = [strip_ansi(line).replace("\r", "").rstrip() for line in body.split("\r\n")]
     non_empty = [line for line in lines if line.strip()]
 
-    # user, reasoning, tool, assistant -> four content lines packed together.
+    # user, reasoning, tool, assistant -> four content lines, each separated by a blank.
     assert non_empty == ["› hi", "· thinking", "✓ run_python", "✦ done"]
+    # There should be blank rows between every pair of content rows.
+    indices = [lines.index(row) for row in non_empty]
+    assert all(indices[i + 1] - indices[i] == 2 for i in range(len(indices) - 1))
 
 
 def test_flush_cell_only_uses_crlf_separators() -> None:
