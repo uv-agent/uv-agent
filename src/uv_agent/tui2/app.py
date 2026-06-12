@@ -391,6 +391,7 @@ class AnsiUvAgentApp:
         self._thread_token_ratios_max_size: int = 16
         self._assistant_cell: TranscriptCell | None = None
         self._reasoning_cell: TranscriptCell | None = None
+        self._user_cell: TranscriptCell | None = None
         self._reasoning_flushed_for_current_response = False
         self._tool_cells: dict[str, TranscriptCell] = {}
         self._history: list[str] = load_composer_history()
@@ -745,6 +746,7 @@ class AnsiUvAgentApp:
             self._capture_attached_run_state(run_state)
         self._assistant_cell = None
         self._reasoning_cell = None
+        self._user_cell: TranscriptCell | None = None
         self._reasoning_flushed_for_current_response = False
         self._tool_cells = {}
         self.state.live.clear()
@@ -2444,6 +2446,7 @@ class AnsiUvAgentApp:
         self._tool_cells.clear()
         self._assistant_cell = None
         self._reasoning_cell = None
+        self._user_cell: TranscriptCell | None = None
         self._reasoning_flushed_for_current_response = False
         self._refresh_window_title()
         if hasattr(self.renderer, "clear_screen"):
@@ -3083,7 +3086,11 @@ class AnsiUvAgentApp:
         level = self._current_level_for_thread(thread_id)
         self.state.level = level
         self._persist_thread_level(thread_id, level)
-        self._flush(TranscriptCell("user", text=text))
+        # Keep the user message in the live region so spacing between the user
+        # message, reasoning/tools, and the assistant response stays visible and
+        # matches the final scrollback layout.
+        self._user_cell = TranscriptCell("user", text=text)
+        self.state.live.append(self._user_cell)
         run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
         run_state.reset_for_turn()
         run_state.token_ratio = self._token_ratio_for_thread(thread_id)
@@ -3706,6 +3713,12 @@ class AnsiUvAgentApp:
                 cell.finished_at = monotonic()
                 self._flush(cell)
             self._tool_cells.pop(key, None)
+        # If the user message was never followed by a response cell, flush it
+        # now so it does not stay stuck in the live region.
+        if self._user_cell is not None:
+            user_cell = self._user_cell
+            self._user_cell = None
+            self._flush(user_cell)
 
     def _remember_flushed_cell(self, cell: TranscriptCell) -> None:
         self.state.flushed.append(_retained_flushed_cell(cell))
@@ -3717,6 +3730,12 @@ class AnsiUvAgentApp:
             del self.state.flushed[:overflow]
 
     def _flush(self, cell: TranscriptCell) -> None:
+        # Flush the current turn's user message before any other cell so the
+        # scrollback order and spacing match the live region.
+        if self._user_cell is not None and self._user_cell is not cell:
+            user_cell = self._user_cell
+            self._user_cell = None
+            self._flush(user_cell)
         if cell in self.state.live:
             self.state.live.remove(cell)
         cell.status = "done" if cell.status in {"running", "streaming"} else cell.status

@@ -2541,6 +2541,25 @@ def test_start_turn_persists_selected_level_for_new_thread(monkeypatch) -> None:
     assert app.engine.thread_store.threads[0]["active_level"] == "alpha"
     assert app.engine.thread_store.threads[0]["active_model"] == "alpha-model"
 
+def test_start_turn_keeps_user_cell_in_live_until_flushed(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+
+    async def run_turn() -> None:
+        await app._start_turn("hello")
+        assert app._user_cell is not None
+        assert app._user_cell.kind == "user"
+        assert app._user_cell in app.state.live
+        assert not app.state.flushed
+        # Simulate the model starting to respond; the user cell should be flushed
+        # before the reasoning cell so scrollback order matches the live region.
+        app.state.live.append(TranscriptCell("reasoning", text="thinking"))
+        app._flush(app.state.live[-1])
+        assert app._user_cell is None
+        assert any(cell.kind == "user" for cell in app.state.flushed)
+
+    asyncio.run(run_turn())
+
+
 
 def test_resuming_thread_restores_persisted_level(monkeypatch) -> None:
     app = _make_app(monkeypatch)
