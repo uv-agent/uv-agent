@@ -368,6 +368,51 @@ def test_tool_cell_wraps_chain_when_narrow() -> None:
     assert "path_info" in plain[1]
 
 
+def test_tool_cell_wraps_long_chain_across_all_helpers() -> None:
+    call = {"name": "run_python", "call_id": "call_123", "arguments": '{"code":"print(1)"}'}
+    payload = {
+        "returncode": 0,
+        "helper_calls": [{"name": f"helper_{index}_name", "args": ""} for index in range(12)],
+    }
+
+    lines = render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 32)
+    plain = [strip_ansi(line) for line in lines]
+    body = "\n".join(plain)
+
+    assert len(plain) > 2
+    assert "helper_0_name" in body
+    assert "helper_11_name" in body
+    assert "…" not in body
+    assert plain[1].startswith("  └─ ")
+    assert all(line.startswith("     ") for line in plain[2:])
+    assert all(visible_len(line) <= 32 for line in plain)
+
+
+def test_running_tool_cell_wraps_long_chain_with_elapsed_status() -> None:
+    call = {"name": "run_python", "call_id": "call_123", "arguments": '{"code":"print(1)"}'}
+    payload = {
+        "helper_calls": [{"name": f"live_helper_{index}", "args": ""} for index in range(10)],
+    }
+    cell = TranscriptCell(
+        "tool",
+        status="running",
+        call=call,
+        payload=payload,
+        created_at=tui2_app.monotonic() - 12.0,
+    )
+
+    lines = render_tool_cell(cell, 36)
+    plain = [strip_ansi(line) for line in lines]
+    body = "\n".join(plain)
+
+    assert "running" in plain[0]
+    assert "12" in plain[0]
+    assert len(plain) > 2
+    assert "live_helper_9" in body
+    assert "…" not in body
+    assert all(visible_len(line) <= 36 for line in plain)
+
+
 def test_live_region_keeps_blank_separator_between_cells_and_composer() -> None:
     state = Tui2State(composer="hi")
     state.live.append(TranscriptCell("reasoning", text="thinking"))

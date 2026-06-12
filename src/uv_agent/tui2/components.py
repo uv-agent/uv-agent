@@ -205,13 +205,62 @@ def _thin_rule(width: int, theme: AnsiTheme = DEFAULT_THEME) -> str:
     return sgr(theme.border_accent, left) + sgr(theme.border_faint, right)
 
 
-def _tree_indented(text: str, width: int, style: str) -> str:
-    """Indent a tool call-chain line with a tree corner to show nesting."""
+def _wrap_chain_text(text: str, first_width: int, subsequent_width: int) -> list[str]:
+    """Wrap a `` · `` separated helper chain without dropping later calls."""
 
-    prefix = "  └─ "
-    inner = max(1, width - visible_len(prefix))
-    clipped = truncate_visible(text.expandtabs(4), inner)
-    return prefix + sgr(style, clipped)
+    separator = " · "
+    segments = [segment for segment in text.expandtabs(4).split(separator) if segment]
+    if not segments:
+        return []
+
+    lines: list[str] = []
+    current = ""
+    available = max(1, first_width)
+    subsequent_width = max(1, subsequent_width)
+
+    for segment in segments:
+        candidate = segment if not current else current + separator + segment
+        if visible_len(candidate) <= available:
+            current = candidate
+            continue
+
+        if current:
+            lines.append(current)
+            current = ""
+            available = subsequent_width
+            candidate = segment
+            if visible_len(candidate) <= available:
+                current = candidate
+                continue
+
+        # Very long helper names are rare but should still wrap instead of
+        # forcing the renderer's final safety truncation to hide the tail.
+        wrapped = wrap_plain(segment, available)
+        if wrapped:
+            lines.extend(wrapped[:-1])
+            current = wrapped[-1]
+        else:
+            current = ""
+        available = subsequent_width
+
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _tree_indented_lines(text: str, width: int, style: str) -> list[str]:
+    """Indent a helper call chain and wrap it across as many rows as needed."""
+
+    first_prefix = "  └─ "
+    continuation_prefix = "     "
+    first_inner = max(1, width - visible_len(first_prefix))
+    continuation_inner = max(1, width - visible_len(continuation_prefix))
+    wrapped = _wrap_chain_text(text, first_inner, continuation_inner) or [""]
+    lines: list[str] = []
+    for index, line in enumerate(wrapped):
+        prefix = first_prefix if index == 0 else continuation_prefix
+        lines.append(prefix + sgr(style, line))
+    return lines
 
 
 def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAULT_THEME) -> list[str]:
@@ -219,8 +268,8 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
 
     Full source, stdout/stderr, and events are intentionally omitted here;
     use the ``/show <run_id>`` pager to inspect them.  The call chain is kept
-    on the title line when it fits; otherwise it wraps to a second indented
-    line.
+    on the title line when it fits; otherwise it wraps across indented lines
+    without truncating later helper names.
     """
 
     payload = cell.payload or {}
@@ -257,7 +306,7 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
     if title_plain_len > width:
         lines.append(truncate_visible(title, width))
         if chain_text:
-            lines.append(_tree_indented(chain_text, width, theme.muted))
+            lines.extend(_tree_indented_lines(chain_text, width, theme.muted))
         return lines
 
     if chain_text:
@@ -266,7 +315,7 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
             lines.append(title + sgr(theme.muted, inline))
             return lines
         lines.append(title)
-        lines.append(_tree_indented(chain_text, width, theme.muted))
+        lines.extend(_tree_indented_lines(chain_text, width, theme.muted))
         return lines
 
     lines.append(title)
