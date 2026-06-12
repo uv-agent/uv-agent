@@ -997,9 +997,10 @@ class _DummyRenderer:
         self.width = 80
         self.flushed: list[TranscriptCell] = []
         self.clear_calls: list[str | None] = []
+        self.repaint_status_messages: list[str] = []
 
     def repaint(self, state) -> None:
-        pass
+        self.repaint_status_messages.append(state.status_message)
 
     def flush_cell(self, cell) -> None:
         self.flushed.append(cell)
@@ -1114,6 +1115,32 @@ def test_ctrl_c_ignores_completed_run_state_after_agent_view_resume(monkeypatch)
     assert app._quit_armed
     assert not app._interrupt_armed
     assert asyncio.run(app.handle_key("\x03")) is False
+
+
+def test_judge_events_update_visible_tui2_status(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "thr_judge"
+    app._thread_runs["thr_judge"] = tui2_app.ThreadRunState(thread_id="thr_judge")
+    app._thread_runs["thr_judge"].started_at = 1.0
+
+    class PendingTask:
+        def done(self):
+            return False
+
+    app._thread_runs["thr_judge"].task = PendingTask()  # type: ignore[assignment]
+
+    app._handle_event({"type": "turn.started", "thread_id": "thr_judge", "turn_id": "turn_1"})
+    app._handle_event({"type": "judge.started", "thread_id": "thr_judge", "turn_id": "turn_1"})
+    app._safe_repaint()
+
+    assert app.state.status_message == app._text("judging")
+    assert app.renderer.repaint_status_messages[-1] == app._text("judging")
+
+    app._handle_event({"type": "judge.completed", "thread_id": "thr_judge", "turn_id": "turn_1"})
+    app._safe_repaint()
+
+    assert app.state.status_message == app._text("working")
+    assert app.renderer.repaint_status_messages[-1] == app._text("working")
 
 
 def test_ctrl_c_quits_after_current_thread_completed_but_task_is_unwinding(monkeypatch) -> None:

@@ -2865,6 +2865,10 @@ class AnsiUvAgentApp:
             if event_type == "turn.started":
                 run_state.terminal_status = "working"
                 run_state.status_message = "running"
+            elif event_type == "judge.started":
+                run_state.status_message = self._text("judging")
+            elif event_type == "judge.completed":
+                run_state.status_message = self._text("working")
             elif event_type == "turn.error":
                 run_state.terminal_status = "failed"
                 run_state.last_error = str(event.get("message") or "turn error")

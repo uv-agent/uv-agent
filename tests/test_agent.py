@@ -115,6 +115,18 @@ class HangingResponseClient(FakeModelClient):
         await asyncio.Event().wait()
 
 
+class GateResponseClient(FakeModelClient):
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        super().__init__(responses)
+        self.request_started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def create_response(self, **kwargs):
+        self.request_started.set()
+        await self.release.wait()
+        return await super().create_response(**kwargs)
+
+
 class ReasoningStreamClient(FakeModelClient):
     async def stream_response(self, **kwargs):
         self.requests.append(
@@ -696,6 +708,85 @@ async def test_cache_aware_judge_replays_completed_judge_before_user_without_cou
     assert "<compaction_judge_request>" in "\n".join(main_texts)
     assert '{"remaining_calls_bucket":"60_plus"' in str(main_input)
     assert main_texts[-1] == "fresh task"
+
+
+@pytest.mark.asyncio
+async def test_cache_aware_judge_started_streams_before_judge_response_finishes(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        compression=CompressionConfig(
+            enabled=True,
+            cache_aware=True,
+            judge_min_context_ratio=0.0,
+            min_gain=999_999.0,
+        ),
+        pricing=PricingConfig(unit="token", models={"fake": ModelPricingConfig(input=1.0, output=1.0, cached_input=0.5)}),
+    )
+    client = GateResponseClient(
+        [
+            {
+                "id": "resp_judge",
+                "output_text": '{"remaining_calls_bucket":"60_plus","history_dependency":"low"}',
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"remaining_calls_bucket":"60_plus","history_dependency":"low"}',
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": "resp_main",
+                "output_text": "answered",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "answered"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events: list[dict[str, Any]] = []
+    turn_events = engine.run_turn(user_text="fresh task")
+
+    events.append(await asyncio.wait_for(anext(turn_events), timeout=1.0))
+    events.append(await asyncio.wait_for(anext(turn_events), timeout=1.0))
+    assert [event["type"] for event in events] == ["turn.started", "judge.started"]
+    assert not client.request_started.is_set()
+
+    next_event = asyncio.create_task(anext(turn_events))
+    await asyncio.wait_for(client.request_started.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    assert not next_event.done()
+
+    client.release.set()
+    events.append(await asyncio.wait_for(next_event, timeout=1.0))
+    async for event in turn_events:
+        events.append(event)
+
+    assert [event["type"] for event in events if event["type"].startswith("judge.")] == [
+        "judge.started",
+        "judge.completed",
+    ]
 
 
 @pytest.mark.asyncio

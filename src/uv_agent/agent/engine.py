@@ -360,12 +360,16 @@ class CompactionResult:
     truncated_last_tool_output: bool = False
 
 
-@dataclass(frozen=True)
-class JudgeResult:
-    """Result of a cache-aware pre-turn judge + optional compaction."""
+@dataclass
+class JudgeRunState:
+    """Mutable result side channel for a streamed pre-turn judge.
+
+    Async generators cannot return a final value, but ``run_turn`` needs to know
+    whether cache-aware pre-turn compaction already ran so it can skip the
+    regular post-turn compaction pass.
+    """
 
     compacted: bool = False
-    events: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -579,7 +583,8 @@ class AgentEngine:
                 self.config.runtime.compression.cache_aware
                 and self.config.runtime.compression.enabled
             ):
-                judge_result = await self._maybe_judge_and_compact(
+                judge_state = JudgeRunState()
+                async for event in self._stream_judge_and_compact(
                     thread_id=thread_id,
                     turn_id=turn_id,
                     input_items=input_items,
@@ -589,10 +594,10 @@ class AgentEngine:
                     system_instructions=system_instructions,
                     level=level,
                     cancel_event=cancel_event,
-                )
-                for event in judge_result.events:
+                    judge_state=judge_state,
+                ):
                     yield event
-                compacted_this_turn = judge_result.compacted
+                compacted_this_turn = judge_state.compacted
 
             self._append_current_user_items(
                 thread_id=thread_id,
@@ -1380,7 +1385,7 @@ class AgentEngine:
             instructions=instructions,
         )
 
-    async def _maybe_judge_and_compact(
+    async def _stream_judge_and_compact(
         self,
         *,
         thread_id: str,
@@ -1392,15 +1397,18 @@ class AgentEngine:
         system_instructions: str,
         level: str | None,
         cancel_event: asyncio.Event | None,
-    ) -> JudgeResult:
-        """Run a cache-aware judge round before the user task and compact if warranted."""
-        out_events: list[dict[str, Any]] = []
+        judge_state: JudgeRunState,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream cache-aware judge lifecycle events while optionally compacting.
 
-        def _emit(event: dict[str, Any]) -> None:
-            out_events.append(event)
+        The TUI can only show ``judge.started`` if the event reaches ``run_turn``
+        before the judge model request blocks.  Keep the lifecycle events in this
+        async generator instead of buffering them until the full judge/compaction
+        operation has already completed.
+        """
 
-        def _done(compacted: bool = False) -> JudgeResult:
-            return JudgeResult(compacted=compacted, events=out_events)
+        def _done(compacted: bool = False) -> None:
+            judge_state.compacted = compacted
 
         compact_level = self.config.runtime.compression.model_level or level
         compact_model = self.config.model_for_level(compact_level)
@@ -1423,21 +1431,23 @@ class AgentEngine:
                 "reason": "below_threshold",
                 "total_tokens": total_tokens,
             })
-            return _done()
+            _done()
+            return
 
         judge_req_item = compaction_judge_request_item(message_item_text(user_item))
         judge_input = copy.deepcopy(input_items)
         judge_input.append(copy.deepcopy(judge_req_item))
 
-        _emit(self._publish_event({
+        yield self._publish_event({
             "type": "judge.started",
             "thread_id": thread_id,
             "turn_id": turn_id,
-        }))
+        })
 
         judge_responses: list[tuple[ModelResponse, list[dict[str, Any]]]] = []
         response: ModelResponse | None = None
         try:
+            self._raise_if_cancelled(cancel_event)
             response = await self.model_client.create_response(
                 input_items=judge_input,
                 level=judge_level,
@@ -1448,6 +1458,7 @@ class AgentEngine:
             # are persisted and replayed as part of the completed judge exchange
             # when no compaction checkpoint supersedes it.
             for _attempt in range(2):
+                self._raise_if_cancelled(cancel_event)
                 tool_calls = [item for item in response.output if item.get("type") == "function_call"]
                 if not tool_calls:
                     break
@@ -1481,12 +1492,13 @@ class AgentEngine:
                 "reason": "judge_error",
                 "error_type": exc.__class__.__name__,
             })
-            _emit(self._publish_event({
+            yield self._publish_event({
                 "type": "judge.completed",
                 "thread_id": thread_id,
                 "turn_id": turn_id,
-            }))
-            return _done()
+            })
+            _done()
+            return
 
         self._persist_judge_interaction(
             thread_id=thread_id,
@@ -1496,18 +1508,19 @@ class AgentEngine:
             judge_responses=judge_responses,
         )
         judge_history_items = self._judge_history_items(judge_req_item, judge_responses)
-        _emit(self._publish_event({
+        yield self._publish_event({
             "type": "judge.completed",
             "thread_id": thread_id,
             "turn_id": turn_id,
-        }))
+        })
 
         assert response is not None, "judge response must exist after successful judge call"
         judge = parse_judge_response(response.output_text)
         if judge is None:
             self._append_judge_history_to_input(turn_input, input_items, judge_history_items)
             self._record_judge({"skipped": True, "reason": "parse_failed"})
-            return _done()
+            _done()
+            return
 
         dependency = str(judge.get("history_dependency") or "")
         if dependency == "exact" or dependency not in DEPENDENCY_PARAMS:
@@ -1517,7 +1530,8 @@ class AgentEngine:
                 "reason": "dependency",
                 "dependency": dependency,
             })
-            return _done()
+            _done()
+            return
 
         N = N_BUCKET_MAP.get(str(judge.get("remaining_calls_bucket") or ""))
         if N is None:
@@ -1527,7 +1541,8 @@ class AgentEngine:
                 "reason": "unknown_bucket",
                 "bucket": str(judge.get("remaining_calls_bucket") or ""),
             })
-            return _done()
+            _done()
+            return
 
         S_ratio, K_min_pct = DEPENDENCY_PARAMS[dependency]
 
@@ -1599,7 +1614,8 @@ class AgentEngine:
                 "N": N,
                 "dependency": dependency,
             })
-            return _done()
+            _done()
+            return
 
         threshold = max(
             self.config.runtime.compression.min_gain,
@@ -1622,9 +1638,10 @@ class AgentEngine:
                 "net_gain": best_gain,
                 "threshold": threshold,
             })
-            return _done()
+            _done()
+            return
 
-        _emit(self._publish_event(self._compaction_started_event(thread_id, turn_id)))
+        yield self._publish_event(self._compaction_started_event(thread_id, turn_id))
         compact_result = await self._compact_if_needed(
             thread_id,
             turn_id,
@@ -1635,16 +1652,16 @@ class AgentEngine:
             force=True,
         )
         if compact_result.token_warning_event is not None:
-            _emit(self._publish_event(self._public_event(compact_result.token_warning_event)))
+            yield self._publish_event(self._public_event(compact_result.token_warning_event))
         if compact_result.result is not None:
             input_items[:] = self._input_after_compaction(thread_id, compact_result.result)
             turn_input.input_items = input_items
             turn_input.previous_response_id = None
             turn_input.use_previous_response_id = False
             turn_input.pending_items.clear()
-            _emit(self._publish_event(self._compaction_completed_event(
+            yield self._publish_event(self._compaction_completed_event(
                 thread_id, turn_id, compact_result.result,
-            )))
+            ))
             self._record_judge({
                 "triggered": True,
                 "compacted": True,
@@ -1657,7 +1674,8 @@ class AgentEngine:
                 "net_gain": best_gain,
                 "threshold": threshold,
             })
-            return _done(compacted=True)
+            _done(compacted=True)
+            return
 
         # Should be rare with force=True, but if compaction is skipped we must
         # replay the already-persisted judge exchange in the main request.
@@ -1674,7 +1692,8 @@ class AgentEngine:
             "net_gain": best_gain,
             "threshold": threshold,
         })
-        return _done()
+        _done()
+        return
 
     def _persist_judge_interaction(
         self,
