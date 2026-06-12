@@ -1212,20 +1212,13 @@ def render_live_with_cursor(
             cell_lines = [marker] + cell_lines[dropped:]
 
     lines: list[str] = list(cell_lines)
-    # Keep exactly one blank row between the cell block and the bottom row of
-    # chrome.  When the status bar has multiple rows, earlier rows sit directly
-    # under the cell block and the blank precedes the last status row; this
-    # keeps the bottom status row consistently separated from the cells.  When
-    # there are no cells, no leading blank is added.
-    if status_lines:
-        if len(status_lines) > 1 and cell_lines:
-            lines.extend(status_lines[:-1])
-        if cell_lines and (not lines or lines[-1].strip()):
-            lines.append("")
-        lines.append(status_lines[-1])
-    else:
-        if cell_lines and (not lines or lines[-1].strip()):
-            lines.append("")
+    # Keep exactly one blank row between the cell block and the bottom chrome as
+    # a whole.  Status rows belong to the same chrome strip, so row1 (activity)
+    # and row2 (context) must stay adjacent; inserting the blank between them
+    # makes the status bar look split and was the source of row1/row2 jitter.
+    if cell_lines and (not lines or lines[-1].strip()):
+        lines.append("")
+    lines.extend(status_lines)
     if palette_lines:
         if lines and lines[-1].strip():
             lines.append("")

@@ -660,6 +660,31 @@ def test_tall_render_area_caps_to_viewport() -> None:
     assert cursor_row < len(capped)
 
 
+def test_live_region_keeps_two_status_rows_together_below_cell_gap() -> None:
+    state = Tui2State(
+        busy=True,
+        turn_elapsed_s=3.0,
+        composer="hi",
+        level="alpha",
+        project_path="/home/user/project",
+    )
+    state.live.append(TranscriptCell("assistant", text="done"))
+
+    lines, _, _ = render_live_with_cursor(state, 80, spinner_frame=1)
+    plain = [strip_ansi(line) for line in lines]
+
+    assistant_idx = next(i for i, line in enumerate(plain) if line.startswith("✦ done"))
+    activity_idx = next(i for i, line in enumerate(plain) if "Working" in line)
+    context_idx = next(i for i, line in enumerate(plain) if line.startswith("◇ "))
+
+    # One blank row separates transcript cells from the status strip...
+    assert activity_idx - assistant_idx == 2
+    assert plain[assistant_idx + 1].strip() == ""
+    # ...but the status strip itself stays contiguous: no row1/row2 gap.
+    assert context_idx == activity_idx + 1
+    assert plain[context_idx + 1].startswith("╭")
+
+
 def test_busy_render_layout_has_status_and_box() -> None:
     state = Tui2State(busy=True, turn_elapsed_s=3.0, composer="hi")
     lines, cursor_row, _ = render_live_with_cursor(state, 60, spinner_frame=1)
