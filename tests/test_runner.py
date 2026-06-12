@@ -13,6 +13,7 @@ import pytest
 
 from uv_agent.config import RunnerConfig
 from uv_agent.runner import PythonRunRequest, PythonRunner
+from uv_agent.runner.output import OutputCapture
 import uv_agent.runner.scriptenv as scriptenv
 from uv_agent.runner.scriptenv import direct_dependencies, ensure_venv
 
@@ -702,3 +703,13 @@ def test_ensure_project_removes_checkout_source_for_installed_release(
     assert "uv-agent = { path" not in text
     assert lock.read_text(encoding="utf-8") == "fresh lock"
     assert [call for call in calls if call[0] == scriptenv.uv_binary() and call[1] == "sync"]
+
+
+def test_output_capture_bounds_structured_events() -> None:
+    capture = OutputCapture()
+    for i in range(10_005):
+        capture.append_structured_event({"index": i})
+
+    assert len(capture.structured_events) == 10_000
+    assert capture.structured_events[0]["index"] == 5
+    assert capture.structured_events[-1]["index"] == 10_004

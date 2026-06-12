@@ -4,16 +4,21 @@ import openai
 import pytest
 
 from uv_agent.config import (
+    AppConfig,
     EndpointConfig,
+    LevelConfig,
     MessagePassthroughConfig,
     ModelConfig,
     ProviderConfig,
     ReasoningDisplayConfig,
+    RunnerConfig,
+    RuntimeConfig,
 )
 from uv_agent.errors import EmptyModelStreamError
 from uv_agent.model.anthropic import anthropic_client
 from uv_agent.model import (
     ModelStreamEvent,
+    UnifiedModelClient,
     anthropic_image_source,
     anthropic_sdk_base_url,
     anthropic_messages,
@@ -1505,3 +1510,122 @@ async def test_stream_chat_fallback_can_display_passthrough_field_as_reasoning(
     assert completed.response is not None
     assert completed.response.output[0]["reasoning_content"] == "think"
     assert completed.response.reasoning_text == "think"
+
+
+def test_openai_client_returns_cached_instance_for_same_provider() -> None:
+    from uv_agent.model.openai_sdk import _reset_openai_client_cache
+
+    _reset_openai_client_cache()
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com/v1",
+        api_key="test-key",
+    )
+
+    client1 = openai_client(provider, "responses", "/responses")
+    client2 = openai_client(provider, "responses", "/responses")
+
+    assert client1 is client2
+
+
+def test_openai_client_creates_separate_instances_for_different_apis() -> None:
+    from uv_agent.model.openai_sdk import _reset_openai_client_cache
+
+    _reset_openai_client_cache()
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com/v1",
+        api_key="test-key",
+    )
+
+    responses_client = openai_client(provider, "responses", "/responses")
+    chat_client = openai_client(provider, "chat_completions", "/chat/completions")
+
+    assert responses_client is not chat_client
+
+
+def test_anthropic_client_returns_cached_instance_for_same_provider() -> None:
+    from uv_agent.model.anthropic import _reset_anthropic_client_cache
+
+    _reset_anthropic_client_cache()
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.anthropic.com",
+        api_key="test-key",
+    )
+
+    client1 = anthropic_client(provider)
+    client2 = anthropic_client(provider)
+
+    assert client1 is client2
+
+
+@pytest.mark.asyncio
+async def test_close_all_openai_clients_closes_cached_clients() -> None:
+    from uv_agent.model.openai_sdk import _reset_openai_client_cache, close_all_openai_clients
+
+    _reset_openai_client_cache()
+    provider = ProviderConfig(
+        name="p",
+        base_url="https://api.example.com/v1",
+        api_key="test-key",
+    )
+
+    client = openai_client(provider, "responses", "/responses")
+    assert client.is_closed() is False
+
+    await close_all_openai_clients()
+
+    assert client.is_closed() is True
+
+
+@pytest.mark.asyncio
+async def test_unified_model_client_aclose_closes_cached_clients() -> None:
+    from uv_agent.model.anthropic import _reset_anthropic_client_cache
+    from uv_agent.model.openai_sdk import _reset_openai_client_cache
+
+    _reset_openai_client_cache()
+    _reset_anthropic_client_cache()
+
+    config = AppConfig(
+        providers={
+            "openai": ProviderConfig(
+                name="openai",
+                base_url="https://api.example.com/v1",
+                api_key="test-key",
+            ),
+            "anthropic": ProviderConfig(
+                name="anthropic",
+                base_url="https://api.anthropic.com",
+                api_key="test-key",
+            ),
+        },
+        models={
+            "openai": ModelConfig(
+                name="openai",
+                provider="openai",
+                model="remote",
+                api="responses",
+            ),
+            "anthropic": ModelConfig(
+                name="anthropic",
+                provider="anthropic",
+                model="claude",
+                api="anthropic_messages",
+            ),
+        },
+        levels={
+            "medium": LevelConfig(name="medium", model="openai"),
+        },
+        runtime=RuntimeConfig(),
+        runner=RunnerConfig(),
+    )
+    client = UnifiedModelClient(config)
+
+    openai = openai_client(config.providers["openai"], "responses", "/responses")
+    anthropic = anthropic_client(config.providers["anthropic"])
+
+    await client.aclose()
+
+    assert openai.is_closed() is True
+    assert anthropic.is_closed() is True

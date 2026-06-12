@@ -7,6 +7,7 @@ import importlib
 import json
 import random
 import re
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from html import escape as xml_escape
@@ -50,6 +51,7 @@ from uv_agent.agent.context_builder import (
     xml_text,
 )
 from uv_agent.context import ContextStats, estimate_tokens, usage_token_count
+from uv_agent.state_db import checkpoint_state_db
 from uv_agent.environment import detect_user_language, host_environment
 from uv_agent.errors import EmptyModelStreamError, is_retryable_provider_error
 from uv_agent.goal_mode import (
@@ -247,9 +249,12 @@ class TurnInputState:
     pending_items: list[dict[str, Any]] = field(default_factory=list)
 
     def request_input_items(self) -> list[dict[str, Any]]:
+        # Shallow copy is sufficient: the engine treats persisted items as
+        # immutable, and the streaming path makes its own deep copy before
+        # handing the list to provider SDKs for retries.
         if self.use_previous_response_id and self.previous_response_id:
-            return copy.deepcopy(self.pending_items)
-        return copy.deepcopy(self.input_items)
+            return list(self.pending_items)
+        return list(self.input_items)
 
     def request_previous_response_id(self) -> str | None:
         if self.use_previous_response_id and self.previous_response_id:
@@ -280,9 +285,12 @@ class RetryState:
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def request_input_items(self) -> list[dict[str, Any]]:
+        # Shallow copy is sufficient: the engine treats persisted items as
+        # immutable, and the streaming path makes its own deep copy before
+        # handing the list to provider SDKs for retries.
         if self.use_previous_response_id and self.previous_response_id:
-            return copy.deepcopy(self.pending_items)
-        return copy.deepcopy(self.input_items)
+            return list(self.pending_items)
+        return list(self.input_items)
 
     def request_previous_response_id(self) -> str | None:
         if self.use_previous_response_id and self.previous_response_id:
@@ -314,22 +322,24 @@ class RuleRuntimeState:
 
 @dataclass
 class StreamResponseState:
-    assistant_parts: list[str] = field(default_factory=list)
-    reasoning_parts: list[str] = field(default_factory=list)
+    # Single-string buffers avoid holding the streaming answer twice: once in
+    # the provider layer and once as a list of deltas in the engine.
+    assistant_text: str = ""
+    reasoning_text: str = ""
     saw_stream_output: bool = False
     response: ModelResponse | None = None
 
     @property
     def partial_text(self) -> str:
-        return "".join(self.assistant_parts).strip()
+        return self.assistant_text.strip()
 
     @property
     def partial_reasoning_text(self) -> str:
-        return "".join(self.reasoning_parts).strip()
+        return self.reasoning_text.strip()
 
     def reset(self) -> None:
-        self.assistant_parts.clear()
-        self.reasoning_parts.clear()
+        self.assistant_text = ""
+        self.reasoning_text = ""
         self.response = None
 
     def require_response(self) -> ModelResponse:
@@ -434,7 +444,8 @@ class AgentEngine:
         self._last_config_refresh_at = 0.0
         self._config_loader = config_loader
         self._host_environment = host_environment()
-        self._rule_states: dict[str, RuleRuntimeState] = {}
+        self._rule_states: OrderedDict[str, RuleRuntimeState] = OrderedDict()
+        self._rule_states_max_size: int = 64
         self._mcp_instructions_probe = mcp_instructions_probe or McpInstructionsProbe(self.project_root)
         self._mcp_instructions_probe.start()
         self.events = EventBus()
@@ -452,6 +463,10 @@ class AgentEngine:
         self._plugins_started = False
         self._plugins_start_task: asyncio.Task[None] | None = None
         self._last_judge: dict[str, Any] | None = None
+        self._context_stats_ttl_s: float = 1.0
+        self._context_stats_cache: dict[tuple[str | None, str | None], tuple[float, ContextStats]] = {}
+        self._turns_since_db_checkpoint: int = 0
+        self._db_checkpoint_interval: int = 50
 
     def close(self) -> None:
         """Release long-lived host resources owned by the engine."""
@@ -462,6 +477,15 @@ class AgentEngine:
 
     async def aclose(self) -> None:
         await self.plugins.stop()
+        model_close = getattr(self.model_client, "aclose", None)
+        if callable(model_close):
+            await model_close()
+        try:
+            await asyncio.to_thread(checkpoint_state_db, self.thread_store.data_dir, mode="PASSIVE")
+        except Exception:
+            # Checkpointing is best-effort; do not let cleanup failures mask
+            # the real shutdown path.
+            pass
         close = getattr(self.runner, "aclose", None)
         if callable(close):
             await close()
@@ -626,7 +650,7 @@ class AgentEngine:
                         thread_id=thread_id,
                         turn_id=turn_id,
                         turn_started_at=turn_started_event.get("created_at"),
-                        input_items=copy.deepcopy(request_input_items),
+                        input_items=request_input_items,
                         level=level,
                         instructions=system_instructions,
                         previous_response_id=turn_input.request_previous_response_id(),
@@ -810,6 +834,14 @@ class AgentEngine:
                 "completed_at": turn_completed_event.get("created_at"),
                 "final_text": final_text,
             })
+            self._turns_since_db_checkpoint += 1
+            if self._turns_since_db_checkpoint >= self._db_checkpoint_interval:
+                self._turns_since_db_checkpoint = 0
+                try:
+                    await asyncio.to_thread(checkpoint_state_db, self.thread_store.data_dir, mode="PASSIVE")
+                except Exception:
+                    # Best-effort WAL checkpoint; failures should not break turns.
+                    pass
 
     def _prepare_run_turn_prelude(
         self,
@@ -2440,7 +2472,7 @@ class AgentEngine:
             self._raise_if_cancelled(cancel_event)
             if stream_event.type == "text_delta" and stream_event.text:
                 stream_state.saw_stream_output = True
-                stream_state.assistant_parts.append(stream_event.text)
+                stream_state.assistant_text += stream_event.text
                 yield self._publish_event({
                     "type": "assistant.delta",
                     "thread_id": thread_id,
@@ -2450,7 +2482,7 @@ class AgentEngine:
                 })
             elif stream_event.type == "reasoning_delta" and stream_event.text:
                 stream_state.saw_stream_output = True
-                stream_state.reasoning_parts.append(stream_event.text)
+                stream_state.reasoning_text += stream_event.text
                 yield self._publish_event({
                     "type": "assistant.reasoning_delta",
                     "thread_id": thread_id,
@@ -2473,10 +2505,10 @@ class AgentEngine:
         response = stream_state.require_response()
         completed_text_delta = completion_text_delta(
             response.output_text,
-            "".join(stream_state.assistant_parts),
+            stream_state.assistant_text,
         )
         if completed_text_delta:
-            stream_state.assistant_parts.append(completed_text_delta)
+            stream_state.assistant_text += completed_text_delta
             yield self._publish_event({
                 "type": "assistant.delta",
                 "thread_id": thread_id,
@@ -3563,6 +3595,7 @@ class AgentEngine:
     def _rule_state(self, thread_id: str) -> RuleRuntimeState:
         state = self._rule_states.get(thread_id)
         if state is not None:
+            self._rule_states.move_to_end(thread_id)
             return state
         active_cwd = self._latest_active_cwd(thread_id)
         state = RuleRuntimeState(
@@ -3572,6 +3605,8 @@ class AgentEngine:
             cwd_notice_cwd=self._latest_cwd_notice_in_epoch(thread_id),
         )
         self._rule_states[thread_id] = state
+        while len(self._rule_states) > self._rule_states_max_size:
+            self._rule_states.popitem(last=False)
         return state
 
     def _latest_active_cwd(self, thread_id: str) -> Path:
@@ -3874,14 +3909,40 @@ class AgentEngine:
         """Return a context-window usage percentage for a thread."""
         return self.context_stats(thread_id, level).percent
 
+    def _empty_context_stats(self, level: str | None) -> ContextStats:
+        """Return zero-usage stats for a missing thread."""
+
+        model = self.config.model_for_level(level)
+        trigger_tokens = int(
+            model.context_window_tokens * self.config.runtime.compression.trigger_ratio
+        )
+        return ContextStats(
+            used_tokens=0,
+            context_window_tokens=model.context_window_tokens,
+            percent=0,
+            threshold_tokens=trigger_tokens,
+            headroom_tokens=model.context_window_tokens,
+            source="empty",
+        )
+
     def context_stats(self, thread_id: str | None, level: str | None = None) -> ContextStats:
         """Return detailed context-window statistics for a thread."""
+
+        from time import monotonic as _monotonic
+
+        cache_key = (thread_id, level)
+        cached = self._context_stats_cache.get(cache_key)
+        if cached is not None:
+            cached_at, stats = cached
+            if _monotonic() - cached_at < self._context_stats_ttl_s:
+                return stats
+
         model = self.config.model_for_level(level)
         trigger_tokens = int(
             model.context_window_tokens * self.config.runtime.compression.trigger_ratio
         )
         if not thread_id:
-            return ContextStats(
+            stats = ContextStats(
                 used_tokens=0,
                 context_window_tokens=model.context_window_tokens,
                 percent=0,
@@ -3889,10 +3950,12 @@ class AgentEngine:
                 headroom_tokens=model.context_window_tokens,
                 source="empty",
             )
+            self._context_stats_cache[cache_key] = (_monotonic(), stats)
+            return stats
         try:
             metadata = self.thread_store.thread_metadata(thread_id)
         except FileNotFoundError:
-            return ContextStats(
+            stats = ContextStats(
                 used_tokens=0,
                 context_window_tokens=model.context_window_tokens,
                 percent=0,
@@ -3900,6 +3963,8 @@ class AgentEngine:
                 headroom_tokens=model.context_window_tokens,
                 source="empty",
             )
+            self._context_stats_cache[cache_key] = (_monotonic(), stats)
+            return stats
         used = metadata.get("latest_usage_tokens") if isinstance(metadata.get("latest_usage_tokens"), int) else None
         source = "provider"
         if used is None:
@@ -3911,7 +3976,7 @@ class AgentEngine:
                 used = estimate_tokens(self._reconstruct_input(thread_id, snapshot=snapshot) + context_items)
                 source = "estimate"
         percent = min(100, max(0, round(used * 100 / model.context_window_tokens)))
-        return ContextStats(
+        stats = ContextStats(
             used_tokens=used,
             context_window_tokens=model.context_window_tokens,
             percent=percent,
@@ -3919,6 +3984,8 @@ class AgentEngine:
             headroom_tokens=max(0, model.context_window_tokens - used),
             source=source,
         )
+        self._context_stats_cache[cache_key] = (_monotonic(), stats)
+        return stats
 
     def _latest_usage_tokens(self, thread_id: str, *, snapshot: ThreadSnapshot | None = None) -> int | None:
         """Return the latest provider-reported token usage when available."""

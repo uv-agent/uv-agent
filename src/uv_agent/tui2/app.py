@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import json
 import re
 import sqlite3
@@ -192,6 +193,11 @@ TOKEN_RATE_DISPLAY_HIDE_BELOW = 0.05
 _AGENT_VIEW_STATUS_RANK = {status: index for index, status in enumerate(AGENT_VIEW_STATUS_ORDER)}
 _RUN_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
 TUI2_FLUSHED_CELLS_MAX = 200
+# Once a cell is in terminal scrollback, tui2 only needs enough text for
+# metadata like row-count estimates and compact status display.  Long cells
+# are truncated to a head/tail preview so large tool outputs do not linger
+# in memory for the rest of the session.
+TUI2_RETAINED_FLUSHED_TEXT_CHARS = 8192
 _RETAINED_TOOL_PAYLOAD_KEYS = frozenset(
     {
         "run_id",
@@ -305,11 +311,15 @@ def _retained_mapping(value: dict[str, Any] | None, keys: frozenset[str]) -> dic
 def _retained_flushed_cell(cell: TranscriptCell) -> TranscriptCell:
     """Return the lightweight copy kept after a cell is in terminal scrollback."""
 
+    text = cell.text
+    if len(text) > TUI2_RETAINED_FLUSHED_TEXT_CHARS:
+        half = TUI2_RETAINED_FLUSHED_TEXT_CHARS // 2
+        text = text[:half] + "\n...[truncated]\n" + text[-half:]
     call = _retained_mapping(cell.call, _RETAINED_TOOL_CALL_KEYS) if cell.kind == "tool" else None
     payload = _retained_mapping(cell.payload, _RETAINED_TOOL_PAYLOAD_KEYS) if cell.kind == "tool" else None
     return TranscriptCell(
         cell.kind,
-        text=cell.text,
+        text=text,
         title=cell.title,
         status=cell.status,
         call=call,
@@ -375,7 +385,8 @@ class AnsiUvAgentApp:
         self.state.agent_view.dispatch_level = self.state.level
         self.renderer = Renderer()
         self._thread_runs: dict[str, ThreadRunState] = {}
-        self._thread_token_ratios: dict[str, ThreadTokenRatio] = {}
+        self._thread_token_ratios: OrderedDict[str, ThreadTokenRatio] = OrderedDict()
+        self._thread_token_ratios_max_size: int = 16
         self._assistant_cell: TranscriptCell | None = None
         self._reasoning_cell: TranscriptCell | None = None
         self._reasoning_flushed_for_current_response = False
@@ -410,7 +421,6 @@ class AnsiUvAgentApp:
         self._image_status_message: str | None = None
         self._agent_view_local_threads: set[str] = set()
         self._agent_view_join_pending_persist: set[str] = set()
-
     @property
     def _running_task(self) -> asyncio.Task[None] | None:
         """Compatibility view of the attached thread's running task."""
@@ -472,14 +482,44 @@ class AnsiUvAgentApp:
 
         key = thread_id or self.state.thread_id or "__draft__"
         ratio = self._thread_token_ratios.get(key)
-        if ratio is None:
-            ratio = self._load_thread_token_ratio(thread_id) if thread_id else ThreadTokenRatio()
-            self._thread_token_ratios[key] = ratio
+        if ratio is not None:
+            self._thread_token_ratios.move_to_end(key)
+            return ratio
+        ratio = self._load_thread_token_ratio(thread_id) if thread_id else ThreadTokenRatio()
+        self._thread_token_ratios[key] = ratio
+        self._evict_thread_token_ratios_if_needed()
         return ratio
+
+    def _evict_thread_token_ratios_if_needed(self) -> None:
+        """Persist and remove the oldest entries when the cache grows too large."""
+
+        while len(self._thread_token_ratios) > self._thread_token_ratios_max_size:
+            oldest_key, oldest_ratio = self._thread_token_ratios.popitem(last=False)
+            if oldest_key != "__draft__":
+                self._persist_thread_token_ratio(oldest_key, oldest_ratio)
+
+    def _persist_thread_token_ratio(self, thread_id: str, ratio: ThreadTokenRatio) -> None:
+        """Best-effort persistence of a token ratio to thread metadata."""
+
+        if ratio.available and thread_id and self.engine is not None:
+            try:
+                self.engine.thread_store.update_thread_metadata(
+                    thread_id,
+                    updates={"token_ratio": ratio.to_metadata()},
+                )
+            except Exception:
+                pass
 
     def _load_thread_token_ratio(self, thread_id: str | None) -> ThreadTokenRatio:
         if not thread_id:
             return ThreadTokenRatio()
+        try:
+            metadata = self.engine.thread_store.thread_metadata(thread_id)
+        except Exception:
+            metadata = {}
+        token_ratio_meta = metadata.get("token_ratio")
+        if isinstance(token_ratio_meta, dict):
+            return ThreadTokenRatio.from_metadata(token_ratio_meta)
         try:
             events = self.engine.thread_store.read_events(thread_id, event_types={"item.model_response"})
         except Exception:
@@ -750,6 +790,10 @@ class AnsiUvAgentApp:
                     self._ticker_task = None
                 self._apply_window_title()
                 self.renderer.close()
+                for thread_id, ratio in list(self._thread_token_ratios.items()):
+                    if thread_id != "__draft__":
+                        self._persist_thread_token_ratio(thread_id, ratio)
+                await self.engine.aclose()
 
     async def _ticker(self) -> None:
         # 12Hz tick: matches the breath animation's target frequency (12
@@ -1473,6 +1517,8 @@ class AnsiUvAgentApp:
             )
             return
         self._thread_runs.pop(thread_id, None)
+        self._agent_view_local_threads.discard(thread_id)
+        self._agent_view_join_pending_persist.discard(thread_id)
         if thread_id == self.state.thread_id:
             self._clear_to_new_thread()
         self.state.agent_view.status_message = self._fmt("agent_view_hidden", thread=short_thread(thread_id))
@@ -1521,8 +1567,10 @@ class AnsiUvAgentApp:
             self._safe_repaint()
             return
         rule_states = getattr(self.engine, "_rule_states", None)
-        if isinstance(rule_states, dict):
+        if rule_states is not None:
             rule_states.pop(thread_id, None)
+        self._agent_view_local_threads.discard(thread_id)
+        self._agent_view_join_pending_persist.discard(thread_id)
         self.state.agent_view.status_message = self._fmt("agent_view_worktree_deleted", branch=result.branch)
         self._refresh_agent_view_rows()
         self._safe_repaint()

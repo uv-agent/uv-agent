@@ -6,7 +6,7 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from uv_agent.runner.run_log import EventWriter
 
@@ -110,18 +110,27 @@ class RuntimeRPCServer:
         thread_id: str | None,
         turn_id: str | None,
         cwd: Path,
-        structured_events: list[dict[str, Any]],
+        structured_events: list[dict[str, Any]] | None = None,
+        on_structured_event: Callable[[dict[str, Any]], None] | None = None,
         writer: EventWriter,
     ) -> RuntimeRPCSessionHandle:
         self.start()
         token = secrets.token_urlsafe(32)
+        if on_structured_event is not None:
+            callback = on_structured_event
+        else:
+            events = structured_events if structured_events is not None else []
+
+            def callback(event: dict[str, Any]) -> None:
+                events.append(event)
+
         session = RunSession(
             token=token,
             run_id=run_id,
             thread_id=thread_id,
             turn_id=turn_id,
             cwd=cwd,
-            structured_events=structured_events,
+            on_structured_event=callback,
             writer=writer,
         )
         with self._lock:

@@ -15,6 +15,15 @@ class UnifiedModelClient:
     def reload_config(self, config: AppConfig) -> None:
         self.config = config
 
+    async def aclose(self) -> None:
+        """Close all cached provider SDK clients."""
+
+        from uv_agent.model.anthropic import close_all_anthropic_clients
+        from uv_agent.model.openai_sdk import close_all_openai_clients
+
+        await close_all_openai_clients()
+        await close_all_anthropic_clients()
+
     async def create_response(
         self,
         *,

@@ -5809,3 +5809,35 @@ def test_refresh_config_updates_engine_and_runner(tmp_path: Path, monkeypatch) -
 
     assert engine.config.model_for_level("medium").context_window_tokens == 20
     assert engine.runner.config.default_timeout_s == 22
+
+
+def test_context_stats_is_cached_within_ttl(tmp_path: Path) -> None:
+    config = AppConfig(
+        providers={
+            "default": ProviderConfig(name="default", base_url="https://api.example.com/v1")
+        },
+        models={
+            "default": ModelConfig(name="default", provider="default", model="remote")
+        },
+        levels={"medium": LevelConfig(name="medium", model="default")},
+        runtime=RuntimeConfig(),
+        runner=RunnerConfig(),
+    )
+    runner = PythonRunner(
+        project_root=tmp_path,
+        data_dir=tmp_path / ".uv-agent",
+        config=RunnerConfig(),
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=runner,
+        thread_store=ThreadStore(tmp_path / ".uv-agent"),
+        project_root=tmp_path,
+    )
+
+    stats1 = engine.context_stats(None, "medium")
+    assert (None, "medium") in engine._context_stats_cache
+    stats2 = engine.context_stats(None, "medium")
+
+    assert stats1 is stats2

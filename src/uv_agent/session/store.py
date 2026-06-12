@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 from collections import OrderedDict
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -241,6 +241,37 @@ class ThreadStore:
         """Return thread metadata without loading the event suffix."""
 
         return self._read_metadata(thread_id, kind=kind)
+
+    def update_thread_metadata(
+        self,
+        thread_id: str,
+        *,
+        updates: dict[str, Any] | None = None,
+        remover: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        """Merge extra metadata into an existing thread row.
+
+        ``updates`` is shallow-merged into the persisted ``metadata_json`` blob.
+        For more complex edits callers may pass ``remover``, which receives the
+        current extra metadata dict and can mutate it in place.
+        """
+
+        with self._connect() as db:
+            metadata = self._metadata_for_update(
+                db,
+                thread_id,
+                kind=self._kind_for_thread(thread_id),
+                event={"created_at": utc_now_iso()},
+            )
+            extra = _json_loads(metadata.get("metadata_json"), default={})
+            if not isinstance(extra, dict):
+                extra = {}
+            if updates:
+                extra.update(updates)
+            if remover is not None:
+                remover(extra)
+            metadata["metadata_json"] = _json_dumps(extra)
+            self._upsert_metadata(db, metadata)
 
     def snapshot(self, thread_id: str) -> ThreadSnapshot:
         metadata = self._read_metadata(thread_id)

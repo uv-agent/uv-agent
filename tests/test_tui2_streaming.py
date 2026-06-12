@@ -76,3 +76,15 @@ def test_tool_delta_visible_text_splits_name_and_argument_delta() -> None:
 
     assert tool_call_name(tool_call) == "run_python"
     assert tool_delta_visible_text(tool_call) == '{"code":'
+
+
+def test_thread_token_ratio_metadata_round_trip() -> None:
+    ratio = ThreadTokenRatio()
+    ratio.observe_response(visible_units=40, output_tokens=10)
+
+    metadata = ratio.to_metadata()
+    restored = ThreadTokenRatio.from_metadata(metadata)
+
+    assert restored.visible_units == 40
+    assert restored.output_tokens == 10
+    assert restored.token_rate(80.0) == 20.0

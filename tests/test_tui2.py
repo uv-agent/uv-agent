@@ -27,6 +27,7 @@ import uv_agent.tui2.app as tui2_app
 
 from uv_agent.tui2.app import TOP_LEVEL_COMMANDS, ThreadRunState, load_composer_history, save_composer_history
 from uv_agent.tui2.events import AgentViewRow, CommandSuggestion, TranscriptCell, Tui2State
+from uv_agent.tui2.app import _retained_flushed_cell, TUI2_RETAINED_FLUSHED_TEXT_CHARS
 from uv_agent.tui2.renderer import Renderer
 from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal, TerminalKeyReader
 from uv_agent.tui2.theme import DEFAULT_THEME, sgr
@@ -3157,3 +3158,13 @@ def test_goal_command_with_invalid_op_shows_usage(monkeypatch) -> None:
     last = app.state.flushed[-1]
     assert last.kind == "error"
     assert "usage" in last.text
+
+
+def test_retained_flushed_cell_truncates_long_text() -> None:
+    long_text = "x" * (TUI2_RETAINED_FLUSHED_TEXT_CHARS + 100)
+    cell = TranscriptCell("assistant", text=long_text)
+    retained = _retained_flushed_cell(cell)
+
+    assert len(retained.text) < len(long_text)
+    assert "...[truncated]" in retained.text
+    assert retained.text.startswith("x" * (TUI2_RETAINED_FLUSHED_TEXT_CHARS // 2))

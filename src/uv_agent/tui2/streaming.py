@@ -211,6 +211,23 @@ class ThreadTokenRatio:
             return None
         return max(0.0, unit_rate / units_per_token)
 
+    def to_metadata(self) -> dict[str, int]:
+        """Serialize accumulated counts for persistence."""
+
+        return {
+            "visible_units": self.visible_units,
+            "output_tokens": self.output_tokens,
+        }
+
+    @classmethod
+    def from_metadata(cls, data: dict[str, Any]) -> ThreadTokenRatio:
+        """Restore accumulated counts from persisted metadata."""
+
+        return cls(
+            visible_units=int(data.get("visible_units") or 0),
+            output_tokens=int(data.get("output_tokens") or 0),
+        )
+
 
 def usage_output_tokens(
     usage: dict[str, Any] | None,

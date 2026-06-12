@@ -1,22 +1,37 @@
 from __future__ import annotations
 
 import codecs
+from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
 
 from uv_agent.runner.run_log import EventWriter
 from uv_agent.time import utc_now_iso
 
 STREAM_READ_CHUNK_BYTES = 64 * 1024
 OUTPUT_TRUNCATION_MARKER = "\n[uv-agent runner output truncated]\n"
+# Bounded in-memory buffers keep long-running or high-output scripts from
+# accumulating unbounded chunk references while still preserving the final
+# joined output up to ``max_output_bytes``.
+MAX_STDOUT_PARTS = 256
+MAX_STDERR_PARTS = 256
+MAX_STRUCTURED_EVENTS = 10_000
 
 
 @dataclass
 class OutputCapture:
-    stdout_parts: list[str] = field(default_factory=list)
-    stderr_parts: list[str] = field(default_factory=list)
-    structured_events: list[dict] = field(default_factory=list)
+    stdout_parts: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_STDOUT_PARTS))
+    stderr_parts: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_STDERR_PARTS))
+    structured_events: list[dict[str, Any]] = field(default_factory=list)
     byte_count: int = 0
     truncated: bool = False
+
+    def append_structured_event(self, event: dict[str, Any]) -> None:
+        """Add a structured event and keep the in-memory list bounded."""
+
+        self.structured_events.append(event)
+        if len(self.structured_events) > MAX_STRUCTURED_EVENTS:
+            self.structured_events[:] = self.structured_events[-MAX_STRUCTURED_EVENTS:]
 
 
 async def pump_stream(
@@ -24,7 +39,7 @@ async def pump_stream(
     stream_name: str,
     stream,
     writer: EventWriter,
-    sink: list[str],
+    sink: deque[str],
     run_id: str,
     max_output_bytes: int,
     capture: OutputCapture,
@@ -99,7 +114,7 @@ def record_output_text(
     stream_name: str,
     text: str,
     writer: EventWriter,
-    sink: list[str],
+    sink: deque[str],
     run_id: str,
 ) -> None:
     if not text:

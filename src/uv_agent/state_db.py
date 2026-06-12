@@ -301,6 +301,27 @@ def _ensure_wal(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA synchronous=NORMAL")
 
 
+def checkpoint_state_db(data_dir: Path, *, mode: str = "PASSIVE") -> None:
+    """Run a WAL checkpoint on the project state database.
+
+    PASSIVE checkpoints as much as possible without blocking readers or writers.
+    TRUNCATE resets the WAL file after checkpointing and may block briefly.
+    """
+
+    db_path = state_db_path(data_dir)
+    if not db_path.exists():
+        return
+    connection = sqlite3.connect(
+        db_path,
+        timeout=SQLITE_TIMEOUT_SECONDS,
+        check_same_thread=True,
+    )
+    try:
+        connection.execute(f"PRAGMA wal_checkpoint({mode})")
+    finally:
+        connection.close()
+
+
 def _read_schema_version(connection: sqlite3.Connection) -> str | None:
     """Return the stored schema version, or None before the schema exists."""
 

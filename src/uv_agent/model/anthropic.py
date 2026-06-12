@@ -35,6 +35,8 @@ ANTHROPIC_FALLBACK_BLOCK_FIELDS = (
     "url",
 )
 
+_anthropic_client_cache: dict[tuple[Any, ...], Any] = {}
+
 
 @lru_cache(maxsize=1)
 def anthropic_sdk_param_keys() -> set[str]:
@@ -223,10 +225,29 @@ def anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _anthropic_client_key(provider: ProviderConfig) -> tuple[Any, ...]:
+    """Hashable key for the cached Anthropic client."""
+
+    headers = provider.headers or {}
+    return (
+        provider.name,
+        provider.base_url,
+        provider.resolved_api_key(),
+        frozenset(headers.items()),
+        provider.timeout_s,
+    )
+
+
 def anthropic_client(provider: ProviderConfig) -> Any:
+    """Return a cached AsyncAnthropic client for the provider configuration."""
+
     from anthropic import AsyncAnthropic
     from anthropic import Timeout
 
+    key = _anthropic_client_key(provider)
+    cached = _anthropic_client_cache.get(key)
+    if cached is not None:
+        return cached
     kwargs = {
         "api_key": provider.resolved_api_key(),
         "base_url": anthropic_sdk_base_url(provider),
@@ -236,7 +257,25 @@ def anthropic_client(provider: ProviderConfig) -> Any:
         # Keep connection failures quick while allowing long model generation
         # or streaming gaps from slower upstream providers.
         kwargs["timeout"] = Timeout(provider.timeout_s, connect=5.0)
-    return AsyncAnthropic(**kwargs)
+    client = AsyncAnthropic(**kwargs)
+    _anthropic_client_cache[key] = client
+    return client
+
+
+async def close_all_anthropic_clients() -> None:
+    """Close all cached Anthropic clients and empty the cache."""
+
+    clients: list[Any] = []
+    clients.extend(_anthropic_client_cache.values())
+    _anthropic_client_cache.clear()
+    for client in clients:
+        await client.close()
+
+
+def _reset_anthropic_client_cache() -> None:
+    """Clear the cache without closing clients. For tests only."""
+
+    _anthropic_client_cache.clear()
 
 
 def anthropic_sdk_base_url(provider: ProviderConfig) -> str:

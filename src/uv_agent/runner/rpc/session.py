@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from uv_agent.runner.run_log import EventWriter
 from uv_agent.time import utc_now_iso
@@ -30,7 +30,7 @@ class RunSession:
         thread_id: str | None,
         turn_id: str | None,
         cwd: Path,
-        structured_events: list[dict[str, Any]],
+        on_structured_event: Callable[[dict[str, Any]], None],
         writer: EventWriter,
     ) -> None:
         self.token = token
@@ -40,7 +40,7 @@ class RunSession:
             turn_id=turn_id,
             cwd=cwd,
         )
-        self._structured_events = structured_events
+        self._on_structured_event = on_structured_event
         self._writer = writer
         self._lock = threading.RLock()
         self.closed = False
@@ -60,7 +60,7 @@ class RunSession:
         with self._lock:
             if self.closed:
                 raise RuntimeError("Run session is closed")
-            self._structured_events.append(event_copy)
+            self._on_structured_event(event_copy)
             self._writer.write(
                 {
                     "type": "run.event",

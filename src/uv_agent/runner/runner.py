@@ -133,7 +133,7 @@ class PythonRunner:
             thread_id=request.thread_id,
             turn_id=request.turn_id,
             cwd=run_cwd,
-            structured_events=capture.structured_events,
+            on_structured_event=capture.append_structured_event,
             writer=writer,
         )
         env["UV_AGENT_RPC_URL"] = self.rpc_server.url
