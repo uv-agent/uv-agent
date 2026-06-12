@@ -378,6 +378,22 @@ def test_live_region_keeps_blank_separator_between_cells_and_composer() -> None:
     assert plain[1].strip() == ""
     assert plain[-1].startswith("╰")
 
+def test_live_region_packs_cells_within_turn_before_composer() -> None:
+    state = Tui2State(composer="hi")
+    state.live.append(TranscriptCell("reasoning", text="thinking"))
+    state.live.append(TranscriptCell("tool", call={"name": "run_python"}, payload={"returncode": 0}))
+    state.live.append(TranscriptCell("assistant", text="done"))
+    lines, _, _ = render_live_with_cursor(state, 60, 0)
+    plain = [strip_ansi(line) for line in lines]
+
+    # Cells inside a turn are packed together; only the chrome gap is blank.
+    assert plain[0].startswith("·")
+    assert plain[1].startswith("✓")
+    assert plain[2].startswith("✦")
+    assert plain[3].strip() == ""
+    assert plain[-1].startswith("╰")
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -717,25 +733,29 @@ def test_flush_cell_separates_turn_boundaries_with_blank_line() -> None:
     assert again_index - hi_index == 2  # hi, blank, again
 
 
-def test_flush_cell_separates_all_cells_with_blank_rows() -> None:
+def test_flush_cell_packs_cells_within_turn_and_blanks_between_turns() -> None:
     output = io.StringIO()
     renderer = Renderer(output=output)
     renderer.flush_cell(TranscriptCell("user", text="hi"))
     renderer.flush_cell(TranscriptCell("reasoning", text="thinking"))
     renderer.flush_cell(TranscriptCell("tool", call={"name": "run_python"}, payload={"returncode": 0}))
     renderer.flush_cell(TranscriptCell("assistant", text="done"))
+    renderer.flush_cell(TranscriptCell("user", text="next"))
     rendered = output.getvalue()
 
-    # Split into visual lines and verify every cell is separated by a blank row.
     body = rendered[: -len("[?7h[?2026l")]
     lines = [strip_ansi(line).replace("\r", "").rstrip() for line in body.split("\r\n")]
     non_empty = [line for line in lines if line.strip()]
 
-    # user, reasoning, tool, assistant -> four content lines, each separated by a blank.
-    assert non_empty == ["› hi", "· thinking", "✓ run_python", "✦ done"]
-    # There should be blank rows between every pair of content rows.
+    # user, reasoning, tool, assistant are compact within one turn.
+    assert non_empty == ["› hi", "· thinking", "✓ run_python", "✦ done", "› next"]
     indices = [lines.index(row) for row in non_empty]
-    assert all(indices[i + 1] - indices[i] == 2 for i in range(len(indices) - 1))
+    # Within the turn cells are adjacent (no blank rows).
+    assert indices[1] - indices[0] == 1
+    assert indices[2] - indices[1] == 1
+    assert indices[3] - indices[2] == 1
+    # A blank row separates the assistant from the next user turn.
+    assert indices[4] - indices[3] == 2
 
 
 def test_flush_cell_only_uses_crlf_separators() -> None:

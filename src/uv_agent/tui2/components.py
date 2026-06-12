@@ -1162,9 +1162,6 @@ def render_live_with_cursor(
     cell_lines: list[str] = []
     for cell in state.live:
         cell_lines.extend(render_cell(cell, width, theme, spinner_frame=spinner_frame))
-        cell_lines.append("")
-    # A blank row after every cell keeps spacing stable between cells and between
-    # the last cell and the bottom chrome (status/palette/composer).
     status_lines = render_status_lines(state, width, spinner_frame, theme)
     composer_lines, row, col = render_composer_with_cursor(
         state.composer,
@@ -1188,6 +1185,8 @@ def render_live_with_cursor(
     if max_height is not None and cell_lines:
         gaps = sum(1 for group in (status_lines, palette_lines) if group)
         reserved = len(composer_lines) + len(status_lines) + len(palette_lines) + gaps
+        if cell_lines:
+            reserved += 1
         available = max(1, max_height - reserved)
         if len(cell_lines) > available:
             dropped = len(cell_lines) - available + 1
@@ -1195,6 +1194,8 @@ def render_live_with_cursor(
             cell_lines = [marker] + cell_lines[dropped:]
 
     lines: list[str] = list(cell_lines)
+    if lines:
+        lines.append("")
     if status_lines:
         lines.extend(status_lines)
     if palette_lines:
