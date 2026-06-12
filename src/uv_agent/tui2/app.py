@@ -227,6 +227,7 @@ class ThreadRunState:
     status_message: str = "running"
     last_error: str | None = None
     terminal_status: str = "working"
+    user_cell: TranscriptCell | None = None
     assistant_cell: TranscriptCell | None = None
     reasoning_cell: TranscriptCell | None = None
     reasoning_flushed_for_current_response: bool = False
@@ -257,6 +258,11 @@ class ThreadRunState:
         return bool(self.assistant_display_queue or self.pending_finish_after_drain)
 
     def reset_for_turn(self) -> None:
+        self.user_cell = None
+        self.assistant_cell = None
+        self.reasoning_cell = None
+        self.reasoning_flushed_for_current_response = False
+        self.tool_cells = {}
         self.rate_estimator = StreamRateEstimator()
         self.observed_tool_call_name_keys.clear()
         self.assistant_display_queue = ""
@@ -726,6 +732,7 @@ class AnsiUvAgentApp:
             else self._inactive_run_status_message(run_state)
         )
         self.state.last_error = run_state.last_error
+        self._user_cell = run_state.user_cell
         self._assistant_cell = run_state.assistant_cell
         self._reasoning_cell = run_state.reasoning_cell
         self._reasoning_flushed_for_current_response = run_state.reasoning_flushed_for_current_response
@@ -739,6 +746,22 @@ class AnsiUvAgentApp:
             self.state.turn_elapsed_s = now - run_state.started_at
         else:
             self.state.turn_elapsed_s = None
+
+    def _sync_attached_run_state_for_repaint(self) -> None:
+        """Refresh busy/status row state immediately before repainting.
+
+        The activity row is rendered from ``Tui2State.busy``.  Keeping that flag
+        in sync on ticker frames prevents a running or draining turn from
+        briefly repainting with only the context row when event timing changes.
+        """
+
+        run_state = self._run_state()
+        if run_state is None:
+            if self.state.busy:
+                self._sync_attached_run_state(None)
+            return
+        if self.state.busy or self._run_state_busy_for_ui(run_state):
+            self._sync_attached_run_state(run_state)
 
     def _detach_live_run_state(self) -> None:
         run_state = self._run_state()
@@ -755,6 +778,7 @@ class AnsiUvAgentApp:
         run_state = run_state or self._run_state()
         if run_state is None:
             return
+        run_state.user_cell = self._user_cell
         run_state.assistant_cell = self._assistant_cell
         run_state.reasoning_cell = self._reasoning_cell
         run_state.reasoning_flushed_for_current_response = self._reasoning_flushed_for_current_response
@@ -810,6 +834,8 @@ class AnsiUvAgentApp:
             confirmation_expired = self._expire_quit_confirmation()
             confirmation_expired = self._expire_interrupt_confirmation() or confirmation_expired
             animation_updated = self._advance_streaming_display()
+            if self.state.mode != "agent_view":
+                self._sync_attached_run_state_for_repaint()
             if self.state.mode == "agent_view":
                 self._spinner_index += 1
                 self.renderer.spinner_frame = self._spinner_index
@@ -2852,17 +2878,25 @@ class AnsiUvAgentApp:
         self.state.live.clear()
         run_state = self._run_state(thread_id)
         if run_state is not None and self._run_state_busy_for_ui(run_state):
+            self._user_cell = run_state.user_cell
             self._assistant_cell = run_state.assistant_cell
             self._reasoning_cell = run_state.reasoning_cell
             self._reasoning_flushed_for_current_response = run_state.reasoning_flushed_for_current_response
             self._tool_cells = run_state.tool_cells
+            live_candidates = [
+                self._user_cell,
+                self._reasoning_cell,
+                self._assistant_cell,
+                *self._tool_cells.values(),
+            ]
             self.state.live = [
                 cell
-                for cell in [self._reasoning_cell, self._assistant_cell, *self._tool_cells.values()]
-                if cell is not None and not cell.done
+                for cell in live_candidates
+                if cell is not None and (cell is self._user_cell or not cell.done)
             ]
         else:
             self._tool_cells.clear()
+            self._user_cell = None
             self._assistant_cell = None
             self._reasoning_cell = None
             self._reasoning_flushed_for_current_response = False
@@ -3093,6 +3127,7 @@ class AnsiUvAgentApp:
         self.state.live.append(self._user_cell)
         run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
         run_state.reset_for_turn()
+        run_state.user_cell = self._user_cell
         run_state.token_ratio = self._token_ratio_for_thread(thread_id)
         run_state.cancel_event = asyncio.Event()
         run_state.started_at = monotonic()
@@ -3738,6 +3773,9 @@ class AnsiUvAgentApp:
             self._flush(user_cell)
         if cell in self.state.live:
             self.state.live.remove(cell)
+        run_state = self._run_state()
+        if run_state is not None and run_state.user_cell is cell:
+            run_state.user_cell = None
         cell.status = "done" if cell.status in {"running", "streaming"} else cell.status
         cell.finished_at = cell.finished_at or monotonic()
         self.renderer.flush_cell(cell)

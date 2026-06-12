@@ -1652,6 +1652,29 @@ def test_token_rate_display_smoothing_throttles_row1_updates(monkeypatch) -> Non
     assert 10.0 < displayed < 50.0
 
 
+def test_repaint_sync_restores_activity_row_for_active_run_state(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.thread_id = "T-test"
+    run_state = ThreadRunState(thread_id="T-test")
+    run_state.started_at = tui2_app.monotonic() - 3.0
+
+    class RunningTask:
+        def done(self):
+            return False
+
+    run_state.task = RunningTask()  # type: ignore[assignment]
+    app._thread_runs["T-test"] = run_state
+    app.state.busy = False
+    app.state.status_message = "ready"
+
+    app._sync_attached_run_state_for_repaint()
+
+    assert app.state.busy
+    plain = "\n".join(strip_ansi(line) for line in render_status_lines(app.state, 80, 0))
+    assert app._text("working") in plain
+    assert "3s" in plain
+
+
 def test_token_rate_freezes_for_tool_execution_and_resumes_on_stream(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.state.thread_id = "T-test"
@@ -2574,6 +2597,7 @@ def test_start_turn_keeps_user_cell_in_live_until_flushed(monkeypatch) -> None:
         assert app._user_cell is not None
         assert app._user_cell.kind == "user"
         assert app._user_cell in app.state.live
+        assert app._run_state().user_cell is app._user_cell
         assert not app.state.flushed
         # Simulate the model starting to respond; the user cell should be flushed
         # before the reasoning cell so scrollback order matches the live region.
@@ -2584,6 +2608,30 @@ def test_start_turn_keeps_user_cell_in_live_until_flushed(monkeypatch) -> None:
 
     asyncio.run(run_turn())
 
+
+
+def test_resume_thread_restores_live_user_cell_before_first_response(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [{"thread_id": "thr_active", "title": "Active"}]
+    run_state = ThreadRunState(thread_id="thr_active")
+    run_state.user_cell = TranscriptCell("user", text="hello")
+
+    class RunningTask:
+        def done(self):
+            return False
+
+    run_state.task = RunningTask()  # type: ignore[assignment]
+    app._thread_runs["thr_active"] = run_state
+
+    app._resume_thread("thr_active")
+
+    assert app._user_cell is run_state.user_cell
+    assert app.state.live[:1] == [run_state.user_cell]
+    plain_lines = [strip_ansi(line) for line in render_live_with_cursor(app.state, 80, 0)[0]]
+    user_idx = next(i for i, line in enumerate(plain_lines) if line.startswith("› hello"))
+    activity_idx = next(i for i, line in enumerate(plain_lines) if app._text("working") in line)
+    assert activity_idx - user_idx == 2
+    assert plain_lines[user_idx + 1].strip() == ""
 
 
 def test_resuming_thread_restores_persisted_level(monkeypatch) -> None:
