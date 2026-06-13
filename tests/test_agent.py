@@ -3701,7 +3701,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'level="small"' not in prompt
     assert "pathlib" in turn_context
     assert "这些 mentions 只是纯文本提示" in prompt
-    assert "在 run_python 中使用 file helpers 或 Python 标准库 API 检查它" in prompt
+    assert "在 run_python 中使用对应 runtime helper 检查它" in prompt
     assert "read_text, write_text" not in prompt
     assert "list_files" not in prompt
     assert "run_command/check_command" not in prompt

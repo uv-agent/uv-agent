@@ -721,8 +721,8 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 
 <mentions>
 <rule>用户文本可能包含 @file、@thread:id、@mcp:name 或 @skill:name references。这些 mentions 只是纯文本提示，不会自动 attach、load、connect 或 call 任何东西。</rule>
-<rule>当提到的文件重要时，在 run_python 中使用 file helpers 或 Python 标准库 API 检查它。当提到的 thread 重要时，先用 list_thread_digests 找线程，再用 thread_view 看对话；需要工具/运行细节时用 thread_detail 按 id 或 turn_id 展开。</rule>
-<rule>当提到的 skill 重要时，从 available skills context 读取它的 SKILL.md。当提到的 MCP server 重要时，通过 Python 使用 uv_agent_runtime MCP helpers。</rule>
+<rule>当文件被提及时，在 run_python 中使用对应 runtime helper 检查它；当 thread 被提及时，使用 runtime thread helpers 查看相关历史。</rule>
+<rule>当 skill 被提及时，从 available skills context 读取它的 SKILL.md；当 MCP server 被提及时，通过 Python 使用 runtime MCP helpers。</rule>
 </mentions>
 
 <context_updates>
