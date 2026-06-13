@@ -125,7 +125,11 @@ def render_markdown(text: str, width: int) -> list[str]:
 # animation frame ("...") so padding the suffix to this width keeps the body
 # column-stable and removes the per-frame jitter the user observed.
 _REASONING_SUFFIX_WIDTH = 3
-_BREATHING_DOTS = ("·", "•", "●", "•")
+# Reasoning is rendered as a subordinate line marked by a thin vertical rail.
+# The rail pulses between a light and heavy bar while streaming; both frames are
+# one column wide so the plain width stays constant and the line never jitters.
+_REASONING_RAIL_FRAMES = ("┊", "┊", "┃", "┊")
+_REASONING_PREFIX_WIDTH = 2  # rail + " "
 _ASSISTANT_PREFIX_STYLES = ("assistant", "accent", "success", "warning", "accent")
 
 
@@ -136,27 +140,30 @@ def render_reasoning_cell(
     *,
     spinner_frame: int = 0,
 ) -> list[str]:
-    """Compact one-line reasoning view with a non-spinner breathing dot.
+    """Compact one-line reasoning view nested under the preceding action.
 
     The rotating activity spinner is reserved for the terminal title and status
-    row.  Reasoning still gets a tiny first-column pulse so the user can see it
-    is live without duplicating the global spinner animation.
+    row.  Reasoning gets a thin breathing rail instead so the user can see it is
+    live without duplicating the global spinner animation.
     """
 
-    # The breath phase is driven by streamed-character throughput so the dot
+    # The breath phase is driven by streamed-character throughput so the rail
     # paces itself with model output rather than wall-clock spinner ticks.
     breath_frame = _breath_frame(cell)
-    dot = _BREATHING_DOTS[breath_frame % len(_BREATHING_DOTS)] if cell.status == "streaming" else "·"
-    dot_style = theme.reasoning if dot != "●" else theme.reasoning + ";1"
-    prefix = sgr(dot_style, dot + " ")
+    if cell.status == "streaming":
+        rail = _REASONING_RAIL_FRAMES[breath_frame % len(_REASONING_RAIL_FRAMES)]
+    else:
+        rail = _REASONING_RAIL_FRAMES[0]
+    rail_style = theme.reasoning if rail != "┃" else theme.reasoning + ";1"
+    prefix = sgr(rail_style, rail) + " "
     compact_text = " ".join(cell.text.strip().split())
-    plain_width = max(1, width - 2)
+    plain_width = max(1, width - _REASONING_PREFIX_WIDTH)
     if visible_len(compact_text) <= plain_width:
         return [prefix + sgr(theme.dim, compact_text)]
     suffix = "…".ljust(_REASONING_SUFFIX_WIDTH)
     body_width = max(
         1,
-        width - 2 - _REASONING_SUFFIX_WIDTH - 1,  # prefix + " " + suffix
+        width - _REASONING_PREFIX_WIDTH - _REASONING_SUFFIX_WIDTH - 1,  # prefix + " " + suffix
     )
     body = truncate_visible(compact_text, body_width, suffix="")
     body_pad = " " * max(0, body_width - visible_len(body))
@@ -263,13 +270,29 @@ def _tree_indented_lines(text: str, width: int, style: str) -> list[str]:
     return lines
 
 
-def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAULT_THEME) -> list[str]:
-    """Compact tool cell: status, short run id, and optional call chain.
+# Fixed action glyph for managed Python runs.  Run status is conveyed by the
+# glyph colour alone (accent while running, green on success, red on failure),
+# so the shape never changes and the transcript reads as a single calm column.
+_TOOL_GLYPH = "▸"
+# Display name for the single ``run_python`` action surface.  The protocol tool
+# is still called ``run_python``; only the transcript label is shortened.
+_TOOL_DISPLAY_NAMES = {"run_python": "python"}
 
-    Full source, stdout/stderr, and events are intentionally omitted here;
-    use the ``/show <run_id>`` pager to inspect them.  The call chain is kept
-    on the title line when it fits; otherwise it wraps across indented lines
-    without truncating later helper names.
+
+def _tool_display_name(call: dict | None) -> str:
+    name = tool_title(call)
+    return _TOOL_DISPLAY_NAMES.get(name, name)
+
+
+def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAULT_THEME) -> list[str]:
+    """Compact tool cell: action glyph, call chain, then de-emphasised chrome.
+
+    Layout reads ``▸ python  <call chain>  <status> (<run id>)``.  The call
+    chain is the meaningful content, so it sits right after the name; status and
+    run id are dim trailing chrome.  Full source, stdout/stderr, and events are
+    omitted here; use the ``/show <run_id>`` pager to inspect them.  When the
+    inline form does not fit, the chain wraps onto indented tree lines and the
+    chrome stays on the head line without truncating later helper names.
     """
 
     payload = cell.payload or {}
@@ -278,47 +301,62 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
     timed_out = bool(payload.get("timed_out"))
     errored = timed_out or (returncode not in (None, 0) and not running)
     if running:
-        glyph = "⠿"
-        status = f"running · {format_elapsed(cell.elapsed_s)}"
-        glyph_style = theme.border_accent
+        glyph_style = theme.accent
     elif errored:
-        glyph = "✗"
-        status = "timeout" if timed_out else f"exit {returncode}"
         glyph_style = theme.error
     else:
-        glyph = "✓"
-        status = ""
         glyph_style = theme.success
+
+    name = sgr(glyph_style, _TOOL_GLYPH) + " " + sgr(theme.tool_title, _tool_display_name(cell.call))
+    name_plain_len = visible_len(_TOOL_GLYPH) + 1 + visible_len(_tool_display_name(cell.call))
+
+    # Trailing chrome: run status then short run id, both de-emphasised.
+    chrome_ansi = ""
+    chrome_plain = ""
+    if running:
+        status = f"running · {format_elapsed(cell.elapsed_s)}"
+        chrome_ansi = sgr(theme.muted, status)
+        chrome_plain = status
+    elif errored:
+        status = "timeout" if timed_out else f"exit {returncode}"
+        chrome_ansi = sgr(theme.error, status)
+        chrome_plain = status
     run_id = str(payload.get("run_id") or (cell.call or {}).get("call_id") or "")
     run_id_short = run_id[-6:] if run_id else ""
-
-    title = sgr(glyph_style, glyph) + " " + sgr(theme.tool_title, tool_title(cell.call))
-    if status:
-        title += sgr(theme.muted, " · " + status)
     if run_id_short and not running:
-        title += sgr(theme.muted, " · " + run_id_short)
+        run_id_text = f"({run_id_short})"
+        if chrome_plain:
+            chrome_ansi += " " + sgr(theme.dim, run_id_text)
+            chrome_plain += " " + run_id_text
+        else:
+            chrome_ansi = sgr(theme.dim, run_id_text)
+            chrome_plain = run_id_text
 
     chains = _tool_cell_import_chains(cell)
     chain_text = " · ".join(format_import_anchor_chains(chains)) if chains else ""
 
-    title_plain_len = visible_len(strip_ansi(title))
+    # Head line carries the chrome and is used for both the inline and wrapped
+    # layouts; only the chain placement differs between them.
+    head_ansi = name + ("  " + chrome_ansi if chrome_plain else "")
+    head_plain_len = name_plain_len + (2 + visible_len(chrome_plain) if chrome_plain else 0)
+
     lines: list[str] = []
-    if title_plain_len > width:
-        lines.append(truncate_visible(title, width))
-        if chain_text:
-            lines.extend(_tree_indented_lines(chain_text, width, theme.muted))
+
+    inline_plain_len = head_plain_len + (2 + visible_len(chain_text) if chain_text else 0)
+    if chain_text and inline_plain_len <= width:
+        chain_segment = sgr(theme.muted, chain_text)
+        if chrome_plain:
+            lines.append(name + "  " + chain_segment + "  " + chrome_ansi)
+        else:
+            lines.append(name + "  " + chain_segment)
         return lines
 
+    if head_plain_len > width:
+        lines.append(truncate_visible(head_ansi, width))
+    else:
+        lines.append(head_ansi)
     if chain_text:
-        inline = " · " + chain_text
-        if title_plain_len + visible_len(inline) <= width:
-            lines.append(title + sgr(theme.muted, inline))
-            return lines
-        lines.append(title)
         lines.extend(_tree_indented_lines(chain_text, width, theme.muted))
-        return lines
-
-    lines.append(title)
     return lines
 
 

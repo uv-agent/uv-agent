@@ -76,7 +76,9 @@ def test_reasoning_cell_is_single_line_and_flattens_newlines() -> None:
 
 def test_reasoning_cell_uses_breathing_dot_not_spinner_frames() -> None:
     # The breath phase advances with streamed characters (target 12 phases
-    # per 100 chars), not with the global spinner frame.
+    # per 100 chars), not with the global spinner frame.  Reasoning is nested
+    # under the preceding action via a two-space indent and a thin rail that
+    # pulses between a light and heavy bar.
     early = TranscriptCell("reasoning", text="thinking", status="streaming", chars_streamed=0)
     later = TranscriptCell("reasoning", text="thinking", status="streaming", chars_streamed=16)
 
@@ -84,8 +86,8 @@ def test_reasoning_cell_uses_breathing_dot_not_spinner_frames() -> None:
     second = strip_ansi(render_cell(later, 50, spinner_frame=10)[0])
 
     assert "⠋" not in first and "⠙" not in second
-    assert first.startswith("· ")
-    assert second.startswith("● ")
+    assert first.startswith("┊ ")
+    assert second.startswith("┃ ")
 
 
 def test_reasoning_animation_keeps_total_width_constant() -> None:
@@ -124,7 +126,8 @@ def test_tool_cell_has_no_rule_and_tree_indented_chains() -> None:
 
     # No horizontal rule on the title line.
     assert not plain_lines[0].startswith("── ")
-    assert "✓" in plain_lines[0] and "run_python" in plain_lines[0]
+    assert "▸" in plain_lines[0] and "python" in plain_lines[0]
+    assert "run_python" not in plain_lines[0]
     assert "run_process_text([])" not in plain
     # Success omits exit code; run id is shortened to the last 6 characters.
     assert "exit 0" not in plain
@@ -273,7 +276,7 @@ def test_running_tool_cell_uses_spinner_glyph() -> None:
     lines = render_tool_cell(cell, 60)
 
     header = strip_ansi(lines[0])
-    assert "⠿" in header
+    assert "▸" in header
     assert "running" in header
 
 
@@ -292,7 +295,7 @@ def test_running_tool_cell_has_no_rule_and_constant_height() -> None:
     assert len(completed) == 1
     assert not strip_ansi(running[0]).startswith("── ")
     assert not strip_ansi(completed[0]).startswith("── ")
-    assert "⠿" in strip_ansi(running[0])
+    assert "▸" in strip_ansi(running[0])
     assert "running" in strip_ansi(running[0])
     assert "exit 0" not in strip_ansi(completed[0])
 
@@ -363,7 +366,7 @@ def test_tool_cell_wraps_chain_when_narrow() -> None:
     plain = [strip_ansi(line) for line in lines]
 
     assert len(lines) == 2
-    assert "✓" in plain[0]
+    assert "▸" in plain[0]
     assert "└─" in plain[1]
     assert "path_info" in plain[1]
 
@@ -419,7 +422,7 @@ def test_live_region_keeps_blank_separator_between_cells_and_composer() -> None:
     lines, _, _ = render_live_with_cursor(state, 60, 0)
     plain = [strip_ansi(line) for line in lines]
 
-    assert plain[0].startswith("·")
+    assert plain[0].startswith("┊")
     assert plain[1].strip() == ""
     assert plain[-1].startswith("╰")
 
@@ -433,8 +436,8 @@ def test_live_region_separates_middle_from_assistant_before_composer() -> None:
 
     # Reasoning and tool are compact; tool and assistant are separated; exactly
     # one blank row separates the cell block from the composer.
-    assert plain[0].startswith("·")
-    assert plain[1].startswith("✓")
+    assert plain[0].startswith("┊")
+    assert plain[1].startswith("▸")
     assert plain[2].strip() == ""
     assert plain[3].startswith("✦")
     assert plain[4].strip() == ""
@@ -857,7 +860,7 @@ def test_flush_cell_separates_user_from_middle_process_and_turns() -> None:
     lines = [strip_ansi(line).replace("\r", "").rstrip() for line in body.split("\r\n")]
     non_empty = [line for line in lines if line.strip()]
 
-    assert non_empty == ["› hi", "· thinking", "✓ run_python", "✦ done", "› next"]
+    assert non_empty == ["› hi", "┊ thinking", "▸ python", "✦ done", "› next"]
     indices = [lines.index(row) for row in non_empty]
     # User message is separated from the following reasoning/tool chain.
     assert indices[1] - indices[0] == 2
