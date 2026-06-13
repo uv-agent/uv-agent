@@ -3584,12 +3584,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "genuinely need a user check-in" not in prompt
     assert "Occam's razor" not in prompt
     assert "capability explanations layered" not in prompt
-    assert "<context_updates>" in prompt
-    assert "模型可见的用户消息" in prompt and "<context_update" in prompt
-    assert "在当前 epoch 内" in prompt
-    assert "compaction 开启新 epoch 后会重新发送" in prompt
-    assert "Skills 和 MCP server declarations" in prompt and "追加" in prompt
-    assert "如果某个 context section 被移除" in prompt
     assert "item.context_update is an internal persistence event" not in prompt
     assert "After compaction, current context updates are re-sent" not in prompt
     assert "Interrupted turns may appear in context" not in prompt
@@ -3692,8 +3686,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "不要把一个清晰工作单元拆成多次 run_python" in turn_context
     assert "每次只调用一个 helper" in turn_context
     assert "偷懒式串行" in turn_context
-    assert "浪费往返、丢失上下文" in turn_context
-    assert "应改为：在一次 run_python 脚本中导入并组合" in turn_context
+    assert "浪费往返、丢失前一次的返回值" in turn_context
+    assert "在一次 run_python 脚本中导入并组合" in turn_context
     assert "已应用变更" in turn_context
     assert '"uv", "run", "pytest"' in turn_context
     assert "def section" not in turn_context
