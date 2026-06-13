@@ -705,6 +705,47 @@ def test_tall_render_area_caps_to_viewport() -> None:
     assert cursor_row < len(capped)
 
 
+def test_live_region_separates_live_user_from_previous_flushed_turn() -> None:
+    state = Tui2State(composer="hi")
+    state.flushed.append(TranscriptCell("assistant", text="previous answer"))
+    state.live.append(TranscriptCell("user", text="next question"))
+
+    lines, _, _ = render_live_with_cursor(state, 80, 0)
+    plain = [strip_ansi(line) for line in lines]
+
+    assert plain[0].strip() == ""
+    assert plain[1].startswith("› next question")
+    assert plain[2].strip() == ""
+    assert plain[3].startswith("╭")
+
+
+def test_live_region_separates_flushed_tool_from_status_when_no_live_cells() -> None:
+    state = Tui2State(busy=True, turn_elapsed_s=3.0, composer="hi")
+    state.flushed.append(TranscriptCell("tool", call={"name": "run_python"}, payload={"returncode": 0}))
+
+    lines, _, _ = render_live_with_cursor(state, 80, 0)
+    plain = [strip_ansi(line) for line in lines]
+
+    assert plain[0].strip() == ""
+    assert "Working" in plain[1]
+    assert plain[2].startswith("╭")
+
+
+def test_live_region_separates_live_assistant_from_flushed_middle_and_status() -> None:
+    state = Tui2State(busy=True, turn_elapsed_s=3.0, composer="hi")
+    state.flushed.append(TranscriptCell("tool", call={"name": "run_python"}, payload={"returncode": 0}))
+    state.live.append(TranscriptCell("assistant", text="final answer"))
+
+    lines, _, _ = render_live_with_cursor(state, 80, 0)
+    plain = [strip_ansi(line) for line in lines]
+
+    assert plain[0].strip() == ""
+    assert plain[1].startswith("✦ final answer")
+    assert plain[2].strip() == ""
+    assert "Working" in plain[3]
+    assert plain[4].startswith("╭")
+
+
 def test_live_region_keeps_two_status_rows_together_below_cell_gap() -> None:
     state = Tui2State(
         busy=True,

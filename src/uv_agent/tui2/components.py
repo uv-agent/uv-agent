@@ -1225,12 +1225,13 @@ def render_live_with_cursor(
         )
 
     cell_lines: list[str] = []
-    last_kind: str | None = None
+    last_kind: str | None = state.flushed[-1].kind if state.flushed else None
     for cell in state.live:
-        if cell_lines and _needs_gap_between_cells(last_kind, cell.kind):
+        if _needs_gap_between_cells(last_kind, cell.kind) and (not cell_lines or cell_lines[-1].strip()):
             cell_lines.append("")
         cell_lines.extend(render_cell(cell, width, theme, spinner_frame=spinner_frame))
         last_kind = cell.kind
+    transcript_before_chrome = bool(state.flushed or state.live)
     status_lines = render_status_lines(state, width, spinner_frame, theme)
     composer_lines, row, col = render_composer_with_cursor(
         state.composer,
@@ -1252,8 +1253,10 @@ def render_live_with_cursor(
     )
 
     if max_height is not None and cell_lines:
-        # Reserve one row for the stable blank between cells and chrome.
-        reserved = len(composer_lines) + len(status_lines) + len(palette_lines) + 1
+        # Reserve the transcript/chrome separator whenever a transcript cell is
+        # visible either in this live frame or immediately above it in scrollback.
+        chrome_gap_rows = 1 if transcript_before_chrome else 0
+        reserved = len(composer_lines) + len(status_lines) + len(palette_lines) + chrome_gap_rows
         available = max(1, max_height - reserved)
         if len(cell_lines) > available:
             dropped = len(cell_lines) - available + 1
@@ -1261,11 +1264,12 @@ def render_live_with_cursor(
             cell_lines = [marker] + cell_lines[dropped:]
 
     lines: list[str] = list(cell_lines)
-    # Keep exactly one blank row between the cell block and the bottom chrome as
-    # a whole.  Status rows belong to the same chrome strip, so row1 (activity)
-    # and row2 (context) must stay adjacent; inserting the blank between them
-    # makes the status bar look split and was the source of row1/row2 jitter.
-    if cell_lines and (not lines or lines[-1].strip()):
+    # Keep exactly one blank row between the transcript and the bottom chrome as
+    # a whole.  The nearest transcript row may already be in terminal scrollback
+    # (for example, a just-flushed tool or previous assistant response), so this
+    # cannot depend only on ``state.live``.  Status rows remain adjacent because
+    # row1/row2 are one chrome strip, not separate transcript cells.
+    if transcript_before_chrome and (not lines or lines[-1].strip()):
         lines.append("")
     lines.extend(status_lines)
     if palette_lines:
