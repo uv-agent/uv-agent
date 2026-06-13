@@ -132,19 +132,22 @@ def save_clipboard_image(target_dir: Path):
 
 HELP_TEXT = (
     "Commands:\n"
-    "  /help              show this help\n"
-    "  /agents            open Agent View dashboard (normal/input/help modes)\n"
-    "  /bg                add the current thread to Agent View\n"
     "  /clear             clear view and start a new thread\n"
     "  /threads           choose a thread to resume\n"
+    "  /status            show model/context/thread status\n"
     "  /skills            list skills and insert @skill mentions\n"
     "  /mcp               list MCP servers and insert @mcp mentions\n"
     "  /image             attach clipboard image as [Image #N]\n"
+    "  /show              show full run script and output\n"
     "  /level <name>      switch model level\n"
-    "  /title <text>      rename the current thread\n"
     "  /goal <op>         enable | disable | reset | status\n"
+    "  /agents            open Agent View dashboard (normal/input/help modes)\n"
+    "  /bg                add the current thread to Agent View\n"
     "  /cancel            interrupt the running turn\n"
+    "  /model <name>      alias for /level\n"
+    "  /title <text>      rename the current thread\n"
     "  /quit              exit the TUI\n"
+    "  /help              show this help\n"
     "\n"
     "Keys: Enter send/select · Ctrl+Enter newline · / command palette · @ mentions · ↑/↓ history\n"
     "      Ctrl+A Agent View · Ctrl+E line end · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt\n"
@@ -155,22 +158,22 @@ HELP_TEXT = (
 # Values ending in a space accept more input; the command palette keeps them in
 # the composer instead of submitting immediately.
 TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
-    CommandSuggestion("/help", "show help"),
-    CommandSuggestion("/agents", "open Agent View dashboard"),
-    CommandSuggestion("/bg", "add current thread to Agent View"),
     CommandSuggestion("/clear", "clear view and start a new thread"),
     CommandSuggestion("/threads", "choose a thread to resume"),
     CommandSuggestion("/status", "show model/context/thread status"),
-    CommandSuggestion("/show ", "show full run script and output"),
     CommandSuggestion("/skills", "list skills and insert @skill mentions"),
     CommandSuggestion("/mcp", "list MCP servers and insert @mcp mentions"),
     CommandSuggestion("/image", "attach clipboard image as [Image #N]"),
+    CommandSuggestion("/show ", "show full run script and output"),
     CommandSuggestion("/level ", "switch model level"),
+    CommandSuggestion("/goal ", "goal-mode subcommands"),
+    CommandSuggestion("/agents", "open Agent View dashboard"),
+    CommandSuggestion("/bg", "add current thread to Agent View"),
+    CommandSuggestion("/cancel", "interrupt the running turn"),
     CommandSuggestion("/model ", "alias for /level"),
     CommandSuggestion("/title ", "rename current thread"),
-    CommandSuggestion("/goal ", "goal-mode subcommands"),
-    CommandSuggestion("/cancel", "interrupt the running turn"),
     CommandSuggestion("/quit", "exit the TUI"),
+    CommandSuggestion("/help", "show help"),
 )
 
 GOAL_COMMANDS: tuple[CommandSuggestion, ...] = (
@@ -2106,7 +2109,7 @@ class AnsiUvAgentApp:
             pool = self._level_command_suggestions("/model") if query != "/model" else TOP_LEVEL_COMMANDS
         else:
             pool = TOP_LEVEL_COMMANDS
-        return [item for item in pool if item.value.lower().startswith(query)][:12]
+        return [item for item in pool if item.value.lower().startswith(query)]
 
     def _level_command_suggestions(self, command: str) -> tuple[CommandSuggestion, ...]:
         levels = sorted(getattr(self.engine.config, "levels", {}).keys())
