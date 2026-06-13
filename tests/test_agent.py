@@ -3688,6 +3688,12 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "未找到目标" in turn_context
     assert "anchor 不匹配" in turn_context
     assert "edit_lines(" in turn_context
+    assert '<example name="anti-pattern-one-helper-per-call">' in turn_context
+    assert "不要把一个清晰工作单元拆成多次 run_python" in turn_context
+    assert "每次只调用一个 helper" in turn_context
+    assert "偷懒式串行" in turn_context
+    assert "浪费往返、丢失上下文" in turn_context
+    assert "应改为：在一次 run_python 脚本中导入并组合" in turn_context
     assert "已应用变更" in turn_context
     assert '"uv", "run", "pytest"' in turn_context
     assert "def section" not in turn_context

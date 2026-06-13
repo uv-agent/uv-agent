@@ -884,6 +884,26 @@ for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py
         print("!!! 测试失败 – 请检查上述变更")
 ```
 </example>
+<example name="anti-pattern-one-helper-per-call">
+反例 — 不要把一个清晰工作单元拆成多次 run_python，每次只调用一个 helper。下面这种“偷懒式串行”会浪费往返、丢失上下文，也让后续步骤无法在同一个 Python 脚本里根据结果分支。
+```python
+# ❌ 不推荐：第一轮只搜索，然后停下来等下一轮。
+from uv_agent_runtime import search_text
+hits = search_text("handle_login", file_types=["py"], literal=True, max_total=10)
+print(hits)
+
+# ❌ 不推荐：第二轮才读取文件。
+from uv_agent_runtime import read_file
+print(read_file("src/auth/handlers.py", around="handle_login", context=30).text)
+
+# ❌ 不推荐：第三轮才验证或继续搜索。
+from uv_agent_runtime import run_process_text
+print(run_process_text(["uv", "run", "pytest", "tests/test_auth.py", "-q"], timeout_s=60).stdout)
+
+# ✅ 应改为：在一次 run_python 脚本中导入并组合 search_text/read_file/find_files/
+# run_process_text 等 helpers，用循环、条件和数据结构衔接结果，最后输出摘要。
+```
+</example>
 <helper_selection>
 <rule>列出的 helpers 是普通 Python 函数，可在同一脚本中与标准库代码和控制流组合使用；在脚本内用 pathlib、os、json 等模块做衔接逻辑；适合时优先使用 helpers，尤其是处理仓库文本的 file/edit helpers，因为它们会保留 newline style、BOM、final newline、line counts 和行范围视图等元数据。</rule>
 <rule>按任务选择：workflow=独立/长时间运行的模型任务图；discovery=find_files/search_text/find_symbols/query_code（search_text 默认 regex；精确代码字符串用 literal=True；路径 pattern 用 globs，rg type aliases 用 file_types）；reading=read_file；edit=用 replace_text 替换唯一小段文本，用 edit_lines 处理 anchored ranges/inserts；完整文件或生成的内容用 write_file；thread history=list_thread_digests/thread_view/thread_detail；dependencies=import 前使用 add_dependency。</rule>
