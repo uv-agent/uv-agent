@@ -169,6 +169,8 @@ def test_tool_cell_uses_payload_helper_calls_without_source() -> None:
     plain = "\n".join(strip_ansi(line) for line in render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 80))
 
     assert "replace_text" in plain
+    assert '"a.txt"' not in plain
+    assert "old" not in plain
     assert "print(1)" not in plain
     assert "exit 0" not in plain
     assert len([line for line in plain.splitlines() if line.strip()]) == 1

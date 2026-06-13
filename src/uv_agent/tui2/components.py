@@ -402,10 +402,18 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
 
 
 def _tool_cell_helper_label(helper: dict[str, object]) -> str:
-    label = format_helper_call(helper)
-    if str(helper.get("args") or ""):
-        return label
-    return label.replace("() x", " x") if "() x" in label else label.removesuffix("()")
+    # Tool cells are deliberately compact: helper names/counts communicate the
+    # run's shape, while exact arguments remain available from the saved script
+    # via detail/show commands. Runtime helper summaries also avoid argument
+    # values for safety, so displaying parentheses here adds noise without
+    # adding reliable detail.
+    name = str(helper.get("name") or helper.get("helper") or "helper")
+    count = helper.get("count")
+    try:
+        count_int = int(count)
+    except (TypeError, ValueError):
+        count_int = 1
+    return f"{name} x{count_int}" if count_int > 1 else name
 
 
 def _tool_cell_import_chains(cell: TranscriptCell) -> list[str]:
