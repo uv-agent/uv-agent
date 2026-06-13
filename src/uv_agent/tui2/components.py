@@ -401,15 +401,24 @@ def render_tool_cell(cell: TranscriptCell, width: int, theme: AnsiTheme = DEFAUL
     return lines
 
 
+def _tool_cell_helper_label(helper: dict[str, object]) -> str:
+    label = format_helper_call(helper)
+    if str(helper.get("args") or ""):
+        return label
+    return label.replace("() x", " x") if "() x" in label else label.removesuffix("()")
+
+
 def _tool_cell_import_chains(cell: TranscriptCell) -> list[str]:
     """Extract imported-name anchored call chains from a tool cell."""
 
     payload = cell.payload or {}
     payload_helpers = payload.get("helper_calls")
     if isinstance(payload_helpers, list) and payload_helpers:
-        # Runtime payloads may include aggregate counts; format them directly so
-        # loops display as e.g. ``read_file() x12`` instead of one static AST call.
-        return [format_helper_call(h) for h in payload_helpers if isinstance(h, dict)]
+        # Runtime payloads may include aggregate counts. TUI2 omits empty
+        # parentheses because runtime summaries intentionally do not include
+        # argument values; showing ``read_file x12`` is clearer than
+        # ``read_file() x12``.
+        return [_tool_cell_helper_label(h) for h in payload_helpers if isinstance(h, dict)]
     code = ""
     if cell.call:
         try:

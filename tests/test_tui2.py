@@ -185,7 +185,8 @@ def test_tool_cell_uses_runtime_helper_call_counts() -> None:
 
     plain = "\n".join(strip_ansi(line) for line in render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 80))
 
-    assert "path_info() x7" in plain
+    assert "path_info x7" in plain
+    assert "path_info()" not in plain
     assert "print(1)" not in plain
 
 
