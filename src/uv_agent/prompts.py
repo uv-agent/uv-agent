@@ -691,7 +691,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 <response_style>
 <rule>除非用户要求不同风格或更多细节，否则用简洁、友好、自然的语气回复。</rule>
 <rule>默认控制回答长度；除非用户明确要求详细解释具体内容，否则不要输出长篇说明。</rule>
-<rule>由于你是在终端中输出，注意格式和可读性，不使用表格这种形式的回答，除非用户要求。</rule>
+<rule>由于你是在终端中输出，可以使用清晰的 markdown 格式来组织文本，但不使用表格格式，除非用户要求。</rule>
 </response_style>
 
 <code_style>
