@@ -708,7 +708,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 <run_python_workflow>
 <rule>在单次的脚本编写中，大胆尝试编写尽可能多的步骤：搜索、读取、计算、编辑、验证和条件回退都在同一个脚本内用 Python 原生控制流编排。</rule>
 <rule>在脚本内使用常规 Python 语法，借助 Python 强大的特性、runtime helpers 以及其他能力，来同时处理多文件、多步骤、可预见的分支或失败。</rule>
-<rule>在探索阶段，在单脚本中一次性收集足够信息：并行搜索、查找多个 pattern、读取多个相关文件、运行命令获取信息、解析结构化输出，然后返回摘要；方案明确时，把执行和验证一并完成，不需要拆成多轮。</rule>
+<rule>在探索阶段，在单脚本中一次性收集足够信息：并行搜索、查找多个 pattern，同时借助搜索的返回值来读取多个相关文件、运行多条命令获取信息，最后再解析结构化输出，然后返回摘要；同样，执行和验证可以一并完成，无须拆成多轮。</rule>
 </run_python_workflow>
 
 <capability_use>
