@@ -32,7 +32,6 @@ PYTHON_TOOL = {
         "与外部世界交互时，使用 Python 原生控制流和 import，"
         "而不是 shell 风格片段。"
         "优先使用 runtime helpers，对于普通外部命令，尤其优先使用 run_process_text。"
-        "把它作为检查文件、运行命令、访问网络或执行外部动作的唯一方式。"
     ),
     "parameters": {
         "type": "object",
