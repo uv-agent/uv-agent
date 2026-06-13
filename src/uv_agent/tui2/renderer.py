@@ -173,7 +173,12 @@ class Renderer:
         self.width = self._paint_width(cols)
         max_height = max(3, rows - 1)
         live_lines, _, _ = render_live_with_cursor(
-            state, self.width, self.spinner_frame, max_height=max_height
+            state,
+            self.width,
+            self.spinner_frame,
+            max_height=max_height,
+            preceding_kind=self._last_flushed_kind,
+            has_preceding_transcript=self._last_flushed_kind is not None,
         )
         target_top = max(0, max_height - len(live_lines))
         pad_rows = max(0, target_top - max(0, preceding_rows))
@@ -214,7 +219,12 @@ class Renderer:
         # viewport doesn't force the live region against the very last row.
         max_height = max(3, rows - 1)
         lines, cursor_row, cursor_col = render_live_with_cursor(
-            state, self.width, self.spinner_frame, max_height=max_height
+            state,
+            self.width,
+            self.spinner_frame,
+            max_height=max_height,
+            preceding_kind=self._last_flushed_kind,
+            has_preceding_transcript=self._last_flushed_kind is not None,
         )
 
         self._write("\x1b[?2026h" + self._AUTOWRAP_OFF)

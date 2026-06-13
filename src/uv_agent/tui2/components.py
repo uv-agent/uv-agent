@@ -1196,6 +1196,8 @@ def render_live_with_cursor(
     theme: AnsiTheme = DEFAULT_THEME,
     *,
     max_height: int | None = None,
+    preceding_kind: str | None = None,
+    has_preceding_transcript: bool | None = None,
 ) -> tuple[list[str], int, int]:
     """Render in-flight cells, optional status lines, and the boxed composer.
 
@@ -1224,14 +1226,23 @@ def render_live_with_cursor(
             max_height=max_height,
         )
 
+    # ``state.flushed`` is only a lightweight transcript cache.  The renderer
+    # owns the authoritative terminal scrollback boundary, so it passes the last
+    # flushed kind here on repaint.  Standalone tests/callers still fall back to
+    # the retained state cache.
+    if preceding_kind is None and state.flushed:
+        preceding_kind = state.flushed[-1].kind
+    if has_preceding_transcript is None:
+        has_preceding_transcript = bool(state.flushed or preceding_kind is not None)
+
     cell_lines: list[str] = []
-    last_kind: str | None = state.flushed[-1].kind if state.flushed else None
+    last_kind: str | None = preceding_kind
     for cell in state.live:
         if _needs_gap_between_cells(last_kind, cell.kind) and (not cell_lines or cell_lines[-1].strip()):
             cell_lines.append("")
         cell_lines.extend(render_cell(cell, width, theme, spinner_frame=spinner_frame))
         last_kind = cell.kind
-    transcript_before_chrome = bool(state.flushed or state.live)
+    transcript_before_chrome = bool(has_preceding_transcript or state.live)
     status_lines = render_status_lines(state, width, spinner_frame, theme)
     composer_lines, row, col = render_composer_with_cursor(
         state.composer,

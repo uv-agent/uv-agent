@@ -828,6 +828,21 @@ def test_grown_paint_area_remembers_cursor_for_next_erase() -> None:
     erase = output.getvalue()
     assert f"\x1b[{expected_row}A" in erase
     assert "\x1b[J" in erase
+def _plain_renderer_lines(rendered: str) -> list[str]:
+    cleaned = (
+        strip_ansi(rendered)
+        .replace("\x1b[?2026h", "")
+        .replace("\x1b[?2026l", "")
+        .replace("\x1b[?7l", "")
+        .replace("\x1b[?7h", "")
+    )
+    # ``Renderer._erase_frame`` starts repaints with a carriage return to move
+    # to column zero.  It is cursor movement, not a visible blank row, so strip
+    # only leading CRs before interpreting the remaining CRLF rows.
+    cleaned = cleaned.lstrip("\r")
+    return [line.replace("\r", "").rstrip() for line in cleaned.splitlines()]
+
+
 def test_flush_cell_separates_user_from_middle_process_and_turns() -> None:
     output = io.StringIO()
     renderer = Renderer(output=output)
@@ -852,6 +867,42 @@ def test_flush_cell_separates_user_from_middle_process_and_turns() -> None:
     assert indices[3] - indices[2] == 2
     # A blank row separates the assistant from the next user turn.
     assert indices[4] - indices[3] == 2
+
+
+def test_renderer_repaint_separates_live_user_from_previous_flushed_turn(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer.flush_cell(TranscriptCell("assistant", text="previous answer"))
+    output.seek(0)
+    output.truncate(0)
+
+    state = Tui2State(composer="hi")
+    state.live.append(TranscriptCell("user", text="next question"))
+    renderer.repaint(state)
+    plain = _plain_renderer_lines(output.getvalue())
+
+    assert plain[0].strip() == ""
+    assert plain[1].startswith("› next question")
+    assert plain[2].strip() == ""
+    assert plain[3].startswith("╭")
+
+
+def test_renderer_repaint_separates_just_flushed_tool_from_status(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer.flush_cell(TranscriptCell("tool", call={"name": "run_python"}, payload={"returncode": 0}))
+    output.seek(0)
+    output.truncate(0)
+
+    state = Tui2State(busy=True, turn_elapsed_s=3.0, composer="hi")
+    renderer.repaint(state)
+    plain = _plain_renderer_lines(output.getvalue())
+
+    assert plain[0].strip() == ""
+    assert "Working" in plain[1]
+    assert plain[2].startswith("╭")
 
 
 def test_flush_cell_only_uses_crlf_separators() -> None:
