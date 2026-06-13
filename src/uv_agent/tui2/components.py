@@ -5,8 +5,10 @@ import re
 from io import StringIO
 from pathlib import Path
 
+from rich import box
 from rich.console import Console
-from rich.markdown import Markdown
+from rich.markdown import Markdown, TableElement
+from rich.table import Table
 
 from uv_agent.environment import UserLanguage, normalize_language
 from uv_agent.helper_calls import (
@@ -91,6 +93,44 @@ def _needs_gap_between_cells(last_kind: str | None, current_kind: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+class FoldingTableElement(TableElement):
+    """Rich Markdown table element that wraps cells instead of ellipsizing them.
+
+    Rich's default Markdown table renderer creates columns with
+    ``overflow="ellipsis"``. That keeps tables short, but in a terminal UI it
+    can hide important model output in dense CJK tables. Folding preserves the
+    existing Markdown table look while allowing cells to occupy additional rows.
+    """
+
+    def __rich_console__(self, console, options):
+        table = Table(
+            box=box.SIMPLE,
+            pad_edge=False,
+            style="markdown.table.border",
+            show_edge=True,
+            collapse_padding=True,
+        )
+
+        if self.header is not None and self.header.row is not None:
+            for column in self.header.row.cells:
+                heading = column.content.copy()
+                heading.stylize("markdown.table.header")
+                table.add_column(heading, overflow="fold", no_wrap=False)
+
+        if self.body is not None:
+            for row in self.body.rows:
+                row_content = [element.content for element in row.cells]
+                table.add_row(*row_content)
+
+        yield table
+
+
+class FoldingTableMarkdown(Markdown):
+    """Markdown renderer variant that keeps table content visible in narrow UI."""
+
+    elements = {**Markdown.elements, "table_open": FoldingTableElement}
+
+
 def _prefix_lines(prefix: str, text: str, width: int) -> list[str]:
     body_width = max(1, width - visible_len(prefix))
     wrapped: list[str] = []
@@ -114,7 +154,7 @@ def render_markdown(text: str, width: int) -> list[str]:
         legacy_windows=False,
     )
     try:
-        console.print(Markdown(text))
+        console.print(FoldingTableMarkdown(text))
     except Exception:
         return wrap_plain(text, width)
     rendered = stream.getvalue().rstrip("\n")

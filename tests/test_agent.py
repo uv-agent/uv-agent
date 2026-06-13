@@ -459,12 +459,7 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert "活动 cwd" in PYTHON_TOOL["description"]
     assert "Python 原生控制流和 import" in PYTHON_TOOL["description"]
     assert "不是 shell 风格片段" in PYTHON_TOOL["description"]
-    assert "把一次调用视为一个完整的工作单元脚本" in PYTHON_TOOL["description"]
-    assert "用 Python 原生控制流把服务于同一目标的搜索、读取、计算、编辑、验证和条件回退编排在一起" in PYTHON_TOOL["description"]
-    assert "条件回退" in PYTHON_TOOL["description"]
-    assert "最后只输出一份摘要" in PYTHON_TOOL["description"]
-    assert "单个命令、单次读取或单个 helper" in PYTHON_TOOL["description"]
-    assert "结果会改变整体方向" in PYTHON_TOOL["description"]
+    assert "完整、独立的 Python 脚本" in PYTHON_TOOL["description"]
     assert "优先使用 runtime helpers" in PYTHON_TOOL["description"]
     assert "普通外部命令" in PYTHON_TOOL["description"] and "run_process_text" in PYTHON_TOOL["description"]
     assert "运行命令、访问网络" in PYTHON_TOOL["description"]
@@ -476,7 +471,7 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert "不要使用 shell 风格伪代码" in code_description
     assert "小型 Python 程序" in code_description
     assert "变量、函数、循环、条件、try/except" in code_description
-    assert "uv_agent_runtime helper 调用" in code_description
+    assert "runtime helper 调用" in code_description
     assert "script_args" not in PYTHON_TOOL["parameters"]["properties"]
     assert PYTHON_TOOL["parameters"]["required"] == ["code"]
 
@@ -3460,7 +3455,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     prompt = engine.system_instructions()
 
     assert "run_python" in prompt
-    assert "uv_agent_runtime" in prompt
+    assert "uv_agent_runtime" not in prompt
     assert str(project_root) not in prompt
     assert prompt.startswith("<uv_agent_system_prompt>")
     assert "</uv_agent_system_prompt>" in prompt
@@ -3505,16 +3500,13 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "系统不会替你截断过大的输出" in prompt
     assert "先过滤、限制或摘要" in prompt
     assert "<run_python_workflow>" in prompt
-    assert "完整的 Python 程序和工作单元" in prompt
-    assert "不是 shell-command wrapper 或单个 helper wrapper" in prompt
-    assert "同一目标下的搜索、读取、计算、编辑、验证和条件回退必须" in prompt
-    assert "必须在同一个脚本内用 Python 原生控制流编排" in prompt
+    assert "同一目标下的搜索、读取、计算、编辑、验证和条件回退都在同一个脚本内用 Python 原生控制流编排" in prompt
     assert "只有需要用户确认、操作有破坏风险、或结果会改变整体方向时" in prompt
     assert "应尽量在同一个脚本内完成" not in prompt
     assert "在脚本内使用常规 Python 语法" in prompt
-    assert "imports、variables、functions、loops、conditionals、try/except" in prompt
-    assert "处理多文件、多步骤、可预见的分支或失败" in prompt
-    assert "探索阶段必须一次性收集足够信息" in prompt
+    assert "使用 Python 强大的特性、runtime helpers 以及其他能力" in prompt
+    assert "同时处理多文件、多步骤、可预见的分支或失败" in prompt
+    assert "在探索阶段，在单脚本中一次性收集足够信息" in prompt
     assert "Call enter_dir proactively whenever the task clearly belongs" not in prompt
     assert "including paths discovered during execution" not in prompt
     assert "<capability_use>" in prompt

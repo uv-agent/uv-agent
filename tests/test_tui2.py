@@ -3665,3 +3665,22 @@ def test_show_command_opens_pager_for_matching_run(monkeypatch) -> None:
     plain = "\n".join(strip_ansi(line) for line in app.state.pager_lines)
     assert "print(1)" in plain
     assert "one" in plain
+
+def test_render_markdown_table_wraps_cells_without_renderer_ellipsis() -> None:
+    text = (
+        "| 方案 | 改动点 | 风险 |\n"
+        "|---|---|---|\n"
+        "| A | comfortableorconfigurationvalue plus more text | 最小，几乎不影响现有 |\n"
+    )
+
+    lines = render_markdown(text, 44)
+    plain = "\n".join(strip_ansi(line) for line in lines)
+    compact = "".join(plain.split())
+
+    assert "comfortableorconf" in compact
+    assert "igurationvalue" in compact
+    assert "plusmoretext" in compact
+    assert "最小，几乎不影响" in compact
+    assert "现有" in compact
+    assert "…" not in plain
+
