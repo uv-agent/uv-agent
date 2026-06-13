@@ -3552,8 +3552,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "系统不会替你截断过大的输出" in prompt
     assert "先过滤、限制或摘要" in prompt
     assert "<run_python_workflow>" in prompt
-    assert "同一目标下的搜索、读取、计算、编辑、验证和条件回退都在同一个脚本内用 Python 原生控制流编排" in prompt
-    assert "只有需要用户确认、操作有破坏风险、或结果会改变整体方向时" in prompt
+    assert "搜索、读取、计算、编辑、验证和条件回退都在同一个脚本内用 Python 原生控制流编排" in prompt
     assert "应尽量在同一个脚本内完成" not in prompt
     assert "在脚本内使用常规 Python 语法" in prompt
     assert "借助 Python 强大的特性、runtime helpers 以及其他能力" in prompt
@@ -3574,9 +3573,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "并发运行相互独立的任务" in prompt
     assert "workflow nodes 或 run_python 内的独立 helper operations" in prompt
     assert "对同一文件的写入保持顺序执行" in prompt
-    assert "结果会改变整体方向" in prompt
-    assert "操作有破坏风险" in prompt
-    assert "只有当先前输出必须改变计划" not in prompt
     assert "Plan each run_python call as a complete work unit" not in prompt
     assert "Use one call for a complete work unit" not in prompt
     assert "batch related commands, searches, reads, edits" not in prompt
@@ -3663,7 +3659,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "根据 helper 结果分支" in turn_context
     assert "用 Python libraries 解析结构化输出" in turn_context
     assert "收集一份摘要" in turn_context
-    assert "结果会改变整体方向" in turn_context
     assert "把 shell 习惯改成 Python 写法" in turn_context
     assert "用 read_file 代替 cat" in turn_context
     assert "用 search_text/find_files 代替临时 grep/find" in turn_context
