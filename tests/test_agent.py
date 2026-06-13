@@ -3503,7 +3503,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "只有需要用户确认、操作有破坏风险、或结果会改变整体方向时" in prompt
     assert "应尽量在同一个脚本内完成" not in prompt
     assert "在脚本内使用常规 Python 语法" in prompt
-    assert "使用 Python 强大的特性、runtime helpers 以及其他能力" in prompt
+    assert "借助 Python 强大的特性、runtime helpers 以及其他能力" in prompt
     assert "同时处理多文件、多步骤、可预见的分支或失败" in prompt
     assert "在探索阶段，在单脚本中一次性收集足够信息" in prompt
     assert "Call enter_dir proactively whenever the task clearly belongs" not in prompt
