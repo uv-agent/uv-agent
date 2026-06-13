@@ -1467,6 +1467,20 @@ class AgentEngine:
             _done()
             return
 
+        # Skip the judge round entirely when no price/amount is configured.
+        # Without pricing the NetGain calculation cannot produce a positive
+        # savings, so running the judge would only waste a model call.
+        pricing_level = compact_level or level or self.config.runtime.default_level
+        model_pricing = pricing_for_model(self.config, compact_model, level=pricing_level)
+        if model_pricing is None:
+            self._record_judge({
+                "skipped": True,
+                "reason": "no_pricing",
+                "total_tokens": total_tokens,
+            })
+            _done()
+            return
+
         judge_req_item = compaction_judge_request_item(message_item_text(user_item))
         judge_input = copy.deepcopy(input_items)
         judge_input.append(copy.deepcopy(judge_req_item))

@@ -926,6 +926,59 @@ async def test_cache_aware_judge_can_compact_below_threshold_and_keeps_current_u
 
 
 @pytest.mark.asyncio
+async def test_cache_aware_judge_skips_when_no_pricing_configured(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(
+        project_root,
+        compression=CompressionConfig(
+            enabled=True,
+            cache_aware=True,
+            judge_min_context_ratio=0.0,
+        ),
+        # Default PricingConfig has no models, so no amount/price is configured.
+    )
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_main",
+                "output_text": "answered",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "answered"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    events = [event async for event in engine.run_turn(user_text="fresh task")]
+    thread_id = events[-1]["thread_id"]
+    stored = engine.thread_store.read(thread_id)
+
+    assert not any(event["type"].startswith("judge.") for event in events)
+    assert not any(event["type"].startswith("item.judge") for event in stored)
+    assert len(client.requests) == 1
+    assert engine.last_judge_summary() == {
+        "skipped": True,
+        "reason": "no_pricing",
+        "total_tokens": engine.last_judge_summary()["total_tokens"],
+    }
+    assert engine.last_judge_summary()["total_tokens"] > 0
+
+
+@pytest.mark.asyncio
 async def test_compaction_sanitizes_prior_judge_history_without_changing_replay(
     tmp_path: Path,
 ) -> None:
