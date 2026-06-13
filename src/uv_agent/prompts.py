@@ -20,13 +20,13 @@ PYTHON_TOOL = {
     "type": "function",
     "name": "run_python",
     "description": (
-        "不要为了单个命令、单次读取或单个 helper 发起一次 run_python；"
-        "也不要把单次搜索、读取、编辑或验证拆成碎片调用。"
-        "每次 run_python 必须是一个完整工作单元脚本；"
-        "把一次调用视为一个完整的工作单元脚本："
-        "用 Python 原生控制流把服务于同一目标的搜索、读取、计算、编辑、验证和条件回退编排在一起，"
-        "最后只输出一份摘要。"
-        "只有需要用户确认、操作有破坏风险、或结果会改变整体方向时，才拆成下一次调用。"
+        # "不要为了单个命令、单次读取或单个 helper 发起一次 run_python；"
+        # "也不要把单次搜索、读取、编辑或验证拆成碎片调用。"
+        # "每次 run_python 必须是一个完整工作单元脚本；"
+        # "把一次调用视为一个完整的工作单元脚本："
+        # "用 Python 原生控制流把服务于同一目标的搜索、读取、计算、编辑、验证和条件回退编排在一起，"
+        # "最后只输出一份摘要。"
+        # "只有需要用户确认、操作有破坏风险、或结果会改变整体方向时，才拆成下一次调用。"
         "在全新的 Python 进程中运行一个完整、独立的 Python 脚本。"
         "它在该线程的活动 cwd 中运行，并使用项目共享的脚本虚拟环境。"
         "与外部世界交互时，使用 Python 原生控制流和 import，"
@@ -44,12 +44,12 @@ PYTHON_TOOL = {
                     "使用常规 Python 语法，不要使用 shell 风格伪代码；"
                     "包含 import 和必要设置。编写一个小型 Python 程序，"
                     "通过变量、函数、循环、条件、try/except、数据结构、依赖项以及 "
-                    "uv_agent_runtime helper 调用来协调相关步骤。"
+                    "runtime helper 调用来协调相关步骤。"
                 ),
             },
             "timeout_s": {
                 "type": "number",
-                "description": "执行超时时间（秒）。",
+                "description": "执行超时时间（秒）。通常无须设置，可以选择在脚本内控制更细粒度的超时。",
                 "default": 7200,
             },
         },
@@ -707,10 +707,9 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 </tool_boundary>
 
 <run_python_workflow>
-<rule>每次 run_python 调用必须是一个完整的 Python 程序和工作单元，而不是 shell-command wrapper 或单个 helper wrapper。</rule>
-<rule>同一目标下的搜索、读取、计算、编辑、验证和条件回退必须在同一个脚本内用 Python 原生控制流编排；只有需要用户确认、操作有破坏风险、或结果会改变整体方向时，才拆成新的调用。</rule>
-<rule>在脚本内使用常规 Python 语法：imports、variables、functions、loops、conditionals、try/except、data structures、dependencies 和 uv_agent_runtime helpers，处理多文件、多步骤、可预见的分支或失败，不要通过多次调用逐步推进。</rule>
-<rule>探索阶段必须一次性收集足够信息：并行搜索多个 pattern、读取多个相关文件、解析结构化输出，然后返回摘要；方案明确时，把执行和验证一并完成，不要故意拆成多轮。</rule>
+<rule>在单次的脚本编写中，执行尽可能多的步骤：同一目标下的搜索、读取、计算、编辑、验证和条件回退都在同一个脚本内用 Python 原生控制流编排；只有需要用户确认、操作有破坏风险、或结果会改变整体方向时，才拆成新的调用。</rule>
+<rule>在脚本内使用常规 Python 语法，使用 Python 强大的特性：imports、variables、functions、loops、conditionals、try/except、data structures、dependencies 和 runtime helpers，来处理多文件、多步骤、可预见的分支或失败。</rule>
+<rule>在探索阶段，在单脚本中一次性收集足够信息：并行搜索、查找多个 pattern、读取多个相关文件、运行命令获取信息、解析结构化输出，然后返回摘要；方案明确时，把执行和验证一并完成，不需要拆成多轮。</rule>
 </run_python_workflow>
 
 <capability_use>
