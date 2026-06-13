@@ -9,6 +9,12 @@ from typing import Any, Literal, NotRequired, TypedDict, cast
 
 DB_FILENAME = "uv-agent.sqlite3"
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+REQUIRED_RUN_COLUMNS = {
+    "run_id",
+    "code",
+    "script_args_json",
+    "structured_events_json",
+}
 
 EpochSelector = Literal["latest", "all"] | int | Sequence[int | str]
 
@@ -123,11 +129,18 @@ class ThreadView(TypedDict):
 
 
 class HelperCall(TypedDict, total=False):
-    """Best-effort static runtime helper call extracted from a run script."""
+    """Runtime helper-call summary or static fallback extracted from a run script."""
 
     name: str
     args: str
     line: int | None
+    source: str
+    count: int
+    outcomes: dict[str, int]
+    total_duration_ms: float
+    keyword_names: list[str]
+    positional_counts: list[int]
+    error_types: list[str]
 
 
 class RunEventDetail(TypedDict):
@@ -429,7 +442,21 @@ def _connect(base: Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    _ensure_readable_schema(connection)
     return connection
+
+
+def _ensure_readable_schema(connection: sqlite3.Connection) -> None:
+    row = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runs'").fetchone()
+    if row is None:
+        return
+    columns = {str(item["name"]) for item in connection.execute("PRAGMA table_info(runs)").fetchall()}
+    missing = REQUIRED_RUN_COLUMNS - columns
+    if missing:
+        raise RuntimeError(
+            "uv-agent state database is missing required run columns: "
+            + ", ".join(sorted(missing))
+        )
 
 
 def _read_metadata(db: sqlite3.Connection, thread_id: str, *, kind: str | None) -> dict[str, Any]:
@@ -571,6 +598,7 @@ def _run_from_row(row: sqlite3.Row) -> dict[str, Any]:
     run = dict(row)
     run["script_args"] = _json_loads(run.pop("script_args_json"), default=[])
     run["structured_events"] = _json_loads(run.pop("structured_events_json"), default=[])
+    run["helper_calls"] = _json_loads(run.pop("helper_calls_json", None), default=None)
     for key in ("timed_out", "interrupted", "truncated"):
         run[key] = bool(run[key])
     return run
@@ -972,7 +1000,7 @@ def _run_detail(
         return None
 
     event_id = _event_id(event) if event is not None else None
-    helper_calls = _helper_calls_from_event(event) or _extract_helper_calls(str(run.get("code") or ""))
+    helper_calls = _helper_calls_from_event(event) or _helper_calls_from_run_and_code(run)
     structured_events = run.get("structured_events") if isinstance(run.get("structured_events"), list) else []
     structured_events_truncated = max_events >= 0 and len(structured_events) > max_events
     if max_events >= 0:
@@ -1140,6 +1168,20 @@ def _tool_output_json(event: dict[str, Any]) -> Any:
     return _json_loads(output, default=None)
 
 
+def _helper_calls_from_run_and_code(run: dict[str, Any]) -> list[HelperCall]:
+    helper_calls = run.get("helper_calls")
+    if isinstance(helper_calls, list):
+        return [cast(HelperCall, call) for call in helper_calls if isinstance(call, dict)]
+    return _extract_helper_calls(str(run.get("code") or ""))
+
+
+def _helper_calls_from_run(run: dict[str, Any]) -> list[HelperCall]:
+    helper_calls = run.get("helper_calls")
+    if not isinstance(helper_calls, list):
+        return []
+    return [cast(HelperCall, call) for call in helper_calls if isinstance(call, dict)]
+
+
 def _helper_calls_from_event(event: dict[str, Any] | None) -> list[HelperCall]:
     if event is None:
         return []
@@ -1292,7 +1334,20 @@ def _format_helper_call(call: Any) -> str:
     name = str(call.get("name") or "helper")
     args = str(call.get("args") or "")
     text = f"{name}({args})" if args else f"{name}()"
+    count = _positive_int(call.get("count")) or 1
+    if count > 1:
+        text = f"{text} x{count}"
     return _short_text(text, 160)
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _short_text(text: str, max_chars: int) -> str:

@@ -32,6 +32,7 @@ class RunSession:
         cwd: Path,
         on_structured_event: Callable[[dict[str, Any]], None],
         writer: EventWriter,
+        on_helper_calls: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
         self.token = token
         self.context = RunContext(
@@ -41,6 +42,7 @@ class RunSession:
             cwd=cwd,
         )
         self._on_structured_event = on_structured_event
+        self._on_helper_calls = on_helper_calls or (lambda _calls: None)
         self._writer = writer
         self._lock = threading.RLock()
         self.closed = False
@@ -69,3 +71,114 @@ class RunSession:
                     "event": event_copy,
                 }
             )
+
+    def record_helper_calls(self, calls: list[Any]) -> None:
+        """Record sanitized helper-call summaries delivered by the runtime."""
+
+        normalized = [call for item in calls for call in [_normalize_helper_call(item)] if call is not None]
+        with self._lock:
+            if self.closed:
+                raise RuntimeError("Run session is closed")
+            self._on_helper_calls(normalized)
+
+
+def _normalize_helper_call(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    name = str(value.get("name") or value.get("helper") or "").strip()
+    if not name:
+        return None
+    count = _positive_int(value.get("count")) or 1
+    call: dict[str, Any] = {
+        "name": _short_text(name, 120),
+        "args": "",
+        "source": "runtime",
+        "count": count,
+    }
+    outcomes = value.get("outcomes")
+    if isinstance(outcomes, dict):
+        normalized_outcomes = {
+            str(key): int(amount)
+            for key, amount in outcomes.items()
+            if isinstance(amount, int) and amount > 0
+        }
+        if normalized_outcomes:
+            call["outcomes"] = normalized_outcomes
+    elif isinstance(value.get("outcome"), str):
+        call["outcomes"] = {str(value["outcome"]): count}
+    duration = _float_or_none(value.get("total_duration_ms"))
+    if duration is None:
+        duration = _float_or_none(value.get("duration_ms"))
+    if duration is not None:
+        call["total_duration_ms"] = round(max(0.0, duration), 3)
+    keyword_names = _string_list(value.get("keyword_names"), max_items=64, max_item_chars=120)
+    if keyword_names:
+        call["keyword_names"] = sorted(set(keyword_names))
+    positional_counts = _int_list(value.get("positional_counts"), max_items=16)
+    positional_count = _positive_int(value.get("positional_count"))
+    if positional_count is not None:
+        positional_counts.append(positional_count)
+    if positional_counts:
+        call["positional_counts"] = sorted(set(positional_counts))
+    argument_types = value.get("argument_types")
+    if isinstance(argument_types, dict):
+        call["argument_types"] = argument_types
+    error_types = _string_list(value.get("error_types"), max_items=32, max_item_chars=120)
+    error_type = value.get("error_type")
+    if isinstance(error_type, str) and error_type:
+        error_types.append(_short_text(error_type, 120))
+    if error_types:
+        call["error_types"] = sorted(set(error_types))
+    return call
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _string_list(value: Any, *, max_items: int, max_item_chars: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if len(result) >= max_items:
+            break
+        text = _short_text(str(item), max_item_chars)
+        if text:
+            result.append(text)
+    return result
+
+
+def _int_list(value: Any, *, max_items: int) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    result: list[int] = []
+    for item in value:
+        if len(result) >= max_items:
+            break
+        parsed = _positive_int(item)
+        if parsed is not None:
+            result.append(parsed)
+    return result
+
+
+def _short_text(value: str, max_chars: int) -> str:
+    text = " ".join(value.split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"

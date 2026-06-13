@@ -148,6 +148,38 @@ async def test_runner_records_runtime_helper_stats_sqlite(
     assert row["outcome"] == "ok"
     assert row["error_type"] is None
 
+
+@pytest.mark.asyncio
+async def test_runner_returns_runtime_helper_call_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(tmp_path, monkeypatch)
+
+    result = await runner.run(
+        PythonRunRequest(
+            code=(
+                "from uv_agent_runtime import path_info\n"
+                "for _ in range(3):\n"
+                "    path_info('.')\n"
+            ),
+            cwd=Path.cwd(),
+        )
+    )
+
+    assert result.returncode == 0
+    assert result.helper_calls is not None
+    assert result.helper_calls[0]["name"] == "path_info"
+    assert result.helper_calls[0]["count"] == 3
+    assert result.helper_calls[0]["source"] == "runtime"
+    assert result.helper_calls[0]["outcomes"] == {"ok": 3}
+    assert result.to_payload()["helper_calls"] == result.helper_calls
+
+    stored = runner.run_logs.get_run(result.run_id)
+    assert stored is not None
+    assert stored["helper_calls"][0]["name"] == "path_info"
+    assert stored["helper_calls"][0]["count"] == 3
+
 @pytest.mark.asyncio
 async def test_runner_truncates_large_output(
     tmp_path: Path,

@@ -118,7 +118,7 @@ from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.skills import SkillSummary, discover_skills, render_skill_entry
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.agent.tool_results import function_output, model_tool_payload
-from uv_agent.helper_calls import extract_runtime_helper_calls
+from uv_agent.helper_calls import extract_runtime_helper_calls, runtime_corrected_helper_calls
 from uv_agent.worktree import render_worktree_notice
 from uv_agent.workflow_context import active_workflows_compaction_section, render_workflow_context
 
@@ -2305,7 +2305,8 @@ class AgentEngine:
                 partial_payload["partial"] = True
                 partial_payload["partial_reason"] = runner_event.data.get("reason")
                 partial_payload["call_id"] = call.get("call_id")
-                partial_payload["helper_calls"] = extract_runtime_helper_calls(code)
+                if "helper_calls" not in partial_payload:
+                    partial_payload["helper_calls"] = extract_runtime_helper_calls(code)
                 visible_partial_events = [
                     event
                     for event in partial_payload.get("events", [])
@@ -2333,7 +2334,11 @@ class AgentEngine:
                 turn_id=turn_id,
             )
             payload = result.to_payload()
-            payload["helper_calls"] = extract_runtime_helper_calls(code)
+            runtime_helper_calls = payload.get("helper_calls")
+            payload["helper_calls"] = runtime_corrected_helper_calls(
+                code,
+                runtime_helper_calls if isinstance(runtime_helper_calls, list) else None,
+            )
             payload["events"] = visible_events
             if rule_events:
                 payload["rules_loaded"] = rule_events

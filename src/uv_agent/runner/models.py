@@ -36,6 +36,7 @@ class PythonRunResult:
     truncated: bool
     script_path: Path | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+    helper_calls: list[dict[str, Any]] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Return the JSON-serializable payload exposed as a tool result.
@@ -46,7 +47,7 @@ class PythonRunResult:
         what the model, TUI, and persisted history see for completed runs.
         """
 
-        return {
+        payload = {
             "run_id": self.run_id,
             "returncode": self.returncode,
             "timed_out": self.timed_out,
@@ -56,3 +57,6 @@ class PythonRunResult:
             "stderr": self.stderr,
             "events": self.events,
         }
+        if self.helper_calls is not None:
+            payload["helper_calls"] = self.helper_calls
+        return payload

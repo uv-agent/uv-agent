@@ -208,8 +208,8 @@ _TRACKED_HELPER_EXPORTS: frozenset[str] = frozenset(
 def _maybe_tracked_helper(name: str, value: Any) -> Any:
     if name not in _TRACKED_HELPER_EXPORTS or not callable(value):
         return value
-    helper_stats = import_module(".helper_stats", __name__)
-    return helper_stats.tracked_helper(value, name=name)
+    helper_tracking = import_module(".helper_tracking", __name__)
+    return helper_tracking.tracked_helper(value, name=name)
 
 
 def _dynamic_host_helper(name: str) -> Any:
@@ -226,8 +226,8 @@ def _dynamic_host_helper(name: str) -> Any:
     helper.__name__ = name
     helper.__qualname__ = name
     helper.__doc__ = str(resolved.get("doc") or f"Host-provided runtime helper {name}.")
-    helper_stats = import_module(".helper_stats", __name__)
-    return helper_stats.tracked_helper(helper, name=name)
+    helper_tracking = import_module(".helper_tracking", __name__)
+    return helper_tracking.tracked_helper(helper, name=name)
 
 
 def __dir__() -> list[str]:

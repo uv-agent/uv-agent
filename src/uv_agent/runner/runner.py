@@ -7,6 +7,7 @@ from pathlib import Path
 from time import monotonic
 
 from uv_agent.config import RunnerConfig
+from uv_agent.helper_calls import summarize_runtime_helper_calls
 from uv_agent.ids import new_id
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RunnerEvent
 from uv_agent.runner.output import OutputCapture, pump_stream
@@ -128,12 +129,19 @@ class PythonRunner:
         yield RunnerEvent("run.started", started)
 
         capture = OutputCapture()
+        runtime_helper_calls: list[dict[str, object]] | None = None
+
+        def record_helper_calls(calls: list[dict[str, object]]) -> None:
+            nonlocal runtime_helper_calls
+            runtime_helper_calls = summarize_runtime_helper_calls(calls)
+
         rpc_session = self.rpc_server.open_session(
             run_id=run_id,
             thread_id=request.thread_id,
             turn_id=request.turn_id,
             cwd=run_cwd,
             on_structured_event=capture.append_structured_event,
+            on_helper_calls=record_helper_calls,
             writer=writer,
         )
         env["UV_AGENT_RPC_URL"] = self.rpc_server.url
@@ -209,6 +217,7 @@ class PythonRunner:
                     truncated=capture.truncated,
                     script_path=script_path,
                     events=list(capture.structured_events),
+                    helper_calls=runtime_helper_calls,
                 )
 
             async def emit_partial(*, reason: str, force: bool = False) -> RunnerEvent | None:
@@ -303,6 +312,7 @@ class PythonRunner:
             truncated=capture.truncated,
             script_path=script_path,
             events=capture.structured_events,
+            helper_calls=runtime_helper_calls,
         )
         completed_at = utc_now_iso()
         self.run_logs.complete_run(
@@ -315,6 +325,7 @@ class PythonRunner:
             stdout=result.stdout,
             stderr=result.stderr,
             structured_events=capture.structured_events,
+            helper_calls=runtime_helper_calls,
         )
         completed = {
             "type": "run.completed",

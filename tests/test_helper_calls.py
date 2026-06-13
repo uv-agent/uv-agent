@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from uv_agent.helper_calls import (
     extract_import_anchor_chains,
+    format_helper_call,
     format_import_anchor_chains,
+    runtime_corrected_helper_calls,
 )
 
 
@@ -44,3 +46,25 @@ def test_format_import_anchor_chains_orders_by_import_and_xn() -> None:
     chains = ["search_text", "read_file", "search_text", "json.loads", "read_file", "read_file"]
     formatted = format_import_anchor_chains(chains)
     assert formatted == ["search_text x2", "read_file x3", "json.loads"]
+
+
+def test_runtime_corrected_helper_calls_uses_runtime_report_as_source_of_truth() -> None:
+    code = """from uv_agent_runtime import path_info, read_file
+for _ in range(3):
+    path_info('.')
+read_file('x.txt')
+"""
+
+    calls = runtime_corrected_helper_calls(code, [{"name": "path_info", "count": 3, "source": "runtime"}])
+
+    assert calls == [{"name": "path_info", "args": "", "source": "runtime", "count": 3}]
+    assert format_helper_call(calls[0]) == "path_info() x3"
+
+
+def test_runtime_corrected_helper_calls_distinguishes_empty_runtime_report_from_missing_report() -> None:
+    code = "from uv_agent_runtime import path_info\npath_info('.')\n"
+
+    assert runtime_corrected_helper_calls(code, None) == [
+        {"name": "path_info", "args": "'.'", "line": 2}
+    ]
+    assert runtime_corrected_helper_calls(code, []) == []

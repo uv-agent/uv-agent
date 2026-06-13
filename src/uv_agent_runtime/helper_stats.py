@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import atexit
-import functools
 import json
 import os
 import sqlite3
 import threading
-import time
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any
+
+from .helper_tracking import helper_call_payload, tracked_helper
 
 DB_FILENAME = "helper-stats.sqlite3"
 SCHEMA_VERSION = 1
 SQLITE_TIMEOUT_SECONDS = 5.0
-T = TypeVar("T", bound=Callable[..., Any])
 
 _thread_local = threading.local()
 _process_lock = threading.RLock()
@@ -57,105 +55,62 @@ def log_helper_call(
     sensitive material are not copied into telemetry.
     """
 
-    if not name or getattr(_thread_local, "logging", False):
+    if not name:
+        return
+    record_helper_call_payload(
+        helper_call_payload(
+            name,
+            args,
+            kwargs or {},
+            called_at_unix=called_at_unix,
+            duration_ms=duration_ms,
+            outcome=outcome,
+            error_type=error_type,
+        )
+    )
+
+
+def record_helper_call_payload(payload: dict[str, Any]) -> None:
+    """Stats subscriber for sanitized helper-call payloads.
+
+    The runtime's canonical tracking path publishes the same payload to the host
+    and to this DB sink. Keeping this function small makes it clear that the host
+    never needs to query helper_stats to build tool-line metadata.
+    """
+
+    if not payload.get("helper") or getattr(_thread_local, "logging", False):
         return
     _thread_local.logging = True
     try:
-        _record_local(
-            _call_payload(
-                name,
-                args,
-                kwargs or {},
-                called_at_unix=called_at_unix,
-                duration_ms=duration_ms,
-                outcome=outcome,
-                error_type=error_type,
-            )
-        )
+        _record_local(_stats_payload(payload))
     except Exception:
         return
     finally:
         _thread_local.logging = False
 
 
-def tracked_helper(func: T, *, name: str | None = None) -> T:
-    """Decorate a public runtime helper so calls are included in usage stats."""
-
-    helper_name = name or getattr(func, "__name__", "helper")
-
-    @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        started_unix = time.time()
-        started_perf = time.perf_counter()
-        try:
-            result = func(*args, **kwargs)
-        except BaseException as exc:
-            log_helper_call(
-                helper_name,
-                args,
-                kwargs,
-                called_at_unix=started_unix,
-                duration_ms=_elapsed_ms(started_perf),
-                outcome="error",
-                error_type=exc.__class__.__name__,
-            )
-            raise
-        log_helper_call(
-            helper_name,
-            args,
-            kwargs,
-            called_at_unix=started_unix,
-            duration_ms=_elapsed_ms(started_perf),
-            outcome="ok",
-            error_type=None,
-        )
-        return result
-
-    return cast(T, wrapper)
-
-
-def _elapsed_ms(started_perf: float) -> float:
-    return max(0.0, (time.perf_counter() - started_perf) * 1000.0)
-
-
-def _call_payload(
-    name: str,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    *,
-    called_at_unix: float | None,
-    duration_ms: float | None,
-    outcome: str,
-    error_type: str | None,
-) -> dict[str, Any]:
+def _stats_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    keyword_names = payload.get("keyword_names")
+    if not isinstance(keyword_names, list):
+        keyword_names = _json_loads(payload.get("keyword_names_json"), default=[])
+    argument_types = payload.get("argument_types")
+    if not isinstance(argument_types, dict):
+        argument_types = _json_loads(payload.get("argument_types_json"), default={})
     return {
-        "helper": name,
-        "called_at_unix": time.time() if called_at_unix is None else called_at_unix,
-        "run_id": os.environ.get("UV_AGENT_RUNTIME_RUN_ID"),
-        "thread_id": os.environ.get("UV_AGENT_RUNTIME_THREAD_ID"),
-        "turn_id": os.environ.get("UV_AGENT_RUNTIME_TURN_ID"),
-        "cwd": str(Path.cwd()),
-        "pid": os.getpid(),
-        "positional_count": len(args),
-        "keyword_names_json": json.dumps(sorted(str(key) for key in kwargs), separators=(",", ":")),
-        "argument_types_json": json.dumps(_argument_types(args, kwargs), sort_keys=True, separators=(",", ":")),
-        "duration_ms": duration_ms,
-        "outcome": outcome,
-        "error_type": error_type,
+        "helper": str(payload.get("helper") or "helper"),
+        "called_at_unix": payload.get("called_at_unix"),
+        "run_id": payload.get("run_id"),
+        "thread_id": payload.get("thread_id"),
+        "turn_id": payload.get("turn_id"),
+        "cwd": payload.get("cwd"),
+        "pid": payload.get("pid"),
+        "positional_count": payload.get("positional_count") or 0,
+        "keyword_names_json": json.dumps(keyword_names if isinstance(keyword_names, list) else [], separators=(",", ":")),
+        "argument_types_json": json.dumps(argument_types if isinstance(argument_types, dict) else {}, sort_keys=True, separators=(",", ":")),
+        "duration_ms": payload.get("duration_ms"),
+        "outcome": str(payload.get("outcome") or "ok"),
+        "error_type": payload.get("error_type"),
     }
-
-
-def _argument_types(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "args": [_type_name(value) for value in args],
-        "kwargs": {str(key): _type_name(value) for key, value in kwargs.items()},
-    }
-
-
-def _type_name(value: Any) -> str:
-    if isinstance(value, Path):
-        return "Path"
-    return type(value).__name__
 
 
 def _record_local(payload: dict[str, Any]) -> None:
@@ -260,8 +215,16 @@ def _ensure_column(db: sqlite3.Connection, name: str, definition: str) -> None:
 def _close_connection() -> None:
     global _process_connection, _process_connection_path
     with _process_lock:
-        if _process_connection is None:
-            return
-        _process_connection.close()
-        _process_connection = None
-        _process_connection_path = None
+        if _process_connection is not None:
+            _process_connection.close()
+            _process_connection = None
+            _process_connection_path = None
+
+
+def _json_loads(value: Any, *, default: Any) -> Any:
+    if value is None:
+        return default
+    try:
+        return json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return default

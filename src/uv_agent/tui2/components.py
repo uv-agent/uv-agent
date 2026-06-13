@@ -13,6 +13,7 @@ from rich.table import Table
 from uv_agent.environment import UserLanguage, normalize_language
 from uv_agent.helper_calls import (
     extract_import_anchor_chains,
+    format_helper_call,
     format_import_anchor_chains,
 )
 from uv_agent.i18n import tr
@@ -406,10 +407,9 @@ def _tool_cell_import_chains(cell: TranscriptCell) -> list[str]:
     payload = cell.payload or {}
     payload_helpers = payload.get("helper_calls")
     if isinstance(payload_helpers, list) and payload_helpers:
-        # Legacy payloads may store helper_calls as {"name": ..., "args": ...}.
-        # We only need the names and cannot reconstruct chains from these,
-        # so treat each as a single-chain item.
-        return [str(h.get("name") or "helper") for h in payload_helpers if isinstance(h, dict)]
+        # Runtime payloads may include aggregate counts; format them directly so
+        # loops display as e.g. ``read_file() x12`` instead of one static AST call.
+        return [format_helper_call(h) for h in payload_helpers if isinstance(h, dict)]
     code = ""
     if cell.call:
         try:

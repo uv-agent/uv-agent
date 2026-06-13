@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from uv_agent.state_db import SCHEMA_VERSION, SQLITE_BUSY_TIMEOUT_MS, connect_state_db, state_db_path
@@ -66,3 +67,28 @@ def test_state_db_migrates_v1_database_to_workflows(tmp_path: Path) -> None:
     assert db_path.exists()
     assert version["value"] == str(SCHEMA_VERSION)
     assert workflow_table is not None
+
+
+def test_state_db_migrates_v2_database_to_helper_calls(tmp_path: Path) -> None:
+    db_path = state_db_path(tmp_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta(key, value) VALUES ('schema_version', '2');
+            CREATE TABLE runs (
+              run_id TEXT PRIMARY KEY,
+              code TEXT NOT NULL,
+              script_args_json TEXT NOT NULL DEFAULT '[]',
+              structured_events_json TEXT NOT NULL DEFAULT '[]'
+            );
+            """
+        )
+
+    with connect_state_db(tmp_path) as db:
+        version = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)").fetchall()}
+
+    assert version["value"] == str(SCHEMA_VERSION)
+    assert "helper_calls_json" in columns

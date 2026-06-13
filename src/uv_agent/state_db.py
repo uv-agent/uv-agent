@@ -6,7 +6,7 @@ from pathlib import Path
 from uv_agent.time import utc_now_iso
 
 DB_FILENAME = "uv-agent.sqlite3"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SQLITE_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
 
@@ -58,6 +58,10 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         return
     if existing_version == "1":
         _migrate_v1_to_v2(connection)
+        _migrate_v2_to_v3(connection)
+        return
+    if existing_version == "2":
+        _migrate_v2_to_v3(connection)
         return
     raise StateDbError(
         f"Unsupported state database schema version {existing_version}; "
@@ -162,6 +166,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
               stdout TEXT NOT NULL DEFAULT '',
               stderr TEXT NOT NULL DEFAULT '',
               structured_events_json TEXT NOT NULL DEFAULT '[]',
+              helper_calls_json TEXT,
 
               script_path TEXT
             );
@@ -202,6 +207,19 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
 
     with connection:
         _create_workflow_schema(connection)
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("2",),
+        )
+
+
+def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
+    """Add runtime helper-call summaries to persisted run records."""
+
+    with connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)")}
+        if "helper_calls_json" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN helper_calls_json TEXT")
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             (str(SCHEMA_VERSION),),

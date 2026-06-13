@@ -34,6 +34,26 @@ def emit_event_rpc(event: dict[str, Any]) -> None:
         return
 
 
+def emit_helper_calls_rpc(calls: list[dict[str, Any]]) -> None:
+    """Best-effort JSON-RPC notification for runtime helper-call summaries."""
+
+    if not calls or not _rpc_configured():
+        return
+    try:
+        _post_jsonrpc(
+            {
+                "jsonrpc": JSONRPC_VERSION,
+                "method": "helper.calls",
+                "params": {"run_id": os.environ.get("UV_AGENT_RUNTIME_RUN_ID"), "calls": calls},
+            },
+            expect_response=False,
+        )
+    except Exception:
+        # Helper-call metadata is display-only; never leak transport failures into
+        # stdout/stderr or alter script behavior.
+        return
+
+
 def resolve_host_helper(name: str) -> dict[str, Any]:
     """Ask the host whether a dynamic runtime helper is registered."""
 

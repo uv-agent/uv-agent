@@ -110,9 +110,10 @@ class RuntimeRPCServer:
         thread_id: str | None,
         turn_id: str | None,
         cwd: Path,
+        writer: EventWriter,
         structured_events: list[dict[str, Any]] | None = None,
         on_structured_event: Callable[[dict[str, Any]], None] | None = None,
-        writer: EventWriter,
+        on_helper_calls: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> RuntimeRPCSessionHandle:
         self.start()
         token = secrets.token_urlsafe(32)
@@ -131,6 +132,7 @@ class RuntimeRPCServer:
             turn_id=turn_id,
             cwd=cwd,
             on_structured_event=callback,
+            on_helper_calls=on_helper_calls,
             writer=writer,
         )
         with self._lock:

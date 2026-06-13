@@ -103,12 +103,72 @@ def extract_runtime_helper_calls(source: str, *, max_calls: int = 80) -> list[He
 
 
 def format_helper_call(call: HelperCall, *, max_chars: int = 160) -> str:
-    """Format one extracted helper call as ``name(args...)`` for display."""
+    """Format one extracted or runtime-recorded helper call for display."""
 
-    name = str(call.get("name") or "helper")
+    name = str(call.get("name") or call.get("helper") or "helper")
     args = str(call.get("args") or "")
     text = f"{name}({args})" if args else f"{name}()"
+    count = _positive_int(call.get("count")) or 1
+    if count > 1:
+        text = f"{text} x{count}"
     return _truncate(text, max_chars)
+
+
+def runtime_corrected_helper_calls(
+    source: str,
+    runtime_calls: list[HelperCall] | None,
+    *,
+    max_helpers: int = 80,
+) -> list[HelperCall]:
+    """Return helper calls corrected by runtime data while preserving static-only calls."""
+
+    if runtime_calls is None:
+        return extract_runtime_helper_calls(source, max_calls=max_helpers)
+    return summarize_runtime_helper_calls(runtime_calls, max_helpers=max_helpers)
+
+
+def summarize_runtime_helper_calls(calls: list[HelperCall], *, max_helpers: int = 80) -> list[HelperCall]:
+    """Aggregate sanitized runtime helper-call summaries for result payloads."""
+
+    ordered: dict[str, HelperCall] = {}
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        name = str(call.get("name") or call.get("helper") or "").strip()
+        if not name:
+            continue
+        count = _positive_int(call.get("count")) or 1
+        entry = ordered.get(name)
+        if entry is None:
+            if len(ordered) >= max_helpers:
+                continue
+            entry = {"name": name, "args": str(call.get("args") or ""), "source": "runtime", "count": 0}
+            ordered[name] = entry
+        entry["count"] = int(entry.get("count") or 0) + count
+        if isinstance(call.get("outcomes"), dict) or isinstance(call.get("outcome"), str):
+            _merge_outcomes(entry, call, count=count)
+        _merge_duration(entry, call)
+        _merge_string_list(entry, "keyword_names", call.get("keyword_names"), max_items=64)
+        _merge_int_list(entry, "positional_counts", call.get("positional_counts"), max_items=16)
+        positional_count = _positive_int(call.get("positional_count"))
+        if positional_count is not None:
+            _merge_int_list(entry, "positional_counts", [positional_count], max_items=16)
+        _merge_string_list(entry, "error_types", call.get("error_types"), max_items=32)
+        error_type = call.get("error_type")
+        if isinstance(error_type, str) and error_type:
+            _merge_string_list(entry, "error_types", [error_type], max_items=32)
+        if "argument_types" not in entry and isinstance(call.get("argument_types"), dict):
+            entry["argument_types"] = call["argument_types"]
+    result = list(ordered.values())
+    for entry in result:
+        duration = entry.get("total_duration_ms")
+        if isinstance(duration, float):
+            entry["total_duration_ms"] = round(duration, 3)
+        if entry.get("count") == 1:
+            # Keep the count available for machine consumers but avoid relying on
+            # it in older callers; display code already treats missing as one.
+            entry["count"] = 1
+    return result
 
 
 class _RuntimeHelperCallVisitor(ast.NodeVisitor):
@@ -229,6 +289,81 @@ def _truncate(value: str, max_chars: int) -> str:
         return value
     return value[: max_chars - 1].rstrip() + "…"
 
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _merge_outcomes(entry: HelperCall, call: HelperCall, *, count: int) -> None:
+    outcomes = entry.setdefault("outcomes", {})
+    if not isinstance(outcomes, dict):
+        return
+    call_outcomes = call.get("outcomes")
+    if isinstance(call_outcomes, dict):
+        for key, value in call_outcomes.items():
+            amount = _positive_int(value) or 0
+            if amount:
+                outcomes[str(key)] = int(outcomes.get(str(key)) or 0) + amount
+        return
+    outcome = call.get("outcome")
+    if isinstance(outcome, str) and outcome:
+        outcomes[outcome] = int(outcomes.get(outcome) or 0) + count
+
+
+def _merge_duration(entry: HelperCall, call: HelperCall) -> None:
+    duration = _float_or_none(call.get("total_duration_ms"))
+    if duration is None:
+        duration = _float_or_none(call.get("duration_ms"))
+    if duration is None:
+        return
+    entry["total_duration_ms"] = float(entry.get("total_duration_ms") or 0.0) + max(0.0, duration)
+
+
+def _merge_string_list(entry: HelperCall, key: str, values: Any, *, max_items: int) -> None:
+    if not isinstance(values, list):
+        return
+    target = entry.setdefault(key, [])
+    if not isinstance(target, list):
+        return
+    seen = {str(item) for item in target}
+    for value in values:
+        if len(target) >= max_items:
+            break
+        text = str(value)
+        if text and text not in seen:
+            target.append(text)
+            seen.add(text)
+
+
+def _merge_int_list(entry: HelperCall, key: str, values: Any, *, max_items: int) -> None:
+    if not isinstance(values, list):
+        return
+    target = entry.setdefault(key, [])
+    if not isinstance(target, list):
+        return
+    seen = {int(item) for item in target if isinstance(item, int)}
+    for value in values:
+        if len(target) >= max_items:
+            break
+        parsed = _positive_int(value)
+        if parsed is not None and parsed not in seen:
+            target.append(parsed)
+            seen.add(parsed)
 
 
 def extract_import_anchor_chains(source: str, *, max_calls: int = 80) -> list[str]:

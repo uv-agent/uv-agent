@@ -72,6 +72,61 @@ def test_runtime_rpc_server_handles_notification_and_call(tmp_path: Path) -> Non
         server.close()
 
 
+def test_runtime_rpc_server_accepts_helper_call_summaries(tmp_path: Path) -> None:
+    server = RuntimeRPCServer()
+    calls: list[dict] = []
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
+    try:
+        handle = server.open_session(
+            run_id="run_rpc",
+            thread_id="thread_1",
+            turn_id="turn_1",
+            cwd=tmp_path,
+            on_helper_calls=calls.extend,
+            writer=writer,
+        )
+        try:
+            status, body = _post(
+                server.url,
+                handle.token,
+                {
+                    "jsonrpc": "2.0",
+                    "method": "helper.calls",
+                    "params": {
+                        "run_id": "run_rpc",
+                        "calls": [
+                            {
+                                "helper": "path_info",
+                                "count": 3,
+                                "outcomes": {"ok": 3},
+                                "keyword_names": ["root"],
+                                "argument_types": {"args": ["str"], "kwargs": {}},
+                            }
+                        ],
+                    },
+                },
+            )
+
+            assert status == 204
+            assert body == b""
+            assert calls == [
+                {
+                    "name": "path_info",
+                    "args": "",
+                    "source": "runtime",
+                    "count": 3,
+                    "outcomes": {"ok": 3},
+                    "keyword_names": ["root"],
+                    "argument_types": {"args": ["str"], "kwargs": {}},
+                }
+            ]
+        finally:
+            handle.close()
+    finally:
+        server.close()
+
+
 def test_runtime_rpc_server_rejects_unknown_or_closed_token(tmp_path: Path) -> None:
     server = RuntimeRPCServer()
     store = _run_store(tmp_path, "run_rpc")

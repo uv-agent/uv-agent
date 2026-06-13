@@ -174,6 +174,21 @@ def test_tool_cell_uses_payload_helper_calls_without_source() -> None:
     assert len([line for line in plain.splitlines() if line.strip()]) == 1
 
 
+
+
+def test_tool_cell_uses_runtime_helper_call_counts() -> None:
+    call = {"name": "run_python", "call_id": "call_123", "arguments": '{"code":"print(1)"}'}
+    payload = {
+        "returncode": 0,
+        "helper_calls": [{"name": "path_info", "count": 7, "source": "runtime"}],
+    }
+
+    plain = "\n".join(strip_ansi(line) for line in render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 80))
+
+    assert "path_info() x7" in plain
+    assert "print(1)" not in plain
+
+
 def test_workflow_structured_event_markup_is_compact() -> None:
     started = renderable_plain(
         structured_event_markup(

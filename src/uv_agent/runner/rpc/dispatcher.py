@@ -97,6 +97,8 @@ class JsonRpcDispatcher:
 
         if method == "event.emit":
             return self._emit_event(params, session=session)
+        if method == "helper.calls":
+            return self._record_helper_calls(params, session=session)
         if method == "helper.resolve":
             return self._resolve_helper(params)
         if method.startswith("call."):
@@ -116,6 +118,23 @@ class JsonRpcDispatcher:
             )
         try:
             session.emit_event(params)
+        except RuntimeError as exc:
+            raise JsonRpcError(SESSION_CLOSED, str(exc)) from exc
+        return {"ok": True}
+
+    def _record_helper_calls(self, params: dict[str, Any], *, session: RunSession) -> dict[str, bool]:
+        run_id = params.get("run_id")
+        if run_id != session.run_id:
+            raise JsonRpcError(
+                INVALID_PARAMS,
+                "Helper-call run id does not match session",
+                data={"run_id": session.run_id},
+            )
+        calls = params.get("calls")
+        if not isinstance(calls, list):
+            raise JsonRpcError(INVALID_PARAMS, "helper.calls requires a calls list")
+        try:
+            session.record_helper_calls(calls)
         except RuntimeError as exc:
             raise JsonRpcError(SESSION_CLOSED, str(exc)) from exc
         return {"ok": True}

@@ -127,13 +127,15 @@ class RunLogStore:
         stdout: str,
         stderr: str,
         structured_events: list[dict[str, Any]],
+        helper_calls: list[dict[str, Any]] | None = None,
     ) -> None:
         with connect_state_db(self.data_dir) as db:
             db.execute(
                 """
                 UPDATE runs
                 SET completed_at = ?, returncode = ?, timed_out = ?, interrupted = ?,
-                    truncated = ?, stdout = ?, stderr = ?, structured_events_json = ?
+                    truncated = ?, stdout = ?, stderr = ?, structured_events_json = ?,
+                    helper_calls_json = ?
                 WHERE run_id = ?
                 """,
                 (
@@ -145,6 +147,7 @@ class RunLogStore:
                     stdout,
                     stderr,
                     _json_dumps(structured_events),
+                    _json_dumps(helper_calls),
                     run_id,
                 ),
             )
@@ -170,6 +173,7 @@ class RunLogStore:
         data = dict(row)
         data["script_args"] = _json_loads(data.pop("script_args_json"), default=[])
         data["structured_events"] = _json_loads(data.pop("structured_events_json"), default=[])
+        data["helper_calls"] = _json_loads(data.pop("helper_calls_json", None), default=None)
         for key in ("timed_out", "interrupted", "truncated"):
             data[key] = bool(data[key])
         return data
