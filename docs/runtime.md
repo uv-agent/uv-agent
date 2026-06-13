@@ -111,7 +111,7 @@ Available helper groups:
 | `emit_event`, `emit_progress`, `emit_result` | Emit structured JSON events rendered by the host. |
 | `look_at` | Attach image context to the conversation. |
 | **Thread introspection** | |
-| `thread_digest`, `list_thread_digests` | Read compact conversation summaries from project state. |
+| `list_thread_digests`, `thread_view`, `thread_detail` | Find stored threads, view conversation-only thread epochs, and expand process/run details by id or turn id. |
 | **Nested agents** | |
 | `ask` | Launch a nested `uv-agent ask` subagent. |
 | **MCP** | |

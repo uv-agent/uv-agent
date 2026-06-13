@@ -721,7 +721,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 
 <mentions>
 <rule>用户文本可能包含 @file、@thread:id、@mcp:name 或 @skill:name references。这些 mentions 只是纯文本提示，不会自动 attach、load、connect 或 call 任何东西。</rule>
-<rule>当提到的文件重要时，在 run_python 中使用 file helpers 或 Python 标准库 API 检查它。当提到的 thread 重要时，使用 thread_digest 或 list_thread_digests。</rule>
+<rule>当提到的文件重要时，在 run_python 中使用 file helpers 或 Python 标准库 API 检查它。当提到的 thread 重要时，先用 list_thread_digests 找线程，再用 thread_view 看对话；需要工具/运行细节时用 thread_detail 按 id 或 turn_id 展开。</rule>
 <rule>当提到的 skill 重要时，从 available skills context 读取它的 SKILL.md。当提到的 MCP server 重要时，通过 Python 使用 uv_agent_runtime MCP helpers。</rule>
 </mentions>
 
@@ -752,8 +752,8 @@ from uv_agent_runtime import (
     replace_text,
     run_process_text,
     list_thread_digests,
-    thread_digest,
-    run_digest,
+    thread_view,
+    thread_detail,
     list_declared_servers,
     connect_named,
     connect_url,
@@ -887,7 +887,7 @@ for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py
 </example>
 <helper_selection>
 <rule>列出的 helpers 是普通 Python functions，可在同一脚本中与标准库代码和控制流组合使用；使用 pathlib、os、json 等模块在脚本内做连接逻辑；适合时优先使用 helpers，尤其是对仓库可见文本工作的 file/edit helpers，因为它们会保留 newline style、BOM、final newline、line counts 和范围视图等 metadata。</rule>
-<rule>按任务选择：workflow=独立/长时间运行的模型任务图；discovery=find_files/search_text/find_symbols/query_code（search_text 默认 regex；精确代码字符串用 literal=True；路径 pattern 用 globs，rg type aliases 用 file_types）；reading=read_file；edit=用 replace_text 替换唯一小段文本，用 edit_lines 做 anchored ranges/inserts；完整文件或生成的内容用 write_file；thread/run history=thread_digest/run_digest/list_thread_digests；dependencies=import 前使用 add_dependency。</rule>
+<rule>按任务选择：workflow=独立/长时间运行的模型任务图；discovery=find_files/search_text/find_symbols/query_code（search_text 默认 regex；精确代码字符串用 literal=True；路径 pattern 用 globs，rg type aliases 用 file_types）；reading=read_file；edit=用 replace_text 替换唯一小段文本，用 edit_lines 做 anchored ranges/inserts；完整文件或生成的内容用 write_file；thread history=list_thread_digests/thread_view/thread_detail；dependencies=import 前使用 add_dependency。</rule>
 <rule>对于普通外部命令，包括 skills 或 docs 中展示的 shell commands，优先用 run_process_text 而不是 raw subprocess；只有需要自定义进程控制时才使用 raw subprocess。</rule>
 <rule>数据量较大时，优先提取字段、行范围、head/tail 或生成摘要。</rule>
 <rule>不要猜测 helper signatures；当精确签名重要时，检查 uv_agent_runtime 实现。</rule>
@@ -949,11 +949,16 @@ run_python_env_dir() -> Path</signature>
 <returns>CommandTextResult(args: list[str], returncode: int, stdout: str, stderr: str, timed_out: bool, ok: bool, raise_for_error() -> CommandTextResult)</returns>
 </helper>
 <helper name="threads">
-<description>检查紧凑的 conversation 和 run summaries；这些 helpers 不会切换活动 TUI thread。</description>
-<signature>list_thread_digests(*, state_dir=None, limit=10, kind="thread", parent_thread_id=None, since_last_compaction=True, include_tools=False) -> list[dict[str, Any]]
-thread_digest(thread_id: str, *, state_dir=None, kind=None, since_last_compaction=True, include_tools=False) -> dict[str, Any]
-run_digest(run_id: str, *, state_dir=None, max_code_chars=4000, max_output_chars=4000, max_events=20, include_events=False) -> dict[str, Any]</signature>
-<returns>thread_digest -> dict[str, Any]，list_thread_digests -> list[dict[str, Any]]（紧凑条目）；run_digest -> dict[str, Any]（某次 run_python 执行的 code/stdout/stderr/helper_calls 摘要）。</returns>
+<description>检查存储的线程历史；list 只负责找线程，thread_view 默认只展开对话文本，thread_detail 再按 id/turn_id 展开工具和 run_python 明细。这些 helpers 不会切换活动 TUI thread，也不会默认读取当前线程；必须显式传 thread_id。</description>
+<signature>list_thread_digests(*, state_dir=None, limit=10, kind="thread", parent_thread_id=None, since_last_compaction=True, include_tools=False) -> list[ThreadDigest]
+thread_view(thread_id: str, *, state_dir=None, kind=None, epoch: Literal["latest", "all"] | int | Sequence[int | str] = "latest", max_turns: int | None = None, max_text_chars: int = 12000, max_item_chars: int = 4000, max_process_refs: int = 500) -> ThreadView
+thread_detail(*, state_dir=None, thread_id: str | None = None, ids: str | Sequence[str] | None = None, turn_ids: str | Sequence[str] | None = None, max_code_chars: int = 4000, max_output_chars: int = 4000, max_events: int = 100, include_raw_events: bool = False) -> ThreadDetailResult</signature>
+<returns>ThreadDigest = {thread_id: str, title: str, created_at: str | None, updated_at: str | None, last_text: str, turn_count: int, interrupted_turn_count: int, latest_compaction: ThreadCompactionSummary | None, items: list[ThreadDigestItem]}。
+ThreadView = {thread_id: str, kind: str, title: str, created_at: str | None, updated_at: str | None, selected_epochs: list[str], epochs: list[ThreadEpoch], turns: list[ThreadTurn], truncated: bool}。epoch="latest" 只选最新 epoch；epoch="all" 或 epoch=[0, "epoch:1"] 可查看前面 epoch。
+ThreadEpoch = {id: "epoch:N", index: int, start_event_id: int, end_event_id: int, compaction: ThreadCompaction | None}；ThreadCompaction = {id: "event:N", event_id: int, turn_id: str | None, created_at: str | None, text: str}。
+ThreadTurn = {id: "turn:&lt;turn_id&gt;", turn_id: str, epoch_id: str, status: str, user_messages: list[ConversationMessage], assistant_messages: list[ConversationMessage], process_refs: list[ProcessRef]}。ConversationMessage = {id: "event:N", event_id: int, role: "user" | "assistant", text: str, chars: int, truncated: bool}。
+ProcessRef = {id: "run:&lt;run_id&gt;" 或 "event:N", kind: str, event_ref: "event:N", event_id: int, turn_id: str, status: str, summary: str, related_ids?: list[str], helper_names?: list[str]}；thread_detail(ids=[...]) 可一次查询多个 ProcessRef.id，thread_detail(thread_id="...", turn_ids=[...]) 可展开一个或多个 turn。
+ThreadDetailResult = {thread_id: str | None, requested_ids: list[str], requested_turn_ids: list[str], details: list[ProcessDetail], missing: list[str], truncated: bool}。ProcessDetail = {id: str, kind: str, status: str, summary: str, thread_id: str | None, turn_id: str | None, event_id: int | None, event_ref: str | None, run_id?: str, returncode?: int | None, timed_out?: bool, interrupted?: bool, code?: BoundedText, stdout?: BoundedText, stderr?: BoundedText, helper_calls?: list[HelperCall], structured_events?: list[dict], events?: list[RunEventDetail], output?: BoundedText, raw_event?: dict}；BoundedText = {text: str, chars: int, truncated: bool, limit: int}。</returns>
 </helper>
 <helper name="mcp">
 <description>从 Python 中发现并调用 declared MCP servers。先调用 client.initialize()，并在 list 或 call tools 前检查返回的 instructions。</description>

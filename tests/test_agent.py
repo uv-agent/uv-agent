@@ -1598,7 +1598,7 @@ async def test_agent_persists_interrupted_turn_and_follow_up_continues(tmp_path:
     follow_up = [event async for event in engine.run_turn(user_text="continue", thread_id=thread_id)]
 
     assert follow_up[-1]["type"] == "turn.completed"
-    assert "interrupted" not in str(follow_client.requests[0]["input"])
+    assert "turn interrupted:" not in str(follow_client.requests[0]["input"])
     assert "continue" in str(follow_client.requests[0]["input"])
 
 
@@ -3607,7 +3607,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "context=None" in turn_context
     assert "max_total=None" in turn_context
     assert '<helper name="threads">' in turn_context
-    assert "run_digest" in turn_context
+    assert "thread_view" in turn_context
+    assert "thread_detail" in turn_context
+    assert "run_digest" not in turn_context
     assert "<usage_pattern>" in turn_context
     assert "Helpers 是供工作单元脚本使用的 Python functions" in turn_context
     assert "不是独立工具模式" in turn_context
@@ -3671,7 +3673,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "包括 skills 或 docs 中展示的 shell commands" in turn_context
     assert "优先用 run_process_text 而不是 raw subprocess" in turn_context
     assert "自定义进程控制" in turn_context
-    assert "thread/run history=thread_digest/run_digest/list_thread_digests" in turn_context
+    assert "thread history=list_thread_digests/thread_view/thread_detail" in turn_context
     assert "数据量较大时，优先提取字段、行范围、head/tail 或生成摘要" in turn_context
     assert "不要猜测 helper signatures" in turn_context
     assert "Search 和 symbol helpers 返回给 file helpers 使用的是绝对路径" in turn_context

@@ -51,11 +51,12 @@ from uv_agent_runtime import (
     restore_snapshot,
     run_python_env_dir,
     run_process_text,
-    run_digest,
     search_text,
     snapshot_files,
     supported_symbol_languages,
+    thread_detail,
     thread_digest,
+    thread_view,
     workspace_transaction,
     write_file,
     write_text_lossless,
@@ -631,7 +632,7 @@ def test_runtime_replace_text_result_changed_and_repr_omits_full_text(tmp_path: 
     assert "text=" not in rendered
 
 
-def test_runtime_run_digest_summarizes_code_outputs_and_helper_calls(tmp_path: Path) -> None:
+def test_runtime_thread_detail_summarizes_run_outputs_and_helper_calls(tmp_path: Path) -> None:
     from uv_agent.runner.run_log import RunLogStore
 
     store = RunLogStore(tmp_path)
@@ -659,23 +660,43 @@ def test_runtime_run_digest_summarizes_code_outputs_and_helper_calls(tmp_path: P
         structured_events=[{"kind": "cwd", "cwd": "."}],
     )
 
-    digest = run_digest("run_one", state_dir=tmp_path, max_code_chars=30, max_output_chars=20)
+    result = thread_detail(
+        state_dir=tmp_path,
+        ids=["run:run_one"],
+        max_code_chars=30,
+        max_output_chars=20,
+    )
+    detail = result["details"][0]
 
-    assert digest["run_id"] == "run_one"
-    assert digest["thread_id"] == "thr_one"
-    assert digest["returncode"] == 0
-    assert digest["code_truncated"] is True
-    assert digest["stdout_truncated"] is True
-    assert digest["stdout"].endswith("x" * 20)
-    assert digest["helper_calls"] == [
+    assert result["missing"] == []
+    assert detail["id"] == "run:run_one"
+    assert detail["thread_id"] == "thr_one"
+    assert detail["returncode"] == 0
+    assert detail["code"]["truncated"] is True
+    assert detail["stdout"]["truncated"] is True
+    assert detail["stdout"]["text"].endswith("x" * 20)
+    assert detail["helper_calls"] == [
         {"name": "replace_text", "args": "'a.txt', 'old', 'new'", "line": 2}
     ]
-    assert digest["structured_events"] == [{"kind": "cwd", "cwd": "."}]
+    assert detail["structured_events"] == [{"kind": "cwd", "cwd": "."}]
 
 
-def test_runtime_thread_digest_includes_bounded_tool_details(tmp_path: Path) -> None:
+def test_runtime_run_digest_is_not_top_level_export() -> None:
+    import uv_agent_runtime
+
+    assert "run_digest" not in uv_agent_runtime.__all__
+    assert not hasattr(uv_agent_runtime, "run_digest")
+
+
+def test_runtime_thread_view_returns_dialogue_and_process_refs(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Tools")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="turn_one",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+    )
     store.append(
         thread_id,
         "item.runner_result",
@@ -688,20 +709,41 @@ def test_runtime_thread_digest_includes_bounded_tool_details(tmp_path: Path) -> 
     )
     store.append(
         thread_id,
-        "item.tool_output",
+        "item.model_response",
         turn_id="turn_one",
-        item={
-            "type": "function_call_output",
-            "call_id": "call_1",
-            "output": '{"run_id":"run_tool","returncode":0,"stdout":"ok\\n"}',
-        },
+        output=[{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}],
     )
 
-    digest = thread_digest(thread_id, state_dir=tmp_path, include_tools=True)
+    view = thread_view(thread_id, state_dir=tmp_path)
 
-    assert digest["items"] == [
-        {"role": "tool", "text": "run_python rc=0 run=run_tool helpers=replace_text('a.txt', 'old', 'new')"},
-        {"role": "tool", "text": "tool_output run=run_tool rc=0 stdout='ok'"},
+    assert view["thread_id"] == thread_id
+    assert view["selected_epochs"] == ["epoch:0"]
+    assert view["turns"] == [
+        {
+            "id": "turn:turn_one",
+            "turn_id": "turn_one",
+            "epoch_id": "epoch:0",
+            "status": "unknown",
+            "user_messages": [
+                {"id": "event:2", "event_id": 2, "role": "user", "text": "inspect", "chars": 7, "truncated": False}
+            ],
+            "assistant_messages": [
+                {"id": "event:4", "event_id": 4, "role": "assistant", "text": "done", "chars": 4, "truncated": False}
+            ],
+            "process_refs": [
+                {
+                    "id": "run:run_tool",
+                    "kind": "run_python",
+                    "event_ref": "event:3",
+                    "event_id": 3,
+                    "turn_id": "turn_one",
+                    "status": "ok",
+                    "summary": "run_python rc=0 run=run_tool helpers=replace_text",
+                    "related_ids": ["event:3"],
+                    "helper_names": ["replace_text"],
+                }
+            ],
+        }
     ]
 
 
@@ -944,7 +986,7 @@ def test_runtime_ask_is_not_exported() -> None:
     assert not hasattr(uv_agent_runtime, "ask")
 
 
-def test_runtime_thread_digest_reads_state_dir(tmp_path: Path) -> None:
+def test_runtime_thread_view_can_select_previous_epochs(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Thread")
     store.append(
@@ -961,10 +1003,18 @@ def test_runtime_thread_digest_reads_state_dir(tmp_path: Path) -> None:
         item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "after"}]},
     )
 
-    digest = thread_digest(thread_id, state_dir=tmp_path)
+    latest = thread_view(thread_id, state_dir=tmp_path)
+    first = thread_view(thread_id, state_dir=tmp_path, epoch=0)
+    all_epochs = thread_view(thread_id, state_dir=tmp_path, epoch="all")
 
-    assert digest["latest_compaction"]["text"] == "summary"
-    assert digest["items"] == [{"role": "user", "text": "after"}]
+    assert [epoch["id"] for epoch in latest["epochs"]] == ["epoch:0", "epoch:1"]
+    assert latest["selected_epochs"] == ["epoch:1"]
+    assert latest["turns"][0]["user_messages"][0]["text"] == "after"
+    assert first["selected_epochs"] == ["epoch:0"]
+    assert first["epochs"][0]["compaction"]["text"] == "summary"
+    assert first["turns"][0]["user_messages"][0]["text"] == "hello"
+    assert [turn["turn_id"] for turn in all_epochs["turns"]] == ["t1", "t2"]
+
 
 def test_runtime_goal_paths_uses_runner_thread_environment(
     tmp_path: Path,
