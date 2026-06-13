@@ -3505,13 +3505,16 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "系统不会替你截断过大的输出" in prompt
     assert "先过滤、限制或摘要" in prompt
     assert "<run_python_workflow>" in prompt
-    assert "完整的 Python 程序" in prompt
+    assert "完整的 Python 程序和工作单元" in prompt
     assert "不是 shell-command wrapper 或单个 helper wrapper" in prompt
-    assert "同一个目标下的多个搜索、读取、计算、编辑或验证" in prompt
-    assert "应尽量在同一个脚本内完成" in prompt
-    assert "Python 原生控制流和常规 Python 语法" in prompt
+    assert "同一目标下的搜索、读取、计算、编辑、验证和条件回退必须" in prompt
+    assert "必须在同一个脚本内用 Python 原生控制流编排" in prompt
+    assert "只有需要用户确认、操作有破坏风险、或结果会改变整体方向时" in prompt
+    assert "应尽量在同一个脚本内完成" not in prompt
+    assert "在脚本内使用常规 Python 语法" in prompt
     assert "imports、variables、functions、loops、conditionals、try/except" in prompt
-    assert "编排相关步骤、回退处理、解析、验证和摘要" in prompt
+    assert "处理多文件、多步骤、可预见的分支或失败" in prompt
+    assert "探索阶段必须一次性收集足够信息" in prompt
     assert "Call enter_dir proactively whenever the task clearly belongs" not in prompt
     assert "including paths discovered during execution" not in prompt
     assert "<capability_use>" in prompt
