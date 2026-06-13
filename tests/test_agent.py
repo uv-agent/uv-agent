@@ -3482,7 +3482,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "thread's active cwd" not in prompt
     assert "PEP 723" not in prompt
     assert "uv pip" not in prompt
-    assert "对于成熟领域的问题" in prompt
+    assert "在成熟领域，临时使用可靠的第三方依赖往往比手写实现更安全、更高效" in prompt
     assert "用 unidiff 解析 diffs" in prompt
     assert "用 libcst 进行 Python 源码转换" in prompt
     assert "你唯一的外部动作工具是 run_python" in prompt
@@ -3518,7 +3518,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Call enter_dir proactively whenever the task clearly belongs" not in prompt
     assert "including paths discovered during execution" not in prompt
     assert "<capability_use>" in prompt
-    assert "当可用能力能减少步骤、时间或风险时" in prompt
+    assert "如果某项能力能减少步骤、节省时间或降低风险，就优先使用" in prompt
     assert "Actively use available capabilities" not in prompt
     assert "Actively use available external capabilities" not in prompt
     assert "runtime helpers、declared skills、declared MCP servers" in prompt
@@ -3526,7 +3526,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Prefer existing helpers and declared external capabilities" not in prompt
     assert "use simple Python for glue code or very small work" not in prompt
     assert "only when it materially helps" not in prompt
-    assert "使用 workflow" in prompt and "独立或长时间运行模型任务" in prompt
+    assert "使用 workflow 相关的 runtime helper 函数" in prompt and "独立或长时间运行的模型任务" in prompt
     assert "并发运行相互独立的任务" in prompt
     assert "workflow nodes 或 run_python 内的独立 helper operations" in prompt
     assert "对同一文件的写入保持顺序执行" in prompt
@@ -3545,7 +3545,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Occam's razor" not in prompt
     assert "capability explanations layered" not in prompt
     assert "<context_updates>" in prompt
-    assert "模型可见的 user messages" in prompt and "<context_update" in prompt
+    assert "模型可见的用户消息" in prompt and "<context_update" in prompt
     assert "在当前 epoch 内" in prompt
     assert "compaction 开启新 epoch 后会重新发送" in prompt
     assert "Skills 和 MCP server declarations" in prompt and "追加" in prompt
@@ -3611,8 +3611,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "thread_detail" in turn_context
     assert "run_digest" not in turn_context
     assert "<usage_pattern>" in turn_context
-    assert "Helpers 是供工作单元脚本使用的 Python functions" in turn_context
-    assert "不是独立工具模式" in turn_context
+    assert "helpers 是工作单元脚本里使用的 Python 函数" in turn_context
+    assert "不是独立的工具模式" in turn_context
     assert "不要仅因为下一步要用另一个 helper" in turn_context
     assert "对方向已经明确的后续步骤" in turn_context
     assert "用 Python 编排" in turn_context
@@ -3620,12 +3620,12 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "用 Python libraries 解析结构化输出" in turn_context
     assert "收集一份摘要" in turn_context
     assert "结果会改变整体方向" in turn_context
-    assert "把 shell 习惯转换成 Python 写法" in turn_context
+    assert "把 shell 习惯改成 Python 写法" in turn_context
     assert "用 read_file 代替 cat" in turn_context
     assert "用 search_text/find_files 代替临时 grep/find" in turn_context
     assert "用 run_process_text([...]) 代替 raw subprocess" in turn_context
-    assert "对于 skill 文件，用 read_file 读取 SKILL.md" in turn_context
-    assert "在同一脚本中处理可预见的后续 parsing 或 fallback logic" in turn_context
+    assert "skill 文件用 read_file 读取 SKILL.md" in turn_context
+    assert "在同一脚本中处理可预见的后续解析或回退逻辑" in turn_context
     assert '<example name="round-1-find">' in turn_context
     assert "查找并理解" in turn_context
     assert "并行搜索多个 pattern、一次读取多个相关文件" in turn_context
@@ -3656,9 +3656,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "def command" not in turn_context
     assert "json.loads" not in turn_context
     assert "<helper_selection>" in turn_context
-    assert "列出的 helpers 是普通 Python functions" in turn_context
+    assert "列出的 helpers 是普通 Python 函数" in turn_context
     assert "与标准库代码和控制流组合使用" in turn_context
-    assert "pathlib、os、json" in turn_context and "脚本内做连接逻辑" in turn_context
+    assert "pathlib、os、json" in turn_context and "做衔接逻辑" in turn_context
     assert "适合时优先使用 helpers" in turn_context
     assert "newline style、BOM、final newline" in turn_context
     assert "按任务选择：" in turn_context
@@ -3666,10 +3666,10 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "search_text 默认 regex" in turn_context
     assert "精确代码字符串用 literal=True" in turn_context
     assert "rg type aliases 用 file_types" in turn_context
-    assert "edit=用 replace_text 替换唯一小段文本，用 edit_lines 做 anchored ranges/inserts" in turn_context
+    assert "edit=用 replace_text 替换唯一小段文本，用 edit_lines 处理 anchored ranges/inserts" in turn_context
     assert "完整文件或生成的内容用 write_file" in turn_context
     assert "process=run_process_text for ordinary external commands" not in turn_context
-    assert "对于普通外部命令" in turn_context
+    assert "普通外部命令（包括" in turn_context
     assert "包括 skills 或 docs 中展示的 shell commands" in turn_context
     assert "优先用 run_process_text 而不是 raw subprocess" in turn_context
     assert "自定义进程控制" in turn_context
@@ -3701,7 +3701,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'level="small"' not in prompt
     assert "pathlib" in turn_context
     assert "这些 mentions 只是纯文本提示" in prompt
-    assert "在 run_python 中使用对应 runtime helper 检查它" in prompt
+    assert "在 run_python 中使用对应 runtime helper 读取并检查它" in prompt
     assert "read_text, write_text" not in prompt
     assert "list_files" not in prompt
     assert "run_command/check_command" not in prompt
@@ -3715,8 +3715,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<description>Demo MCP</description>" in turn_context
     assert '<instructions truncated="false">Use demo tools carefully.</instructions>' in turn_context
     assert mcp_probe.started is True
-    assert "当某个 skill 适合任务时使用它" in turn_context
-    assert "当某个 MCP server 适合任务时使用它" in turn_context
+    assert "遇到适合任务的 skill 时" in turn_context
+    assert "遇到适合任务的 MCP server 时" in turn_context
 
 
 def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_path: Path) -> None:
@@ -4784,7 +4784,7 @@ def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) ->
     text = update["text"]
     assert text.index("<runtime_helpers>") < text.index("<plugin_runtime_helpers>")
     assert (
-        "使用 helper 的 name 属性作为 Python import/callable 名称；"
+        "使用 helper 的 name 属性作为 Python 中的 import/callable 名称；"
         "plugin 属性只标识提供方 plugin。"
     ) in text
     assert '<helper name="demo_helper" plugin="demo-plugin">Demo helper.</helper>' in text
