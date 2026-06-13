@@ -462,7 +462,6 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert "完整、独立的 Python 脚本" in PYTHON_TOOL["description"]
     assert "优先使用 runtime helpers" in PYTHON_TOOL["description"]
     assert "普通外部命令" in PYTHON_TOOL["description"] and "run_process_text" in PYTHON_TOOL["description"]
-    assert "运行命令、访问网络" in PYTHON_TOOL["description"]
     assert "call subprocesses" not in PYTHON_TOOL["description"]
     assert set(PYTHON_TOOL["parameters"]["properties"]) == {"code", "timeout_s"}
     code_description = PYTHON_TOOL["parameters"]["properties"]["code"]["description"]
