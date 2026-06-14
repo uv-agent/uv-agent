@@ -3612,7 +3612,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<level>small</level>" in turn_context
     assert "<level>medium</level>" in turn_context
     assert "</runtime_helpers>" in turn_context
-    assert "它们来自 uv_agent_runtime，不是预加载 globals" in turn_context
+    assert "它们不会自动加载，需要从 uv_agent_runtime 显式导入" in turn_context
     assert "read_file" in turn_context
     assert "write_file" in turn_context
     assert "edit_lines" in turn_context
@@ -3645,15 +3645,15 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "thread_detail" in turn_context
     assert "run_digest" not in turn_context
     assert "<usage_pattern>" in turn_context
-    assert "helpers 是工作单元脚本里使用的 Python 函数" in turn_context
-    assert "不是独立的工具模式" in turn_context
+    assert "helpers 是脚本中使用的普通 Python 函数" in turn_context
+    assert "不是独立的工具调用" in turn_context
     assert "不要仅因为下一步要用另一个 helper" in turn_context
     assert "对方向已经明确的后续步骤" in turn_context
     assert "用 Python 编排" in turn_context
     assert "根据 helper 结果分支" in turn_context
     assert "用 Python libraries 解析结构化输出" in turn_context
     assert "收集一份摘要" in turn_context
-    assert "把 shell 习惯改成 Python 写法" in turn_context
+    assert "用 Python 方式替代 shell 习惯" in turn_context
     assert "用 read_file 代替 cat" in turn_context
     assert "用 search_text/find_files 代替临时 grep/find" in turn_context
     assert "用 run_process_text([...]) 代替 raw subprocess" in turn_context
