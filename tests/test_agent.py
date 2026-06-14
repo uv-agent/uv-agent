@@ -3529,7 +3529,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "thread's active cwd" not in prompt
     assert "PEP 723" not in prompt
     assert "uv pip" not in prompt
-    assert "在成熟领域，临时使用可靠的第三方依赖往往比手写实现更安全、更高效" in prompt
+    assert "在成熟领域，临时引入可靠的第三方依赖往往比手写实现更安全、更高效" in prompt
     assert "用 unidiff 解析 diffs" in prompt
     assert "用 libcst 进行 Python 源码转换" in prompt
     assert "你唯一的外部动作工具是 run_python" in prompt
@@ -3683,7 +3683,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "anchor 不匹配" in turn_context
     assert "edit_lines(" in turn_context
     assert '<example name="anti-pattern-one-helper-per-call">' in turn_context
-    assert "不要把一个清晰工作单元拆成多次 run_python" in turn_context
+    assert "不要把一个清晰的工作单元拆成多次 run_python" in turn_context
     assert "每次只调用一个 helper" in turn_context
     assert "偷懒式串行" in turn_context
     assert "浪费往返、丢失前一次的返回值" in turn_context

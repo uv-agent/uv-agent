@@ -111,7 +111,7 @@ COMPACTION_TOOL_ERROR_STDERR = '错误：上下文压缩期间不允许调用工
 INTERRUPTED_TOOL_ERROR = '工具调用未完成，因为用户中断了本轮。不要假定该工具已成功运行。'
 
 ACTIVE_CWD_NOTICE_TEMPLATE = """<active_cwd_notice>
-run_python 的活动工作目录现在是 {active_cwd_rel}。线程打开时位于 {initial_cwd_rel}。相对路径和自动目录规则都跟随活动工作目录。
+run_python 的活动工作目录现在是 {active_cwd_rel}（线程打开时位于 {initial_cwd_rel}）。相对路径与目录规则均跟随活动工作目录。
 </active_cwd_notice>"""
 
 CONTEXT_REMOVED_ALL = """<context_update id="runtime_context" status="removed">
@@ -192,7 +192,7 @@ PROJECT_RULE_INDEX_HEADER = '在活动 {label} 下发现了规则文件。内容
 # Compaction inline prompts (extracted from compaction.py)
 # ---------------------------------------------------------------------------
 
-COMPACTION_RETURN_ONLY_INSTRUCTION = '只返回交接摘要，使用清晰的 Markdown 格式，不要代码块或工具调用标记。保留用户意图、决策、文件变更、工具结果和未解决任务。从做了什么、学到了什么的角度总结工具调用；不要复现调用 payload、脚本、JSON、DSML/XML 协议块、stdout 封装或 run ID。不要复述 AGENTS 目录规则，系统会自动重新加载必要内容。'
+COMPACTION_RETURN_ONLY_INSTRUCTION = '只返回交接摘要，使用清晰的 Markdown 格式，不要代码块或工具调用标记。保留用户意图、决策、文件变更、工具结果和未解决任务。从做了什么、学到了什么的角度总结工具调用；不要复现调用 payload、脚本、JSON、DSML/XML 协议块、stdout 包装或 run ID。不要复述 AGENTS 目录规则，系统会自动重新加载必要内容。'
 
 COMPACTION_NO_SUMMARY_FALLBACK = '（无可用摘要）'
 
@@ -334,7 +334,7 @@ GOAL_MODE_FIELD_CHECKLIST = "checklist"
 GOAL_MODE_FIELD_DOCUMENT = "document"
 GOAL_MODE_FIELD_OBJECTIVE = "objective"
 GOAL_MODE_ENABLED_STATUS_FRAGMENT = 'status="enabled"'
-GOAL_MODE_ACTIVE_RULES = """<rule>将这些文件作为此线程目标的持久外部记忆。</rule>
+GOAL_MODE_ACTIVE_RULES = """<rule>将这些文件作为本线程目标的外部持久记忆。</rule>
 <rule>维护 checklist.md，用于记录验收标准、任务、进展、阻塞和下一步。</rule>
 <rule>维护 notes.md，用于记录决策、调查笔记、约束和交接上下文。</rule>
 <rule>当目标进展变化或从不清楚的上下文恢复时，用 run_python 读取或更新这些文件。</rule>
@@ -694,7 +694,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 </response_style>
 
 <code_style>
-<rule>当项目规则或用户指令未另行要求时，倾向于编写更充分的代码内文档：为公共接口、不明显的流程、边界情况、兼容性选择、失败模式和易变的假设添加注释和文档字符串。</rule>
+<rule>当项目规则或用户指令未另行要求时，倾向于编写更充分的代码内文档：为公共接口、不明显的流程、边界情况、兼容性取舍、失败模式和易变的假设添加注释和文档字符串。</rule>
 <rule>优先写解释“为什么”的注释，而不是只复述“做什么”的注释。保持注释准确；周围代码变化时，更新或删除对应注释。</rule>
 <rule>默认用 English 写 git commit messages，并包含足够细节，帮助未来读者理解改了什么、为什么改、如何验证。只有当用户明确要求，或本线程中明显偏好其他语言或更简短风格时，才使用其他语言或更简短风格。</rule>
 </code_style>
@@ -713,7 +713,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 
 <capability_use>
 <rule>如果某项能力能减少步骤、节省时间或降低风险，就优先使用，包括：runtime helpers、declared skills、declared MCP servers，以及安装到共享脚本虚拟环境中、目标明确的第三方包。</rule>
-<rule>在成熟领域，临时使用可靠的第三方依赖往往比手写实现更安全、更高效。例如：用 unidiff 解析 diffs，用 libcst 进行 Python 源码转换，用 ruamel.yaml 保留 YAML 格式，用 beautifulsoup4/lxml 处理 HTML/XML，用 charset-normalizer 处理未知编码，用 pillow 处理图片 metadata 或格式转换，用 packaging 处理版本与限定符逻辑，用 pathspec 进行 gitignore 风格匹配。</rule>
+<rule>在成熟领域，临时引入可靠的第三方依赖往往比手写实现更安全、更高效。例如：用 unidiff 解析 diffs，用 libcst 进行 Python 源码转换，用 ruamel.yaml 保留 YAML 格式，用 beautifulsoup4/lxml 处理 HTML/XML，用 charset-normalizer 处理未知编码，用 pillow 处理图片 metadata 或格式转换，用 packaging 处理版本与限定符逻辑，用 pathspec 进行 gitignore 风格匹配。</rule>
 <rule>独立或长时间运行的模型任务，使用 workflow 相关的 runtime helper 函数来做子任务拆分、持久任务图、显式等待点和 checkpoints。</rule>
 <rule>只要能安全地节省时间，就并发运行相互独立的任务，包括 workflow nodes 或 run_python 内的独立 helper operations；在 Python 中可使用 asyncio、concurrent.futures 和 threading 等标准设施。按确定顺序收集结果，并让相互依赖的任务以及对同一文件的写入保持顺序执行。</rule>
 </capability_use>
@@ -881,7 +881,7 @@ for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py
 ```
 </example>
 <example name="anti-pattern-one-helper-per-call">
-反例 — 不要把一个清晰工作单元拆成多次 run_python，每次只调用一个 helper。下面这种“偷懒式串行”会浪费往返、丢失前一次的返回值，也让后续步骤无法在同一个 Python 脚本里根据结果分支。
+反例 — 不要把一个清晰的工作单元拆成多次 run_python，每次只调用一个 helper。下面这种“偷懒式串行”会浪费往返、丢失前一次的返回值，也让后续步骤无法在同一个 Python 脚本里根据结果分支。
 ```python
 # **不推荐**：第一轮只搜索，然后停下来等下一轮。
 from uv_agent_runtime import search_text
