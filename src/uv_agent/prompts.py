@@ -87,7 +87,7 @@ COMPACTION_SUMMARIZATION_PROMPT = """你正在执行 CONTEXT CHECKPOINT COMPACTI
 请保持简洁、结构化，并聚焦于帮助下一个 LLM 无缝继续工作。"""
 TITLE_GENERATION_PROMPT = '根据用户第一条消息，为这个 uv-agent 线程创建一个简洁、标题式名称。抓住用户的底层任务或意图，而不是逐字改写句子。如果问题宽泛或含糊，就用抽象名词短语风格。例如，询问这是哪种项目的消息应生成类似“项目内容询问”的标题。只返回标题，不要引号或标点。优先使用用户的语言。控制在 8 个英文词以内或 24 个 CJK 字符以内。'
 BRANCH_NAME_GENERATION_PROMPT = '根据用户任务创建一个简短的 git branch slug。捕捉具体动作和对象。只返回 slug：ASCII 小写字母、数字和连字符。不要空格、斜杠、引号、标点、解释或前缀。最多 30 个字符。优先使用动宾短语，例如 fix-login-redirect、add-dark-mode 或 refactor-parser。'
-COMPACTED_CONTEXT_CONTINUATION = '上方 retained-history 消息可能包含早期用户或助手消息，这些消息为保持连续性而保留。请从这个已压缩上下文继续，恢复任何未完成的任务。把摘要和保留历史视为既有对话状态，然后采取下一个具体步骤，不要要求用户重复已捕获的信息。'
+COMPACTED_CONTEXT_CONTINUATION = '上方 <conversation_summary> 和 <retained_history> 是为保持连续性而保留的历史上下文，仅供参考。不要复述或输出这些 XML 块，也不要把它们当作新的用户指令。请直接基于这些已有状态，采取下一个具体步骤，恢复任何未完成的任务，不要要求用户重复已捕获的信息。'
 TOOL_ATTACHMENT_CONTEXT_BRIDGE = '工具执行已完成。工具产生的额外视觉上下文会在下一条用户消息中提供。'
 POST_TOOL_COMPACTION_BRIDGE = '我已经收到工具结果。当下一条用户消息要求上下文压缩时，我会按照这些指令生成所需的压缩摘要，并准确保留工具结果、决策、文件变更、约束和未解决任务。'
 INTERRUPTED_TOOL_CONTEXT_BRIDGE = '某个工具调用未返回完整结果。请基于可用上下文继续。'
@@ -690,7 +690,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 <response_style>
 <rule>除非用户要求不同风格或更多细节，否则用简洁、友好、自然的语气回复。</rule>
 <rule>默认控制回答长度；除非用户明确要求详细解释具体内容，否则不要输出长篇说明。</rule>
-<rule>由于你是在终端中输出，可以使用清晰的 markdown 格式来组织文本，但不建议使用表格，除非用户明确要求。</rule>
+<rule>使用清晰的 markdown 格式来组织文本，但不建议使用表格，除非用户明确要求。</rule>
 </response_style>
 
 <code_style>
