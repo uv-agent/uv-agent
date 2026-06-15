@@ -4691,6 +4691,8 @@ def test_runtime_context_skill_change_sends_incremental_section_only(tmp_path: P
     text = message_item_text(second[0])
     assert text.startswith('<context_update id="runtime_context" status="current">\n')
     assert text.endswith("</context_update>")
+    assert "以下运行时上下文是当前增量更新" in text
+    assert "The following runtime context" not in text
     assert "changed:" not in text
     assert "fingerprint:" not in text
     assert "<available_skills>" not in text

@@ -127,8 +127,8 @@ CONTEXT_REMOVED_SOME_SUFFIX = "\n</context_update_removed>"
 
 CONTEXT_UPDATE_CURRENT_PREFIX = (
     '<context_update id="runtime_context" status="current">\n'
-    "The following runtime context is current. It updates only the listed content; "
-    "prior runtime context remains current within this epoch unless explicitly removed."
+    "以下运行时上下文是当前增量更新。它只更新本块列出的内容；"
+    "除非本块明确移除，否则本上下文周期内先前的运行时上下文仍然有效。"
 )
 CONTEXT_UPDATE_CURRENT_SUFFIX = "\n</context_update>"
 
