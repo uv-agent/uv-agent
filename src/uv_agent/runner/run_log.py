@@ -158,15 +158,25 @@ class RunLogStore:
                     run_id,
                 ),
             )
+            row = db.execute(
+                "SELECT thread_id, turn_id, started_at FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
         self._publish_host_event(
             {
                 "type": "runner.run_completed",
                 "run_id": run_id,
+                "thread_id": row["thread_id"] if row is not None else None,
+                "turn_id": row["turn_id"] if row is not None else None,
+                "started_at": row["started_at"] if row is not None else None,
                 "completed_at": completed_at,
                 "returncode": returncode,
                 "timed_out": timed_out,
                 "interrupted": interrupted,
                 "truncated": truncated,
+                "stdout_bytes": len(stdout.encode("utf-8")),
+                "stderr_bytes": len(stderr.encode("utf-8")),
+                "event_count": len(structured_events),
                 "helper_calls": helper_calls,
             }
         )

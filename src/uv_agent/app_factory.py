@@ -5,6 +5,7 @@ from pathlib import Path
 from uv_agent.agent import AgentEngine
 from uv_agent.config import load_config
 from uv_agent.host_events import HostEventBus
+from uv_agent.telemetry import TelemetryStore
 from uv_agent.model import UnifiedModelClient
 from uv_agent.paths import (
     ensure_project_local_dir,
@@ -23,6 +24,8 @@ def create_engine(project_root: Path | None = None, *, data_dir: Path | None = N
     config = load_config(root)
     state_dir = (data_dir or project_state_dir(root)).resolve()
     host_events = HostEventBus()
+    telemetry = TelemetryStore(state_dir)
+    host_events.subscribe(telemetry.on_event)
     runner = PythonRunner(
         project_root=root,
         data_dir=state_dir,
