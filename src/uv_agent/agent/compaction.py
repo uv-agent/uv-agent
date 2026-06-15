@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json as _json
 import re as _re
+from dataclasses import dataclass
+from html import unescape as xml_unescape
 from typing import Any
 
 from uv_agent.context import estimate_tokens
@@ -10,6 +12,9 @@ from uv_agent.agent.context_builder import xml_text
 from uv_agent.agent.messages import message_item, message_item_text
 from uv_agent.prompts import (
     COMPACTED_CONTEXT_CONTINUATION,
+    COMPACTION_CONTINUATION_TEMPLATE,
+    COMPACTION_HANDOFF_OPEN,
+    COMPACTION_HANDOFF_TEMPLATE,
     COMPACTION_JUDGE_REQUEST,
     COMPACTION_NO_SUMMARY_FALLBACK,
     COMPACTION_RETURN_ONLY_INSTRUCTION,
@@ -21,12 +26,15 @@ from uv_agent.prompts import (
     CONVERSATION_SUMMARY_OPEN,
     CONVERSATION_SUMMARY_TEMPLATE,
     POST_TOOL_COMPACTION_BRIDGE,
-    RETAINED_HISTORY_EMPTY_MESSAGE_TEMPLATE,
+    RETAINED_HISTORY_CLOSE,
+    RETAINED_HISTORY_EMPTY_TEMPLATE,
     RETAINED_HISTORY_MARKER,
-    RETAINED_HISTORY_MESSAGE_TEMPLATE,
-    RETAINED_TOOL_CALL_TEMPLATE,
-    RETAINED_TOOL_FALLBACK_NAME,
-    RETAINED_TOOL_OUTPUT_TEMPLATE,
+    RETAINED_HISTORY_MESSAGE_ENTRY_TEMPLATE,
+    RETAINED_HISTORY_OPEN,
+    RETAINED_HISTORY_TEMPLATE,
+    RETAINED_HISTORY_TOOL_CALL_ENTRY_TEMPLATE,
+    RETAINED_HISTORY_TOOL_FALLBACK_NAME,
+    RETAINED_HISTORY_TOOL_OUTPUT_ENTRY_TEMPLATE,
     UPCOMING_USER_TASK_TEMPLATE,
 )
 from uv_agent.model.types import ModelResponse
@@ -55,6 +63,15 @@ K_CANDIDATE_PCTS = [0.02, 0.05, 0.10, 0.15, 0.25]
 
 S_MIN = 500
 S_MAX = 8000
+
+
+@dataclass(frozen=True)
+class RetainedHistoryEntry:
+    """One inert entry inside the model-visible <retained_history> block."""
+
+    order: int
+    identity: tuple[Any, ...]
+    text: str
 
 
 def compaction_judge_request_item(upcoming_user_text: str | None = None) -> dict[str, Any]:
@@ -126,39 +143,89 @@ def estimate_compact_cost(
     return input_tokens * P_summary_in + S * P_summary_out
 
 
+# ---------------------------------------------------------------------------
+# Retained history selection and rendering
+# ---------------------------------------------------------------------------
+
+
 def retain_recent_context(
     input_items: list[dict[str, Any]],
     K: int,
 ) -> list[dict[str, Any]]:
-    """Return the most recent replay-safe context items totalling up to K tokens.
+    """Return recent context as inert retained-history message items.
 
-    Provider tool-call protocol items are converted to ordinary retained-history
-    messages.  Replaying raw ``function_call`` / ``function_call_output`` items
-    after a compaction can create an invalid or dangling tool-call sequence, but
-    the textual artefact is still useful as recent context for the model.
+    Cache-aware compaction stores recent user/assistant/tool protocol history in
+    a single textual <retained_history> block.  This helper keeps its historical
+    test-facing shape (a list of message items) while using the canonical entry
+    tags that are embedded in that block.
     """
-    selected: list[dict[str, Any]] = []
+
+    return [message_item("user", entry.text) for entry in _retained_recent_history_entries(input_items, K)]
+
+
+def _retained_recent_history_entries(
+    input_items: list[dict[str, Any]],
+    K: int,
+) -> list[RetainedHistoryEntry]:
+    if K <= 0:
+        return []
+    selected: list[RetainedHistoryEntry] = []
     remaining = K
-    for item in reversed(input_items):
-        candidate = _recent_context_candidate_item(item)
-        if candidate is None:
+    for index in range(len(input_items) - 1, -1, -1):
+        entry = _recent_context_candidate_entry(input_items[index], index)
+        if entry is None:
             continue
-        tokens = estimate_tokens([candidate])
+        tokens = _entry_tokens(entry)
         if tokens <= remaining:
-            selected.append(candidate)
+            selected.append(entry)
             remaining -= tokens
-        else:
-            text = message_item_text(candidate)
-            if remaining > 0 and text:
-                truncated = truncate_text_to_estimated_tokens(text, remaining)
-                selected.append(message_item(str(candidate.get("role") or "user"), truncated))
-            break
+            if remaining <= 0:
+                break
+            continue
+        if remaining > 0:
+            truncated = _recent_context_candidate_entry(input_items[index], index, max_tokens=remaining)
+            if truncated is not None and truncated.text:
+                selected.append(truncated)
+        break
     selected.reverse()
     return selected
 
 
-def _recent_context_candidate_item(item: dict[str, Any]) -> dict[str, Any] | None:
-    """Return a replay-safe item suitable for verbatim recent-history retention."""
+def _retained_user_history_entries(input_items: list[dict[str, Any]]) -> list[RetainedHistoryEntry]:
+    """Return entries selected by the legacy retained-user-message budget."""
+
+    selected: list[RetainedHistoryEntry] = []
+    remaining = COMPACTION_USER_MESSAGE_MAX_TOKENS
+    for index in range(len(input_items) - 1, -1, -1):
+        item = input_items[index]
+        if not retain_item_after_compaction(item):
+            continue
+        entry = _retained_history_entry_from_item(item, index)
+        if entry is None:
+            continue
+        tokens = _entry_tokens(entry)
+        if tokens <= remaining:
+            selected.append(entry)
+            remaining -= tokens
+            if remaining <= 0:
+                break
+            continue
+        if remaining > 0:
+            truncated = _retained_history_entry_from_item(item, index, max_tokens=remaining)
+            if truncated is not None:
+                selected.append(truncated)
+        break
+    selected.reverse()
+    return selected
+
+
+def _recent_context_candidate_entry(
+    item: dict[str, Any],
+    order: int,
+    *,
+    max_tokens: int | None = None,
+) -> RetainedHistoryEntry | None:
+    """Return an inert retained-history entry for a replay item."""
 
     typ = item.get("type")
     if typ == "message":
@@ -170,31 +237,105 @@ def _recent_context_candidate_item(item: dict[str, Any]) -> dict[str, Any] | Non
         # judge prompts so they do not become long-lived user-looking history.
         if any(marker in text for marker in CONTEXT_SCAFFOLD_MARKERS):
             return None
-        return copy.deepcopy(item)
+        return _retained_history_entry_from_item(item, order, max_tokens=max_tokens)
     if typ in {"function_call", "function_call_output"}:
-        text = _tool_artifact_history_text(item)
-        if text:
-            return message_item("user", text)
+        return _retained_history_entry_from_item(item, order, max_tokens=max_tokens)
     return None
 
 
-def _tool_artifact_history_text(item: dict[str, Any]) -> str:
-    """Render a tool protocol item as inert retained-history text."""
-
+def _retained_history_entry_from_item(
+    item: dict[str, Any],
+    order: int,
+    *,
+    max_tokens: int | None = None,
+    identity_prefix: str = "item",
+) -> RetainedHistoryEntry | None:
     typ = item.get("type")
-    call_id = xml_text(str(item.get("call_id") or ""))
+    if typ == "message":
+        role = str(item.get("role") or "user")
+        if role not in {"user", "assistant"}:
+            return None
+        body = message_item_text(item)
+        if max_tokens is not None:
+            body = truncate_text_to_estimated_tokens(body, max_tokens)
+        if not body:
+            return None
+        return RetainedHistoryEntry(
+            order=order,
+            identity=(identity_prefix, order, "message", role),
+            text=RETAINED_HISTORY_MESSAGE_ENTRY_TEMPLATE.format(
+                role=xml_text(role),
+                text=xml_text(body),
+            ),
+        )
     if typ == "function_call":
-        name = xml_text(str(item.get("name") or RETAINED_TOOL_FALLBACK_NAME))
-        arguments = xml_text(str(item.get("arguments") or ""))
-        return RETAINED_TOOL_CALL_TEMPLATE.format(
-            name=name,
-            call_id=call_id,
-            arguments=arguments,
+        call_id = str(item.get("call_id") or "")
+        name = str(item.get("name") or RETAINED_HISTORY_TOOL_FALLBACK_NAME)
+        arguments = str(item.get("arguments") or "")
+        if max_tokens is not None:
+            arguments = truncate_text_to_estimated_tokens(arguments, max_tokens)
+        if not (call_id or name or arguments):
+            return None
+        return RetainedHistoryEntry(
+            order=order,
+            identity=(identity_prefix, order, "tool_call", call_id, name),
+            text=RETAINED_HISTORY_TOOL_CALL_ENTRY_TEMPLATE.format(
+                name=xml_text(name),
+                call_id=xml_text(call_id),
+                arguments=xml_text(arguments),
+            ),
         )
     if typ == "function_call_output":
-        output = xml_text(str(item.get("output") or ""))
-        return RETAINED_TOOL_OUTPUT_TEMPLATE.format(call_id=call_id, output=output)
-    return ""
+        call_id = str(item.get("call_id") or "")
+        output = str(item.get("output") or "")
+        if max_tokens is not None:
+            output = truncate_text_to_estimated_tokens(output, max_tokens)
+        if not (call_id or output):
+            return None
+        return RetainedHistoryEntry(
+            order=order,
+            identity=(identity_prefix, order, "tool_output", call_id),
+            text=RETAINED_HISTORY_TOOL_OUTPUT_ENTRY_TEMPLATE.format(
+                call_id=xml_text(call_id),
+                output=xml_text(output),
+            ),
+        )
+    return None
+
+
+def _entry_tokens(entry: RetainedHistoryEntry) -> int:
+    return estimate_tokens([message_item("user", entry.text)])
+
+
+def _merge_retained_history_entries(entries: list[RetainedHistoryEntry]) -> list[RetainedHistoryEntry]:
+    """Deduplicate legacy retained users and cache-aware recent context.
+
+    Both selectors may choose the same underlying item.  Keep the longest render
+    for that item (usually the untruncated one) and then restore chronological
+    order inside the single <retained_history> block.
+    """
+
+    by_identity: dict[tuple[Any, ...], RetainedHistoryEntry] = {}
+    for entry in entries:
+        current = by_identity.get(entry.identity)
+        if current is None or len(entry.text) > len(current.text):
+            by_identity[entry.identity] = entry
+    return sorted(by_identity.values(), key=lambda entry: entry.order)
+
+
+def _render_retained_history(entries: list[RetainedHistoryEntry]) -> str:
+    merged = _merge_retained_history_entries(entries)
+    if not merged:
+        return RETAINED_HISTORY_EMPTY_TEMPLATE
+    history = "\n\n".join(entry.text for entry in merged if entry.text)
+    if not history:
+        return RETAINED_HISTORY_EMPTY_TEMPLATE
+    return RETAINED_HISTORY_TEMPLATE.format(history=history)
+
+
+# ---------------------------------------------------------------------------
+# Judge-history filtering
+# ---------------------------------------------------------------------------
 
 
 def strip_compaction_judge_history(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -249,7 +390,7 @@ def _is_compaction_judge_response_item(item: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Compaction trigger, replacement, and retention (existing)
+# Compaction trigger, replacement, and retention
 # ---------------------------------------------------------------------------
 
 COMPACTION_USER_MESSAGE_MAX_TOKENS = 20_000
@@ -274,23 +415,17 @@ def compaction_replacement_input(
 ) -> list[dict[str, Any]]:
     """Build the replacement for pre-compaction history.
 
-    When *K* > 0 the replacement contains three parts:
-      1. retained old user messages (XML-wrapped, existing logic)
-      2. retained recent context (K tokens of verbatim tail)
-      3. compaction summary
-
-    When *K* == 0 the behaviour matches the pre-cache-aware code path (used
-    by threshold-triggered mid-turn compaction).
+    The replacement is a single inert <compaction_handoff> user message.  The
+    legacy retained-user selector and the cache-aware recent-context selector are
+    merged into one <retained_history> block so user, assistant, tool-call, and
+    tool-output history all share one tag contract.
     """
-    retained_users = retained_user_messages_after_compaction(input_items)
-    replacement = retained_history_items(retained_users)
+
+    entries = _retained_user_history_entries(input_items)
     if K > 0:
-        recent = retain_recent_context(input_items, K)
-        # Don't double-count items already pulled into retained_users.
-        replacement.extend(_retained_history_item(item) for item in recent)
+        entries.extend(_retained_recent_history_entries(input_items, K))
     summary = compaction_response_summary_text(response).strip() or COMPACTION_NO_SUMMARY_FALLBACK
-    replacement.append(compaction_summary_item(summary))
-    return replacement
+    return [compaction_handoff_item(summary, entries=entries)]
 
 
 def compaction_response_summary_text(response: ModelResponse) -> str:
@@ -316,52 +451,82 @@ def compaction_response_summary_text(response: ModelResponse) -> str:
 
 
 def compaction_summary_item(summary: str) -> dict[str, Any]:
-    """Return the model-visible summary item used to resume after compaction."""
+    """Return a handoff item containing a summary and an empty history block."""
 
+    return compaction_handoff_item(summary, entries=[])
+
+
+def compaction_handoff_item(
+    summary: str,
+    *,
+    entries: list[RetainedHistoryEntry] | None = None,
+    retained_history: str | None = None,
+) -> dict[str, Any]:
+    """Return the model-visible compaction handoff item."""
+
+    if retained_history is None:
+        retained_history = _render_retained_history(entries or [])
+    conversation_summary = CONVERSATION_SUMMARY_TEMPLATE.format(summary=summary)
+    continuation = COMPACTION_CONTINUATION_TEMPLATE.format(
+        continuation=COMPACTED_CONTEXT_CONTINUATION
+    )
     return message_item(
         "user",
-        CONVERSATION_SUMMARY_TEMPLATE.format(
-            summary=summary,
-            continuation=COMPACTED_CONTEXT_CONTINUATION,
+        COMPACTION_HANDOFF_TEMPLATE.format(
+            retained_history=retained_history,
+            conversation_summary=conversation_summary,
+            continuation=continuation,
         ),
     )
 
 
 def retained_history_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Wrap retained pre-compaction messages so future compactions can identify them.
+    """Return a canonical retained-history block for legacy callers."""
 
-    The retained messages are historical context, not fresh user instructions. We
-    keep the original message role and non-text parts (for example images) but
-    wrap text parts in an XML-ish envelope to make that boundary explicit to the
-    model and easy to filter out during later compactions.
-    """
-
-    return [_retained_history_item(item) for item in items]
+    entries = [
+        entry
+        for index, item in enumerate(items)
+        if (entry := _retained_history_entry_from_item(item, index)) is not None
+    ]
+    return [message_item("user", _render_retained_history(entries))]
 
 
 def normalize_compaction_replacement_input(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return stored replacement input using the current retained-history shape.
+    """Return stored replacement input using the current handoff shape.
 
-    Older thread files may contain replacement inputs written before retained
-    history had its own XML envelope. Normalizing on read lets resumed threads
-    get the clearer prompt contract without changing the persisted event format.
-    It also drops legacy judge artifacts that were accidentally retained before
-    compaction started sanitizing its source history.
+    Older thread files may contain top-level <retained_history_message> items
+    followed by a <conversation_summary> item. Normalize those legacy fragments
+    into the canonical <compaction_handoff> shape without rewriting storage.
     """
 
-    normalized: list[dict[str, Any]] = []
-    saw_summary = False
-    for item in strip_compaction_judge_history(items):
+    source = strip_compaction_judge_history(items)
+    for item in source:
+        if COMPACTION_HANDOFF_OPEN in message_item_text(item):
+            return [copy.deepcopy(item)]
+
+    entries: list[RetainedHistoryEntry] = []
+    summary = ""
+    for index, item in enumerate(source):
         text = message_item_text(item)
-        if not saw_summary and CONVERSATION_SUMMARY_OPEN in text:
-            normalized.append(compaction_summary_item(_conversation_summary_text(text) or text))
-            saw_summary = True
+        if CONVERSATION_SUMMARY_OPEN in text:
+            summary = _conversation_summary_text(text) or summary or text
             continue
-        if not saw_summary and _should_wrap_retained_history_item(item):
-            normalized.append(_retained_history_item(item))
-        else:
-            normalized.append(copy.deepcopy(item))
-    return normalized
+        block_entries = _retained_history_block_entries_from_text(text, index)
+        if block_entries:
+            entries.extend(block_entries)
+            continue
+        legacy_entries = _legacy_retained_history_entries_from_text(text, index)
+        if legacy_entries:
+            entries.extend(legacy_entries)
+            continue
+        if _should_wrap_retained_history_item(item):
+            entry = _retained_history_entry_from_item(item, index)
+            if entry is not None:
+                entries.append(entry)
+
+    if summary or entries:
+        return [compaction_handoff_item(summary or COMPACTION_NO_SUMMARY_FALLBACK, entries=entries)]
+    return [copy.deepcopy(item) for item in source]
 
 
 def _should_wrap_retained_history_item(item: dict[str, Any]) -> bool:
@@ -370,6 +535,7 @@ def _should_wrap_retained_history_item(item: dict[str, Any]) -> bool:
         item.get("type") == "message"
         and item.get("role") in {"user", "assistant"}
         and RETAINED_HISTORY_MARKER not in text
+        and CONVERSATION_SUMMARY_OPEN not in text
     )
 
 
@@ -386,32 +552,44 @@ def _conversation_summary_text(text: str) -> str:
     return text[start:end].strip()
 
 
-def _retained_history_item(item: dict[str, Any]) -> dict[str, Any]:
-    wrapped = copy.deepcopy(item)
-    role = str(wrapped.get("role") or "user")
-    saw_text = False
-    for content in wrapped.get("content") or []:
-        if content.get("type") not in TEXT_CONTENT_TYPES:
+def _retained_history_block_entries_from_text(text: str, order: int) -> list[RetainedHistoryEntry]:
+    entries: list[RetainedHistoryEntry] = []
+    for match in _re.finditer(
+        _re.escape(RETAINED_HISTORY_OPEN) + r"\s*(.*?)\s*" + _re.escape(RETAINED_HISTORY_CLOSE),
+        text,
+        flags=_re.S,
+    ):
+        body = match.group(1).strip()
+        if not body:
             continue
-        saw_text = True
-        text = str(content.get("text") or "")
-        content["text"] = RETAINED_HISTORY_MESSAGE_TEMPLATE.format(
-            role=xml_text(role),
-            text=xml_text(text),
-        )
-    if not saw_text:
-        # Rare, but keeps even text-free retained items visibly inside the
-        # retained-history envelope instead of silently passing through as a new
-        # user/assistant message.
-        content_type = "output_text" if role == "assistant" else "input_text"
-        wrapped.setdefault("content", []).insert(
-            0,
-            {
-                "type": content_type,
-                "text": RETAINED_HISTORY_EMPTY_MESSAGE_TEMPLATE.format(role=xml_text(role)),
-            },
-        )
-    return wrapped
+        entries.append(RetainedHistoryEntry(
+            order=order,
+            identity=("retained_history_block", order, body),
+            text=body,
+        ))
+    return entries
+
+
+def _legacy_retained_history_entries_from_text(text: str, order: int) -> list[RetainedHistoryEntry]:
+    entries: list[RetainedHistoryEntry] = []
+    pattern = _re.compile(
+        r'<retained_history_message\s+role="([^"]*)">\s*(.*?)\s*</retained_history_message>',
+        flags=_re.S,
+    )
+    for index, match in enumerate(pattern.finditer(text)):
+        role = xml_unescape(match.group(1) or "user")
+        body = xml_unescape(match.group(2) or "").strip()
+        if not body:
+            continue
+        entries.append(RetainedHistoryEntry(
+            order=order,
+            identity=("legacy_retained_history_message", order, index, role, body),
+            text=RETAINED_HISTORY_MESSAGE_ENTRY_TEMPLATE.format(
+                role=xml_text(role),
+                text=xml_text(body),
+            ),
+        ))
+    return entries
 
 
 def retained_user_messages_after_compaction(input_items: list[dict[str, Any]]) -> list[dict[str, Any]]:

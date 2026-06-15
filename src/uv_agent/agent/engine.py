@@ -82,6 +82,7 @@ from uv_agent.prompts import (
     PRE_TURN_JUDGE_ERROR_STDERR,
     TOKEN_ESTIMATION_WARNING,
     COMPACTION_TOOL_ERROR_STDERR,
+    COMPACTION_CONTINUE_WITHOUT_CURRENT_USER,
     INTERRUPTED_TOOL_ERROR,
     ACTIVE_CWD_NOTICE_TEMPLATE,
     CONTEXT_REMOVED_ALL,
@@ -730,7 +731,11 @@ class AgentEngine:
                             turn_id,
                             mid_turn_compaction.result,
                         ))
-                        input_items = self._input_after_compaction(thread_id, mid_turn_compaction.result)
+                        input_items = self._input_after_compaction(
+                            thread_id,
+                            mid_turn_compaction.result,
+                            continue_without_current_user=True,
+                        )
                         turn_input.input_items = input_items
                         turn_input.previous_response_id = None
                         turn_input.use_previous_response_id = False
@@ -1055,7 +1060,11 @@ class AgentEngine:
                             turn_id,
                             mid_turn_compaction.result,
                         ))
-                        retry_state.input_items = self._input_after_compaction(thread_id, mid_turn_compaction.result)
+                        retry_state.input_items = self._input_after_compaction(
+                            thread_id,
+                            mid_turn_compaction.result,
+                            continue_without_current_user=True,
+                        )
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
                         retry_state.pending_items.clear()
@@ -1141,7 +1150,11 @@ class AgentEngine:
                             turn_id,
                             mid_turn_compaction.result,
                         ))
-                        retry_state.input_items = self._input_after_compaction(thread_id, mid_turn_compaction.result)
+                        retry_state.input_items = self._input_after_compaction(
+                            thread_id,
+                            mid_turn_compaction.result,
+                            continue_without_current_user=True,
+                        )
                         retry_state.previous_response_id = None
                         retry_state.use_previous_response_id = False
                         retry_state.pending_items.clear()
@@ -2141,6 +2154,8 @@ class AgentEngine:
         self,
         thread_id: str,
         result: CompactionResult,
+        *,
+        continue_without_current_user: bool = False,
     ) -> list[dict[str, Any]]:
         """Build post-compaction model input for continuing in the same turn.
 
@@ -2150,7 +2165,10 @@ class AgentEngine:
         later turn reconstructs from disk.
         """
 
-        return self._pre_user_context_items(thread_id) + copy.deepcopy(result.replacement_input)
+        items = self._pre_user_context_items(thread_id) + copy.deepcopy(result.replacement_input)
+        if continue_without_current_user:
+            items.append(message_item("user", COMPACTION_CONTINUE_WITHOUT_CURRENT_USER))
+        return items
 
     @staticmethod
     def _compaction_replacement_items(compaction: dict[str, Any]) -> list[dict[str, Any]]:

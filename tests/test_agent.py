@@ -30,6 +30,7 @@ from uv_agent.prompts import (
     BRANCH_NAME_GENERATION_PROMPT,
     BRANCH_SLUG_INSTRUCTION,
     COMPACTED_CONTEXT_CONTINUATION,
+    COMPACTION_CONTINUE_WITHOUT_CURRENT_USER,
     COMPACTION_TRUNCATION_SUFFIX,
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
     INTERRUPTED_TOOL_CONTEXT_BRIDGE,
@@ -633,8 +634,8 @@ def test_retain_recent_context_converts_tool_protocol_items_to_messages() -> Non
     assert retained
     assert {item["type"] for item in retained} == {"message"}
     retained_text = "\n".join(message_item_text(item) for item in retained)
-    assert "<retained_tool_call" in retained_text
-    assert "<retained_tool_output" in retained_text
+    assert "<tool_call" in retained_text
+    assert "<tool_output" in retained_text
     assert "function_call" not in {item.get("type") for item in retained}
 
 
@@ -1416,15 +1417,68 @@ def test_compaction_replacement_keeps_recent_user_messages_with_budget(tmp_path:
     )
 
     replacement = engine._compaction_replacement_input(input_items, response)
-    text = str(replacement)
+    text = message_item_text(replacement[0])
 
+    assert text.startswith("<compaction_handoff>")
     assert recent_text in text
     assert "workspace_rule_index" not in text
     assert "assistant output" not in text
     assert COMPACTION_TRUNCATION_SUFFIX.strip() in text
-    assert "<retained_history_message" in text
+    assert "<retained_history>" in text
+    assert '<message role="user">' in text
+    assert "<retained_history_message" not in text
+    assert text.index("<retained_history>") < text.index("<conversation_summary>") < text.index("<compaction_continuation>")
     assert COMPACTED_CONTEXT_CONTINUATION in text
     assert "<compacted_context_continuation>" not in text
+
+
+def test_cache_aware_retained_history_merges_legacy_users_and_recent_context(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    response = parse_responses_response(
+        {
+            "id": "resp_compact",
+            "output_text": "summary",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "summary"}],
+                }
+            ],
+        }
+    )
+    input_items = [
+        message_item("user", "same request"),
+        message_item("assistant", "assistant detail"),
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "run_python",
+            "arguments": json.dumps({"code": "print('hello')"}),
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "tool result"},
+    ]
+
+    handoff = message_item_text(engine._compaction_replacement_input(input_items, response, K=1_000)[0])
+
+    assert handoff.startswith("<compaction_handoff>")
+    assert handoff.count("same request") == 1
+    assert handoff.count('<message role="user">') == 1
+    assert '<message role="assistant">' in handoff
+    assert "assistant detail" in handoff
+    assert '<tool_call name="run_python" call_id="call_1">' in handoff
+    assert '<tool_output call_id="call_1">' in handoff
+    assert "<retained_history_message" not in handoff
+    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
 
 
 @pytest.mark.asyncio
@@ -5428,7 +5482,12 @@ def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> 
     reconstructed = engine._reconstruct_input(thread_id)
     text = str(reconstructed)
 
-    assert "<retained_history_message" in message_item_text(reconstructed[0])
+    handoff = message_item_text(reconstructed[0])
+    assert handoff.startswith("<compaction_handoff>")
+    assert "<retained_history>" in handoff
+    assert '<message role="user">' in handoff
+    assert "<retained_history_message" not in handoff
+    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
     assert "kept" in text
     assert "summary" in text
     assert "new" in text
@@ -5474,10 +5533,15 @@ def test_reconstruct_input_places_post_compaction_context_before_replacement(tmp
     reconstructed = engine._reconstruct_input(thread_id)
 
     assert message_item_text(reconstructed[0]).startswith("<context_update")
-    assert "<retained_history_message" in message_item_text(reconstructed[1])
-    assert "kept request" in message_item_text(reconstructed[1])
-    assert "<conversation_summary>" in message_item_text(reconstructed[2])
-    assert message_item_text(reconstructed[3]) == "new request"
+    handoff = message_item_text(reconstructed[1])
+    assert handoff.startswith("<compaction_handoff>")
+    assert "<retained_history>" in handoff
+    assert '<message role="user">' in handoff
+    assert "<retained_history_message" not in handoff
+    assert "kept request" in handoff
+    assert "<conversation_summary>" in handoff
+    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
+    assert message_item_text(reconstructed[2]) == "new request"
 
 
 def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_path: Path) -> None:
@@ -5516,11 +5580,13 @@ def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_p
     texts = [message_item_text(item) for item in prelude.input_items if item.get("type") == "message"]
     assert texts[0].startswith("<workspace_rules")
     assert "Reloaded rule." in texts[0]
-    retained_index = next(index for index, text in enumerate(texts) if "<retained_history_message" in text)
-    summary_index = next(index for index, text in enumerate(texts) if "<conversation_summary>" in text)
-    assert "kept request" in texts[retained_index]
-    assert texts[retained_index - 1].startswith("<context_update")
-    assert retained_index < summary_index
+    handoff_index = next(index for index, text in enumerate(texts) if text.startswith("<compaction_handoff>"))
+    handoff = texts[handoff_index]
+    assert "kept request" in handoff
+    assert "<retained_history>" in handoff
+    assert "<retained_history_message" not in handoff
+    assert texts[handoff_index - 1].startswith("<context_update")
+    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
     assert message_item_text(prelude.user_item) == "new request"
     assert "new request" not in texts
 
@@ -5587,10 +5653,13 @@ async def test_mid_turn_compaction_readds_epoch_context_before_continuing(tmp_pa
     continued_texts = [message_item_text(item) for item in continued_input if item.get("type") == "message"]
     assert continued_texts[0].startswith("<workspace_rules")
     assert "Mid-turn rule." in continued_texts[0]
-    retained_index = next(index for index, text in enumerate(continued_texts) if "<retained_history_message" in text)
-    summary_index = next(index for index, text in enumerate(continued_texts) if "<conversation_summary>" in text)
-    assert continued_texts[retained_index - 1].startswith("<context_update")
-    assert retained_index < summary_index
+    handoff_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<compaction_handoff>"))
+    handoff = continued_texts[handoff_index]
+    assert "<retained_history>" in handoff
+    assert "<retained_history_message" not in handoff
+    assert continued_texts[handoff_index - 1].startswith("<context_update")
+    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
+    assert continued_texts[-1] == COMPACTION_CONTINUE_WITHOUT_CURRENT_USER
 
 
 def test_context_update_reconstructs_as_stable_prefix(tmp_path: Path) -> None:

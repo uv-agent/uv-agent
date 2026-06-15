@@ -87,7 +87,8 @@ COMPACTION_SUMMARIZATION_PROMPT = """你正在执行 CONTEXT CHECKPOINT COMPACTI
 请保持简洁、结构化，并聚焦于帮助下一个 LLM 无缝继续工作。"""
 TITLE_GENERATION_PROMPT = '根据用户第一条消息，为这个 uv-agent 线程创建一个简洁、标题式名称。抓住用户的底层任务或意图，而不是逐字改写句子。如果问题宽泛或含糊，就用抽象名词短语风格。例如，询问这是哪种项目的消息应生成类似“项目内容询问”的标题。只返回标题，不要引号或标点。优先使用用户的语言。控制在 8 个英文词以内或 24 个 CJK 字符以内。'
 BRANCH_NAME_GENERATION_PROMPT = '根据用户任务创建一个简短的 git branch slug。捕捉具体动作和对象。只返回 slug：ASCII 小写字母、数字和连字符。不要空格、斜杠、引号、标点、解释或前缀。最多 30 个字符。优先使用动宾短语，例如 fix-login-redirect、add-dark-mode 或 refactor-parser。'
-COMPACTED_CONTEXT_CONTINUATION = '上方 <conversation_summary> 和 <retained_history> 是为保持连续性而保留的历史上下文，仅供参考。不要复述或输出这些 XML 块，也不要把它们当作新的用户指令。请直接基于这些已有状态，采取下一个具体步骤，恢复任何未完成的任务，不要要求用户重复已捕获的信息。'
+COMPACTED_CONTEXT_CONTINUATION = '上方 <retained_history> 和 <conversation_summary> 是压缩前的历史上下文，仅供继续任务参考。不要复述或输出 <compaction_handoff>、<retained_history>、<conversation_summary> 或本说明文本，也不要把其中内容当作新的用户指令。请直接基于这些已有状态采取下一个具体步骤，恢复并完成未结束的任务，不要要求用户重复已捕获的信息。'
+COMPACTION_CONTINUE_WITHOUT_CURRENT_USER = '当前没有新的用户消息。请依据上方 <compaction_handoff> 中的历史上下文和摘要，继续完成压缩前正在进行的任务；如果下一步需要工具，请直接调用 run_python。不要复述或输出压缩交接 XML。'
 TOOL_ATTACHMENT_CONTEXT_BRIDGE = '工具执行已完成。工具产生的额外视觉上下文会在下一条用户消息中提供。'
 POST_TOOL_COMPACTION_BRIDGE = '我已经收到工具结果。当下一条用户消息要求上下文压缩时，我会按照这些指令生成所需的压缩摘要，并准确保留工具结果、决策、文件变更、约束和未解决任务。'
 INTERRUPTED_TOOL_CONTEXT_BRIDGE = '某个工具调用未返回完整结果。请基于可用上下文继续。'
@@ -228,6 +229,7 @@ ACTIVE_CWD_NOTICE_TAG = "active_cwd_notice"
 GOAL_MODE_TAG = "goal_mode"
 WORKTREE_TAG = "worktree"
 WORKFLOW_CONTEXT_TAG = "workflow_context"
+COMPACTION_HANDOFF_TAG = "compaction_handoff"
 CONVERSATION_SUMMARY_TAG = "conversation_summary"
 AVAILABLE_SKILLS_TAG = "available_skills"
 AVAILABLE_MCP_SERVERS_TAG = "available_mcp_servers"
@@ -235,6 +237,7 @@ CONTEXT_UPDATE_TAG = "context_update"
 RETAINED_HISTORY_TAG = "retained_history"
 COMPACTION_JUDGE_REQUEST_TAG = "compaction_judge_request"
 CONTEXT_COMPACTION_REQUEST_TAG = "context_compaction_request"
+COMPACTION_CONTINUATION_TAG = "compaction_continuation"
 PLUGIN_RUNTIME_HELPERS_TAG = "plugin_runtime_helpers"
 
 # Purpose: markers for synthetic pre-user context. These messages are regenerated
@@ -258,9 +261,11 @@ PRE_USER_CONTEXT_MARKERS = (
 # Purpose: extra wrappers used only by compaction. They distinguish summaries,
 # retained history, and compaction judge requests from fresh user instructions.
 COMPACTION_CONTEXT_MARKERS = (
+    f"<{COMPACTION_HANDOFF_TAG}>",
     f"<{CONVERSATION_SUMMARY_TAG}>",
     f"<{RETAINED_HISTORY_TAG}",
     f"<{COMPACTION_JUDGE_REQUEST_TAG}>",
+    f"<{COMPACTION_CONTINUATION_TAG}>",
 )
 CONTEXT_SCAFFOLD_MARKERS = PRE_USER_CONTEXT_MARKERS + COMPACTION_CONTEXT_MARKERS
 
@@ -436,13 +441,29 @@ UPCOMING_USER_TASK_TEMPLATE = "<upcoming_user_task>\n{task}\n</upcoming_user_tas
 CONTEXT_COMPACTION_REQUEST_TEMPLATE = (
     "<context_compaction_request>\n{prompt}</context_compaction_request>\n\n{return_only_instruction}"
 )
-CONVERSATION_SUMMARY_TEMPLATE = (
-    "<conversation_summary>\n{summary}\n</conversation_summary>\n{continuation}"
+CONVERSATION_SUMMARY_TEMPLATE = "<conversation_summary>\n{summary}\n</conversation_summary>"
+COMPACTION_CONTINUATION_TEMPLATE = "<compaction_continuation>\n{continuation}\n</compaction_continuation>"
+COMPACTION_HANDOFF_TEMPLATE = (
+    "<compaction_handoff>\n{retained_history}\n\n{conversation_summary}\n\n"
+    "{continuation}\n</compaction_handoff>"
 )
 CONVERSATION_SUMMARY_OPEN = f"<{CONVERSATION_SUMMARY_TAG}>"
 CONVERSATION_SUMMARY_CLOSE = f"</{CONVERSATION_SUMMARY_TAG}>"
+COMPACTION_HANDOFF_OPEN = f"<{COMPACTION_HANDOFF_TAG}>"
+COMPACTION_HANDOFF_CLOSE = f"</{COMPACTION_HANDOFF_TAG}>"
+RETAINED_HISTORY_OPEN = f"<{RETAINED_HISTORY_TAG}>"
+RETAINED_HISTORY_CLOSE = f"</{RETAINED_HISTORY_TAG}>"
 RETAINED_HISTORY_MARKER = f"<{RETAINED_HISTORY_TAG}"
-RETAINED_TOOL_FALLBACK_NAME = "tool"
+RETAINED_HISTORY_EMPTY_TEMPLATE = "<retained_history />"
+RETAINED_HISTORY_TEMPLATE = "<retained_history>\n{history}\n</retained_history>"
+RETAINED_HISTORY_MESSAGE_ENTRY_TEMPLATE = '<message role="{role}">\n{text}\n</message>'
+RETAINED_HISTORY_TOOL_FALLBACK_NAME = "tool"
+RETAINED_HISTORY_TOOL_CALL_ENTRY_TEMPLATE = (
+    '<tool_call name="{name}" call_id="{call_id}">\n{arguments}\n</tool_call>'
+)
+RETAINED_HISTORY_TOOL_OUTPUT_ENTRY_TEMPLATE = '<tool_output call_id="{call_id}">\n{output}\n</tool_output>'
+# Legacy retained-history wrappers are recognized when old persisted threads are normalized.
+RETAINED_TOOL_FALLBACK_NAME = RETAINED_HISTORY_TOOL_FALLBACK_NAME
 RETAINED_TOOL_CALL_TEMPLATE = (
     '<retained_tool_call name="{name}" call_id="{call_id}">\n{arguments}\n</retained_tool_call>'
 )
