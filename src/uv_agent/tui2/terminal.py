@@ -340,6 +340,8 @@ class Terminal(AbstractContextManager["Terminal"]):
             return "<LEFT>"
         if sequence == "\x1b[27;5;13~":
             return "<C-ENTER>"
+        if sequence == "\x1b[27;2;13~":
+            return "<S-ENTER>"
         if sequence == "\x1b[200~":
             return PASTE_PREFIX + self._read_bracketed_paste()
         return "\x1b"

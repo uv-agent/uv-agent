@@ -2572,6 +2572,32 @@ def test_agent_view_input_ctrl_enter_inserts_newline(monkeypatch) -> None:
     assert app.state.agent_view.composer == "a\nb"
 
 
+def test_agent_view_input_shift_enter_inserts_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("i"))
+    asyncio.run(app.handle_key("a"))
+    asyncio.run(app.handle_key("<S-ENTER>"))
+    asyncio.run(app.handle_key("b"))
+
+    assert app.state.agent_view.interaction_mode == "input"
+    assert app.state.agent_view.composer == "a\nb"
+
+
+def test_agent_view_input_ctrl_j_inserts_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("i"))
+    asyncio.run(app.handle_key("a"))
+    asyncio.run(app.handle_key("\x0a"))
+    asyncio.run(app.handle_key("b"))
+
+    assert app.state.agent_view.interaction_mode == "input"
+    assert app.state.agent_view.composer == "a\nb"
+
+
 def test_agent_view_ctrl_c_cancels_selected_running_thread(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.engine.thread_store.threads = [{"thread_id": "thr_1", "title": "One", "agent_view_joined": True}]
@@ -2893,6 +2919,22 @@ def test_ctrl_enter_inserts_newline(monkeypatch) -> None:
     assert app.state.composer == "hello\n"
 
 
+def test_shift_enter_inserts_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "hello"
+    asyncio.run(app.handle_key("<S-ENTER>"))
+
+    assert app.state.composer == "hello\n"
+
+
+def test_ctrl_j_inserts_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "hello"
+    asyncio.run(app.handle_key("\x0a"))
+
+    assert app.state.composer == "hello\n"
+
+
 def test_bracketed_paste_inserts_multiline_text_without_submitting(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.state.composer = "prefix "
@@ -3105,6 +3147,13 @@ def test_terminal_reads_bracketed_paste_as_single_key() -> None:
     terminal._windows = False
 
     assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
+
+
+def test_terminal_reads_shift_enter_as_s_enter() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b[27;2;13~"))
+    terminal._windows = False
+
+    assert terminal.read_key() == "<S-ENTER>"
 
 
 def _install_fake_msvcrt(monkeypatch, text: str) -> None:
