@@ -2176,11 +2176,12 @@ class AnsiUvAgentApp:
         self._set_composer_text(value[:start] + replacement + value[end:], cursor=start + len(replacement))
 
     def _accept_mention_item(self, item: CommandSuggestion) -> None:
-        token = item.value
-        if item.kind == "thread-mention" and token.startswith("@@"):
-            token = "@thread:" + token[2:]
-        if not token.endswith(" "):
-            token += " "
+        if item.kind == "thread-mention" and item.id:
+            token = f"@thread:{item.id} "
+        else:
+            token = item.value
+            if not token.endswith(" "):
+                token += " "
         if self._mention_start is not None:
             self._replace_composer_range(self._mention_start, self._composer_cursor(), token)
             return
@@ -2269,14 +2270,14 @@ class AnsiUvAgentApp:
             haystack = f"{thread_id} {title} {last_text}".lower()
             if needle and needle not in haystack:
                 continue
-            description = last_text[:100] if last_text else f"{thread.get('turn_count', 0)} turns"
+            description = last_text[:100] if last_text else "no messages"
             items.append(
                 CommandSuggestion(
-                    f"@@{thread_id}",
+                    title,
                     description,
                     id=thread_id,
                     kind="thread-mention",
-                    meta=short_thread(thread_id),
+                    meta=f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} turns",
                 )
             )
         return items[:20]

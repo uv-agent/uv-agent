@@ -2044,6 +2044,10 @@ def test_double_at_completes_threads_and_inserts_thread_mention(monkeypatch) -> 
     app.state.composer_cursor = len(app.state.composer)
     app._after_composer_changed()
     assert app.state.command_palette_open
+    item = app.state.command_palette_items[0]
+    assert item.value == "Alpha"
+    assert item.id == "thr_1"
+    assert item.kind == "thread-mention"
 
     app._accept_command_palette_selection()
 
