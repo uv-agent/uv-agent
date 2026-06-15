@@ -90,6 +90,23 @@ def test_host_event_bus_forwards_scoped_plugin_events() -> None:
     assert plugin_bus.events[0]["type"] == "telemetry"
 
 
+def test_host_event_bus_close_calls_handler_close() -> None:
+    bus = HostEventBus()
+    closed: list[bool] = []
+
+    class CloseableHandler:
+        def __call__(self, event: dict[str, Any]) -> None:
+            pass
+
+        def close(self) -> None:
+            closed.append(True)
+
+    bus.subscribe(CloseableHandler())
+    bus.close()
+
+    assert closed == [True]
+
+
 @pytest.mark.asyncio
 async def test_host_event_bus_schedules_async_handlers() -> None:
     bus = HostEventBus()

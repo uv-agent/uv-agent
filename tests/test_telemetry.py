@@ -9,7 +9,7 @@ from uv_agent.telemetry import TelemetryStore, _duration_ms, _summarize_helper_c
 
 
 def test_telemetry_store_records_model_call(tmp_path: Path) -> None:
-    telemetry = TelemetryStore(tmp_path)
+    telemetry = TelemetryStore(tmp_path, batch_max_size=10)
 
     telemetry.on_event(
         {
@@ -32,6 +32,7 @@ def test_telemetry_store_records_model_call(tmp_path: Path) -> None:
             },
         }
     )
+    telemetry.flush()
 
     with telemetry._connect() as db:
         rows = db.execute("SELECT * FROM model_calls").fetchall()
@@ -46,7 +47,7 @@ def test_telemetry_store_records_model_call(tmp_path: Path) -> None:
 
 
 def test_telemetry_store_records_run_completed(tmp_path: Path) -> None:
-    telemetry = TelemetryStore(tmp_path)
+    telemetry = TelemetryStore(tmp_path, batch_max_size=10)
 
     telemetry.on_event(
         {
@@ -109,7 +110,7 @@ def test_telemetry_store_records_run_completed(tmp_path: Path) -> None:
 
 
 def test_telemetry_store_aggregates_turn(tmp_path: Path) -> None:
-    telemetry = TelemetryStore(tmp_path)
+    telemetry = TelemetryStore(tmp_path, batch_max_size=10)
 
     telemetry.on_event(
         {
@@ -166,7 +167,7 @@ def test_telemetry_store_aggregates_turn(tmp_path: Path) -> None:
 
 
 def test_telemetry_store_turn_error_status(tmp_path: Path) -> None:
-    telemetry = TelemetryStore(tmp_path)
+    telemetry = TelemetryStore(tmp_path, batch_max_size=10)
 
     telemetry.on_event(
         {
@@ -194,6 +195,118 @@ def test_telemetry_store_turn_error_status(tmp_path: Path) -> None:
     row = telemetry.query_turn_stats("turn_1")
     assert row is not None
     assert row["status"] == "error"
+
+
+def test_telemetry_store_batches_model_calls_and_flushes_on_turn_end(tmp_path: Path) -> None:
+    telemetry = TelemetryStore(tmp_path, batch_max_size=10)
+
+    telemetry.on_event(
+        {
+            "type": "thread.event_stored",
+            "thread_id": "thr_1",
+            "event": {
+                "type": "turn.started",
+                "turn_id": "turn_1",
+                "created_at": "2026-06-15T10:00:00+00:00",
+            },
+        }
+    )
+    for i in range(5):
+        telemetry.on_event(
+            {
+                "type": "agent.model_call_billed",
+                "thread_id": "thr_1",
+                "turn_id": "turn_1",
+                "level": "medium",
+                "source": "model_response",
+                "usage": {},
+                "billing": {
+                    "amount": "0.001",
+                    "currency": "USD",
+                    "input_tokens": 1,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1,
+                    "reasoning_tokens": 0,
+                },
+            }
+        )
+
+    # Before turn end, batch is not flushed yet (size 5 < 10).
+    with telemetry._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM model_calls").fetchone()[0] == 0
+
+    telemetry.on_event(
+        {
+            "type": "thread.event_stored",
+            "thread_id": "thr_1",
+            "event": {
+                "type": "turn.completed",
+                "turn_id": "turn_1",
+                "created_at": "2026-06-15T10:00:02+00:00",
+            },
+        }
+    )
+
+    with telemetry._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM model_calls").fetchone()[0] == 5
+
+    row = telemetry.query_turn_stats("turn_1")
+    assert row is not None
+    assert row["model_calls"] == 5
+
+
+def test_telemetry_store_flushes_when_batch_size_reached(tmp_path: Path) -> None:
+    telemetry = TelemetryStore(tmp_path, batch_max_size=3)
+
+    for i in range(3):
+        telemetry.on_event(
+            {
+                "type": "agent.model_call_billed",
+                "thread_id": "thr_1",
+                "turn_id": "turn_1",
+                "level": "medium",
+                "source": "model_response",
+                "usage": {},
+                "billing": {
+                    "amount": "0.001",
+                    "currency": "USD",
+                    "input_tokens": 1,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1,
+                    "reasoning_tokens": 0,
+                },
+            }
+        )
+
+    with telemetry._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM model_calls").fetchone()[0] == 3
+
+
+def test_telemetry_store_close_flushes_pending(tmp_path: Path) -> None:
+    telemetry = TelemetryStore(tmp_path, batch_max_size=10)
+
+    telemetry.on_event(
+        {
+            "type": "agent.model_call_billed",
+            "thread_id": "thr_1",
+            "turn_id": "turn_1",
+            "level": "medium",
+            "source": "model_response",
+            "usage": {},
+            "billing": {
+                "amount": "0.001",
+                "currency": "USD",
+                "input_tokens": 1,
+                "cached_input_tokens": 0,
+                "output_tokens": 1,
+                "reasoning_tokens": 0,
+            },
+        }
+    )
+    telemetry.close()
+
+    with telemetry._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM model_calls").fetchone()[0] == 1
 
 
 def test_summarize_helper_calls_counts_and_errors() -> None:

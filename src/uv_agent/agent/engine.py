@@ -503,8 +503,9 @@ class AgentEngine:
         close = getattr(self.runner, "aclose", None)
         if callable(close):
             await close()
-            return
-        await asyncio.to_thread(self.close)
+        else:
+            await asyncio.to_thread(self.close)
+        self.host_events.close()
 
     def start_plugins_background(self) -> asyncio.Task[None]:
         self._plugins_started = True

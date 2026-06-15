@@ -72,6 +72,19 @@ class HostEventBus:
         with self._lock:
             self._plugin_bus = plugin_bus
 
+    def close(self) -> None:
+        """Notify all handlers that support ``close`` to release resources."""
+
+        with self._lock:
+            handlers = list(self._handlers)
+        for handler in handlers:
+            close_fn = getattr(handler, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    logger.exception("Host event handler close failed")
+
     def publish(self, event: dict[str, Any]) -> None:
         """Deliver an event to all registered handlers in order.
 

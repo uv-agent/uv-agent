@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
+import time
 from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from uv_agent.billing import decimal_or_none, decimal_to_string, normalize_currency
 from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
@@ -14,6 +16,97 @@ from uv_agent.time import utc_now_iso
 
 DB_FILENAME = "telemetry.sqlite3"
 SCHEMA_VERSION = 1
+
+logger = logging.getLogger("uv_agent.telemetry")
+
+_MODEL_CALL_INSERT = """
+INSERT INTO model_calls(
+    thread_id, turn_id, level, source, model_name, remote_model,
+    input_tokens, cached_input_tokens, output_tokens, reasoning_tokens,
+    billing_amount, billing_currency, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_RUN_STAT_INSERT = """
+INSERT OR REPLACE INTO run_stats(
+    run_id, thread_id, turn_id, started_at, completed_at, duration_ms,
+    returncode, timed_out, interrupted, truncated,
+    helper_count, helper_duration_ms, helper_errors, top_helpers_json,
+    stdout_bytes, stderr_bytes, event_count
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+class _SqliteBatcher:
+    """Buffers model-call and run-stat rows and flushes them in bulk.
+
+    Flushing happens when the combined pending count reaches ``max_size``,
+    when ``max_age_ms`` has elapsed since the last flush, or when ``flush()``
+    is called explicitly (e.g. on turn completion or shutdown).
+    """
+
+    def __init__(
+        self,
+        connect: Callable[[], sqlite3.Connection],
+        *,
+        max_size: int = 32,
+        max_age_ms: float = 100.0,
+    ) -> None:
+        self._connect = connect
+        self._max_size = max(1, max_size)
+        self._max_age_seconds = max(0.0, max_age_ms / 1000.0)
+        self._lock = threading.RLock()
+        self._model_calls: list[tuple[Any, ...]] = []
+        self._run_stats: list[tuple[Any, ...]] = []
+        self._last_flush = 0.0
+
+    def add_model_call(self, params: tuple[Any, ...]) -> None:
+        with self._lock:
+            self._model_calls.append(params)
+            self._maybe_flush_locked()
+
+    def add_run_stat(self, params: tuple[Any, ...]) -> None:
+        with self._lock:
+            self._run_stats.append(params)
+            self._maybe_flush_locked()
+
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_locked()
+
+    def close(self) -> None:
+        self.flush()
+
+    def _maybe_flush_locked(self) -> None:
+        total = len(self._model_calls) + len(self._run_stats)
+        if total == 0:
+            return
+        now = time.monotonic()
+        if self._last_flush == 0:
+            self._last_flush = now
+            if self._max_age_seconds == 0:
+                self._flush_locked()
+            return
+        if total >= self._max_size or (now - self._last_flush) >= self._max_age_seconds:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        model_calls = self._model_calls
+        run_stats = self._run_stats
+        self._model_calls = []
+        self._run_stats = []
+        self._last_flush = time.monotonic()
+        if not model_calls and not run_stats:
+            return
+        try:
+            with self._connect() as db:
+                if model_calls:
+                    db.executemany(_MODEL_CALL_INSERT, model_calls)
+                if run_stats:
+                    db.executemany(_RUN_STAT_INSERT, run_stats)
+        except Exception:
+            # Telemetry is best-effort; never let a flush failure propagate.
+            logger.exception("Telemetry batch flush failed")
 
 
 class TelemetryStore:
@@ -23,18 +116,43 @@ class TelemetryStore:
     be queried, pruned, or archived without affecting the main conversation
     state.  The store consumes host events and maintains lightweight in-memory
     per-turn aggregates that are flushed when a turn ends.
+
+    Model-call and run-stat inserts are buffered and flushed in bulk to keep
+    per-event overhead minimal.  Turn-stat writes are flushed immediately when
+    a turn ends so that per-turn summaries are durable right away.
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        batch_max_size: int = 32,
+        batch_max_age_ms: float = 100.0,
+    ) -> None:
         self.data_dir = data_dir.resolve()
         self.db_path = self.data_dir / "log" / DB_FILENAME
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._turn_aggregates: dict[str, dict[str, Any]] = {}
+        self._batcher = _SqliteBatcher(
+            self._connect,
+            max_size=batch_max_size,
+            max_age_ms=batch_max_age_ms,
+        )
         self._ensure_schema()
 
     def db_path_for_data_dir(self) -> Path:
         return self.db_path
+
+    def close(self) -> None:
+        """Flush any pending telemetry and release resources."""
+
+        self._batcher.close()
+
+    def flush(self) -> None:
+        """Flush pending model-call and run-stat batches immediately."""
+
+        self._batcher.flush()
 
     def _ensure_schema(self) -> None:
         with self._connect() as db:
@@ -152,31 +270,23 @@ class TelemetryStore:
         usage = event.get("usage") or {}
         amount = decimal_or_none(billing.get("amount"))
         currency = normalize_currency(str(billing.get("currency") or "USD"))
-        with self._lock, self._connect() as db:
-            db.execute(
-                """
-                INSERT INTO model_calls(
-                    thread_id, turn_id, level, source, model_name, remote_model,
-                    input_tokens, cached_input_tokens, output_tokens, reasoning_tokens,
-                    billing_amount, billing_currency, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event.get("thread_id"),
-                    event.get("turn_id"),
-                    event.get("level"),
-                    billing.get("source") or event.get("source"),
-                    billing.get("model"),
-                    billing.get("remote_model"),
-                    int(billing.get("input_tokens") or 0),
-                    int(billing.get("cached_input_tokens") or 0),
-                    int(billing.get("output_tokens") or 0),
-                    int(billing.get("reasoning_tokens") or 0),
-                    decimal_to_string(amount) if amount is not None else None,
-                    currency,
-                    billing.get("created_at") or utc_now_iso(),
-                ),
+        self._batcher.add_model_call(
+            (
+                event.get("thread_id"),
+                event.get("turn_id"),
+                event.get("level"),
+                billing.get("source") or event.get("source"),
+                billing.get("model"),
+                billing.get("remote_model"),
+                int(billing.get("input_tokens") or 0),
+                int(billing.get("cached_input_tokens") or 0),
+                int(billing.get("output_tokens") or 0),
+                int(billing.get("reasoning_tokens") or 0),
+                decimal_to_string(amount) if amount is not None else None,
+                currency,
+                billing.get("created_at") or utc_now_iso(),
             )
+        )
         self._update_turn_aggregate(
             event.get("thread_id"),
             event.get("turn_id"),
@@ -194,36 +304,27 @@ class TelemetryStore:
         completed_at = event.get("completed_at")
         duration_ms = _duration_ms(started_at, completed_at)
 
-        with self._lock, self._connect() as db:
-            db.execute(
-                """
-                INSERT OR REPLACE INTO run_stats(
-                    run_id, thread_id, turn_id, started_at, completed_at, duration_ms,
-                    returncode, timed_out, interrupted, truncated,
-                    helper_count, helper_duration_ms, helper_errors, top_helpers_json,
-                    stdout_bytes, stderr_bytes, event_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    event.get("thread_id"),
-                    event.get("turn_id"),
-                    started_at,
-                    completed_at,
-                    duration_ms,
-                    event.get("returncode"),
-                    int(bool(event.get("timed_out"))),
-                    int(bool(event.get("interrupted"))),
-                    int(bool(event.get("truncated"))),
-                    summary["count"],
-                    summary["total_duration_ms"],
-                    summary["errors"],
-                    json.dumps(summary["top_helpers"], sort_keys=True, separators=(",", ":")),
-                    int(event.get("stdout_bytes") or 0),
-                  int(event.get("stderr_bytes") or 0),
-                    int(event.get("event_count") or 0),
-                ),
+        self._batcher.add_run_stat(
+            (
+                run_id,
+                event.get("thread_id"),
+                event.get("turn_id"),
+                started_at,
+                completed_at,
+                duration_ms,
+                event.get("returncode"),
+                int(bool(event.get("timed_out"))),
+                int(bool(event.get("interrupted"))),
+                int(bool(event.get("truncated"))),
+                summary["count"],
+                summary["total_duration_ms"],
+                summary["errors"],
+                json.dumps(summary["top_helpers"], sort_keys=True, separators=(",", ":")),
+                int(event.get("stdout_bytes") or 0),
+                int(event.get("stderr_bytes") or 0),
+                int(event.get("event_count") or 0),
             )
+        )
         self._update_turn_aggregate(
             event.get("thread_id"),
             event.get("turn_id"),
@@ -249,6 +350,9 @@ class TelemetryStore:
             return
 
         if event_type in {"turn.completed", "turn.error", "turn.interrupted"}:
+            # Flush pending model/run rows before writing the turn summary so
+            # that consumers querying after a turn ends see complete data.
+            self._batcher.flush()
             self._flush_turn_aggregate(
                 thread_id,
                 turn_id,
