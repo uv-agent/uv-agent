@@ -5,8 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from typing import TYPE_CHECKING
+
 from uv_agent.runner.run_log import EventWriter
 from uv_agent.time import utc_now_iso
+
+if TYPE_CHECKING:
+    from uv_agent.host_events import HostEventBus
 
 
 @dataclass(frozen=True)
@@ -33,8 +38,10 @@ class RunSession:
         on_structured_event: Callable[[dict[str, Any]], None],
         writer: EventWriter,
         on_helper_calls: Callable[[list[dict[str, Any]]], None] | None = None,
+        host_events: "HostEventBus | None" = None,
     ) -> None:
         self.token = token
+        self._host_events = host_events
         self.context = RunContext(
             run_id=run_id,
             thread_id=thread_id,
@@ -80,6 +87,27 @@ class RunSession:
             if self.closed:
                 raise RuntimeError("Run session is closed")
             self._on_helper_calls(normalized)
+            self._publish_host_event(
+                {
+                    "type": "runtime.helper_calls",
+                    "run_id": self.run_id,
+                    "thread_id": self.context.thread_id,
+                    "turn_id": self.context.turn_id,
+                    "cwd": str(self.context.cwd),
+                    "calls": normalized,
+                }
+            )
+
+
+    def _publish_host_event(self, event: dict[str, Any]) -> None:
+        """Best-effort publish a host event; never raise."""
+
+        if self._host_events is None:
+            return
+        try:
+            self._host_events.publish(event)
+        except Exception:
+            return
 
 
 def _normalize_helper_call(value: Any) -> dict[str, Any] | None:

@@ -10,10 +10,15 @@ from typing import Any, Callable
 
 from uv_agent.runner.run_log import EventWriter
 
+from typing import TYPE_CHECKING
+
 from .auth import bearer_token, is_loopback_address
 from .dispatcher import DispatchResult, JsonRpcDispatcher
 from .registry import HostMethod, MethodRegistry
 from .session import RunSession
+
+if TYPE_CHECKING:
+    from uv_agent.host_events import HostEventBus
 
 DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -42,9 +47,16 @@ class RuntimeRPCSessionHandle:
 class RuntimeRPCServer:
     """Long-lived lightweight HTTP server used by managed runtime scripts."""
 
-    def __init__(self, *, host: str = "127.0.0.1", max_body_bytes: int = DEFAULT_MAX_BODY_BYTES) -> None:
+    def __init__(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+        host_events: "HostEventBus | None" = None,
+    ) -> None:
         self.host = host
         self.max_body_bytes = max_body_bytes
+        self._host_events = host_events
         self.methods = MethodRegistry()
         self._dispatcher = JsonRpcDispatcher(self.methods)
         self._lock = threading.RLock()
@@ -134,6 +146,7 @@ class RuntimeRPCServer:
             on_structured_event=callback,
             on_helper_calls=on_helper_calls,
             writer=writer,
+            host_events=self._host_events,
         )
         with self._lock:
             self._sessions[token] = session

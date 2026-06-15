@@ -53,6 +53,7 @@ from uv_agent.agent.context_builder import (
 from uv_agent.context import ContextStats, estimate_tokens, usage_token_count
 from uv_agent.state_db import checkpoint_state_db
 from uv_agent.environment import detect_user_language, host_environment
+from uv_agent.host_events import HostEventBus
 from uv_agent.errors import EmptyModelStreamError, is_retryable_provider_error
 from uv_agent.goal_mode import (
     GoalState,
@@ -436,11 +437,13 @@ class AgentEngine:
         project_root: Path,
         config_loader: Callable[[], AppConfig] | None = None,
         mcp_instructions_probe: McpInstructionsProbe | None = None,
+        host_events: HostEventBus | None = None,
     ) -> None:
         self.config = config
         self.model_client = model_client
         self.runner = runner
         self.thread_store = thread_store
+        self.host_events = host_events or HostEventBus()
         self.project_root = project_root
         self.attachments = AttachmentStore(attachments_dir or thread_store.data_dir / "attachments")
         self._last_config_refresh_at = 0.0
@@ -451,6 +454,7 @@ class AgentEngine:
         self._mcp_instructions_probe = mcp_instructions_probe or McpInstructionsProbe(self.project_root)
         self._mcp_instructions_probe.start()
         self.events = EventBus()
+        self.host_events.register_plugin_bus(self.events)
         self.runtime_helpers = RuntimeHelperRegistry()
         self.plugins = PluginManager(
             config=self.config.plugins,
@@ -469,6 +473,14 @@ class AgentEngine:
         self._context_stats_cache: dict[tuple[str | None, str | None], tuple[float, ContextStats]] = {}
         self._turns_since_db_checkpoint: int = 0
         self._db_checkpoint_interval: int = 50
+
+    def _publish_host_event(self, event: dict[str, Any]) -> None:
+        """Best-effort publish a host event; never raise."""
+
+        try:
+            self.host_events.publish(event)
+        except Exception:
+            return
 
     def close(self) -> None:
         """Release long-lived host resources owned by the engine."""
@@ -2605,6 +2617,17 @@ class AgentEngine:
             thread_id,
             "thread.billing_accumulated",
             **payload,
+        )
+        self._publish_host_event(
+            {
+                "type": "agent.model_call_billed",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "level": level,
+                "source": source,
+                "usage": usage,
+                "billing": payload,
+            }
         )
         total = billing_total_from_metadata(
             self.thread_store.thread_metadata(thread_id),

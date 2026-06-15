@@ -9,13 +9,16 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from uv_agent.billing import decimal_or_none, decimal_or_zero, decimal_to_string, normalize_currency
 from uv_agent.context import usage_token_count
 from uv_agent.ids import new_id
 from uv_agent.state_db import connect_state_db, state_db_path
 from uv_agent.time import utc_now_iso
+
+if TYPE_CHECKING:
+    from uv_agent.host_events import HostEventBus
 
 
 VISIBLE_HISTORY_EVENT_TYPES = {
@@ -130,6 +133,7 @@ class ThreadStore:
         *,
         threads_dir: Path | None = None,
         subthreads_dir: Path | None = None,
+        host_events: "HostEventBus | None" = None,
     ) -> None:
         self.data_dir = data_dir.resolve()
         # threads_dir/subthreads_dir are accepted for older construction sites,
@@ -140,6 +144,7 @@ class ThreadStore:
         self._lock_owner_id = new_id("owner")
         self._held_thread_locks: dict[str, str] = {}
         self._history_segment_cache: OrderedDict[tuple[Any, ...], ThreadHistorySegment] = OrderedDict()
+        self._host_events = host_events
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._remove_empty_legacy_thread_dirs()
         with self._connect():
@@ -219,7 +224,25 @@ class ThreadStore:
             "thread_id": thread_id,
             **data,
         }
-        return self._write_event(thread_id, event)
+        stored = self._write_event(thread_id, event)
+        self._publish_host_event(
+            {
+                "type": "thread.event_stored",
+                "thread_id": thread_id,
+                "event": stored,
+            }
+        )
+        return stored
+
+    def _publish_host_event(self, event: dict[str, Any]) -> None:
+        """Best-effort publish a host event; never raise."""
+
+        if self._host_events is None:
+            return
+        try:
+            self._host_events.publish(event)
+        except Exception:
+            return
 
     def update_title(self, thread_id: str, title: str, *, source: str = "manual") -> None:
         self.append(thread_id, "thread.title_updated", title=title, source=source)

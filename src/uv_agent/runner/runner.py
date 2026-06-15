@@ -6,7 +6,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from time import monotonic
 
+from typing import TYPE_CHECKING
+
 from uv_agent.config import RunnerConfig
+
+if TYPE_CHECKING:
+    from uv_agent.host_events import HostEventBus
 from uv_agent.helper_calls import summarize_runtime_helper_calls
 from uv_agent.ids import new_id
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult, RunnerEvent
@@ -33,6 +38,7 @@ class PythonRunner:
         config: RunnerConfig,
         runs_dir: Path | None = None,
         scriptenv_dir: Path | None = None,
+        host_events: "HostEventBus | None" = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.data_dir = data_dir.resolve()
@@ -40,9 +46,15 @@ class PythonRunner:
         # run code/events are stored in the project SQLite database.
         self.runs_dir = (runs_dir or self.data_dir / "runner" / "scripts").resolve()
         self.scriptenv_dir = (scriptenv_dir or self.data_dir / "runner" / "scriptenv").resolve()
+        self._host_events = host_events
         self.config = config
-        self.run_logs = RunLogStore(self.data_dir, scripts_dir=self.runs_dir, max_run_logs=config.max_run_logs)
-        self.rpc_server = RuntimeRPCServer()
+        self.run_logs = RunLogStore(
+            self.data_dir,
+            scripts_dir=self.runs_dir,
+            max_run_logs=config.max_run_logs,
+            host_events=host_events,
+        )
+        self.rpc_server = RuntimeRPCServer(host_events=host_events)
 
     @property
     def config(self) -> RunnerConfig:

@@ -6,7 +6,12 @@ import threading
 from pathlib import Path
 from typing import Any, Protocol
 
+from typing import TYPE_CHECKING
+
 from uv_agent.state_db import connect_state_db
+
+if TYPE_CHECKING:
+    from uv_agent.host_events import HostEventBus
 
 
 class EventWriter(Protocol):
@@ -63,10 +68,12 @@ class RunLogStore:
         *,
         scripts_dir: Path | None = None,
         max_run_logs: int = 200,
+        host_events: "HostEventBus | None" = None,
     ) -> None:
         self.data_dir = data_dir.resolve()
         self.scripts_dir = (scripts_dir or self.data_dir / "runner" / "scripts").resolve()
         self.max_run_logs = max(1, max_run_logs)
+        self._host_events = host_events
         self.scripts_dir.mkdir(parents=True, exist_ok=True)
         with connect_state_db(self.data_dir):
             pass
@@ -151,6 +158,28 @@ class RunLogStore:
                     run_id,
                 ),
             )
+        self._publish_host_event(
+            {
+                "type": "runner.run_completed",
+                "run_id": run_id,
+                "completed_at": completed_at,
+                "returncode": returncode,
+                "timed_out": timed_out,
+                "interrupted": interrupted,
+                "truncated": truncated,
+                "helper_calls": helper_calls,
+            }
+        )
+
+    def _publish_host_event(self, event: dict[str, Any]) -> None:
+        """Best-effort publish a host event; never raise."""
+
+        if self._host_events is None:
+            return
+        try:
+            self._host_events.publish(event)
+        except Exception:
+            return
 
     def read_events(self, run_id: str) -> list[dict[str, Any]]:
         with connect_state_db(self.data_dir) as db:
