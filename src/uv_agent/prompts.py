@@ -119,20 +119,18 @@ CONTEXT_REMOVED_ALL = """<context_update id="runtime_context" status="removed">
 先前可用的运行时上下文已不再存在。除非它再次出现，否则不要依赖旧的运行时上下文。
 </context_update>"""
 
-CONTEXT_REMOVED_SOME_PREFIX = """
-
-<context_update_removed id="runtime_context">
+CONTEXT_REMOVED_SOME_PREFIX = """<context_update_removed id="runtime_context">
 部分先前可用的运行时上下文已不再存在。对已移除的 skill 或 MCP server，除非它们再次出现，否则不要依赖其先前内容。
 """
 
 CONTEXT_REMOVED_SOME_SUFFIX = "\n</context_update_removed>"
 
 CONTEXT_UPDATE_CURRENT_PREFIX = (
-    "<context_update id=\"runtime_context\" status=\"current\">\n"
+    '<context_update id="runtime_context" status="current">\n'
     "The following runtime context is current. It updates only the listed content; "
-    "prior runtime context remains current within this epoch unless explicitly removed.\n"
-    "</context_update>"
+    "prior runtime context remains current within this epoch unless explicitly removed."
 )
+CONTEXT_UPDATE_CURRENT_SUFFIX = "\n</context_update>"
 
 SKILLS_HEADER = """<available_skills>
 遇到适合任务的 skill 时，先用 Python 读取它的 SKILL.md。"""

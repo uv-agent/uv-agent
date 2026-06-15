@@ -89,6 +89,7 @@ from uv_agent.prompts import (
     CONTEXT_REMOVED_SOME_PREFIX,
     CONTEXT_REMOVED_SOME_SUFFIX,
     CONTEXT_UPDATE_CURRENT_PREFIX,
+    CONTEXT_UPDATE_CURRENT_SUFFIX,
     SKILLS_HEADER,
     MCP_SERVERS_HEADER,
     PLUGIN_HELPERS_HEADER,
@@ -3287,10 +3288,10 @@ class AgentEngine:
         items: list[dict[str, Any]] = []
         for text in self._rule_context_texts(thread_id):
             items.append(message_item("user", text))
+        items.extend(self._runtime_context_items(thread_id))
+        items.extend(self._workflow_context_items(thread_id))
         items.extend(self._goal_context_items(thread_id))
         items.extend(self._worktree_context_items(thread_id))
-        items.extend(self._workflow_context_items(thread_id))
-        items.extend(self._runtime_context_items(thread_id))
         return items
 
 
@@ -3785,16 +3786,19 @@ class AgentEngine:
                 "removed": removed or sorted(previous_parts),
                 "text": CONTEXT_REMOVED_ALL,
             }
-        if removed:
-            removed_text = (
-                CONTEXT_REMOVED_SOME_PREFIX
-                + _removed_context_text(removed, previous_parts)
-                + CONTEXT_REMOVED_SOME_SUFFIX
-            )
+        if initial:
+            text = rendered
         else:
-            removed_text = ""
-        prefix = CONTEXT_UPDATE_CURRENT_PREFIX
-        text = prefix + removed_text + ("\n\n" + rendered if rendered else "")
+            body_parts = [CONTEXT_UPDATE_CURRENT_PREFIX]
+            if removed:
+                body_parts.append(
+                    CONTEXT_REMOVED_SOME_PREFIX
+                    + _removed_context_text(removed, previous_parts)
+                    + CONTEXT_REMOVED_SOME_SUFFIX
+                )
+            if rendered:
+                body_parts.append(rendered)
+            text = "\n\n".join(body_parts) + CONTEXT_UPDATE_CURRENT_SUFFIX
         return {
             "fingerprint": fingerprint,
             "state": {"fingerprint": fingerprint, "parts": state_parts},

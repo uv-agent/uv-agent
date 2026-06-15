@@ -4682,14 +4682,20 @@ def test_runtime_context_skill_change_sends_incremental_section_only(tmp_path: P
     (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
     second = engine._runtime_context_items(thread_id)
 
-    assert "<runtime_environment>" in str(first)
-    assert "<model_levels>" in str(first)
-    assert "<runtime_helpers>" in str(first)
-    text = str(second)
+    first_text = message_item_text(first[0])
+    assert first_text.startswith("<runtime_environment>")
+    assert "<context_update" not in first_text
+    assert "<runtime_environment>" in first_text
+    assert "<model_levels>" in first_text
+    assert "<runtime_helpers>" in first_text
+    text = message_item_text(second[0])
+    assert text.startswith('<context_update id="runtime_context" status="current">\n')
+    assert text.endswith("</context_update>")
     assert "changed:" not in text
     assert "fingerprint:" not in text
     assert "<available_skills>" not in text
     assert '<skill name="demo" scope="project"' in text
+    assert text.index('<skill name="demo" scope="project"') < text.rindex("</context_update>")
     assert "<runtime_environment>" not in text
     assert "<model_levels>" not in text
     assert "<runtime_helpers>" not in text
@@ -4719,12 +4725,15 @@ def test_runtime_context_mcp_removal_sends_removal_only(tmp_path: Path) -> None:
     mcp_path.unlink()
     second = engine._runtime_context_items(thread_id)
 
-    assert "<available_mcp_servers>" in str(first)
-    text = str(second)
+    assert "<available_mcp_servers>" in message_item_text(first[0])
+    text = message_item_text(second[0])
+    assert text.startswith('<context_update id="runtime_context" status="current">\n')
+    assert text.endswith("</context_update>")
     assert "removed:" not in text
     assert "fingerprint:" not in text
     assert "<context_update_removed id=\"runtime_context\">" in text
     assert '<removed_mcp_server name="demo" scope="project"' in text
+    assert text.index("<context_update_removed") < text.index("</context_update_removed>") < text.rindex("</context_update>")
     assert "<available_mcp_servers>" not in text
     assert '<mcp_server name="demo"' not in text
     assert "<runtime_environment>" not in text
@@ -4767,13 +4776,16 @@ def test_runtime_context_mcp_instruction_change_sends_single_server_only(tmp_pat
     )
     second = engine._runtime_context_items(thread_id)
 
-    assert '<mcp_server name="first"' in str(first)
-    assert '<mcp_server name="second"' in str(first)
-    text = str(second)
+    assert '<mcp_server name="first"' in message_item_text(first[0])
+    assert '<mcp_server name="second"' in message_item_text(first[0])
+    text = message_item_text(second[0])
+    assert text.startswith('<context_update id="runtime_context" status="current">\n')
+    assert text.endswith("</context_update>")
     assert "changed:" not in text
     assert "fingerprint:" not in text
     assert '<mcp_server name="second" scope="project"' in text
     assert '<instructions truncated="false">Use the second MCP carefully.</instructions>' in text
+    assert text.index('<mcp_server name="second" scope="project"') < text.rindex("</context_update>")
     assert '<mcp_server name="first"' not in text
     assert "<available_mcp_servers>" not in text
 
@@ -4840,7 +4852,8 @@ def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> N
 
     assert update is not None
     text = update["text"]
-    assert text.startswith('<context_update id="runtime_context" status="current">\n')
+    assert text.startswith("<runtime_environment>")
+    assert "<context_update" not in text
     assert text.index("<runtime_environment>") < text.index("<model_levels>")
     assert text.index("<model_levels>") < text.index("<runtime_helpers>")
     assert text.index('name="enter_dir"') < text.index('name="workflow"')
@@ -5083,7 +5096,10 @@ def test_goal_mode_notice_emits_once_per_epoch_and_after_disable(tmp_path: Path)
     engine.disable_goal_mode(thread_id)
     disabled = engine._pre_user_context_items(thread_id)
     repeated_disabled = engine._pre_user_context_items(thread_id)
-    assert '<goal_mode status="disabled">' in str(disabled)
+    disabled_text = "\n".join(message_item_text(item) for item in disabled)
+    assert '<goal_mode status="disabled">' in disabled_text
+    assert disabled_text.index("<files>") < disabled_text.index("<rules>") < disabled_text.index("</rules>")
+    assert '<rule>现有目标文件会保留' in disabled_text
     assert '<goal_mode status="disabled">' not in str(repeated_disabled)
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t2", text="summary", usage={})
@@ -5167,14 +5183,17 @@ def test_goal_mode_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -
     )
     thread_id = engine.thread_store.create_thread()
     engine.enable_goal_mode(thread_id)
-    goal_item = engine._pre_user_context_items(thread_id)[0]
+    pre_user_items = engine._pre_user_context_items(thread_id)
+    goal_item = next(item for item in pre_user_items if "<goal_mode" in message_item_text(item))
     engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=message_item("user", "do work"))
 
     assert engine._is_pre_user_context_item(goal_item)
     assert retain_item_after_compaction(goal_item) is False
     reconstructed = engine._reconstruct_input(thread_id)
     reconstructed_texts = [message_item_text(item) for item in reconstructed]
-    assert "<goal_mode" in reconstructed_texts[0]
+    goal_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<goal_mode" in item_text)
+    assert "<runtime_helpers>" in reconstructed_texts[0]
+    assert goal_index < reconstructed_texts.index("do work")
     assert "do work" in reconstructed_texts
 
 
@@ -5287,6 +5306,8 @@ async def test_worktree_notice_reaches_first_send_and_coexists_with_goal_mode(tm
     request_text = "\n".join(message_item_text(item) for item in model_client.requests[0]["input"])
     assert '<goal_mode status="enabled">' in request_text
     assert '<worktree status="active">' in request_text
+    assert request_text.index("<runtime_helpers>") < request_text.index('<workflow_context scope="main_agent" status="current">')
+    assert request_text.index('<workflow_context scope="main_agent" status="current">') < request_text.index('<goal_mode status="enabled">')
     assert request_text.index('<goal_mode status="enabled">') < request_text.index('<worktree status="active">')
     assert engine.thread_store.read_events(thread_id, event_types={"item.worktree_notice"})
 
@@ -5314,14 +5335,17 @@ def test_worktree_notice_is_pre_user_context_and_not_retained(tmp_path: Path) ->
         worktree_origin_root=str(project_root),
     )
     engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
-    worktree_item = engine._pre_user_context_items(thread_id)[0]
+    pre_user_items = engine._pre_user_context_items(thread_id)
+    worktree_item = next(item for item in pre_user_items if "<worktree" in message_item_text(item))
     engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=message_item("user", "do work"))
 
     assert engine._is_pre_user_context_item(worktree_item)
     assert retain_item_after_compaction(worktree_item) is False
     reconstructed = engine._reconstruct_input(thread_id)
     reconstructed_texts = [message_item_text(item) for item in reconstructed]
-    assert any("<worktree" in text for text in reconstructed_texts[:2])
+    runtime_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<runtime_helpers>" in item_text)
+    worktree_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<worktree" in item_text)
+    assert runtime_index < worktree_index < reconstructed_texts.index("do work")
     assert "do work" in reconstructed_texts
 
 
@@ -5580,12 +5604,16 @@ def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_p
     texts = [message_item_text(item) for item in prelude.input_items if item.get("type") == "message"]
     assert texts[0].startswith("<workspace_rules")
     assert "Reloaded rule." in texts[0]
+    runtime_index = next(index for index, text in enumerate(texts) if text.startswith("<runtime_environment>"))
+    workflow_index = next(index for index, text in enumerate(texts) if text.startswith('<workflow_context scope="main_agent" status="current">'))
     handoff_index = next(index for index, text in enumerate(texts) if text.startswith("<compaction_handoff>"))
+    assert "<context_update" not in texts[runtime_index]
+    assert "<runtime_helpers>" in texts[runtime_index]
+    assert runtime_index < workflow_index < handoff_index
     handoff = texts[handoff_index]
     assert "kept request" in handoff
     assert "<retained_history>" in handoff
     assert "<retained_history_message" not in handoff
-    assert texts[handoff_index - 1].startswith("<context_update")
     assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
     assert message_item_text(prelude.user_item) == "new request"
     assert "new request" not in texts
@@ -5653,11 +5681,15 @@ async def test_mid_turn_compaction_readds_epoch_context_before_continuing(tmp_pa
     continued_texts = [message_item_text(item) for item in continued_input if item.get("type") == "message"]
     assert continued_texts[0].startswith("<workspace_rules")
     assert "Mid-turn rule." in continued_texts[0]
+    runtime_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<runtime_environment>"))
+    workflow_index = next(index for index, text in enumerate(continued_texts) if text.startswith('<workflow_context scope="main_agent" status="current">'))
     handoff_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<compaction_handoff>"))
+    assert "<context_update" not in continued_texts[runtime_index]
+    assert "<runtime_helpers>" in continued_texts[runtime_index]
+    assert runtime_index < workflow_index < handoff_index
     handoff = continued_texts[handoff_index]
     assert "<retained_history>" in handoff
     assert "<retained_history_message" not in handoff
-    assert continued_texts[handoff_index - 1].startswith("<context_update")
     assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
     assert continued_texts[-1] == COMPACTION_CONTINUE_WITHOUT_CURRENT_USER
 

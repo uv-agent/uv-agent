@@ -158,7 +158,9 @@ def render_goal_mode_notice(state: GoalState, *, status: GoalModeStatus) -> str:
                 _xml_element(GOAL_MODE_FIELD_DOCUMENT, state.paths.notes),
                 GOAL_MODE_FILES_CLOSE,
                 "",
+                GOAL_MODE_RULES_OPEN,
                 GOAL_MODE_DISABLED_RULES,
+                GOAL_MODE_RULES_CLOSE,
                 GOAL_MODE_CLOSE,
             ]
         )
