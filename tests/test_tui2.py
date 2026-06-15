@@ -3237,6 +3237,55 @@ def test_translate_extended_scan_code_returns_none_for_unmappable_keys() -> None
         ctypes.windll = original_windll  # type: ignore[attr-defined]
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="ctypes.windll is only available on Windows; verified on windows-latest CI",
+)
+def test_terminal_preserves_processed_input_and_restores_mode(monkeypatch) -> None:
+    """VT input is required for bracketed paste, but processed input should stay on.
+
+    Clearing ENABLE_PROCESSED_INPUT was historically needed to stop
+    asyncio.to_thread(read_key) from leaking workers on Ctrl+C.  tui2 now uses a
+    single persistent reader thread plus a SIGINT shim, so processed input can be
+    left enabled.  Keeping the console closer to its default mode prevents
+    Windows Terminal/ConPTY from leaving the mouse wheel in application-input
+    mode after the TUI exits.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    original_input_mode = 0x1F7  # ENABLE_PROCESSED_INPUT and other defaults
+    original_output_mode = 0x7
+    set_mode_calls: list[tuple[int, int]] = []
+
+    class FakeKernel32:
+        def GetStdHandle(self, n: int) -> int:
+            return n
+
+        def GetConsoleMode(self, handle: int, mode_ref) -> int:
+            # mode_ref is a CArgObject created by ctypes.byref(wintypes.DWORD()).
+            mode_ref._obj.value = original_input_mode if handle == -10 else original_output_mode
+            return 1
+
+        def SetConsoleMode(self, handle: int, mode: int) -> int:
+            set_mode_calls.append((handle, mode))
+            return 1
+
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=FakeKernel32()))
+
+    terminal = Terminal()
+    terminal._enable_windows_vt()
+
+    input_set = [m for h, m in set_mode_calls if h == -10]
+    assert input_set
+    assert input_set[0] & 0x0001, "ENABLE_PROCESSED_INPUT should be preserved"
+    assert input_set[0] & 0x0200, "ENABLE_VIRTUAL_TERMINAL_INPUT should be enabled"
+
+    terminal._restore_windows_vt()
+    restored = [m for h, m in set_mode_calls if h == -10 and m == original_input_mode]
+    assert restored, "original input console mode should be restored"
+
+
 def test_unbracketed_paste_fallback_does_not_swallow_stringio_input() -> None:
     terminal = Terminal(stdin=io.StringIO("ab"))
     terminal._windows = False
@@ -3701,4 +3750,3 @@ def test_render_markdown_table_wraps_cells_without_renderer_ellipsis() -> None:
     assert "最小，几乎不影响" in compact
     assert "现有" in compact
     assert "…" not in plain
-

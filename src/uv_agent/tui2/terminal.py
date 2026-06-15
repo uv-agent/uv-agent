@@ -45,7 +45,12 @@ class Terminal(AbstractContextManager["Terminal"]):
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.write("\x1b[?2004l\x1b[0m\n")
+        # Explicitly disable common mouse-reporting modes before disabling
+        # bracketed paste.  tui2 does not enable mouse reporting itself, but
+        # Windows Terminal can get stuck in a state where the mouse wheel is
+        # routed to the application instead of scrolling the scrollback; these
+        # resets are a defensive cleanup.
+        self.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?2004l\x1b[0m\n")
         if not self._windows and self._old_termios is not None:
             import termios
 
@@ -374,14 +379,15 @@ class Terminal(AbstractContextManager["Terminal"]):
             input_handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
             if kernel32.GetConsoleMode(input_handle, ctypes.byref(mode)):
                 self._old_input_mode = int(mode.value)
-                # Clear ENABLE_PROCESSED_INPUT (0x0001) so Ctrl+C is delivered
-                # as a raw ETX byte ("\x03") by ``msvcrt.getwch`` instead of
-                # being translated by the console driver into a SIGINT signal.
-                # The TUI also uses ``TerminalKeyReader`` to tolerate consoles
-                # or child processes that re-enable processed input later, but
-                # preferring raw ETX here avoids routing Ctrl+C through Python's
-                # SIGINT machinery in the normal case.
-                new_input = (mode.value | 0x0200) & ~0x0001
+                # Keep ENABLE_PROCESSED_INPUT (0x0001) set.  The legacy reason
+                # for clearing it was to stop asyncio.to_thread(read_key) from
+                # leaking one worker per Ctrl+C, but tui2 now uses a single
+                # persistent reader thread that catches KeyboardInterrupt and a
+                # SIGINT shim, so Ctrl+C is handled either way.  Leaving the
+                # console closer to its default mode prevents Windows
+                # Terminal/ConPTY from keeping the mouse wheel in VT-input mode
+                # after the application exits.
+                new_input = mode.value | 0x0200
                 kernel32.SetConsoleMode(input_handle, new_input)
 
             output_handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
