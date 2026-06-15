@@ -155,6 +155,7 @@ class PythonRunner:
                 *argv,
                 cwd=str(run_cwd),
                 env=env,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 **subprocess_group_kwargs(),

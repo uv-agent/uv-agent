@@ -79,6 +79,31 @@ async def test_runner_executes_script_and_records_sqlite(
 
 
 @pytest.mark.asyncio
+async def test_runner_redirects_stdin_to_devnull(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Managed scripts should not inherit the host TUI's console stdin.
+
+    Sharing the console input handle with child processes (notably long-running
+    builds such as cargo/rustc) can cause Windows Terminal/ConPTY to drop or
+    delay mouse events delivered to the parent application.  Redirecting stdin
+    to DEVNULL keeps the input handle exclusive to uv-agent.
+    """
+
+    runner = make_runner(tmp_path, monkeypatch)
+    result = await runner.run(
+        PythonRunRequest(
+            code="import sys\nprint('stdin_eof:', sys.stdin.read() == '')\n",
+            cwd=Path.cwd(),
+        )
+    )
+
+    assert result.returncode == 0
+    assert "stdin_eof: True" in result.stdout
+
+
+@pytest.mark.asyncio
 async def test_runner_passes_project_root_without_polluting_parent_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
