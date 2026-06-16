@@ -462,7 +462,7 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert "不是 shell 风格片段" in PYTHON_TOOL["description"]
     assert "完整、独立的 Python 脚本" in PYTHON_TOOL["description"]
     assert "优先使用 runtime helpers" in PYTHON_TOOL["description"]
-    assert "普通外部命令" in PYTHON_TOOL["description"] and "run_process_text" in PYTHON_TOOL["description"]
+    assert "普通外部命令" in PYTHON_TOOL["description"] and "rt.run" in PYTHON_TOOL["description"]
     assert "call subprocesses" not in PYTHON_TOOL["description"]
     assert set(PYTHON_TOOL["parameters"]["properties"]) == {"code", "timeout_s"}
     code_description = PYTHON_TOOL["parameters"]["properties"]["code"]["description"]
@@ -2970,7 +2970,7 @@ async def test_tool_look_at_adds_assistant_bridge_before_image_context(tmp_path:
                         "type": "function_call",
                         "call_id": "call_1",
                         "name": "run_python",
-                        "arguments": json.dumps({"code": "from uv_agent_runtime import look_at"}),
+                        "arguments": json.dumps({"code": "import uv_agent_runtime as rt"}),
                     }
                 ],
             },
@@ -3044,7 +3044,7 @@ async def test_responses_tool_look_at_resends_full_context_before_resuming_incre
                         "type": "function_call",
                         "call_id": "call_1",
                         "name": "run_python",
-                        "arguments": json.dumps({"code": "from uv_agent_runtime import look_at"}),
+                        "arguments": json.dumps({"code": "import uv_agent_runtime as rt"}),
                     }
                 ],
             },
@@ -3352,9 +3352,9 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
                         "arguments": json.dumps(
                             {
                                 "code": (
-                                    "from uv_agent_runtime import emit_progress\n"
+                                    "import uv_agent_runtime as rt\n"
                                     "print('visible before')\n"
-                                    "emit_progress('internal progress')\n"
+                                    "rt.events.progress('internal progress')\n"
                                     "print('visible after')\n"
                                 )
                             }
@@ -3447,9 +3447,9 @@ async def test_enter_dir_loads_rules_in_tool_result_and_persists_cwd(tmp_path: P
                         "arguments": json.dumps(
                             {
                                 "code": (
-                                    "from uv_agent_runtime import enter_dir\n"
+                                    "import uv_agent_runtime as rt\n"
                                     "from pathlib import Path\n"
-                                    "enter_dir('src')\n"
+                                    "rt.cd('src')\n"
                                     "print(Path.cwd().name)\n"
                                 )
                             }
@@ -3666,40 +3666,69 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<level>small</level>" in turn_context
     assert "<level>medium</level>" in turn_context
     assert "</runtime_helpers>" in turn_context
-    assert "它们不会自动加载，需要从 uv_agent_runtime 显式导入" in turn_context
-    assert "read_file" in turn_context
-    assert "write_file" in turn_context
-    assert "edit_lines" in turn_context
+    assert "import uv_agent_runtime as rt" in turn_context
+    assert "<common_types>" in turn_context
+    assert "CollectionResult[T]" in turn_context
+    assert "FileView.header() -> str" in turn_context
+    assert "CommandTextResult.tail" in turn_context
+    assert "Match.file() -> File" in turn_context
+    assert "SearchResults(CollectionResult[Match])" in turn_context
+    assert "ThreadDetailResult" in turn_context
+    assert "McpClient.initialize()" in turn_context
+    assert '<function name="file">' in turn_context
+    assert "rt.file(path: str | Path) -> File" in turn_context
+    assert "File.read(" in turn_context
+    assert "File.write(" in turn_context
+    assert "File.replace(" in turn_context
+    assert "File.edit(" in turn_context
+    assert "File.insert_after" in turn_context
+    assert '<function name="search">' in turn_context
+    assert "rt.search(pattern: str" in turn_context
+    assert "types: str | Sequence[str] | None" in turn_context
+    assert "limit: int | None" in turn_context
+    assert '<function name="run">' in turn_context
+    assert "rt.run(*args" in turn_context
+    assert "默认 check=False" in turn_context
+    assert '<function name="deps">' in turn_context
+    assert "rt.deps.add" in turn_context
+    assert "向共享 run_python uv project 添加 direct packages" in turn_context
+    assert "在当前脚本 import 该 package 前调用" in turn_context
+    assert "rt.deps.env_dir" in turn_context
+    assert '<function name="threads">' in turn_context
+    assert "rt.threads.list" in turn_context
+    assert "rt.threads.view" in turn_context
+    assert "rt.threads.detail" in turn_context
+    assert '<function name="mcp">' in turn_context
+    assert "rt.mcp.connect" in turn_context
+    assert "client.initialize()" in turn_context
+    assert "检查返回的 instructions" in turn_context
+    assert '<function name="workflow">' in turn_context
+    assert "rt.workflow.start" in turn_context
+    assert "构建持久任务图" in turn_context
+    assert '<function name="misc">' in turn_context
+    assert "rt.cd(path" in turn_context
+    assert "rt.patch" in turn_context
+    assert "rt.convert_patch" in turn_context
+    assert "rt.snapshot" in turn_context
+    assert "run_digest" not in turn_context
+    assert "read_file" not in turn_context
+    assert "write_file" not in turn_context
+    assert "edit_lines" not in turn_context
+    assert "replace_text" not in turn_context
+    assert "run_process_text" not in turn_context
     assert "path_info" not in turn_context
     assert "read_text_lossless" not in turn_context
     assert "write_text_lossless" not in turn_context
-    assert "compare_text" not in turn_context
-    assert "normalize_text" not in turn_context
-    assert "replace_text" in turn_context
-    assert "replace_exact" not in turn_context
     assert "make_unified_diff" not in turn_context
     assert "apply_patch_any" not in turn_context
-    assert "convert_patch" not in turn_context
     assert "workspace_transaction" not in turn_context
     assert "snapshot_files" not in turn_context
     assert "restore_snapshot" not in turn_context
     assert "goal_paths" not in turn_context
     assert "supported_symbol_languages" not in turn_context
     assert "clear_codequery_cache" not in turn_context
-    assert "run_process_text" in turn_context
-    assert "add_dependency" in turn_context
-    assert "向共享 run_python uv project 添加 direct packages" in turn_context
-    assert "在当前脚本 import 该 package 前调用" in turn_context
-    assert "该进程中已经 import 的 package" in turn_context
-    assert "run_python_env_dir" in turn_context
-    assert "context=None" in turn_context
-    assert "max_total=None" in turn_context
-    assert '<helper name="threads">' in turn_context
-    assert "thread_view" in turn_context
-    assert "thread_detail" in turn_context
-    assert "run_digest" not in turn_context
     assert "<usage_pattern>" in turn_context
-    assert "helpers 是脚本中使用的普通 Python 函数" in turn_context
+    assert "runtime helpers 是脚本中使用的普通 Python 对象" in turn_context
     assert "不是独立的工具调用" in turn_context
     assert "不要仅因为下一步要用另一个 helper" in turn_context
     assert "对方向已经明确的后续步骤" in turn_context
@@ -3708,10 +3737,10 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "用 Python libraries 解析结构化输出" in turn_context
     assert "收集一份摘要" in turn_context
     assert "用 Python 方式替代 shell 习惯" in turn_context
-    assert "用 read_file 代替 cat" in turn_context
-    assert "用 search_text/find_files 代替临时 grep/find" in turn_context
-    assert "用 run_process_text([...]) 代替 raw subprocess" in turn_context
-    assert "skill 文件用 read_file 读取 SKILL.md" in turn_context
+    assert "用 `rt.file(path).read()` 代替 cat" in turn_context
+    assert "用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find" in turn_context
+    assert "用 `rt.run(" in turn_context and "代替 raw subprocess" in turn_context
+    assert "skill 文件用 `rt.file(skill_path).read()` 读取 SKILL.md" in turn_context
     assert "在同一脚本中处理可预见的后续解析或回退逻辑" in turn_context
     assert '<example name="round-1-find">' in turn_context
     assert "查找并理解" in turn_context
@@ -3722,20 +3751,20 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "在目标、位置和修改方式已经明确后" in turn_context
     assert "先快速搜索确认目标，再一起应用变更并验证" in turn_context
     assert "不要把已知编辑推迟到下一轮" in turn_context
-    assert "from uv_agent_runtime import search_text, find_files, read_file" in turn_context
-    assert 'search_text("def handle_login"' in turn_context
+    assert "import uv_agent_runtime as rt" in turn_context
+    assert 'rt.search("def handle_login"' in turn_context
     assert "未定义 handle_login" in turn_context
-    assert 'search_text("handle_login("' in turn_context
+    assert 'rt.search("handle_login("' in turn_context
     assert "call_hits" in turn_context
-    assert "find_files(globs=" in turn_context
-    assert "from uv_agent_runtime import search_text, replace_text, edit_lines, run_process_text" in turn_context
-    assert "replace_text(" in turn_context
+    assert "rt.files(globs=" in turn_context
+    assert "hits.one().file().replace" in turn_context
     assert 'redirect("/old-dashboard")' in turn_context
     assert 'redirect(url_for("dashboard"))' in turn_context
     assert "MAX_LOGIN_ATTEMPTS" in turn_context
     assert "未找到目标" in turn_context
     assert "anchor 不匹配" in turn_context
-    assert "edit_lines(" in turn_context
+    assert 'rt.file("src/config/auth.py").edit' in turn_context
+    assert "insert_before" in turn_context
     assert '<example name="anti-pattern-one-helper-per-call">' in turn_context
     assert "不要把一个清晰的工作单元拆成多次 run_python" in turn_context
     assert "每次只调用一个 helper" in turn_context
@@ -3749,35 +3778,33 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "def command" not in turn_context
     assert "json.loads" not in turn_context
     assert "<helper_selection>" in turn_context
-    assert "列出的 helpers 是普通 Python 函数" in turn_context
+    assert "列出的 helpers 是普通 Python 对象" in turn_context
     assert "与标准库代码和控制流组合使用" in turn_context
     assert "pathlib、os、json" in turn_context and "做衔接逻辑" in turn_context
     assert "适合时优先使用 helpers" in turn_context
     assert "newline style、BOM、final newline" in turn_context
     assert "按任务选择：" in turn_context
-    assert "discovery=find_files/search_text/find_symbols/query_code" in turn_context
-    assert "search_text 默认 regex" in turn_context
+    assert "discovery=rt.files/rt.search/rt.symbols/rt.query" in turn_context
+    assert "rt.search 默认 regex" in turn_context
     assert "精确代码字符串用 literal=True" in turn_context
-    assert "rg type aliases 用 file_types" in turn_context
-    assert "edit=用 replace_text 替换唯一小段文本，用 edit_lines 处理 anchored ranges/inserts" in turn_context
-    assert "完整文件或生成的内容用 write_file" in turn_context
-    assert "process=run_process_text for ordinary external commands" not in turn_context
+    assert "rg type aliases 用 types" in turn_context
+    assert "edit=用 File.replace 替换唯一小段文本" in turn_context
+    assert "完整文件或生成的内容用 File.write" in turn_context
     assert "普通外部命令（包括" in turn_context
     assert "包括 skills 或 docs 中展示的 shell commands" in turn_context
-    assert "优先用 run_process_text 而不是 raw subprocess" in turn_context
+    assert "优先用 `rt.run(...)` 而不是 raw subprocess" in turn_context
     assert "自定义进程控制" in turn_context
-    assert "thread history=list_thread_digests/thread_view/thread_detail" in turn_context
+    assert "thread history=rt.threads.list/view/detail" in turn_context
     assert "数据量较大时，优先提取字段、行范围、head/tail 或生成摘要" in turn_context
     assert "不要猜测 helper signatures" in turn_context
-    assert "Search 和 symbol helpers 返回给 file helpers 使用的是绝对路径" in turn_context
-    assert "start=end+1 插入" in turn_context
-    assert "pattern 默认是 regex，精确字符串传 literal=True" in turn_context
+    assert "Search、symbol 和 capture 结果可直接 `.view()`" in turn_context
+    assert "pattern 默认是 regex" in turn_context
     assert "Prefer the smallest helper that directly matches the task" not in turn_context
     assert "uv-agent patch envelope shown below" not in turn_context
-    assert turn_context.count("<description>") >= 15
+    assert turn_context.count("<description>") >= 10
     assert "<![CDATA[" not in turn_context
-    assert '<helper name="replace_text">' in turn_context
-    assert '<helper name="mcp">' in turn_context
+    assert '<helper name="replace_text">' not in turn_context
+    assert '<helper name="mcp">' not in turn_context
     assert '<helper name="stdlib">' not in turn_context
     assert '<helper name="inspect_signatures">' not in turn_context
     assert "These helpers do not switch the active TUI thread" not in turn_context
@@ -3786,10 +3813,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'find_files("src", globs=["*.py", "!**/migrations/**"], max_total=30)' not in turn_context
     assert "before.text.replace" not in turn_context
     assert 'connect_named("server-name")' not in turn_context
-    assert "client.initialize()" in turn_context
-    assert "检查返回的 instructions" in turn_context
-    assert '<helper name="workflow"' in turn_context
-    assert "构建持久任务图" in turn_context
     assert "replaces " + "ask" not in turn_context
     assert 'level="small"' not in prompt
     assert "pathlib" in turn_context
@@ -3799,7 +3822,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "list_files" not in prompt
     assert "run_command/check_command" not in prompt
     assert "emit_event" not in prompt
-    assert "enter_dir" in turn_context
+    assert "rt.cd" in turn_context
     assert "demo (project)" not in prompt
 
     assert '<skill name="demo" scope="project"' in turn_context
@@ -4858,14 +4881,17 @@ def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> N
     assert "<context_update" not in text
     assert text.index("<runtime_environment>") < text.index("<model_levels>")
     assert text.index("<model_levels>") < text.index("<runtime_helpers>")
-    assert text.index('name="enter_dir"') < text.index('name="workflow"')
-    assert text.index('name="workflow"') < text.index('name="add_dependency"')
-    assert text.index('name="add_dependency"') < text.index('name="look_at"')
-    assert text.index('name="look_at"') < text.index('name="read_file"')
-    assert text.index('name="read_file"') < text.index('name="write_file"')
-    assert text.index('name="write_file"') < text.index('name="edit_lines"')
-    assert text.index('name="edit_lines"') < text.index('name="replace_text"')
-    assert text.index('name="replace_text"') < text.index('name="run_process_text"')
+    assert text.index('name="file"') < text.index('name="search"')
+    assert text.index('name="search"') < text.index('name="files"')
+    assert text.index('name="files"') < text.index('name="symbols"')
+    assert text.index('name="symbols"') < text.index('name="query"')
+    assert text.index('name="query"') < text.index('name="run"')
+    assert text.index('name="run"') < text.index('name="deps"')
+    assert text.index('name="deps"') < text.index('name="threads"')
+    assert text.index('name="threads"') < text.index('name="mcp"')
+    assert text.index('name="mcp"') < text.index('name="events"')
+    assert text.index('name="events"') < text.index('name="workflow"')
+    assert text.index('name="workflow"') < text.index('name="misc"')
 
 
 def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) -> None:
@@ -5043,7 +5069,7 @@ def test_workflow_context_is_pre_user_context_and_not_retained(tmp_path: Path) -
 
 
 def test_compaction_summary_appends_active_workflows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from uv_agent_runtime import workflow
+    import uv_agent_runtime as rt
 
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -5058,7 +5084,7 @@ def test_compaction_summary_appends_active_workflows(tmp_path: Path, monkeypatch
     )
     thread_id = engine.thread_store.create_thread()
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", thread_id)
-    wf = workflow.start("Long task", state_dir=state_dir)
+    wf = rt.workflow.start("Long task", state_dir=state_dir)
     wf.agent("Do the first part", key="first")
 
     summary = engine._compaction_summary_with_active_workflows(thread_id, "Conversation summary")

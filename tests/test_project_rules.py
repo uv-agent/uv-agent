@@ -83,7 +83,7 @@ def test_workspace_rule_index_can_render_active_working_directory_label(tmp_path
     rendered = discover_workspace_rule_index(project).render(label="working directory")
 
     assert "在活动 working directory 下发现" in rendered
-    assert "enter_dir" in rendered
+    assert "rt.cd" in rendered
 
 
 def test_load_directory_rules_only_loads_current_directory(tmp_path: Path) -> None:

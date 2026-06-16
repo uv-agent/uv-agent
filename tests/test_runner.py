@@ -50,7 +50,7 @@ async def test_runner_executes_script_and_records_sqlite(
 
     result = await runner.run(
         PythonRunRequest(
-            code="from uv_agent_runtime import emit_event\nemit_event('hello', value=42)\n",
+            code="import uv_agent_runtime as rt\nrt.events.emit('hello', value=42)\n",
             cwd=project_root,
         )
     )
@@ -138,8 +138,9 @@ async def test_runner_records_runtime_helper_stats_sqlite(
     result = await runner.run(
         PythonRunRequest(
             code=(
-                "from uv_agent_runtime import helper_stats_db_path, path_info\n"
-                "path_info('.')\n"
+                "import uv_agent_runtime as rt\n"
+                "from uv_agent_runtime.helper_stats import helper_stats_db_path\n"
+                "rt.path('.')\n"
                 "print(helper_stats_db_path())\n"
             ),
             cwd=project_root,
@@ -165,7 +166,7 @@ async def test_runner_records_runtime_helper_stats_sqlite(
         ).fetchone()
 
     assert row is not None
-    assert row["helper"] == "path_info"
+    assert row["helper"] == "path"
     assert row["positional_count"] == 1
     assert row["keyword_names_json"] == "[]"
     assert '"str"' in row["argument_types_json"]
@@ -184,9 +185,9 @@ async def test_runner_returns_runtime_helper_call_counts(
     result = await runner.run(
         PythonRunRequest(
             code=(
-                "from uv_agent_runtime import path_info\n"
+                "import uv_agent_runtime as rt\n"
                 "for _ in range(3):\n"
-                "    path_info('.')\n"
+                "    rt.path('.')\n"
             ),
             cwd=Path.cwd(),
         )
@@ -194,7 +195,7 @@ async def test_runner_returns_runtime_helper_call_counts(
 
     assert result.returncode == 0
     assert result.helper_calls is not None
-    assert result.helper_calls[0]["name"] == "path_info"
+    assert result.helper_calls[0]["name"] == "path"
     assert result.helper_calls[0]["count"] == 3
     assert result.helper_calls[0]["source"] == "runtime"
     assert result.helper_calls[0]["outcomes"] == {"ok": 3}
@@ -202,7 +203,7 @@ async def test_runner_returns_runtime_helper_call_counts(
 
     stored = runner.run_logs.get_run(result.run_id)
     assert stored is not None
-    assert stored["helper_calls"][0]["name"] == "path_info"
+    assert stored["helper_calls"][0]["name"] == "path"
     assert stored["helper_calls"][0]["count"] == 3
 
 @pytest.mark.asyncio
@@ -245,8 +246,8 @@ async def test_runner_receives_structured_event_over_rpc(
     result = await runner.run(
         PythonRunRequest(
             code=(
-                "from uv_agent_runtime import emit_event\n"
-                "emit_event('big', value='x' * 70_000)\n"
+                "import uv_agent_runtime as rt\n"
+                "rt.events.emit('big', value='x' * 70_000)\n"
             ),
             cwd=project_root,
         )
@@ -295,10 +296,10 @@ async def test_runner_receives_threaded_runtime_events_over_rpc(
         PythonRunRequest(
             code=(
                 "import threading\n"
-                "from uv_agent_runtime import emit_event\n"
+                "import uv_agent_runtime as rt\n"
                 "def emit_many(worker):\n"
                 "    for index in range(25):\n"
-                "        emit_event('threaded', worker=worker, index=index)\n"
+                "        rt.events.emit('threaded', worker=worker, index=index)\n"
                 "threads = [threading.Thread(target=emit_many, args=(worker,)) for worker in range(4)]\n"
                 "for thread in threads:\n"
                 "    thread.start()\n"
@@ -325,12 +326,16 @@ async def test_runner_call_host_invokes_registered_method(
     project_root = Path.cwd()
     runner = make_runner(tmp_path, monkeypatch)
     runner.rpc_server.register_method("echo", lambda text: {"text": text})
+    runner.rpc_server.register_method(
+        "helper.resolve",
+        lambda name: {"found": name == "echo", "name": name, "doc": "Echo helper."},
+    )
 
     result = await runner.run(
         PythonRunRequest(
             code=(
-                "from uv_agent_runtime import call_host\n"
-                "print(call_host('echo', text='hello')['text'])\n"
+                "import uv_agent_runtime as rt\n"
+                "print(rt.echo(text='hello')['text'])\n"
             ),
             cwd=project_root,
         )

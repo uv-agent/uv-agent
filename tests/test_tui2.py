@@ -117,7 +117,7 @@ def test_tool_cell_has_no_rule_and_tree_indented_chains() -> None:
     call = {
         "name": "run_python",
         "call_id": "call_123",
-        "arguments": '{"code":"from uv_agent_runtime import run_process_text\\nrun_process_text([])"}',
+        "arguments": '{"code":"import uv_agent_runtime as rt\\nrt.run()"}',
     }
     payload = {"returncode": 0, "run_id": "run_abcdef", "stdout": "one\ntwo"}
     lines = render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 60)
@@ -128,13 +128,13 @@ def test_tool_cell_has_no_rule_and_tree_indented_chains() -> None:
     assert not plain_lines[0].startswith("── ")
     assert "▸" in plain_lines[0] and "python" in plain_lines[0]
     assert "run_python" not in plain_lines[0]
-    assert "run_process_text([])" not in plain
+    assert "rt.run()" not in plain
     # Success omits exit code; run id is shortened to the last 6 characters.
     assert "exit 0" not in plain
     assert "abcdef" in plain
     assert "run_abcdef" not in plain
-    assert "run_process_text" in plain
-    assert "from uv_agent_runtime" not in plain
+    assert "run" in plain
+    assert "import uv_agent_runtime" not in plain
     # stdout/stderr are no longer inlined; use /show <run_id> for full output.
     assert "one" not in plain and "two" not in plain
     # At width 60 the chain fits on the title line.
@@ -145,14 +145,14 @@ def test_tool_cell_compresses_script_and_output_lines() -> None:
     call = {
         "name": "run_python",
         "call_id": "call_123",
-        "arguments": '{"code":"from uv_agent_runtime import path_info\\npath_info(\\"0\\")\\npath_info(\\"1\\")\\npath_info(\\"2\\")\\npath_info(\\"3\\")\\npath_info(\\"4\\")\\npath_info(\\"5\\")\\npath_info(\\"6\\")"}',
+        "arguments": '{"code":"import uv_agent_runtime as rt\\nrt.path(\\"0\\")\\nrt.path(\\"1\\")\\nrt.path(\\"2\\")\\nrt.path(\\"3\\")\\nrt.path(\\"4\\")\\nrt.path(\\"5\\")\\nrt.path(\\"6\\")"}',
     }
     payload = {"returncode": 0, "stdout": "\n".join(f"out{i}" for i in range(8))}
     lines = render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 80)
     plain_lines = [strip_ansi(line) for line in lines]
 
     # Only the compact imported-name chain is shown; stdout is omitted.
-    assert any("path_info x7" in line for line in plain_lines)
+    assert any("rt.path x7" in line for line in plain_lines)
     assert not any(line.strip().startswith("out") for line in plain_lines)
     assert "exit 0" not in "\n".join(plain_lines)
     # At width 80 the chain fits on the title line.
@@ -163,12 +163,12 @@ def test_tool_cell_uses_payload_helper_calls_without_source() -> None:
     call = {"name": "run_python", "call_id": "call_123", "arguments": '{"code":"print(1)"}'}
     payload = {
         "returncode": 0,
-        "helper_calls": [{"name": "replace_text", "args": '"a.txt", "old", "new"'}],
+        "helper_calls": [{"name": "file.replace", "args": '"old", "new"'}],
     }
 
     plain = "\n".join(strip_ansi(line) for line in render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 80))
 
-    assert "replace_text" in plain
+    assert "file.replace" in plain
     assert '"a.txt"' not in plain
     assert "old" not in plain
     assert "print(1)" not in plain
@@ -182,13 +182,13 @@ def test_tool_cell_uses_runtime_helper_call_counts() -> None:
     call = {"name": "run_python", "call_id": "call_123", "arguments": '{"code":"print(1)"}'}
     payload = {
         "returncode": 0,
-        "helper_calls": [{"name": "path_info", "count": 7, "source": "runtime"}],
+        "helper_calls": [{"name": "path", "count": 7, "source": "runtime"}],
     }
 
     plain = "\n".join(strip_ansi(line) for line in render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 80))
 
-    assert "path_info x7" in plain
-    assert "path_info()" not in plain
+    assert "path x7" in plain
+    assert "path()" not in plain
     assert "print(1)" not in plain
 
 
@@ -302,7 +302,7 @@ def test_running_tool_cell_has_no_rule_and_constant_height() -> None:
     call = {
         "name": "run_python",
         "call_id": "call_" + "x" * 24,
-        "arguments": '{"code":"from uv_agent_runtime import path_info\\npath_info(\\".\\")"}',
+        "arguments": '{"code":"import uv_agent_runtime as rt\\nrt.path(\\".\\")"}',
     }
     running = render_tool_cell(TranscriptCell("tool", status="running", call=call), 80)
     completed = render_tool_cell(TranscriptCell("tool", call=call, payload={"returncode": 0}), 80)
@@ -331,7 +331,7 @@ def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
     call = {
         "name": "run_python",
         "call_id": "x",
-        "arguments": '{"code":"from uv_agent_runtime import path_info\\npath_info(\\".\\")"}',
+        "arguments": '{"code":"import uv_agent_runtime as rt\\nrt.path(\\".\\")"}',
     }
     empty = render_tool_cell(TranscriptCell("tool", status="running", call=call), 80)
     with_stdout = render_tool_cell(
@@ -358,7 +358,7 @@ def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
         plain = "\n".join(strip_ansi(line) for line in lines)
         assert "line1" not in plain and "warn1" not in plain
         assert "waiting for run_python output" not in plain
-        assert "path_info" in plain  # call chain still shown for context
+        assert "rt.path" in plain  # call chain still shown for context
 
     completed = render_tool_cell(
         TranscriptCell(
@@ -371,13 +371,13 @@ def test_running_tool_cell_height_is_constant_across_payload_growth() -> None:
     completed_plain = "\n".join(strip_ansi(line) for line in completed)
     assert "done-line" not in completed_plain
     assert "done-warn" not in completed_plain
-    assert "path_info" in completed_plain
+    assert "rt.path" in completed_plain
 
 def test_tool_cell_wraps_chain_when_narrow() -> None:
     call = {
         "name": "run_python",
         "call_id": "call_123",
-        "arguments": '{"code":"from uv_agent_runtime import path_info\\npath_info(\\".\\")\\npath_info(\\".\\")"}',
+        "arguments": '{"code":"import uv_agent_runtime as rt\\nrt.path(\\".\\")\\nrt.path(\\".\\")"}',
     }
     payload = {"returncode": 0}
     lines = render_tool_cell(TranscriptCell("tool", call=call, payload=payload), 20)
@@ -386,7 +386,7 @@ def test_tool_cell_wraps_chain_when_narrow() -> None:
     assert len(lines) == 2
     assert "▸" in plain[0]
     assert "└─" in plain[1]
-    assert "path_info" in plain[1]
+    assert "rt.path" in plain[1]
 
 
 def test_tool_cell_wraps_long_chain_across_all_helpers() -> None:
@@ -1948,7 +1948,7 @@ def test_flushed_tool_cells_retain_only_lightweight_payload(monkeypatch) -> None
                     "stdout": stdout,
                     "stderr": "err",
                     "events": [{"big": stdout}],
-                    "helper_calls": [{"name": "run_process_text", "args": "[]"}],
+                    "helper_calls": [{"name": "run", "args": ""}],
                 }
             )
         },
@@ -1961,7 +1961,7 @@ def test_flushed_tool_cells_retain_only_lightweight_payload(monkeypatch) -> None
     assert retained.payload == {
         "run_id": "run_123",
         "returncode": 0,
-        "helper_calls": [{"name": "run_process_text", "args": "[]"}],
+        "helper_calls": [{"name": "run", "args": ""}],
     }
     assert retained.call == {"name": "run_python", "call_id": "call_1"}
 
@@ -3599,11 +3599,11 @@ def test_tool_cell_shows_import_anchor_chains_with_method_calls() -> None:
             {
                 "code": (
                     "from pathlib import Path\n"
-                    "from uv_agent_runtime import search_text, read_file\n"
+                    "import uv_agent_runtime as rt\n"
                     "import json\n\n"
-                    "hits = search_text(\"foo\")\n"
+                    "hits = rt.search(\"foo\")\n"
                     "p = Path.home().resolve()\n"
-                    "data = json.loads(read_file(p).text)\n"
+                    "data = json.loads(rt.file(p).read().text)\n"
                 )
             }
         ),
@@ -3611,10 +3611,10 @@ def test_tool_cell_shows_import_anchor_chains_with_method_calls() -> None:
     lines = render_tool_cell(TranscriptCell("tool", call=call, payload={"returncode": 0}), 80)
     plain = "\n".join(strip_ansi(line) for line in lines)
 
-    assert "search_text" in plain
+    assert "rt.search" in plain
     assert "Path.home.resolve" in plain
     assert "json.loads" in plain
-    assert "read_file" in plain
+    assert "rt.file.read" in plain
 
 
 def test_pager_renders_content_with_fixed_chrome() -> None:

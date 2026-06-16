@@ -119,14 +119,13 @@ After installing the package into the environment used to run uv-agent, managed
 scripts can use the helper:
 
 ```python
-from uv_agent_runtime import shout
+import uv_agent_runtime as rt
 
-print(shout("done"))
+print(rt.shout("done"))
 ```
 
 When a helper is registered, uv-agent adds it to the dynamic runtime context as a
-`<plugin_runtime_helpers>` section so the model knows it can import it from
-`uv_agent_runtime`.
+`<plugin_runtime_helpers>` section so the model knows it can call it as a dynamic `rt.<helper>` attribute.
 
 ## Lifecycle Hooks
 
@@ -195,12 +194,12 @@ enforced as JSON Schema validation.
 Runtime use:
 
 ```python
-from uv_agent_runtime import notify
+import uv_agent_runtime as rt
 
-notify("build finished", channel="dev")
+rt.notify("build finished", channel="dev")
 ```
 
-Under the hood, `uv_agent_runtime` resolves unknown imports by asking the host
+Under the hood, `uv_agent_runtime` resolves unknown facade attributes by asking the host
 via the runner RPC transport. Calls are sent back to the host as `call.<helper>`
 requests with positional and keyword arguments.
 

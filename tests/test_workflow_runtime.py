@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from uv_agent_runtime import workflow
+import uv_agent_runtime as rt
 from uv_agent_runtime.textops import CommandTextResult
 
 
@@ -18,9 +18,9 @@ def test_workflow_wait_reaches_checkpoint_and_resumes(monkeypatch, tmp_path: Pat
         calls.append(args)
         return CommandTextResult(args=args, returncode=0, stdout="final node output\n", stderr="[workflow-node-thread] thr_node\n")
 
-    monkeypatch.setattr(workflow, "run_process_text", fake_run_process_text)
+    monkeypatch.setattr(rt.workflow, "run_process_text", fake_run_process_text)
 
-    wf = workflow.start(objective="demo", default_model_level="deep")
+    wf = rt.workflow.start(objective="demo", default_model_level="deep")
     node = wf.agent("Investigate the demo", key="investigate")
     wf.checkpoint(key="after_investigation", after=node, reason="Review direction", options=["continue", "abort"])
 
@@ -48,7 +48,7 @@ def test_workflow_can_modify_pending_graph(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thr_parent")
 
-    wf = workflow.start(objective="modify graph")
+    wf = rt.workflow.start(objective="modify graph")
     first = wf.agent("old prompt", key="first")
     second = wf.agent("second", key="second", after=first)
 
@@ -67,7 +67,7 @@ def test_workflow_is_blocked_inside_workflow_node(monkeypatch, tmp_path: Path) -
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_KIND", "workflow_node")
 
     try:
-        workflow.start("nested")
+        rt.workflow.start("nested")
     except RuntimeError as exc:
         assert "main Agent" in str(exc)
     else:  # pragma: no cover - defensive assertion style for clearer failure output

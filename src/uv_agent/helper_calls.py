@@ -9,77 +9,41 @@ from typing import Any
 # not known to the host ahead of time.
 RUNTIME_HELPER_NAMES: frozenset[str] = frozenset(
     {
-        "add_dependencies",
-        "add_dependency",
         "apply_patch",
-        "apply_patch_any",
-        "clear_codequery_cache",
-        "compare_text",
-        "connect_declared",
-        "connect_named",
-        "connect_stdio",
-        "connect_url",
+        "cd",
+        "compare",
         "convert_patch",
-        "emit_event",
-        "emit_progress",
-        "emit_result",
-        "enter_dir",
-        "edit_lines",
-        "find_files",
-        "find_symbols",
-        "goal_paths",
-        "helper_stats_db_path",
-        "list_declared_servers",
-        "list_files",
-        "list_thread_digests",
+        "diff",
+        "dry_run_patch",
+        "file",
+        "files",
         "look_at",
-        "make_unified_diff",
-        "normalize_text",
-        "path_info",
-        "query_code",
-        "read_file",
-        "read_json",
-        "read_text",
-        "read_text_lossless",
-        "replace_text",
-        "resolve_workspace_path",
-        "restore_snapshot",
-        "run_process_text",
-        "run_python_env_dir",
-        "search_text",
-        "snapshot_files",
-        "supported_symbol_languages",
-        "thread_detail",
-        "thread_digest",
-        "thread_view",
-        "workspace_transaction",
-        "write_file",
-        "write_json",
-        "write_text",
-        "write_text_lossless",
+        "normalize",
+        "patch",
+        "path",
+        "pwd",
+        "query",
+        "restore",
+        "run",
+        "search",
+        "snapshot",
+        "symbols",
+        "transaction",
     }
 )
 
+
 RUNTIME_SUBMODULE_NAMES: frozenset[str] = frozenset(
     {
-        "codequery",
-        "codesearch",
-        "cwd",
-        "dependencies",
+        "deps",
         "events",
-        "files",
-        "goal_mode",
-        "helper_stats",
-        "lockfile",
+        "goals",
         "mcp",
-        "patch",
-        "textops",
         "threads",
-        "transport",
-        "vision",
         "workflow",
     }
 )
+
 
 HelperCall = dict[str, Any]
 
@@ -87,10 +51,11 @@ HelperCall = dict[str, Any]
 def extract_runtime_helper_calls(source: str, *, max_calls: int = 80) -> list[HelperCall]:
     """Return runtime-helper calls found in a run_python script.
 
-    This is intentionally static and best-effort.  It recognizes helpers imported
-    from ``uv_agent_runtime`` directly, calls through a module alias such as
-    ``rt.run_process_text(...)``, and calls through imported runtime submodules
-    such as ``textops.replace_text(...)``.  It never evaluates user code.
+    This is intentionally static and best-effort.  It recognizes calls through a
+    module alias such as ``rt.search(...)`` or namespace calls such as
+    ``rt.threads.view(...)``.  Direct imports from ``uv_agent_runtime`` are still
+    accepted as plugin-provided helpers, but the built-in runtime context now
+    recommends ``import uv_agent_runtime as rt``.  It never evaluates user code.
     """
 
     try:
@@ -214,6 +179,7 @@ class _RuntimeHelperCallVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 - ast API
+        recorded = False
         if len(self.calls) < self.max_calls:
             name = self._helper_name(node.func)
             if name:
@@ -224,6 +190,17 @@ class _RuntimeHelperCallVisitor(ast.NodeVisitor):
                         "line": getattr(node, "lineno", None),
                     }
                 )
+                recorded = True
+        if recorded:
+            # The outer call already captures chains such as
+            # ``rt.file('x').replace(...)``.  Visiting the callee expression would
+            # add a second, less useful ``file('x')`` entry, but arguments may
+            # still contain independent helper calls.
+            for arg in node.args:
+                self.visit(arg)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
+            return
         self.generic_visit(node)
 
     def _helper_name(self, func: ast.expr) -> str | None:
@@ -234,13 +211,35 @@ class _RuntimeHelperCallVisitor(ast.NodeVisitor):
                 return func.id
             return None
         if isinstance(func, ast.Attribute):
-            if self._is_runtime_module_expr(func.value):
-                return func.attr if func.attr in RUNTIME_HELPER_NAMES else None
+            chain = self._runtime_call_chain(func)
+            if chain:
+                return chain
             if self._is_runtime_submodule_expr(func.value):
                 # For imported runtime submodules we accept unknown attributes as
                 # well, because plugin/submodule helpers may not be in the stable
                 # top-level helper list.
                 return func.attr
+        return None
+
+    def _runtime_call_chain(self, expr: ast.expr) -> str | None:
+        if isinstance(expr, ast.Attribute):
+            prefix = self._runtime_call_chain(expr.value)
+            if prefix is not None:
+                return f"{prefix}.{expr.attr}"
+            if self._is_runtime_module_expr(expr.value):
+                if expr.attr in RUNTIME_HELPER_NAMES or expr.attr in RUNTIME_SUBMODULE_NAMES:
+                    return expr.attr
+            if self._is_runtime_submodule_expr(expr.value):
+                submodule = self._runtime_call_chain(expr.value)
+                return f"{submodule}.{expr.attr}" if submodule else expr.attr
+            return None
+        if isinstance(expr, ast.Call):
+            return self._runtime_call_chain(expr.func)
+        if isinstance(expr, ast.Name):
+            if expr.id in self.imported_helpers:
+                return self.imported_helpers[expr.id]
+            if self.star_imported_runtime and expr.id in RUNTIME_HELPER_NAMES:
+                return expr.id
         return None
 
     def _is_runtime_module_expr(self, expr: ast.expr) -> bool:
@@ -370,18 +369,18 @@ def extract_import_anchor_chains(source: str, *, max_calls: int = 80) -> list[st
     """Return call chains anchored by imported names, in import order.
 
     A chain starts at a name that was imported into the module (e.g.
-    ``search_text``, ``Path``, or ``json``) and follows attribute access and
-    call expressions that use that name directly.  For example:
+    ``rt``, ``Path``, or ``json``) and follows attribute access and call
+    expressions that use that name directly.  For example:
 
         from pathlib import Path
-        from uv_agent_runtime import search_text
+        import uv_agent_runtime as rt
         import json
 
-        search_text("foo")
+        rt.search("foo")
         Path.home().resolve()
         json.loads(s)
 
-    produces ``["search_text", "Path.home.resolve", "json.loads"]``.
+    produces ``["rt.search", "Path.home.resolve", "json.loads"]``.
 
     This is intentionally best-effort and literal: it does not trace variables
     assigned from imported objects, so ``p = Path.home(); p.resolve()`` is not
@@ -451,10 +450,18 @@ class _ImportAnchorChainVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 - ast API
+        recorded = False
         if len(self.chains) < self.max_calls:
             chain = self._call_chain(node.func)
             if chain:
                 self.chains.append(chain)
+                recorded = True
+        if recorded:
+            for arg in node.args:
+                self.visit(arg)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
+            return
         self.generic_visit(node)
 
     def _call_chain(self, func: ast.expr) -> str | None:

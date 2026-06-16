@@ -76,8 +76,8 @@ def test_telemetry_store_records_run_completed(tmp_path: Path) -> None:
             "stderr_bytes": 0,
             "event_count": 3,
             "helper_calls": [
-                {"name": "read_file", "count": 2, "total_duration_ms": 30.0},
-                {"name": "search_text", "count": 1, "outcomes": {"error": 1}},
+                {"name": "file.read", "count": 2, "total_duration_ms": 30.0},
+                {"name": "search", "count": 1, "outcomes": {"error": 1}},
             ],
         }
     )
@@ -311,15 +311,15 @@ def test_telemetry_store_close_flushes_pending(tmp_path: Path) -> None:
 
 def test_summarize_helper_calls_counts_and_errors() -> None:
     calls = [
-        {"name": "read_file", "count": 2, "total_duration_ms": 30.0},
-        {"name": "search_text", "count": 1, "outcomes": {"error": 1}},
+        {"name": "file.read", "count": 2, "total_duration_ms": 30.0},
+        {"name": "search", "count": 1, "outcomes": {"error": 1}},
         {"name": "write_file", "outcome": "error"},
     ]
     summary = _summarize_helper_calls(calls)
     assert summary["count"] == 4
     assert summary["total_duration_ms"] == 30.0
     assert summary["errors"] == 2
-    assert summary["top_helpers"]["read_file"] == 2
+    assert summary["top_helpers"]["file.read"] == 2
 
 
 def test_duration_ms_parses_iso() -> None:

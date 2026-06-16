@@ -178,6 +178,19 @@ class Match:
     context_before: list[tuple[int, str]] = field(default_factory=list)
     context_after: list[tuple[int, str]] = field(default_factory=list)
 
+    def file(self):
+        import uv_agent_runtime as rt
+
+        return rt.file(self.path)
+
+    def line_range(self, *, context: int = 0) -> tuple[int, int]:
+        return (max(1, self.line - context), self.line + context)
+
+    def view(self, *, context: int = 8):
+        from .textops import read_file
+
+        return read_file(self.path, lines=self.line_range(context=context))
+
 
 def _rg_binary() -> str:
     binary = shutil.which("rg")

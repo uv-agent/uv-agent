@@ -43,6 +43,16 @@ class Capture:
     end_col: int
     text: str
 
+    def file(self):
+        import uv_agent_runtime as rt
+
+        return rt.file(self.path)
+
+    def view(self, *, context: int = 8):
+        from .textops import read_file
+
+        return read_file(self.path, lines=(max(1, self.start_line - context), self.end_line + context))
+
 
 @dataclass(frozen=True)
 class Symbol:
@@ -55,6 +65,16 @@ class Symbol:
     language: str
     start_line: int
     end_line: int
+
+    def file(self):
+        import uv_agent_runtime as rt
+
+        return rt.file(self.path)
+
+    def view(self, *, context: int = 12):
+        from .textops import read_file
+
+        return read_file(self.path, lines=(max(1, self.start_line - context), self.end_line + context))
 
 
 # Pre-baked symbol queries. Each capture name maps directly to ``Symbol.kind``.

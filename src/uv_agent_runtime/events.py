@@ -32,3 +32,14 @@ def emit_result(**payload: Any) -> dict[str, Any]:
     """Emit a final structured result event from a temporary script."""
 
     return emit_event("result", **payload)
+
+
+# Facade aliases used by `import uv_agent_runtime as rt` when the submodule is imported explicitly.
+emit = emit_event
+progress = emit_progress
+result = emit_result
+
+def look_at(path, *, note=""):
+    from .vision import look_at as _look_at
+
+    return _look_at(path, note=note)

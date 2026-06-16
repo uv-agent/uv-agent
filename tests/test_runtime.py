@@ -11,58 +11,43 @@ from typing import Any
 
 import pytest
 
-from uv_agent_runtime import (
-    add_dependency,
-    apply_patch,
-    apply_patch_any,
-    clear_codequery_cache,
-    CommandError,
-    CommandTextResult,
-    compare_text,
-    connect_declared,
-    connect_named,
-    connect_stdio,
-    connect_url,
-    convert_patch,
-    emit_event,
-    emit_progress,
-    emit_result,
-    enter_dir,
-    edit_lines,
-    find_files,
+import uv_agent_runtime as rt
+from uv_agent_runtime.codequery import (
+    clear_cache as clear_codequery_cache,
     find_symbols,
-    FileSelectionError,
-    HelperRuntimeError,
-    HelperValueError,
-    helper_stats_db_path,
-    list_declared_servers,
-    list_files,
-    list_thread_digests,
-    look_at,
+    query_code,
+    supported_symbol_languages,
+)
+from uv_agent_runtime.codesearch import find_files, search_text
+from uv_agent_runtime.dependencies import add_dependency, run_python_env_dir
+from uv_agent_runtime.errors import CommandError, FileSelectionError, HelperRuntimeError, HelperValueError
+from uv_agent_runtime.events import emit_event, emit_progress, emit_result
+from uv_agent_runtime.files import list_files, read_json, read_text, write_json, write_text
+from uv_agent_runtime.goal_mode import goal_paths
+from uv_agent_runtime.helper_stats import helper_stats_db_path
+from uv_agent_runtime.mcp import connect_declared, connect_named, connect_stdio, connect_url, list_declared_servers
+from uv_agent_runtime.patch import apply_patch
+from uv_agent_runtime.textops import (
+    CommandTextResult,
+    apply_patch_any,
+    compare_text,
+    convert_patch,
+    edit_lines,
     make_unified_diff,
     normalize_text,
     path_info,
-    query_code,
     read_file,
-    read_json,
-    read_text,
     read_text_lossless,
     replace_text,
     restore_snapshot,
-    run_python_env_dir,
     run_process_text,
-    search_text,
     snapshot_files,
-    supported_symbol_languages,
-    thread_detail,
-    thread_digest,
-    thread_view,
     workspace_transaction,
     write_file,
     write_text_lossless,
-    write_json,
-    write_text,
 )
+from uv_agent_runtime.threads import list_thread_digests, thread_detail, thread_digest, thread_view
+from uv_agent_runtime.vision import look_at
 from uv_agent.session import ThreadStore
 
 
@@ -73,6 +58,41 @@ def test_runtime_file_helpers(tmp_path: Path) -> None:
     assert read_text(tmp_path / "a.txt") == "hello"
     assert read_json(tmp_path / "nested" / "data.json") == {"ok": True}
     assert "a.txt" in list_files(tmp_path, pattern="*.txt")
+
+
+def test_runtime_facade_file_search_run_and_namespace_helpers(tmp_path: Path) -> None:
+    rt.file(tmp_path / "pkg" / "a.py").write("def hello():\n    return 1\n")
+
+    view = rt.file(tmp_path / "pkg" / "a.py").read(around="hello", context=1)
+    assert view.header().endswith("a.py:1-2")
+    assert "1: def hello" in view.numbered()
+
+    replaced = rt.file(tmp_path / "pkg" / "a.py").replace("return 1", "return 2")
+    assert replaced.changed is True
+    assert "return 2" in rt.file(tmp_path / "pkg" / "a.py").text()
+
+    listed = rt.files(tmp_path, globs="*.py")
+    assert listed.ok
+    assert listed.first().endswith("a.py")
+
+    hits = rt.search("hello", root=tmp_path, types="py", literal=True)
+    assert hits.ok
+    assert hits.one().view(context=0).text.startswith("def hello")
+    assert "matches across" in hits.summary()
+
+    result = rt.run(sys.executable, "-c", "print('facade')")
+    assert result.ok
+    assert result.stdout.strip() == "facade"
+    assert "facade" in result.tail(5)
+
+    assert rt.pwd() == Path.cwd()
+
+
+def test_runtime_facade_does_not_export_legacy_top_level_helpers() -> None:
+    assert "read_file" not in rt.__all__
+    assert "search_text" not in rt.__all__
+    assert not hasattr(rt, "read_file")
+    assert not hasattr(rt, "run_process_text")
 
 
 def test_runtime_apply_patch_helper(tmp_path: Path) -> None:
@@ -368,7 +388,7 @@ def test_runtime_helper_stats_records_top_level_helper_usage(
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thread_stats")
     monkeypatch.setenv("UV_AGENT_RUNTIME_TURN_ID", "turn_stats")
 
-    path_info("secret-token-value")
+    rt.path("secret-token-value")
 
     db_path = helper_stats_db_path()
     assert db_path == (tmp_path / "log" / "helper-stats.sqlite3").resolve()
@@ -385,7 +405,7 @@ def test_runtime_helper_stats_records_top_level_helper_usage(
         ).fetchone()
 
     assert row is not None
-    assert row["helper"] == "path_info"
+    assert row["helper"] == "path"
     assert row["run_id"] == "run_stats"
     assert row["thread_id"] == "thread_stats"
     assert row["turn_id"] == "turn_stats"
@@ -478,7 +498,7 @@ def test_runtime_read_file_errors_include_recovery_metadata(tmp_path: Path) -> N
 def test_runtime_friendly_excepthook_suppresses_tracebacks_for_helper_errors(tmp_path: Path) -> None:
     path = tmp_path / "sample.txt"
     path.write_text("first\nsecond\n", encoding="utf-8")
-    code = f"from uv_agent_runtime import read_file; read_file({str(path)!r}, lines=(2, 5))"
+    code = f"import uv_agent_runtime as rt; rt.file({str(path)!r}).read(lines=(2, 5))"
 
     result = run_process_text(
         [sys.executable, "-c", code],
@@ -503,7 +523,7 @@ def test_runtime_friendly_excepthook_preserves_ordinary_and_full_tracebacks(tmp_
 
     path = tmp_path / "sample.txt"
     path.write_text("first\nsecond\n", encoding="utf-8")
-    code = f"from uv_agent_runtime import read_file; read_file({str(path)!r}, lines=(2, 5))"
+    code = f"import uv_agent_runtime as rt; rt.file({str(path)!r}).read(lines=(2, 5))"
     full = run_process_text(
         [sys.executable, "-c", code],
         env_patch={
@@ -636,7 +656,7 @@ def test_runtime_thread_detail_summarizes_run_outputs_and_helper_calls(tmp_path:
     from uv_agent.runner.run_log import RunLogStore
 
     store = RunLogStore(tmp_path)
-    code = "from uv_agent_runtime import replace_text\nreplace_text('a.txt', 'old', 'new')\n"
+    code = "import uv_agent_runtime as rt\nrt.file('a.txt').replace('old', 'new')\n"
     store.create_run_record(
         run_id="run_one",
         code=code,
@@ -676,7 +696,7 @@ def test_runtime_thread_detail_summarizes_run_outputs_and_helper_calls(tmp_path:
     assert detail["stdout"]["truncated"] is True
     assert detail["stdout"]["text"].endswith("x" * 20)
     assert detail["helper_calls"] == [
-        {"name": "replace_text", "args": "'a.txt', 'old', 'new'", "line": 2}
+        {"name": "file.replace", "args": "'old', 'new'", "line": 2}
     ]
     assert detail["structured_events"] == [{"kind": "cwd", "cwd": "."}]
 
@@ -867,7 +887,7 @@ def test_runtime_run_process_text_decodes_explicitly() -> None:
 def test_runtime_enter_dir_changes_cwd_and_returns_event(tmp_path: Path, capsys) -> None:
     previous = Path.cwd()
     try:
-        resolved = enter_dir(tmp_path)
+        resolved = rt.cd(tmp_path)
         captured = capsys.readouterr()
 
         assert resolved == tmp_path.resolve()
@@ -1020,12 +1040,10 @@ def test_runtime_goal_paths_uses_runner_thread_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from uv_agent_runtime import goal_paths
-
     monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thr_goal")
 
-    paths = goal_paths()
+    paths = rt.goals.paths()
 
     assert paths.directory == tmp_path / "goals" / "thr_goal"
     assert paths.state == paths.directory / "goal.json"
@@ -1034,13 +1052,11 @@ def test_runtime_goal_paths_uses_runner_thread_environment(
 
 
 def test_runtime_goal_paths_requires_thread_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    from uv_agent_runtime import goal_paths
-
     monkeypatch.delenv("UV_AGENT_RUNTIME_STATE_DIR", raising=False)
     monkeypatch.delenv("UV_AGENT_RUNTIME_THREAD_ID", raising=False)
 
     with pytest.raises(RuntimeError, match="goal_paths requires"):
-        goal_paths()
+        rt.goals.paths()
 
 
 
@@ -1170,7 +1186,7 @@ def codequery_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("UV_AGENT_HOME", str(home))
     # Reset in-process LRU caches so language/parser/query objects are rebuilt
     # against the freshly created on-disk cache directory.
-    from uv_agent_runtime import codequery
+    import uv_agent_runtime.codequery as codequery
 
     codequery._language.cache_clear()
     codequery._parser.cache_clear()

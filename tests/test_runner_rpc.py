@@ -97,7 +97,7 @@ def test_runtime_rpc_server_accepts_helper_call_summaries(tmp_path: Path) -> Non
                         "run_id": "run_rpc",
                         "calls": [
                             {
-                                "helper": "path_info",
+                                "helper": "path",
                                 "count": 3,
                                 "outcomes": {"ok": 3},
                                 "keyword_names": ["root"],
@@ -112,7 +112,7 @@ def test_runtime_rpc_server_accepts_helper_call_summaries(tmp_path: Path) -> Non
             assert body == b""
             assert calls == [
                 {
-                    "name": "path_info",
+                    "name": "path",
                     "args": "",
                     "source": "runtime",
                     "count": 3,

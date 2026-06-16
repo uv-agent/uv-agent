@@ -8,15 +8,15 @@ from uv_agent.helper_calls import (
 )
 
 
-def test_extract_import_anchor_chains_finds_direct_imports() -> None:
-    code = """from uv_agent_runtime import search_text, read_file
+def test_extract_import_anchor_chains_finds_runtime_module_alias() -> None:
+    code = """import uv_agent_runtime as rt
 import json
 
-hits = search_text("def foo", file_types=["py"])
-data = json.loads(read_file(hits[0].path).text)
+hits = rt.search("def foo", types=["py"])
+data = json.loads(hits[0].view().text)
 """
     chains = extract_import_anchor_chains(code)
-    assert chains == ["search_text", "json.loads", "read_file"]
+    assert chains == ["rt.search", "json.loads"]
 
 
 def test_extract_import_anchor_chains_follows_method_chains() -> None:
@@ -29,13 +29,13 @@ p = Path.home().resolve()
 
 
 def test_extract_import_anchor_chains_ignores_unimported_calls() -> None:
-    code = """from uv_agent_runtime import read_file
+    code = """import uv_agent_runtime as rt
 
 foo()
-read_file("x")
+rt.file("x").read()
 """
     chains = extract_import_anchor_chains(code)
-    assert chains == ["read_file"]
+    assert chains == ["rt.file.read"]
 
 
 def test_extract_import_anchor_chains_returns_empty_for_invalid_syntax() -> None:
@@ -43,28 +43,28 @@ def test_extract_import_anchor_chains_returns_empty_for_invalid_syntax() -> None
 
 
 def test_format_import_anchor_chains_orders_by_import_and_xn() -> None:
-    chains = ["search_text", "read_file", "search_text", "json.loads", "read_file", "read_file"]
+    chains = ["rt.search", "rt.file.read", "rt.search", "json.loads", "rt.file.read", "rt.file.read"]
     formatted = format_import_anchor_chains(chains)
-    assert formatted == ["search_text x2", "read_file x3", "json.loads"]
+    assert formatted == ["rt.search x2", "rt.file.read x3", "json.loads"]
 
 
 def test_runtime_corrected_helper_calls_uses_runtime_report_as_source_of_truth() -> None:
-    code = """from uv_agent_runtime import path_info, read_file
+    code = """import uv_agent_runtime as rt
 for _ in range(3):
-    path_info('.')
-read_file('x.txt')
+    rt.path('.')
+rt.file('x.txt').read()
 """
 
-    calls = runtime_corrected_helper_calls(code, [{"name": "path_info", "count": 3, "source": "runtime"}])
+    calls = runtime_corrected_helper_calls(code, [{"name": "path", "count": 3, "source": "runtime"}])
 
-    assert calls == [{"name": "path_info", "args": "", "source": "runtime", "count": 3}]
-    assert format_helper_call(calls[0]) == "path_info() x3"
+    assert calls == [{"name": "path", "args": "", "source": "runtime", "count": 3}]
+    assert format_helper_call(calls[0]) == "path() x3"
 
 
 def test_runtime_corrected_helper_calls_distinguishes_empty_runtime_report_from_missing_report() -> None:
-    code = "from uv_agent_runtime import path_info\npath_info('.')\n"
+    code = "import uv_agent_runtime as rt\nrt.path('.')\n"
 
     assert runtime_corrected_helper_calls(code, None) == [
-        {"name": "path_info", "args": "'.'", "line": 2}
+        {"name": "path", "args": "'.'", "line": 2}
     ]
     assert runtime_corrected_helper_calls(code, []) == []

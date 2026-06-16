@@ -66,6 +66,11 @@ class FileView:
     size: int | None
     kind: Literal["file", "dir", "missing", "other"]
 
+    def header(self) -> str:
+        """Return a compact display header for this view."""
+
+        return f"{self.path}:{self.start_line}-{self.end_line}"
+
     def numbered(self) -> str:
         """Return the selected text with 1-indexed line-number prefixes."""
 
@@ -76,6 +81,16 @@ class FileView:
             f"{line_no:>{width}}: {line}"
             for line_no, line in enumerate(self.text.splitlines(), start=self.start_line)
         )
+
+    def summary(self) -> str:
+        if not self.exists:
+            return f"{self.path}: {self.kind}"
+        suffix = " truncated" if self.truncated else ""
+        return f"{self.path}:{self.start_line}-{self.end_line} of {self.line_count} lines{suffix}"
+
+    def print(self, *, numbered: bool = False) -> None:
+        print(self.header())
+        print(self.numbered() if numbered else self.text)
 
 
 @dataclass(frozen=True)
@@ -130,6 +145,26 @@ class CommandTextResult:
     def ok(self) -> bool:
         return self.returncode == 0
 
+    def head(self, lines: int = 20, *, stream: str = "both") -> str:
+        """Return the first lines of stdout/stderr for quick diagnostics."""
+
+        return _command_stream_excerpt(self, lines=lines, stream=stream, tail=False)
+
+    def tail(self, lines: int = 20, *, stream: str = "both") -> str:
+        """Return the last lines of stdout/stderr for quick diagnostics."""
+
+        return _command_stream_excerpt(self, lines=lines, stream=stream, tail=True)
+
+    def summary(self) -> str:
+        status = "timeout" if self.timed_out else f"exit={self.returncode}"
+        return f"{status}; stdout={len(self.stdout)} chars; stderr={len(self.stderr)} chars"
+
+    def print(self, *, lines: int = 20) -> None:
+        print(self.summary())
+        excerpt = self.tail(lines)
+        if excerpt:
+            print(excerpt)
+
     def raise_for_error(self) -> "CommandTextResult":
         """Raise CommandError if the command exited non-zero or timed out."""
 
@@ -163,6 +198,29 @@ class CommandTextResult:
                 hints=("Run with check=False to inspect CommandTextResult without raising.",),
             )
         return self
+
+
+def _command_stream_excerpt(result: CommandTextResult, *, lines: int, stream: str, tail: bool) -> str:
+    if lines < 1:
+        return ""
+    chunks: list[str] = []
+    streams: list[tuple[str, str]]
+    if stream == "stdout":
+        streams = [("stdout", result.stdout)]
+    elif stream == "stderr":
+        streams = [("stderr", result.stderr)]
+    elif stream == "both":
+        streams = [("stdout", result.stdout), ("stderr", result.stderr)]
+    else:
+        raise ValueError("stream must be 'stdout', 'stderr', or 'both'")
+    for name, value in streams:
+        if not value:
+            continue
+        selected = value.splitlines()
+        selected = selected[-lines:] if tail else selected[:lines]
+        chunks.append(f"--- {name} ---")
+        chunks.extend(selected)
+    return "\n".join(chunks)
 
 
 def path_info(path: str | Path, *, base: str | Path | None = None) -> PathInfo:
