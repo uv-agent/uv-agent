@@ -88,6 +88,22 @@ def test_runtime_facade_file_search_run_and_namespace_helpers(tmp_path: Path) ->
     assert rt.pwd() == Path.cwd()
 
 
+def test_runtime_run_accepts_list_or_tuple_args(tmp_path: Path) -> None:
+    # rt.run should accept either separate arguments or a single list/tuple.
+    result_list = rt.run([sys.executable, "-c", "print('list')"])
+    assert result_list.ok
+    assert result_list.stdout.strip() == "list"
+
+    result_tuple = rt.run((sys.executable, "-c", "print('tuple')"))
+    assert result_tuple.ok
+    assert result_tuple.stdout.strip() == "tuple"
+
+    # Separate args still work.
+    result_args = rt.run(sys.executable, "-c", "print('args')")
+    assert result_args.ok
+    assert result_args.stdout.strip() == "args"
+
+
 def test_runtime_facade_does_not_export_legacy_top_level_helpers() -> None:
     assert "read_file" not in rt.__all__
     assert "search_text" not in rt.__all__

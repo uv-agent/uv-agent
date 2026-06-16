@@ -751,7 +751,7 @@ def query(
 
 @_track("run")
 def run(
-    *args: str | os.PathLike[str],
+    *args: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
     cwd: str | Path | None = None,
     encoding: str = "utf-8",
     errors: str = "replace",
@@ -761,7 +761,7 @@ def run(
     check: bool = False,
 ) -> textops.CommandTextResult:
     if len(args) == 1 and isinstance(args[0], (builtins.list, tuple)):
-        raise TypeError("rt.run expects separate arguments: rt.run('uv', 'run', ...), not one list")
+        args = args[0]
     return textops.run_process_text(
         [str(arg) for arg in args],
         cwd=cwd,

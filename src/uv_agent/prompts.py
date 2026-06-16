@@ -757,7 +757,7 @@ import uv_agent_runtime as rt
 <usage_pattern>
 <rule>runtime helpers 是脚本中使用的普通 Python 对象，不是独立的工具调用；当多个 helpers 服务同一工作单元时，在同一个脚本中导入一次 `uv_agent_runtime as rt` 后组合使用。</rule>
 <rule>不要仅因为下一步要用另一个 helper、读文件、搜索或运行外部命令，就发起新的 run_python 调用。对方向已经明确的后续步骤，用 Python 编排：根据 helper 结果分支、遍历文件或命令、用 Python libraries 解析结构化输出，并收集一份摘要。只有当结果会改变整体方向、需要用户确认或涉及破坏性操作时，才先返回摘要并拆成下一次调用。</rule>
-<rule>用 Python 方式替代 shell 习惯：适合时用 `rt.file(path).read()` 代替 cat，用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find，用 `rt.run("cmd", "arg")` 代替 raw subprocess 或 shell pipelines 来运行普通命令。</rule>
+<rule>用 Python 方式替代 shell 习惯：适合时用 `rt.file(path).read()` 代替 cat，用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find，用 `rt.run("cmd", "arg")` 或 `rt.run(["cmd", "arg"])` 代替 raw subprocess 或 shell pipelines 来运行普通命令。</rule>
 <rule>skill 文件用 `rt.file(skill_path).read()` 读取 SKILL.md；skills 或 docs 中展示的命令用 `rt.run(...)` 运行，并在同一脚本中处理可预见的后续解析或回退逻辑。</rule>
 </usage_pattern>
 
@@ -906,8 +906,8 @@ File.diff(other: str | Path, *, context: int = 3) -> str</signature>
 <signature>rt.query(query_text: str, *, language: str, root: str | Path = ".", globs: str | Sequence[str] | None = None, types: str | Sequence[str] | None = None, hidden: bool = False, no_ignore: bool = False, limit: int | None = None) -> CaptureResults</signature>
 </function>
 <function name="run">
-<description>运行普通外部命令。参数按 subprocess argv 分开传，不要传 shell 字符串；默认 check=False 便于读取失败输出。</description>
-<signature>rt.run(*args: str | os.PathLike[str], cwd: str | Path | None = None, encoding: str = "utf-8", errors: str = "replace", env: Mapping[str, str] | None = None, env_patch: Mapping[str, str | None] | None = None, timeout: float | None = None, check: bool = False) -> CommandTextResult</signature>
+<description>运行普通外部命令。参数按 subprocess argv 分开传，也可传单个 list/tuple；不要传 shell 字符串；默认 check=False 便于读取失败输出。</description>
+<signature>rt.run(*args: str | os.PathLike[str] | Sequence[str | os.PathLike[str]], cwd: str | Path | None = None, encoding: str = "utf-8", errors: str = "replace", env: Mapping[str, str] | None = None, env_patch: Mapping[str, str | None] | None = None, timeout: float | None = None, check: bool = False) -> CommandTextResult</signature>
 </function>
 <function name="deps">
 <description>向共享 run_python uv project 添加 direct packages；添加的 packages 会在后续调用中持续存在。在当前脚本 import 该 package 前调用。</description>
