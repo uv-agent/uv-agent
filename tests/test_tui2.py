@@ -17,6 +17,7 @@ from uv_agent.tui2.components import (
     render_agent_view,
     render_agent_view_with_cursor,
     render_cell,
+    render_command_palette,
     render_composer_with_cursor,
     render_live_with_cursor,
     render_markdown,
@@ -2072,16 +2073,44 @@ def test_show_command_palette_selection_opens_run_picker(monkeypatch) -> None:
     app.engine.thread_store.events.extend(
         [
             {
-                "type": "item.runner_result",
+                "type": "item.model_response",
                 "thread_id": thread_id,
-                "call": {"call_id": "call_old", "name": "run_python"},
-                "result": {"run_id": "run_oldone", "returncode": 0},
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_old",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "import uv_agent_runtime as rt\nrt.search('old')"}),
+                    }
+                ],
             },
             {
                 "type": "item.runner_result",
                 "thread_id": thread_id,
-                "call": {"call_id": "call_new", "name": "run_python"},
-                "result": {"run_id": "run_newone", "returncode": 1},
+                "call_id": "call_old",
+                "result": {"run_id": "run_oldone", "returncode": 0},
+            },
+            {
+                "type": "item.model_response",
+                "thread_id": thread_id,
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_new",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "import uv_agent_runtime as rt\nrt.run('git', 'status')"}),
+                    }
+                ],
+            },
+            {
+                "type": "item.runner_result",
+                "thread_id": thread_id,
+                "call_id": "call_new",
+                "result": {
+                    "run_id": "run_newone",
+                    "returncode": 1,
+                    "helper_calls": [{"name": "run", "count": 2}],
+                },
             },
         ]
     )
@@ -2096,6 +2125,10 @@ def test_show_command_palette_selection_opens_run_picker(monkeypatch) -> None:
     assert app.state.command_palette_open
     assert app._picker_mode == "run"
     assert [item.id for item in app.state.command_palette_items] == ["run_newone", "run_oldone"]
+    assert app.state.command_palette_items[0].description == "run x2"
+    assert app.state.command_palette_items[0].meta == "exit 1"
+    assert app.state.command_palette_items[1].description == "rt.search"
+    assert app.state.command_palette_items[1].meta == "ok"
 
 
 def test_show_space_lists_run_completion_choices(monkeypatch) -> None:
@@ -2117,6 +2150,7 @@ def test_show_space_lists_run_completion_choices(monkeypatch) -> None:
                 "stdout": "one",
                 "stderr": "",
                 "events": [],
+                "helper_calls": [{"name": "file.read", "count": 1}, {"name": "search", "count": 3}],
             },
         }
     )
@@ -2131,6 +2165,11 @@ def test_show_space_lists_run_completion_choices(monkeypatch) -> None:
     assert item.value == "/show showme"
     assert item.id == "run_showme"
     assert item.kind == "run"
+    assert item.description == "file.read · search x3"
+    assert item.meta == "ok"
+    rendered = "\n".join(strip_ansi(line) for line in render_command_palette([item], 0, 80))
+    assert "/show showme — file.read · search x3 · ok" in rendered
+    assert "run_python · run_python" not in rendered
 
     assert asyncio.run(app.handle_key("\r")) is True
 
@@ -2138,7 +2177,6 @@ def test_show_space_lists_run_completion_choices(monkeypatch) -> None:
     plain = "\n".join(strip_ansi(line) for line in app.state.pager_lines)
     assert "print(1)" in plain
     assert "one" in plain
-
 
 
 def test_agent_view_renderer_groups_rows_and_shows_peek() -> None:
@@ -3834,13 +3872,21 @@ def test_show_command_opens_pager_for_matching_run(monkeypatch) -> None:
     def fake_read_events(thread_id, *, event_types=None):
         return [
             {
+                "type": "item.model_response",
+                "thread_id": thread_id,
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_show",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "print(1)"}),
+                    }
+                ],
+            },
+            {
                 "type": "item.runner_result",
                 "thread_id": thread_id,
-                "call": {
-                    "call_id": "call_show",
-                    "name": "run_python",
-                    "arguments": json.dumps({"code": "print(1)"}),
-                },
+                "call_id": "call_show",
                 "result": {
                     "run_id": "run_showme",
                     "returncode": 0,
@@ -3848,7 +3894,7 @@ def test_show_command_opens_pager_for_matching_run(monkeypatch) -> None:
                     "stderr": "",
                     "events": [],
                 },
-            }
+            },
         ]
 
     monkeypatch.setattr(app.engine.thread_store, "read_events", fake_read_events)

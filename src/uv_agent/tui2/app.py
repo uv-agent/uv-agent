@@ -26,7 +26,8 @@ from uv_agent.session import ThreadLockedError
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.skills import discover_skills
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
-from uv_agent.tui.formatting import format_elapsed, short_block, short_thread
+from uv_agent.helper_calls import extract_import_anchor_chains, format_import_anchor_chains
+from uv_agent.tui.formatting import format_elapsed, short_block, short_thread, tool_call_code
 from uv_agent.billing import billing_total_from_metadata, currency_symbol, format_billing_total
 from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
@@ -2375,11 +2376,12 @@ class AnsiUvAgentApp:
         try:
             events = self.engine.thread_store.read_events(
                 thread_id,
-                event_types={"item.runner_result"},
+                event_types={"item.model_response", "item.runner_result"},
             )
         except Exception:
             return []
-        return [event for event in events if isinstance(event, dict)]
+        merged = self._merge_history_tool_events([event for event in events if isinstance(event, dict)])
+        return [event for event in merged if event.get("type") == "item.runner_result"]
 
     def _run_picker_items(self, needle: str = "", *, command_values: bool = False) -> list[CommandSuggestion]:
         return self._run_picker_items_from_events(
@@ -2414,24 +2416,113 @@ class AnsiUvAgentApp:
             tool_name = str(call.get("tool_name") or call.get("name") or "run_python")
             returncode = result.get("returncode")
             status = "✓" if returncode == 0 else ("…" if returncode is None else "✗")
-            summary = str(result.get("summary") or "").replace("\n", " ")[:80]
+            description = self._run_picker_description(result, call, tool_name=tool_name)
+            meta = self._run_picker_meta(result, tool_name=tool_name)
             short_id = display_id[-6:] if len(display_id) >= 6 else display_id
-            haystack = f"{display_id} {short_id} {tool_name} {summary} {returncode}".lower()
+            haystack = f"{display_id} {short_id} {tool_name} {description} {meta} {returncode}".lower()
             if query and query not in haystack:
                 continue
 
             items.append(
                 CommandSuggestion(
                     f"/show {short_id}" if command_values else f"{status} {short_id}",
-                    summary or tool_name,
+                    description,
                     id=display_id,
                     kind="run",
-                    meta=f"{tool_name} · rc={returncode if returncode is not None else '?'}",
+                    meta=meta,
                 )
             )
             if len(items) >= 50:
                 break
         return items
+
+    def _run_picker_description(
+        self,
+        result: dict[str, Any],
+        call: dict[str, Any],
+        *,
+        tool_name: str,
+    ) -> str:
+        helper_calls = result.get("helper_calls")
+        if isinstance(helper_calls, list):
+            helper_summary = self._run_helper_summary(helper_calls)
+            if helper_summary:
+                return helper_summary
+
+        code = tool_call_code(call)
+        if code:
+            chains = format_import_anchor_chains(extract_import_anchor_chains(code))
+            if chains:
+                return self._join_run_picker_labels(chains)
+            preview = self._run_script_preview(code)
+            if preview:
+                return preview
+
+        summary = str(result.get("summary") or "").replace("\n", " ").strip()
+        if summary and not summary.lower().startswith("run_python rc="):
+            return self._truncate_run_picker_text(summary)
+        return tool_name or "run"
+
+    def _run_picker_meta(self, result: dict[str, Any], *, tool_name: str) -> str:
+        returncode = result.get("returncode")
+        if returncode == 0:
+            status = "ok"
+        elif returncode is None:
+            status = "pending"
+        else:
+            status = f"exit {returncode}"
+        if tool_name and tool_name != "run_python":
+            return f"{tool_name} · {status}"
+        return status
+
+    @staticmethod
+    def _run_helper_summary(helper_calls: list[Any]) -> str:
+        labels: list[str] = []
+        for helper in helper_calls:
+            if not isinstance(helper, dict):
+                continue
+            name = str(helper.get("name") or helper.get("helper") or "").strip()
+            if not name:
+                continue
+            count = AnsiUvAgentApp._positive_run_helper_count(helper.get("count"))
+            labels.append(f"{name} x{count}" if count > 1 else name)
+        return AnsiUvAgentApp._join_run_picker_labels(labels)
+
+    @staticmethod
+    def _positive_run_helper_count(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 1
+        return parsed if parsed > 0 else 1
+
+    @staticmethod
+    def _run_script_preview(code: str) -> str:
+        for line in code.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith(("import ", "from ")):
+                continue
+            return AnsiUvAgentApp._truncate_run_picker_text(stripped)
+        return ""
+
+    @staticmethod
+    def _join_run_picker_labels(labels: list[str], *, max_items: int = 4) -> str:
+        visible = [label for label in labels if label]
+        if not visible:
+            return ""
+        text = " · ".join(visible[:max_items])
+        if len(visible) > max_items:
+            text += f" · +{len(visible) - max_items}"
+        return AnsiUvAgentApp._truncate_run_picker_text(text)
+
+    @staticmethod
+    def _truncate_run_picker_text(text: str, *, max_chars: int = 96) -> str:
+        text = " ".join(text.split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + "..."
 
     def _open_run_picker(self) -> None:
         """Open a picker for run events in reverse chronological order."""
@@ -2719,11 +2810,16 @@ class AnsiUvAgentApp:
         try:
             events = self.engine.thread_store.read_events(
                 thread_id,
-                event_types={"item.runner_result"},
+                event_types={"item.model_response", "item.runner_result"},
             )
         except Exception:
             return None
-        for event in events:
+        merged_events = self._merge_history_tool_events(
+            [event for event in events if isinstance(event, dict)]
+        )
+        for event in merged_events:
+            if event.get("type") != "item.runner_result":
+                continue
             result = event.get("result") if isinstance(event.get("result"), dict) else {}
             call = event.get("call") if isinstance(event.get("call"), dict) else {}
             if not call and isinstance(result.get("call"), dict):
