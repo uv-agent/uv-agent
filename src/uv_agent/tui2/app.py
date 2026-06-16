@@ -2158,6 +2158,14 @@ class AnsiUvAgentApp:
             self._close_command_palette()
             self._resume_thread(item.id or item.value)
             return True
+        if mode == "run":
+            self._close_command_palette()
+            run_id = item.id or item.value
+            # Extract the short ID from the display value if needed
+            if " " in run_id:
+                run_id = run_id.split()[-1]
+            self._show_run_detail(run_id)
+            return True
         if mode in {"skill", "mcp", "mention"}:
             self._accept_mention_item(item)
             self._close_command_palette()
@@ -2357,6 +2365,67 @@ class AnsiUvAgentApp:
 
     # ------------------------------------------------------------------
     # Submit & commands
+
+    def _open_run_picker(self) -> None:
+        """Open a picker for run events in reverse chronological order."""
+        thread_id = self.state.thread_id
+        if not thread_id:
+            self._flush(TranscriptCell("event", text="(no active thread)"))
+            return
+        
+        # Collect run events from current thread
+        try:
+            events = self.engine.thread_store.read_events(
+                thread_id,
+                event_types={"item.runner_result"},
+            )
+        except Exception:
+            events = []
+        
+        if not events:
+            self._flush(TranscriptCell("event", text="(no runs in current thread)"))
+            return
+        
+        # Build picker items in reverse order (most recent first)
+        items: list[CommandSuggestion] = []
+        for event in reversed(events):
+            result = event.get("result") if isinstance(event.get("result"), dict) else {}
+            call = event.get("call") if isinstance(event.get("call"), dict) else {}
+            if not call and isinstance(result.get("call"), dict):
+                call = result["call"]
+            
+            run_id = str(result.get("run_id") or "")
+            call_id = str(call.get("call_id") or result.get("call_id") or "")
+            display_id = run_id or call_id
+            
+            if not display_id:
+                continue
+            
+            # Extract tool name and summary
+            tool_name = str(call.get("tool_name") or call.get("name") or "run_python")
+            returncode = result.get("returncode")
+            status = "✓" if returncode == 0 else ("✗" if returncode else "…")
+            summary = str(result.get("summary") or "").replace("\n", " ")[:80]
+            
+            # Use short ID for display
+            short_id = display_id[-6:] if len(display_id) >= 6 else display_id
+            
+            items.append(
+                CommandSuggestion(
+                    f"{status} {short_id}",
+                    summary or tool_name,
+                    id=display_id,
+                    kind="run",
+                    meta=f"{tool_name} · rc={returncode if returncode is not None else '?'}",
+                )
+            )
+        
+        if not items:
+            self._flush(TranscriptCell("event", text="(no runs found)"))
+            return
+        
+        self._open_picker("run", items)
+
     # ------------------------------------------------------------------
 
     async def submit(self) -> bool:
@@ -2426,8 +2495,11 @@ class AnsiUvAgentApp:
             self._open_thread_picker()
         elif command == "/status":
             self._show_status()
-        elif command == "/show" and arg:
-            self._show_run_detail(arg.strip())
+        elif command == "/show":
+            if arg:
+                self._show_run_detail(arg.strip())
+            else:
+                self._open_run_picker()
         elif command == "/skills":
             self._open_skill_picker()
         elif command == "/mcp":
@@ -2633,7 +2705,7 @@ class AnsiUvAgentApp:
                 call = result["call"]
             run_id = str(result.get("run_id") or "")
             call_id = str(call.get("call_id") or result.get("call_id") or "")
-            if query in (run_id, call_id, run_id[-12:], call_id[-12:]):
+            if query in (run_id, call_id, run_id[-12:], call_id[-12:], run_id[-6:], call_id[-6:]):
                 return event
         return None
 
