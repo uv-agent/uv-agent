@@ -60,50 +60,6 @@ def test_runtime_file_helpers(tmp_path: Path) -> None:
     assert "a.txt" in list_files(tmp_path, pattern="*.txt")
 
 
-def test_runtime_facade_file_search_run_and_namespace_helpers(tmp_path: Path) -> None:
-    rt.file(tmp_path / "pkg" / "a.py").write("def hello():\n    return 1\n")
-
-    view = rt.file(tmp_path / "pkg" / "a.py").read(around="hello", context=1)
-    assert view.header().endswith("a.py:1-2")
-    assert "1: def hello" in view.numbered()
-
-    replaced = rt.file(tmp_path / "pkg" / "a.py").replace("return 1", "return 2")
-    assert replaced.changed is True
-    assert "return 2" in rt.file(tmp_path / "pkg" / "a.py").text()
-
-    listed = rt.files(tmp_path, globs="*.py")
-    assert listed.ok
-    assert listed.first().endswith("a.py")
-
-    hits = rt.search("hello", root=tmp_path, types="py", literal=True)
-    assert hits.ok
-    assert hits.one().view(context=0).text.startswith("def hello")
-    assert "matches across" in hits.summary()
-
-    result = rt.run(sys.executable, "-c", "print('facade')")
-    assert result.ok
-    assert result.stdout.strip() == "facade"
-    assert "facade" in result.tail(5)
-
-    assert rt.pwd() == Path.cwd()
-
-
-def test_runtime_run_accepts_list_or_tuple_args(tmp_path: Path) -> None:
-    # rt.run should accept either separate arguments or a single list/tuple.
-    result_list = rt.run([sys.executable, "-c", "print('list')"])
-    assert result_list.ok
-    assert result_list.stdout.strip() == "list"
-
-    result_tuple = rt.run((sys.executable, "-c", "print('tuple')"))
-    assert result_tuple.ok
-    assert result_tuple.stdout.strip() == "tuple"
-
-    # Separate args still work.
-    result_args = rt.run(sys.executable, "-c", "print('args')")
-    assert result_args.ok
-    assert result_args.stdout.strip() == "args"
-
-
 def test_runtime_facade_does_not_export_legacy_top_level_helpers() -> None:
     assert "read_file" not in rt.__all__
     assert "search_text" not in rt.__all__
@@ -1194,6 +1150,51 @@ requires_rg = pytest.mark.skipif(
     shutil.which("rg") is None,
     reason="ripgrep (`rg`) not on PATH",
 )
+
+
+@requires_rg
+def test_runtime_facade_file_search_run_and_namespace_helpers(tmp_path: Path) -> None:
+    rt.file(tmp_path / "pkg" / "a.py").write("def hello():\n    return 1\n")
+
+    view = rt.file(tmp_path / "pkg" / "a.py").read(around="hello", context=1)
+    assert view.header().endswith("a.py:1-2")
+    assert "1: def hello" in view.numbered()
+
+    replaced = rt.file(tmp_path / "pkg" / "a.py").replace("return 1", "return 2")
+    assert replaced.changed is True
+    assert "return 2" in rt.file(tmp_path / "pkg" / "a.py").text()
+
+    listed = rt.files(tmp_path, globs="*.py")
+    assert listed.ok
+    assert listed.first().endswith("a.py")
+
+    hits = rt.search("hello", root=tmp_path, types="py", literal=True)
+    assert hits.ok
+    assert hits.one().view(context=0).text.startswith("def hello")
+    assert "matches across" in hits.summary()
+
+    result = rt.run(sys.executable, "-c", "print('facade')")
+    assert result.ok
+    assert result.stdout.strip() == "facade"
+    assert "facade" in result.tail(5)
+
+    assert rt.pwd() == Path.cwd()
+
+
+def test_runtime_run_accepts_list_or_tuple_args(tmp_path: Path) -> None:
+    # rt.run should accept either separate arguments or a single list/tuple.
+    result_list = rt.run([sys.executable, "-c", "print('list')"])
+    assert result_list.ok
+    assert result_list.stdout.strip() == "list"
+
+    result_tuple = rt.run((sys.executable, "-c", "print('tuple')"))
+    assert result_tuple.ok
+    assert result_tuple.stdout.strip() == "tuple"
+
+    # Separate args still work.
+    result_args = rt.run(sys.executable, "-c", "print('args')")
+    assert result_args.ok
+    assert result_args.stdout.strip() == "args"
 
 
 @pytest.fixture
