@@ -138,7 +138,7 @@ HELP_TEXT = (
     "  /skills            list skills and insert @skill mentions\n"
     "  /mcp               list MCP servers and insert @mcp mentions\n"
     "  /image             attach clipboard image as [Image #N]\n"
-    "  /show              show full run script and output\n"
+    "  /show [run]        choose or show a run script and output\n"
     "  /level <name>      switch model level\n"
     "  /goal <op>         enable | disable | reset | status\n"
     "  /agents            open Agent View dashboard (normal/input/help modes)\n"
@@ -164,7 +164,7 @@ TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
     CommandSuggestion("/skills", "list skills and insert @skill mentions"),
     CommandSuggestion("/mcp", "list MCP servers and insert @mcp mentions"),
     CommandSuggestion("/image", "attach clipboard image as [Image #N]"),
-    CommandSuggestion("/show ", "show full run script and output"),
+    CommandSuggestion("/show", "choose a run to inspect"),
     CommandSuggestion("/level ", "switch model level"),
     CommandSuggestion("/goal ", "goal-mode subcommands"),
     CommandSuggestion("/agents", "open Agent View dashboard"),
@@ -2101,6 +2101,8 @@ class AnsiUvAgentApp:
 
     def _command_suggestions(self, text: str) -> list[CommandSuggestion]:
         query = text.lower()
+        if query.startswith("/show "):
+            return self._run_picker_items(query[len("/show ") :], command_values=True)
         if query.startswith("/goal ") or query == "/goal":
             pool = GOAL_COMMANDS if query != "/goal" else TOP_LEVEL_COMMANDS
         elif query.startswith("/level ") or query == "/level":
@@ -2366,64 +2368,87 @@ class AnsiUvAgentApp:
     # ------------------------------------------------------------------
     # Submit & commands
 
-    def _open_run_picker(self) -> None:
-        """Open a picker for run events in reverse chronological order."""
+    def _run_events_for_current_thread(self) -> list[dict[str, Any]]:
         thread_id = self.state.thread_id
         if not thread_id:
-            self._flush(TranscriptCell("event", text="(no active thread)"))
-            return
-        
-        # Collect run events from current thread
+            return []
         try:
             events = self.engine.thread_store.read_events(
                 thread_id,
                 event_types={"item.runner_result"},
             )
         except Exception:
-            events = []
-        
-        if not events:
-            self._flush(TranscriptCell("event", text="(no runs in current thread)"))
-            return
-        
-        # Build picker items in reverse order (most recent first)
+            return []
+        return [event for event in events if isinstance(event, dict)]
+
+    def _run_picker_items(self, needle: str = "", *, command_values: bool = False) -> list[CommandSuggestion]:
+        return self._run_picker_items_from_events(
+            self._run_events_for_current_thread(),
+            needle,
+            command_values=command_values,
+        )
+
+    def _run_picker_items_from_events(
+        self,
+        events: list[dict[str, Any]],
+        needle: str = "",
+        *,
+        command_values: bool = False,
+    ) -> list[CommandSuggestion]:
+        """Build run picker rows, newest first, optionally as /show completions."""
+
+        query = needle.strip().lower()
         items: list[CommandSuggestion] = []
         for event in reversed(events):
             result = event.get("result") if isinstance(event.get("result"), dict) else {}
             call = event.get("call") if isinstance(event.get("call"), dict) else {}
             if not call and isinstance(result.get("call"), dict):
                 call = result["call"]
-            
+
             run_id = str(result.get("run_id") or "")
             call_id = str(call.get("call_id") or result.get("call_id") or "")
             display_id = run_id or call_id
-            
             if not display_id:
                 continue
-            
-            # Extract tool name and summary
+
             tool_name = str(call.get("tool_name") or call.get("name") or "run_python")
             returncode = result.get("returncode")
-            status = "✓" if returncode == 0 else ("✗" if returncode else "…")
+            status = "✓" if returncode == 0 else ("…" if returncode is None else "✗")
             summary = str(result.get("summary") or "").replace("\n", " ")[:80]
-            
-            # Use short ID for display
             short_id = display_id[-6:] if len(display_id) >= 6 else display_id
-            
+            haystack = f"{display_id} {short_id} {tool_name} {summary} {returncode}".lower()
+            if query and query not in haystack:
+                continue
+
             items.append(
                 CommandSuggestion(
-                    f"{status} {short_id}",
+                    f"/show {short_id}" if command_values else f"{status} {short_id}",
                     summary or tool_name,
                     id=display_id,
                     kind="run",
                     meta=f"{tool_name} · rc={returncode if returncode is not None else '?'}",
                 )
             )
-        
+            if len(items) >= 50:
+                break
+        return items
+
+    def _open_run_picker(self) -> None:
+        """Open a picker for run events in reverse chronological order."""
+        if not self.state.thread_id:
+            self._flush(TranscriptCell("event", text="(no active thread)"))
+            return
+
+        events = self._run_events_for_current_thread()
+        if not events:
+            self._flush(TranscriptCell("event", text="(no runs in current thread)"))
+            return
+
+        items = self._run_picker_items_from_events(events)
         if not items:
             self._flush(TranscriptCell("event", text="(no runs found)"))
             return
-        
+
         self._open_picker("run", items)
 
     # ------------------------------------------------------------------

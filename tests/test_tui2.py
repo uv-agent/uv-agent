@@ -2065,6 +2065,81 @@ def test_threads_command_opens_interactive_picker(monkeypatch) -> None:
     assert app.state.command_palette_items[0].id == "thr_1"
 
 
+def test_show_command_palette_selection_opens_run_picker(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    thread_id = app.engine.thread_store.create_thread("show test")
+    app.state.thread_id = thread_id
+    app.engine.thread_store.events.extend(
+        [
+            {
+                "type": "item.runner_result",
+                "thread_id": thread_id,
+                "call": {"call_id": "call_old", "name": "run_python"},
+                "result": {"run_id": "run_oldone", "returncode": 0},
+            },
+            {
+                "type": "item.runner_result",
+                "thread_id": thread_id,
+                "call": {"call_id": "call_new", "name": "run_python"},
+                "result": {"run_id": "run_newone", "returncode": 1},
+            },
+        ]
+    )
+    app.state.composer = "/show"
+    app.state.composer_cursor = len(app.state.composer)
+    app._refresh_command_palette()
+
+    assert [item.value for item in app.state.command_palette_items] == ["/show"]
+
+    assert asyncio.run(app.handle_key("\r")) is True
+
+    assert app.state.command_palette_open
+    assert app._picker_mode == "run"
+    assert [item.id for item in app.state.command_palette_items] == ["run_newone", "run_oldone"]
+
+
+def test_show_space_lists_run_completion_choices(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    thread_id = app.engine.thread_store.create_thread("show test")
+    app.state.thread_id = thread_id
+    app.engine.thread_store.events.append(
+        {
+            "type": "item.runner_result",
+            "thread_id": thread_id,
+            "call": {
+                "call_id": "call_show",
+                "name": "run_python",
+                "arguments": json.dumps({"code": "print(1)"}),
+            },
+            "result": {
+                "run_id": "run_showme",
+                "returncode": 0,
+                "stdout": "one",
+                "stderr": "",
+                "events": [],
+            },
+        }
+    )
+    app.state.composer = "/show "
+    app.state.composer_cursor = len(app.state.composer)
+
+    app._after_composer_changed()
+
+    assert app.state.command_palette_open
+    assert app._picker_mode == "command"
+    item = app.state.command_palette_items[0]
+    assert item.value == "/show showme"
+    assert item.id == "run_showme"
+    assert item.kind == "run"
+
+    assert asyncio.run(app.handle_key("\r")) is True
+
+    assert app.state.pager_open
+    plain = "\n".join(strip_ansi(line) for line in app.state.pager_lines)
+    assert "print(1)" in plain
+    assert "one" in plain
+
+
 
 def test_agent_view_renderer_groups_rows_and_shows_peek() -> None:
     state = Tui2State(mode="agent_view")
