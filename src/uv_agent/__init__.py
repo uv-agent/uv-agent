@@ -4,7 +4,7 @@ import platform
 
 __all__ = ["__version__", "DEFAULT_USER_AGENT"]
 
-__version__ = "0.17.5"
+__version__ = "0.17.6"
 
 DEFAULT_USER_AGENT = (
     f"uv-agent/{__version__} ({platform.system()}; Python/{platform.python_version()})"
