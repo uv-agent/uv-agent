@@ -18,10 +18,10 @@ class Renderer:
     with normal CRLF flow, later repaints must never clear over it.
 
     Only the *live tail* (status rows, in-flight cells, composer, pickers/pagers)
-    is repaintable.  The first live frame after any transcript append is also
-    written with normal flow, which naturally scrolls preceding transcript rows
-    out of the viewport before we start tracking the frame.  Subsequent repaints
-    may use absolute row erases inside that tracked frame.
+    is repaintable.  Short transcripts use a floating relative frame so startup
+    and resume do not manufacture blank scrollback; after the transcript naturally
+    fills the viewport, the frame switches to absolute row erases inside known
+    bottom rows.
     """
 
     _SYNC_ON = "\x1b[?2026h"
@@ -41,13 +41,15 @@ class Renderer:
         self._frame_cursor_row = 0
         self._frame_cursor_col = 0
         self._has_frame = False
-        # Approximate physical transcript rows emitted since the last explicit
-        # clear.  Once this exceeds the viewport the live frame pins to bottom;
-        # while it is small the frame floats immediately after the transcript.
+        self._frame_anchored = False
+        # Approximate visible transcript rows emitted since the last explicit
+        # clear.  Short transcripts keep the live frame in a floating relative
+        # mode; once content naturally fills the viewport, absolute CUP/EL repaint
+        # becomes safe because the live frame is pinned to known bottom rows.
         self._transcript_rows = 0
-        # A freshly-started process does not know the terminal cursor's absolute
-        # row.  Before the first absolute repaint, force a harmless bottom scroll
-        # so subsequent CUP/EL operations target only rows we own.
+        # Explicit clears and natural scrolling establish an absolute row anchor.
+        # A fresh process starts unanchored so first paint does not manufacture
+        # blank scrollback just to discover the bottom of the terminal.
         self._anchor_known = False
         self.spinner_frame = 0
         self._last_flushed_kind: str | None = None
@@ -83,6 +85,14 @@ class Renderer:
         return f"\x1b[{row};{col}H"
 
     @staticmethod
+    def _up(rows: int) -> str:
+        return f"\x1b[{rows}A" if rows > 0 else ""
+
+    @staticmethod
+    def _hpa(col: int) -> str:
+        return f"\x1b[{col}G"
+
+    @staticmethod
     def _paint_width(columns: int) -> int:
         """Return a render width that never writes into the last terminal column."""
 
@@ -101,30 +111,43 @@ class Renderer:
         for row in range(max(1, top), min(rows, bottom) + 1):
             buf.append(self._cup(row, 1) + self._EL)
 
+    def _clear_floating_frame(self, buf: list[str]) -> None:
+        """Erase the current unanchored frame using only rows we just painted.
+
+        A short transcript has no trustworthy absolute viewport row: the app may
+        have started anywhere in the user's terminal.  In that phase we use
+        relative movement, but only within the tracked live frame and never with
+        ``ESC[J`` clear-to-end, so completed transcript rows above the frame stay
+        append-only.
+        """
+
+        if not self._has_frame:
+            return
+        buf.append("\r" + self._up(self._frame_cursor_row))
+        for index in range(self._frame_rows):
+            buf.append(self._EL)
+            if index < self._frame_rows - 1:
+                buf.append("\r\n")
+        if self._frame_rows > 1:
+            buf.append("\r" + self._up(self._frame_rows - 1))
+        else:
+            buf.append("\r")
+
     def _reset_frame(self) -> None:
         self._has_frame = False
+        self._frame_anchored = False
         self._frame_top_row = 0
         self._frame_rows = 0
         self._frame_cursor_row = 0
         self._frame_cursor_col = 0
 
-    def _reserve_bottom_anchor(self, buf: list[str], rows: int, height: int) -> bool:
-        """Reserve a known bottom frame without erasing existing transcript.
-
-        Absolute CUP/EL repainting is only safe after we know where the live
-        frame lives in the viewport.  On process start, the shell could have left
-        the cursor on any row.  Moving down to the bottom margin and emitting one
-        CRLF per live row scrolls existing content into scrollback instead of
-        overwriting it; the following frame is then painted into those bottom
-        rows at known absolute coordinates.
-        """
-
+    def _frame_is_anchored_after_append(self, rows: int, height: int) -> bool:
         if self._anchor_known:
-            return False
-        buf.append(f"\r\x1b[{max(1, rows)}B" + "\r\n" * max(1, height))
-        self._transcript_rows = max(self._transcript_rows, rows)
-        self._anchor_known = True
-        return True
+            return True
+        if self._transcript_rows + height >= rows:
+            self._anchor_known = True
+            return True
+        return False
 
     def _render_live(
         self,
@@ -150,16 +173,39 @@ class Renderer:
         height: int,
         cursor_row: int,
         cursor_col: int,
-    ) -> tuple[int, int]:
-        top = self._live_top(rows, height)
+        anchored: bool,
+    ) -> None:
+        del cols  # Kept in the signature to mirror cursor placement callers.
+        top = self._live_top(rows, height) if anchored else max(1, self._transcript_rows + 1)
         self._has_frame = True
+        self._frame_anchored = anchored
         self._frame_top_row = top
         self._frame_rows = height
         self._frame_cursor_row = cursor_row
         self._frame_cursor_col = cursor_col
-        final_row = max(1, min(rows, top + cursor_row))
+
+    def _place_cursor_in_frame(
+        self,
+        buf: list[str],
+        *,
+        rows: int,
+        cols: int,
+        height: int,
+        cursor_row: int,
+        cursor_col: int,
+        anchored: bool,
+    ) -> None:
         final_col = max(1, min(cols, cursor_col + 1))
-        return final_row, final_col
+        if anchored:
+            final_row = max(1, min(rows, self._frame_top_row + cursor_row))
+            buf.append(self._cup(final_row, final_col))
+            return
+
+        last_row = max(0, height - 1)
+        target_row = max(0, min(last_row, cursor_row))
+        if target_row < last_row:
+            buf.append(self._up(last_row - target_row))
+        buf.append("\r" + self._hpa(final_col))
 
     def _append_live_frame_after_transcript(
         self,
@@ -173,27 +219,36 @@ class Renderer:
     ) -> None:
         """Append a fresh live frame with normal flow and track it.
 
-        This method intentionally does not clear any rows first.  It is used only
-        when no live frame is currently active, typically immediately after
-        transcript rows have been appended.  Normal CRLF flow is the critical
-        part: if the transcript already fills the viewport, writing the live frame
-        scrolls transcript rows into real scrollback instead of overwriting them.
+        This method intentionally does not reserve bottom rows.  If the transcript
+        is still shorter than the viewport, the frame remains floating and future
+        repaints use constrained relative erases.  Once transcript + frame reaches
+        the viewport bottom naturally, the frame becomes safe for absolute CUP/EL
+        repainting.
         """
 
         if not lines:
             self._reset_frame()
             return
-        if self._reserve_bottom_anchor(buf, rows, len(lines)):
-            buf.append(self._cup(self._live_top(rows, len(lines)), 1))
+        height = len(lines)
+        anchored = self._frame_is_anchored_after_append(rows, height)
         buf.append("\r\n".join(lines))
-        final_row, final_col = self._record_live_frame(
+        self._record_live_frame(
             rows=rows,
             cols=cols,
-            height=len(lines),
+            height=height,
             cursor_row=cursor_row,
             cursor_col=cursor_col,
+            anchored=anchored,
         )
-        buf.append(self._cup(final_row, final_col))
+        self._place_cursor_in_frame(
+            buf,
+            rows=rows,
+            cols=cols,
+            height=height,
+            cursor_row=cursor_row,
+            cursor_col=cursor_col,
+            anchored=anchored,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -251,8 +306,11 @@ class Renderer:
         # A completed cell replaces the old live tail.  Clearing only tracked
         # live rows preserves completed transcript rows above it.
         if self._has_frame:
-            self._clear_rows(buf, self._frame_top_row, self._frame_top_row + self._frame_rows - 1, rows)
-            buf.append(self._cup(max(1, min(self._frame_top_row, rows)), 1))
+            if self._frame_anchored:
+                self._clear_rows(buf, self._frame_top_row, self._frame_top_row + self._frame_rows - 1, rows)
+                buf.append(self._cup(max(1, min(self._frame_top_row, rows)), 1))
+            else:
+                self._clear_floating_frame(buf)
         buf.append("\r\n".join(hard_lines) + "\r\n")
         self._transcript_rows += len(hard_lines)
         if self._transcript_rows >= rows:
@@ -376,13 +434,41 @@ class Renderer:
 
         buf = [self._SYNC_ON + self._AUTOWRAP_OFF]
         if not lines:
-            self._clear_rows(buf, self._frame_top_row, self._frame_top_row + self._frame_rows - 1, rows)
+            if self._frame_anchored:
+                self._clear_rows(buf, self._frame_top_row, self._frame_top_row + self._frame_rows - 1, rows)
+            else:
+                self._clear_floating_frame(buf)
             buf.append(self._AUTOWRAP_ON + self._SYNC_OFF)
             self._write("".join(buf))
             self._reset_frame()
             return
 
         height = len(lines)
+        if not self._frame_anchored:
+            self._clear_floating_frame(buf)
+            buf.append("\r\n".join(lines))
+            anchored = self._frame_is_anchored_after_append(rows, height)
+            self._record_live_frame(
+                rows=rows,
+                cols=cols,
+                height=height,
+                cursor_row=cursor_row,
+                cursor_col=cursor_col,
+                anchored=anchored,
+            )
+            self._place_cursor_in_frame(
+                buf,
+                rows=rows,
+                cols=cols,
+                height=height,
+                cursor_row=cursor_row,
+                cursor_col=cursor_col,
+                anchored=anchored,
+            )
+            buf.append(self._AUTOWRAP_ON + self._SYNC_OFF)
+            self._write("".join(buf))
+            return
+
         new_top = self._live_top(rows, height)
         old_top = self._frame_top_row
         old_bottom = old_top + self._frame_rows - 1
@@ -403,14 +489,23 @@ class Renderer:
         buf.append(self._cup(new_top, 1))
         buf.append("\r\n".join(lines))
 
-        final_row, final_col = self._record_live_frame(
+        self._record_live_frame(
             rows=rows,
             cols=cols,
             height=height,
             cursor_row=cursor_row,
             cursor_col=cursor_col,
+            anchored=True,
         )
-        buf.append(self._cup(final_row, final_col))
+        self._place_cursor_in_frame(
+            buf,
+            rows=rows,
+            cols=cols,
+            height=height,
+            cursor_row=cursor_row,
+            cursor_col=cursor_col,
+            anchored=True,
+        )
         buf.append(self._AUTOWRAP_ON + self._SYNC_OFF)
         self._write("".join(buf))
 
@@ -418,7 +513,10 @@ class Renderer:
         _, rows = terminal_size()
         buf = [self._SYNC_ON + self._AUTOWRAP_OFF]
         if self._has_frame:
-            self._clear_rows(buf, self._frame_top_row, self._frame_top_row + self._frame_rows - 1, rows)
+            if self._frame_anchored:
+                self._clear_rows(buf, self._frame_top_row, self._frame_top_row + self._frame_rows - 1, rows)
+            else:
+                self._clear_floating_frame(buf)
         # Always restore DECAWM so the shell the user returns to does not inherit
         # a nowrap terminal state.
         buf.append(self._AUTOWRAP_ON + "\x1b[?2026l\x1b[0m")

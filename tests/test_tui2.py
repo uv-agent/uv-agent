@@ -819,18 +819,37 @@ def test_first_repaint_uses_sync_output() -> None:
     assert "\x1b[J" not in rendered  # no previous frame to erase
 
 
-def test_second_repaint_erases_with_absolute_rows_not_relative_moves(monkeypatch) -> None:
-    # The renderer must not erase the previous frame with relative cursor-up
-    # (\x1b[<n>A) or \x1b[J: those drift when the terminal moves the cursor or
-    # scrolls between frames (window focus-in / resize), stranding old
-    # "... running" rows into scrollback.  Erasure is absolute CUP + EL only.
-    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
+def test_first_repaint_does_not_reserve_bottom_rows(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 12))
     output = io.StringIO()
     renderer = Renderer(output=output)
 
     renderer.repaint(Tui2State(composer=""))
+    rendered = output.getvalue()
+    plain = _plain_renderer_lines(rendered)
+
+    assert not re.search(r"\x1b\[\d+B", rendered)
+    assert plain[0].startswith("╭")
+    assert renderer._transcript_rows == 0
+    assert not renderer._anchor_known
+    assert not renderer._frame_anchored
+
+
+def test_second_anchored_repaint_erases_with_absolute_rows_not_relative_moves(monkeypatch) -> None:
+    # Once the transcript naturally fills the viewport, the renderer must not
+    # erase with relative cursor-up (\x1b[<n>A) or \x1b[J: those drift when the
+    # terminal moves the cursor or scrolls between frames. Anchored erasure is
+    # absolute CUP + per-row EL only.
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer._transcript_rows = 500
+    renderer._anchor_known = True
+
+    renderer.repaint(Tui2State(composer=""))
     top = renderer._frame_top_row
     assert top >= 1
+    assert renderer._frame_anchored
     output.seek(0)
     output.truncate(0)
 
@@ -846,16 +865,19 @@ def test_second_repaint_erases_with_absolute_rows_not_relative_moves(monkeypatch
 
 
 def test_repaint_anchors_frame_independent_of_external_cursor_drift(monkeypatch) -> None:
-    # Even if the terminal moves the cursor between frames, the next repaint
-    # re-anchors absolutely from the current terminal size, so the frame top is
-    # recomputed rather than carried as a relative offset.
+    # Even if the terminal moves the cursor between anchored frames, the next
+    # repaint re-anchors absolutely from the current terminal size, so the frame
+    # top is recomputed rather than carried as a relative offset.
     monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
     output = io.StringIO()
     renderer = Renderer(output=output)
+    renderer._transcript_rows = 500
+    renderer._anchor_known = True
 
     state = Tui2State(composer="line1\nline2\nline3", busy=True, turn_elapsed_s=1.0)
     renderer.repaint(state)
     first_top = renderer._frame_top_row
+    assert renderer._frame_anchored
     output.seek(0)
     output.truncate(0)
 
@@ -884,16 +906,18 @@ def test_repaint_pins_live_region_to_bottom_when_saturated(monkeypatch) -> None:
 
 def test_repaint_floats_live_region_after_short_transcript(monkeypatch) -> None:
     # While the screen is not full, the live region floats right after the
-    # transcript instead of jumping to the bottom.
+    # transcript instead of jumping to the bottom or reserving blank rows.
     monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 40))
     output = io.StringIO()
     renderer = Renderer(output=output)
     renderer._transcript_rows = 3
-    renderer._anchor_known = True
 
     renderer.repaint(Tui2State(composer="hi"))
+    rendered = output.getvalue()
 
     assert renderer._frame_top_row == 4  # transcript_rows + 1
+    assert not renderer._frame_anchored
+    assert not re.search(r"\x1b\[\d+B", rendered)
 
 
 def test_flush_cell_redraws_post_flush_live_region(monkeypatch) -> None:
@@ -927,6 +951,18 @@ def _plain_renderer_lines(rendered: str) -> list[str]:
     # only leading CRs before interpreting the remaining CRLF rows.
     cleaned = cleaned.lstrip("\r")
     return [line.replace("\r", "").rstrip() for line in cleaned.splitlines()]
+
+
+def _max_empty_run(lines: list[str]) -> int:
+    longest = 0
+    current = 0
+    for line in lines:
+        if line.strip():
+            longest = max(longest, current)
+            current = 0
+        else:
+            current += 1
+    return max(longest, current)
 
 
 def test_flush_cell_separates_user_from_middle_process_and_turns() -> None:
@@ -970,7 +1006,7 @@ def test_renderer_repaint_separates_live_user_from_previous_flushed_turn(monkeyp
 
     visible = [line for line in plain if line.strip()]
     user_idx = next(i for i, line in enumerate(plain) if line.startswith("› next question"))
-    assert user_idx > 0  # first repaint may reserve bottom rows before drawing
+    assert user_idx > 0  # transcript/live separator before the next turn
     assert plain[user_idx - 1].strip() == ""
     assert plain[user_idx + 1].strip() == ""
     assert any(line.startswith("╭") for line in visible)
@@ -989,7 +1025,7 @@ def test_renderer_repaint_separates_just_flushed_tool_from_status(monkeypatch) -
     plain = _plain_renderer_lines(output.getvalue())
 
     working_idx = next(i for i, line in enumerate(plain) if "Working" in line)
-    assert working_idx > 0  # first repaint may reserve bottom rows before drawing
+    assert working_idx > 0  # transcript/chrome separator before status
     assert plain[working_idx - 1].strip() == ""
     assert any(line.startswith("╭") for line in plain[working_idx + 1:])
 
@@ -1607,9 +1643,41 @@ def test_resume_thread_keeps_final_history_tail_before_live_frame(monkeypatch) -
     renderer.flush_cells(cells, live_state=Tui2State(composer="next"))
     rendered = output.getvalue()
 
-    assert "[2J" not in rendered and "[3J" not in rendered
+    assert "\x1b[2J" not in rendered and "\x1b[3J" not in rendered
     assert rendered.index("final output tail") < rendered.index("╭")
     assert renderer._has_frame
+
+
+def test_short_resume_does_not_insert_bottom_anchor_blank_run(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 12))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+
+    renderer.flush_cells([TranscriptCell("assistant", text="final output tail")], live_state=Tui2State(composer="next"))
+    rendered = output.getvalue()
+    plain = _plain_renderer_lines(rendered)
+
+    assert not re.search(r"\x1b\[\d+B", rendered)
+    assert _max_empty_run(plain) <= 1
+    assert renderer._transcript_rows < 12
+    assert not renderer._frame_anchored
+
+
+def test_flush_cell_with_live_reasoning_does_not_insert_bottom_anchor_blank_run(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 12))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    state = Tui2State(composer="", busy=True, turn_elapsed_s=1.0)
+    state.live.append(TranscriptCell("reasoning", text="thinking"))
+
+    renderer.flush_cell(TranscriptCell("user", text="hello"), state)
+    rendered = output.getvalue()
+    plain = _plain_renderer_lines(rendered)
+
+    assert not re.search(r"\x1b\[\d+B", rendered)
+    assert _max_empty_run(plain) <= 1
+    assert any(line.startswith("┊ thinking") for line in plain)
+    assert not renderer._frame_anchored
 
 
 def test_regular_key_cancels_ctrl_c_quit_confirmation(monkeypatch) -> None:
