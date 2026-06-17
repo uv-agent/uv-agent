@@ -3683,8 +3683,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "File.edit(" in turn_context
     assert "File.insert_after" in turn_context
     assert '<function name="search">' in turn_context
-    assert "rt.search(pattern: str" in turn_context
+    assert "rt.search(query: str" in turn_context
     assert "types: str | Sequence[str] | None" in turn_context
+    assert 'mode: Literal["text", "regex", "fuzzy"]' in turn_context
     assert "limit: int | None" in turn_context
     assert '<function name="run">' in turn_context
     assert "rt.run(*args" in turn_context
@@ -3756,7 +3757,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "未定义 handle_login" in turn_context
     assert 'rt.search("handle_login("' in turn_context
     assert "call_hits" in turn_context
-    assert "rt.files(globs=" in turn_context
+    assert "rt.files(query=" in turn_context
     assert "hits.one().file().replace" in turn_context
     assert 'redirect("/old-dashboard")' in turn_context
     assert 'redirect(url_for("dashboard"))' in turn_context
@@ -3785,9 +3786,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "newline style、BOM、final newline" in turn_context
     assert "按任务选择：" in turn_context
     assert "discovery=rt.files/rt.search/rt.symbols/rt.query" in turn_context
-    assert "rt.search 默认 regex" in turn_context
-    assert "精确代码字符串用 literal=True" in turn_context
-    assert "rg type aliases 用 types" in turn_context
+    assert "rt.search 默认精确文本" in turn_context
+    assert '正则用 mode="regex"' in turn_context
+    assert "语言/扩展名别名用 types" in turn_context
     assert "edit=用 File.replace 替换唯一小段文本" in turn_context
     assert "完整文件或生成的内容用 File.write" in turn_context
     assert "普通外部命令（包括" in turn_context
@@ -3798,7 +3799,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "数据量较大时，优先提取字段、行范围、head/tail 或生成摘要" in turn_context
     assert "不要猜测 helper signatures" in turn_context
     assert "Search、symbol 和 capture 结果可直接 `.view()`" in turn_context
-    assert "pattern 默认是 regex" in turn_context
+    assert '默认 mode="text"' in turn_context
     assert "Prefer the smallest helper that directly matches the task" not in turn_context
     assert "uv-agent patch envelope shown below" not in turn_context
     assert turn_context.count("<description>") >= 10

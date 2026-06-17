@@ -149,10 +149,10 @@ _SYMBOL_QUERIES: dict[str, str] = {
     """,
 }
 
-# Use ripgrep's native type filters when possible so large mixed-language
+# Use search-helper type filters when possible so large mixed-language
 # repositories do not enumerate every ignored/non-code file before Python filters
-# by tree-sitter language.  Keep this deliberately small and limited to rg's
-# built-in aliases to avoid surprising path semantics.
+# by tree-sitter language.  Keep this deliberately small and language-focused;
+# codesearch expands these aliases to concrete extension globs.
 _LANGUAGE_FILE_TYPES: dict[str, tuple[str, ...]] = {
     "python": ("py",),
     "javascript": ("js",),
@@ -246,8 +246,8 @@ def _detect_language(path: str | Path) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
-def _rg_file_types_for_languages(languages: set[str] | None) -> list[str] | None:
-    """Return rg type aliases that safely cover the requested languages."""
+def _file_types_for_languages(languages: set[str] | None) -> list[str] | None:
+    """Return type aliases that safely cover the requested languages."""
 
     if not languages:
         return None
@@ -256,7 +256,7 @@ def _rg_file_types_for_languages(languages: set[str] | None) -> list[str] | None
         values = _LANGUAGE_FILE_TYPES.get(language)
         if values is None:
             # Fall back to broad enumeration if any requested language lacks a
-            # known rg alias; correctness is more important than partial speedup.
+            # known type alias; correctness is more important than partial speedup.
             return None
         aliases.extend(values)
     return aliases
@@ -304,7 +304,7 @@ def _candidate_files(
     no_ignore: bool,
 ) -> list[tuple[str, str]]:
     """Return ``[(rel_path, language), ...]`` for files under root."""
-    effective_file_types = file_types or _rg_file_types_for_languages(languages)
+    effective_file_types = file_types or _file_types_for_languages(languages)
     paths = codesearch.find_files(
         root,
         globs=globs,

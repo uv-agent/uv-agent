@@ -834,7 +834,7 @@ Capture.view(*, context: int = 8) -> FileView</signature>
 <signature>class FileSet(CollectionResult[str]):
     def files(self) -> list[File]: ...
     def views(*, head: int | None = None, tail: int | None = None, lines: tuple[int, int] | None = None, around: str | None = None, context: int = 20, limit: int | None = None) -> list[FileView]: ...
-    def search(pattern: str, *, globs=None, types=None, literal=None, limit=None, ...) -> SearchResults: ...
+    def search(query: str, *, globs=None, types=None, mode="text", limit=None, ...) -> SearchResults: ...
     def symbols(*, language=None, kind=None, name=None, limit=None, ...) -> SymbolResults: ...</signature>
 </type>
 <type name="Other result types">
@@ -890,12 +890,12 @@ File.compare(other: str | Path, *, ignore_eol: bool = False, ignore_final_newlin
 File.diff(other: str | Path, *, context: int = 3) -> str</signature>
 </function>
 <function name="search">
-<description>ripgrep 文本搜索；pattern 默认是 regex，精确代码字符串用 literal=True。返回可迭代 SearchResults，hit 可直接 `.view()`。</description>
-<signature>rt.search(pattern: str, *, root: str | Path = ".", roots: str | Path | Sequence[str | Path] | None = None, globs: str | Sequence[str] | None = None, types: str | Sequence[str] | None = None, ignore_case: bool = False, case_sensitive: bool | None = None, fixed_string: bool = False, literal: bool | None = None, multiline: bool = False, word: bool = False, before: int = 0, after: int = 0, context: int | None = None, max_count_per_file: int | None = None, limit: int | None = None, hidden: bool = False, no_ignore: bool = False, extra_args: str | Sequence[str] | None = None) -> SearchResults</signature>
+<description>FFF 原生索引内容搜索；默认 mode="text" 是精确文本搜索（不用转义正则），需要正则时用 mode="regex"，需要容错行搜索时用 mode="fuzzy"。返回可迭代 SearchResults，hit 可直接 `.view()`。</description>
+<signature>rt.search(query: str, *, root: str | Path = ".", roots: str | Path | Sequence[str | Path] | None = None, globs: str | Sequence[str] | None = None, types: str | Sequence[str] | None = None, mode: Literal["text", "regex", "fuzzy"] = "text", ignore_case: bool = False, before: int = 0, after: int = 0, context: int | None = None, limit: int | None = None, refresh: bool = False) -> SearchResults</signature>
 </function>
 <function name="files">
-<description>通过 ripgrep 枚举文件，默认遵循 .gitignore；返回绝对路径集合，可继续 `.search()` 或 `.views()`。</description>
-<signature>rt.files(root: str | Path = ".", *, roots: str | Path | Sequence[str | Path] | None = None, globs: str | Sequence[str] | None = None, types: str | Sequence[str] | None = None, limit: int | None = None, hidden: bool = False, no_ignore: bool = False, extra_args: str | Sequence[str] | None = None) -> FileSet</signature>
+<description>通过 FFF 原生索引枚举或模糊查找文件，默认遵循 ignore/.gitignore；query 做文件名模糊搜索，globs/types 做路径过滤。返回绝对路径集合，可继续 `.search()` 或 `.views()`。</description>
+<signature>rt.files(root: str | Path = ".", *, roots: str | Path | Sequence[str | Path] | None = None, query: str = "", globs: str | Sequence[str] | None = None, types: str | Sequence[str] | None = None, limit: int | None = None, refresh: bool = False) -> FileSet</signature>
 </function>
 <function name="symbols">
 <description>定位 tree-sitter symbols。内置语言：c、cpp、go、java、javascript、python、ruby、rust、tsx、typescript。</description>
@@ -986,7 +986,7 @@ rt.goals.paths() -> RuntimeGoalPaths</signature>
 
 <helper_selection>
 <rule>列出的 helpers 是普通 Python 对象，可在同一脚本中与标准库代码和控制流组合使用；在脚本内用 pathlib、os、json 等模块做衔接逻辑；适合时优先使用 helpers，尤其是处理仓库文本的 `rt.file(...)`，因为它会保留 newline style、BOM、final newline、line counts 和行范围视图等元数据。</rule>
-<rule>按任务选择：workflow=独立/长时间运行的模型任务图；discovery=rt.files/rt.search/rt.symbols/rt.query（rt.search 默认 regex；精确代码字符串用 literal=True；路径 pattern 用 globs，rg type aliases 用 types）；reading=rt.file(path).read；edit=用 File.replace 替换唯一小段文本，用 File.edit/insert_after/insert_before/delete_lines 处理 anchored ranges/inserts；完整文件或生成的内容用 File.write；thread history=rt.threads.list/view/detail；dependencies=import 前使用 rt.deps.add。</rule>
+<rule>按任务选择：workflow=独立/长时间运行的模型任务图；discovery=rt.files/rt.search/rt.symbols/rt.query（rt.search 默认精确文本；正则用 mode="regex"；容错行搜索用 mode="fuzzy"；路径 pattern 用 globs；语言/扩展名别名用 types）；reading=rt.file(path).read；edit=用 File.replace 替换唯一小段文本，用 File.edit/insert_after/insert_before/delete_lines 处理 anchored ranges/inserts；完整文件或生成的内容用 File.write；thread history=rt.threads.list/view/detail；dependencies=import 前使用 rt.deps.add。</rule>
 <rule>普通外部命令（包括 skills 或 docs 中展示的 shell commands），优先用 `rt.run(...)` 而不是 raw subprocess；只有需要自定义进程控制时才使用 raw subprocess。</rule>
 <rule>数据量较大时，优先提取字段、行范围、head/tail 或生成摘要。</rule>
 <rule>不要猜测 helper signatures；当精确签名重要时，检查 uv_agent_runtime 实现。</rule>
@@ -1000,13 +1000,13 @@ from pathlib import Path
 import uv_agent_runtime as rt
 
 # --- 定位目标函数 ---
-fn_hits = rt.search("def handle_login", types="py", literal=True, limit=5)
+fn_hits = rt.search("def handle_login", types="py", limit=5)
 if not fn_hits:
     print("未定义 handle_login – 请检查函数名")
     exit(0)
 
 # --- 同时查找调用点 ---
-call_hits = rt.search("handle_login(", types="py", literal=True, limit=10)
+call_hits = rt.search("handle_login(", types="py", limit=10)
 print(f"定义: {len(fn_hits)} 处，调用: {len(call_hits)} 处")
 
 # --- 带上下文读取完整定义 ---
@@ -1021,7 +1021,7 @@ for hit in call_hits[:3]:
     print(site.text)
 
 # --- 发现相关 config / test / middleware 文件 ---
-related = rt.files(globs=["**/auth*", "**/login*", "**/middleware*"], types="py", limit=12)
+related = rt.files(query="auth login middleware", types="py", limit=12)
 print(f"\n相关文件: {len(related)}")
 for p in related[:5]:
     head = rt.file(p).read(head=50)
@@ -1037,7 +1037,7 @@ import uv_agent_runtime as rt
 changes: list[str] = []
 
 # --- 确认目标存在，然后修复硬编码 redirect ---
-hits = rt.search('redirect("/old-dashboard")', types="py", literal=True, limit=1)
+hits = rt.search('redirect("/old-dashboard")', types="py", limit=1)
 if hits:
     r1 = hits.one().file().replace(
         old='redirect("/old-dashboard")',
@@ -1048,7 +1048,7 @@ else:
     changes.append("handlers.py redirect: 未找到目标 – 可能已经修复")
 
 # --- 确认 config 常量存在，然后更新 ---
-hits = rt.search("MAX_LOGIN_ATTEMPTS = 3", types="py", literal=True, limit=1)
+hits = rt.search("MAX_LOGIN_ATTEMPTS = 3", types="py", limit=1)
 if hits:
     r2 = hits.one().file().replace(
         old="MAX_LOGIN_ATTEMPTS = 3",
@@ -1097,7 +1097,7 @@ for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py
 ```python
 # **不推荐**：第一轮只搜索，然后停下来等下一轮。
 import uv_agent_runtime as rt
-hits = rt.search("handle_login", types="py", literal=True, limit=10)
+hits = rt.search("handle_login", types="py", limit=10)
 print(hits)
 ---
 # **不推荐**：第二轮才读取文件。

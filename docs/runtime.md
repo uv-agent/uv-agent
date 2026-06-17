@@ -89,8 +89,8 @@ Available helper groups:
 | **File snapshots & transactions** | |
 | `rt.snapshot()` / `rt.restore()` / `rt.transaction()` | Capture file state and restore it later, manually or as a rollback transaction. |
 | **Search & discovery** | |
-| `rt.search()` | Grep-like content search via ripgrep across the workspace. |
-| `rt.files()` | Enumerate workspace files via ripgrep (faster than manual walking). |
+| `rt.search()` | Indexed content search via the native fff-search Python binding. |
+| `rt.files()` | Enumerate or fuzzy-find workspace files via the native fff-search index. |
 | `rt.symbols()` | Locate function/class/method/etc. definitions via tree-sitter. |
 | `rt.query()` | Run a custom tree-sitter S-expression query over the workspace. |
 | **Text utilities** | |

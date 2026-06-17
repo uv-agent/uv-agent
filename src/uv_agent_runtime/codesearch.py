@@ -1,33 +1,120 @@
-"""ripgrep-backed code search helpers.
+"""FFF-backed code search helpers.
 
-Requires the `rg` binary (https://github.com/BurntSushi/ripgrep) on PATH.
+The helpers use the native ``fff-search`` Python binding instead of spawning an
+external grep binary.  A small in-process finder cache is kept so a single
+``run_python`` script can perform several searches against the same root without
+paying the indexing cost repeatedly.
 """
 from __future__ import annotations
 
-import json
-import shutil
-import subprocess
+import atexit
+import fnmatch
+import re
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from .errors import HelperRuntimeError, HelperValueError
 from .files import resolve_workspace_path
 
+SearchMode = Literal["text", "plain", "literal", "regex", "fuzzy"]
 
-class RipgrepNotFoundError(HelperRuntimeError):
-    """Raised when the `rg` binary is not on PATH."""
+
+class FffSearchNotAvailableError(HelperRuntimeError):
+    """Raised when the native ``fff-search`` binding is unavailable."""
 
     def __init__(self, message: str | None = None) -> None:
         super().__init__(
             helper="search helpers",
-            problem=message
-            or "ripgrep (`rg`) not found on PATH; install it and retry the search helper.",
+            problem=message or "fff-search Python binding is not available in this run_python environment.",
             hints=(
-                "Install ripgrep with winget install BurntSushi.ripgrep.MSVC, brew install ripgrep, or apt-get install ripgrep.",
-                "After installing, restart the agent or ensure rg is available on PATH for run_python.",
+                "Install project dependencies with `uv sync`, or add the fff-search package to the managed run_python environment.",
+                "The search helpers use the `fff` Python module and no longer require an external rg/ripgrep binary.",
             ),
         )
+
+
+# Backward-compatible name for callers that imported the old exception.  New
+# code should not mention ripgrep; the runtime no longer shells out to it.
+RipgrepNotFoundError = FffSearchNotAvailableError
+
+
+@dataclass(frozen=True)
+class Submatch:
+    """Byte-range of a single match inside the surrounding line."""
+
+    start: int
+    end: int
+    text: str
+
+
+@dataclass(frozen=True)
+class Match:
+    """A single content-search match line."""
+
+    path: str
+    rel_path: str
+    line: int
+    column: int
+    text: str
+    submatches: list[Submatch] = field(default_factory=list)
+    context_before: list[tuple[int, str]] = field(default_factory=list)
+    context_after: list[tuple[int, str]] = field(default_factory=list)
+
+    def file(self):
+        import uv_agent_runtime as rt
+
+        return rt.file(self.path)
+
+    def line_range(self, *, context: int = 0) -> tuple[int, int]:
+        return (max(1, self.line - context), self.line + context)
+
+    def view(self, *, context: int = 8):
+        from .textops import read_file
+
+        return read_file(self.path, lines=self.line_range(context=context))
+
+
+_FINDER_CACHE_LIMIT = 8
+_FINDER_CACHE: "OrderedDict[str, object]" = OrderedDict()
+
+# Common language/type shortcuts that are convenient for agents.  Unknown
+# entries are treated as extension names (``types="proto"`` -> ``*.proto``),
+# while extension-looking or glob-looking values are rejected to keep ``types``
+# distinct from ``globs``.
+_TYPE_GLOBS: dict[str, tuple[str, ...]] = {
+    "py": ("*.py", "*.pyi"),
+    "python": ("*.py", "*.pyi"),
+    "js": ("*.js", "*.jsx", "*.mjs", "*.cjs"),
+    "javascript": ("*.js", "*.jsx", "*.mjs", "*.cjs"),
+    "ts": ("*.ts", "*.tsx"),
+    "typescript": ("*.ts", "*.tsx"),
+    "tsx": ("*.tsx",),
+    "jsx": ("*.jsx",),
+    "rs": ("*.rs",),
+    "rust": ("*.rs",),
+    "go": ("*.go",),
+    "java": ("*.java",),
+    "c": ("*.c", "*.h"),
+    "cpp": ("*.cc", "*.cpp", "*.cxx", "*.hpp", "*.hh", "*.hxx"),
+    "cxx": ("*.cc", "*.cpp", "*.cxx", "*.hpp", "*.hh", "*.hxx"),
+    "ruby": ("*.rb",),
+    "rb": ("*.rb",),
+    "sh": ("*.sh", "*.bash", "*.zsh"),
+    "shell": ("*.sh", "*.bash", "*.zsh"),
+    "md": ("*.md", "*.markdown"),
+    "markdown": ("*.md", "*.markdown"),
+    "json": ("*.json",),
+    "toml": ("*.toml",),
+    "yaml": ("*.yaml", "*.yml"),
+    "yml": ("*.yaml", "*.yml"),
+    "html": ("*.html", "*.htm"),
+    "css": ("*.css",),
+    "xml": ("*.xml",),
+    "txt": ("*.txt",),
+}
 
 
 def _coerce_str_sequence(value: str | Sequence[str] | None, *, name: str) -> list[str] | None:
@@ -99,602 +186,158 @@ def _coerce_path_sequence(
 
 
 def _coerce_file_types(value: str | Sequence[str] | None) -> list[str] | None:
-    """Normalize rg type aliases and reject common extension/glob mixups."""
+    """Normalize model-friendly language/extension aliases."""
 
-    kinds = _coerce_str_sequence(value, name="file_types")
+    kinds = _coerce_str_sequence(value, name="types")
     if kinds is None:
         return None
+    normalized: list[str] = []
     for kind in kinds:
         if not kind:
             raise HelperValueError(
                 helper="search helpers",
-                problem="file_types entries must be non-empty ripgrep type aliases such as 'py'",
-                details={"file_types": kinds},
+                problem="types entries must be non-empty aliases such as 'py' or extension names such as 'proto'",
+                details={"types": kinds},
             )
         if kind.startswith(".") or any(char in kind for char in "*?[]/\\"):
             raise HelperValueError(
                 helper="search helpers",
                 problem=(
-                    "file_types uses ripgrep type aliases such as 'py', not filename extensions "
-                    f"or glob patterns: {kind!r}. Use globs=['*.py'] for extension/path patterns."
+                    "types uses aliases or extension names such as 'py'/'python'/'rs', "
+                    f"not extensions or glob patterns: {kind!r}. Use globs=['*.py'] for path patterns."
                 ),
-                details={"file_types": kinds, "invalid_entry": kind},
-                hints=("Use file_types='py' for ripgrep's Python alias, or globs=['*.py'] for filename patterns.",),
+                details={"types": kinds, "invalid_entry": kind},
+                hints=("Use types='py' for Python files, or globs=['*.py'] for filename/path patterns.",),
             )
-    return kinds
+        normalized.append(kind.lower())
+    return normalized
 
 
-def _raise_ripgrep_error(
-    code: int,
-    stderr: str,
-    *,
-    helper: str = "search_text",
-    pattern: str | None = None,
-    fixed_string: bool = False,
-) -> None:
-    """Raise a ripgrep failure with hints tuned for common script mistakes."""
-
-    detail = stderr.strip()
-    hints: list[str] = []
-    if pattern is not None and not fixed_string and "regex parse error" in detail:
-        hints.append(
-            "search_text patterns are regular expressions by default; use literal=True "
-            "or fixed_string=True when searching for exact code text."
-        )
-    if "unrecognized file type" in detail:
-        hints.append(
-            "file_types uses ripgrep type aliases such as 'py'; use globs=['*.py'] "
-            "for filename extensions or path patterns."
-        )
-    raise HelperRuntimeError(
-        helper=helper,
-        problem=f"ripgrep failed (exit {code}): {detail}" if detail else f"ripgrep failed (exit {code})",
-        details={"pattern": pattern, "fixed_string": fixed_string},
-        preview_title="ripgrep stderr",
-        preview=detail or None,
-        hints=hints,
-    )
-
-
-@dataclass(frozen=True)
-class Submatch:
-    """Byte-range of a single match inside the surrounding line."""
-
-    start: int
-    end: int
-    text: str
-
-
-@dataclass(frozen=True)
-class Match:
-    """A single ripgrep match line."""
-
-    path: str
-    rel_path: str
-    line: int
-    column: int
-    text: str
-    submatches: list[Submatch] = field(default_factory=list)
-    context_before: list[tuple[int, str]] = field(default_factory=list)
-    context_after: list[tuple[int, str]] = field(default_factory=list)
-
-    def file(self):
-        import uv_agent_runtime as rt
-
-        return rt.file(self.path)
-
-    def line_range(self, *, context: int = 0) -> tuple[int, int]:
-        return (max(1, self.line - context), self.line + context)
-
-    def view(self, *, context: int = 8):
-        from .textops import read_file
-
-        return read_file(self.path, lines=self.line_range(context=context))
-
-
-def _rg_binary() -> str:
-    binary = shutil.which("rg")
-    if binary is None:
-        raise RipgrepNotFoundError(
-            "ripgrep (`rg`) not found on PATH; install via your system package manager "
-            "(winget install BurntSushi.ripgrep.MSVC / brew install ripgrep / "
-            "apt-get install ripgrep) and retry."
-        )
-    return binary
-
-
-def _build_args(
-    *,
-    pattern: str | None,
-    files_only: bool,
-    globs: Sequence[str] | None,
-    file_types: Sequence[str] | None,
-    ignore_case: bool,
-    fixed_string: bool,
-    multiline: bool,
-    word: bool,
-    before: int,
-    after: int,
-    max_count: int | None,
-    hidden: bool,
-    no_ignore: bool,
-    extra: Sequence[str] | None,
-) -> list[str]:
-    args: list[str] = [_rg_binary()]
-    if files_only:
-        args.append("--files")
-    else:
-        args.extend(["--json"])
-        if ignore_case:
-            args.append("--ignore-case")
-        if fixed_string:
-            args.append("--fixed-strings")
-        if multiline:
-            args.extend(["--multiline", "--multiline-dotall"])
-        if word:
-            args.append("--word-regexp")
-        if before:
-            args.extend(["--before-context", str(before)])
-        if after:
-            args.extend(["--after-context", str(after)])
-        if max_count is not None:
-            args.extend(["--max-count", str(max_count)])
-    if hidden:
-        args.append("--hidden")
-    if no_ignore:
-        args.append("--no-ignore")
-    for glob in globs or ():
-        args.extend(["--glob", glob])
+def _type_globs(file_types: Sequence[str] | None) -> list[str]:
+    globs: list[str] = []
     for kind in file_types or ():
-        args.extend(["--type", kind])
-    if extra:
-        args.extend(extra)
-    if not files_only:
-        args.extend(["--", pattern or ""])
-    return args
+        globs.extend(_TYPE_GLOBS.get(kind, (f"*.{kind}",)))
+    return globs
 
 
-def _run(args: list[str], cwd: Path) -> tuple[int, str, str]:
-    """Run ripgrep to completion and return decoded output.
-
-    The simple capture path is still best when callers do not request a global
-    limit: ripgrep can stream internally without Python sitting in the middle.
-    Bounded calls use ``_run_limited`` below so ``max_total`` can stop the child
-    process before it scans and emits the rest of a very large repository.
-    """
-
-    completed = subprocess.run(
-        args,
-        cwd=str(cwd),
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    return completed.returncode, completed.stdout, completed.stderr
+def _normalize_rel_path(path: str) -> str:
+    return path.replace("\\", "/").lstrip("./")
 
 
-def _terminate_process(process: subprocess.Popen[str]) -> None:
-    """Stop a bounded ripgrep process without leaving it behind.
-
-    ``terminate`` is usually enough, but on busy Windows file scans the process
-    may need a final ``kill``.  The helper centralizes that defensive cleanup so
-    the streaming readers stay small and deterministic.
-    """
-
-    process.terminate()
-    try:
-        process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=2)
+def _normalize_glob(pattern: str) -> str:
+    negative = pattern.startswith("!")
+    body = pattern[1:] if negative else pattern
+    body = body.replace("\\", "/").lstrip("./")
+    return f"!{body}" if negative else body
 
 
-def _run_limited(args: list[str], cwd: Path, *, line_limit: int) -> tuple[int, list[str], str, bool]:
-    """Run ripgrep and stop after collecting ``line_limit`` stdout lines.
-
-    ``rg`` has ``--max-count``, but that limit is per file, not global.  The
-    runtime helpers expose ``max_total`` as a global cap, so we enforce it by
-    streaming stdout and terminating ripgrep once enough relevant lines are in
-    hand.  A non-zero return code caused by our own termination is reported via
-    ``terminated`` instead of treated as a ripgrep failure.
-    """
-
-    if line_limit <= 0:
-        return 0, [], "", False
-    process = subprocess.Popen(
-        args,
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    lines: list[str] = []
-    terminated = False
-    try:
-        assert process.stdout is not None
-        for line in process.stdout:
-            lines.append(line.rstrip("\r\n"))
-            if len(lines) >= line_limit:
-                terminated = True
-                process.terminate()
-                break
-        _remaining_stdout, stderr = process.communicate(timeout=2 if terminated else None)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        _remaining_stdout, stderr = process.communicate()
-        terminated = True
-    return process.returncode or 0, lines, stderr, terminated
+def _matches_any_glob(rel_path: str, patterns: Sequence[str]) -> bool:
+    return any(fnmatch.fnmatchcase(rel_path, pattern) for pattern in patterns)
 
 
-def _run_until_matches(args: list[str], cwd: Path, *, match_limit: int) -> tuple[int, list[str], str, bool]:
-    """Run ripgrep JSON output until ``match_limit`` match events are collected."""
-
-    if match_limit <= 0:
-        return 0, [], "", False
-    process = subprocess.Popen(
-        args,
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    lines: list[str] = []
-    matches = 0
-    terminated = False
-    try:
-        assert process.stdout is not None
-        for line in process.stdout:
-            stripped = line.rstrip("\r\n")
-            lines.append(stripped)
-            if _is_match_event_line(stripped):
-                matches += 1
-                if matches >= match_limit:
-                    terminated = True
-                    _terminate_process(process)
-                    break
-        _remaining_stdout, stderr = process.communicate(timeout=2 if terminated else None)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        _remaining_stdout, stderr = process.communicate()
-        terminated = True
-    return process.returncode or 0, lines, stderr, terminated
-
-
-def _is_match_event_line(line: str) -> bool:
-    """Fast-path detection for rg JSON match records.
-
-    The line is parsed later by ``_parse_search_matches``; here we only need a
-    cheap counter to know when to stop the child process.
-    """
-
-    return '"type":"match"' in line or '"type": "match"' in line
-
-def search_text(
-    pattern: str,
-    *,
-    root: str | Path = ".",
-    roots: str | Path | Sequence[str | Path] | None = None,
-    globs: str | Sequence[str] | None = None,
-    file_types: str | Sequence[str] | None = None,
-    ignore_case: bool = False,
-    case_sensitive: bool | None = None,
-    fixed_string: bool = False,
-    literal: bool | None = None,
-    multiline: bool = False,
-    word: bool = False,
-    before: int = 0,
-    after: int = 0,
-    context: int | None = None,
-    max_count_per_file: int | None = None,
-    max_total: int | None = None,
-    hidden: bool = False,
-    no_ignore: bool = False,
-    extra_args: str | Sequence[str] | None = None,
-) -> list[Match]:
-    """Search file contents with ripgrep and return structured matches.
-
-    `pattern` is a regex unless `fixed_string=True`. Paths are returned relative
-    to `root` when ripgrep emits them that way (typical for recursive search). If
-    `roots` is supplied, each result path is relative to the root that produced
-    it. Honors `.gitignore` and skips binary files by default; toggle with
-    `hidden` and `no_ignore`. `globs` is a list of include/exclude rg glob
-    patterns (prefix with `!` to exclude); `file_types` uses rg's `--type`
-    aliases.
-    """
-    if not pattern:
-        raise HelperValueError(helper="search_text", problem="pattern must be non-empty")
-    before, after = _resolve_context_counts(before=before, after=after, context=context)
-    resolved_roots = _resolve_roots(root=root, roots=roots)
-    normalized_globs = _coerce_str_sequence(globs, name="globs")
-    normalized_file_types = _coerce_file_types(file_types)
-    normalized_extra_args = _coerce_str_sequence(extra_args, name="extra_args")
-    if max_total is not None and max_total <= 0:
-        return []
-
-    matches: list[Match] = []
-    remaining = max_total
-    for resolved in resolved_roots:
-        root_matches = _search_text_one(
-            pattern,
-            resolved=resolved,
-            globs=normalized_globs,
-            file_types=normalized_file_types,
-            ignore_case=ignore_case,
-            case_sensitive=case_sensitive,
-            fixed_string=fixed_string,
-            literal=literal,
-            multiline=multiline,
-            word=word,
-            before=before,
-            after=after,
-            max_count_per_file=max_count_per_file,
-            max_total=remaining,
-            hidden=hidden,
-            no_ignore=no_ignore,
-            extra_args=normalized_extra_args,
-        )
-        matches.extend(root_matches)
-        if remaining is not None:
-            remaining -= len(root_matches)
-            if remaining <= 0:
-                break
-    return matches
-
-
-def _search_text_one(
-    pattern: str,
-    *,
-    resolved: Path,
-    globs: Sequence[str] | None,
-    file_types: Sequence[str] | None,
-    ignore_case: bool,
-    case_sensitive: bool | None,
-    fixed_string: bool,
-    literal: bool | None,
-    multiline: bool,
-    word: bool,
-    before: int,
-    after: int,
-    max_count_per_file: int | None,
-    max_total: int | None,
-    hidden: bool,
-    no_ignore: bool,
-    extra_args: Sequence[str] | None,
-) -> list[Match]:
-    cwd_path, target_paths = _split_root(resolved)
-    effective_ignore_case = ignore_case if case_sensitive is None else not case_sensitive
-    effective_fixed_string = fixed_string if literal is None else literal
-    args = _build_args(
-        pattern=pattern,
-        files_only=False,
-        globs=globs,
-        file_types=file_types,
-        ignore_case=effective_ignore_case,
-        fixed_string=effective_fixed_string,
-        multiline=multiline,
-        word=word,
-        before=before,
-        after=after,
-        max_count=max_count_per_file,
-        hidden=hidden,
-        no_ignore=no_ignore,
-        extra=extra_args,
-    )
-    args.extend(target_paths)
-    if max_total is None:
-        code, stdout, stderr = _run(args, cwd_path)
-        # rg exits 1 when no matches; 2+ for real errors.
-        if code >= 2:
-            _raise_ripgrep_error(code, stderr, helper="search_text", pattern=pattern, fixed_string=effective_fixed_string)
-        return _parse_search_matches(stdout.splitlines(), cwd=cwd_path, before=before, after=after, max_total=None)
-
-    if before or after:
-        code, stdout, stderr = _run(args, cwd_path)
-        if code >= 2:
-            _raise_ripgrep_error(code, stderr, helper="search_text", pattern=pattern, fixed_string=effective_fixed_string)
-        return _parse_search_matches(stdout.splitlines(), cwd=cwd_path, before=before, after=after, max_total=max_total)
-
-    code, lines, stderr, terminated = _run_until_matches(args, cwd_path, match_limit=max_total)
-    if code >= 2 and not terminated:
-        _raise_ripgrep_error(code, stderr, helper="search_text", pattern=pattern, fixed_string=effective_fixed_string)
-    return _parse_search_matches(lines, cwd=cwd_path, before=before, after=after, max_total=max_total)
-
-
-def _parse_search_matches(
-    lines: Sequence[str],
-    *,
-    cwd: Path,
-    before: int,
-    after: int,
-    max_total: int | None,
-) -> list[Match]:
-    """Parse ripgrep JSON lines into Match objects without rerunning rg."""
-
-    matches: list[Match] = []
-    for line in lines:
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") != "match":
-            continue
-        data = event.get("data", {})
-        path_obj = data.get("path", {})
-        rel_path = path_obj.get("text") or _decode_bytes_field(path_obj)
-        if rel_path is None:
-            continue
-        lines_field = data.get("lines", {})
-        text = lines_field.get("text") or _decode_bytes_field(lines_field) or ""
-        text = text.rstrip("\r\n")
-        line_no = int(data.get("line_number") or 0)
-        submatches: list[Submatch] = []
-        first_col = None
-        for sub in data.get("submatches") or ():
-            start = int(sub.get("start", 0))
-            end = int(sub.get("end", start))
-            match_field = sub.get("match", {})
-            sub_text = match_field.get("text") or _decode_bytes_field(match_field) or ""
-            submatches.append(Submatch(start=start, end=end, text=sub_text))
-            if first_col is None:
-                first_col = start + 1
-        matches.append(
-            Match(
-                path=str((cwd / rel_path).resolve()),
-                rel_path=rel_path,
-                line=line_no,
-                column=first_col or 1,
-                text=text,
-                submatches=submatches,
-                context_before=_context_for_match(
-                    lines,
-                    cwd=cwd,
-                    rel_path=rel_path,
-                    line_no=line_no,
-                    before=True,
-                    context_lines=before,
-                ),
-                context_after=_context_for_match(
-                    lines,
-                    cwd=cwd,
-                    rel_path=rel_path,
-                    line_no=line_no,
-                    before=False,
-                    context_lines=after,
-                ),
-            )
-        )
-        if max_total is not None and len(matches) >= max_total:
-            break
-    return matches
-
-
-def _context_for_match(
-    events: Sequence[str],
-    *,
-    cwd: Path,
+def _path_allowed(
     rel_path: str,
-    line_no: int,
-    before: bool,
-    context_lines: int,
-) -> list[tuple[int, str]]:
-    if context_lines <= 0:
-        return []
-    context: list[tuple[int, str]] = []
-    abs_path = (cwd / rel_path).resolve()
-    for raw in events:
-        if not raw:
-            continue
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") != "context":
-            continue
-        data = event.get("data", {})
-        event_rel = data.get("path", {}).get("text") or _decode_bytes_field(data.get("path", {}))
-        if event_rel is None or (cwd / event_rel).resolve() != abs_path:
-            continue
-        context_line_no = int(data.get("line_number") or 0)
-        if before:
-            if not line_no - context_lines <= context_line_no < line_no:
-                continue
-        elif not line_no < context_line_no <= line_no + context_lines:
-            continue
-        lines_field = data.get("lines", {})
-        text = lines_field.get("text") or _decode_bytes_field(lines_field) or ""
-        context.append((context_line_no, text.rstrip("\r\n")))
-    context.sort(key=lambda item: item[0])
-    return context
-
-
-def find_files(
-    root: str | Path = ".",
     *,
-    roots: str | Path | Sequence[str | Path] | None = None,
-    globs: str | Sequence[str] | None = None,
-    file_types: str | Sequence[str] | None = None,
-    max_total: int | None = None,
-    hidden: bool = False,
-    no_ignore: bool = False,
-    extra_args: str | Sequence[str] | None = None,
-) -> list[str]:
-    """List workspace files via ripgrep, respecting `.gitignore` by default.
-
-    Returns absolute paths so the result can be passed directly to file helpers.
-    This is typically far faster than `Path.rglob` on large repositories.
-    """
-    resolved_roots = _resolve_roots(root=root, roots=roots)
-    normalized_globs = _coerce_str_sequence(globs, name="globs")
-    normalized_file_types = _coerce_file_types(file_types)
-    normalized_extra_args = _coerce_str_sequence(extra_args, name="extra_args")
-    if max_total is not None and max_total <= 0:
-        return []
-
-    files: list[str] = []
-    remaining = max_total
-    for resolved in resolved_roots:
-        root_files = _find_files_one(
-            resolved=resolved,
-            globs=normalized_globs,
-            file_types=normalized_file_types,
-            max_total=remaining,
-            hidden=hidden,
-            no_ignore=no_ignore,
-            extra_args=normalized_extra_args,
-        )
-        files.extend(root_files)
-        if remaining is not None:
-            remaining -= len(root_files)
-            if remaining <= 0:
-                break
-    return files
-
-
-def _find_files_one(
-    *,
-    resolved: Path,
+    scope_rel: str | None,
     globs: Sequence[str] | None,
     file_types: Sequence[str] | None,
-    max_total: int | None,
-    hidden: bool,
-    no_ignore: bool,
-    extra_args: Sequence[str] | None,
-) -> list[str]:
-    cwd_path, target_paths = _split_root(resolved)
-    args = _build_args(
-        pattern=None,
-        files_only=True,
-        globs=globs,
-        file_types=file_types,
-        ignore_case=False,
-        fixed_string=False,
-        multiline=False,
-        word=False,
-        before=0,
-        after=0,
-        max_count=None,
-        hidden=hidden,
-        no_ignore=no_ignore,
-        extra=extra_args,
-    )
-    args.extend(target_paths)
-    if max_total is None:
-        code, stdout, stderr = _run(args, cwd_path)
-        if code >= 2:
-            _raise_ripgrep_error(code, stderr, helper="find_files")
-        return [_absolute_result_path(cwd_path, line) for line in stdout.splitlines() if line]
-    code, lines, stderr, terminated = _run_limited(args, cwd_path, line_limit=max_total)
-    if code >= 2 and not terminated:
-        _raise_ripgrep_error(code, stderr, helper="find_files")
-    return [_absolute_result_path(cwd_path, line) for line in lines if line][:max_total]
+) -> bool:
+    rel = _normalize_rel_path(rel_path)
+    if scope_rel is not None and rel != scope_rel:
+        return False
+
+    type_patterns = _type_globs(file_types)
+    if type_patterns and not _matches_any_glob(rel, type_patterns):
+        return False
+
+    normalized_globs = [_normalize_glob(glob) for glob in globs or ()]
+    include_globs = [glob for glob in normalized_globs if not glob.startswith("!")]
+    exclude_globs = [glob[1:] for glob in normalized_globs if glob.startswith("!")]
+    if include_globs and not _matches_any_glob(rel, include_globs):
+        return False
+    if exclude_globs and _matches_any_glob(rel, exclude_globs):
+        return False
+    return True
+
+
+def _abs_path(base: Path, rel_path: str) -> str:
+    parts = [part for part in _normalize_rel_path(rel_path).split("/") if part]
+    return str((base.joinpath(*parts) if parts else base).resolve())
+
+
+def _fff_module():
+    try:
+        import fff  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - exercised only in broken envs
+        raise FffSearchNotAvailableError() from exc
+    return fff
+
+
+def _finder(base_path: Path, *, refresh: bool = False):
+    """Return a cached finder for ``base_path``.
+
+    The cache is intentionally process-local.  Managed scripts run in fresh
+    Python processes, but a single script often performs several related searches;
+    reusing the native index within that process is where FFF's long-running
+    design gives the runtime helpers their biggest win.
+    """
+
+    fff = _fff_module()
+    key = str(base_path)
+    if refresh and key in _FINDER_CACHE:
+        old = _FINDER_CACHE.pop(key)
+        close = getattr(old, "close", None)
+        if callable(close):
+            close()
+    cached = _FINDER_CACHE.get(key)
+    if cached is not None:
+        _FINDER_CACHE.move_to_end(key)
+        return cached
+
+    try:
+        finder = fff.FileFinder(
+            base_path,
+            watch=False,
+            enable_content_indexing=True,
+            ai_mode=True,
+        )
+        if not finder.wait_for_scan_blocking(timeout_ms=120_000):
+            finder.close()
+            raise HelperRuntimeError(
+                helper="search helpers",
+                problem=f"fff indexing timed out for {base_path}",
+                hints=("Try a narrower root, or pass refresh=True after reducing the file set.",),
+            )
+    except HelperRuntimeError:
+        raise
+    except Exception as exc:
+        raise HelperRuntimeError(
+            helper="search helpers",
+            problem=f"fff failed to index {base_path}: {exc}",
+        ) from exc
+
+    _FINDER_CACHE[key] = finder
+    _FINDER_CACHE.move_to_end(key)
+    while len(_FINDER_CACHE) > _FINDER_CACHE_LIMIT:
+        _, evicted = _FINDER_CACHE.popitem(last=False)
+        close = getattr(evicted, "close", None)
+        if callable(close):
+            close()
+    return finder
+
+
+def _close_finders() -> None:
+    for finder in list(_FINDER_CACHE.values()):
+        close = getattr(finder, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+    _FINDER_CACHE.clear()
+
+
+atexit.register(_close_finders)
 
 
 def _resolve_roots(
@@ -715,6 +358,14 @@ def _resolve_roots(
     return [resolve_workspace_path(item) for item in _coerce_path_sequence(roots, name="roots") or []]
 
 
+def _split_root(resolved: Path) -> tuple[Path, str | None]:
+    """Return ``(finder_base, optional_single_file_rel)`` for a root."""
+
+    if resolved.is_file():
+        return resolved.parent, _normalize_rel_path(resolved.name)
+    return resolved, None
+
+
 def _resolve_context_counts(*, before: int, after: int, context: int | None) -> tuple[int, int]:
     if before < 0 or after < 0:
         raise HelperValueError(helper="search_text", problem="before and after must be >= 0")
@@ -727,30 +378,346 @@ def _resolve_context_counts(*, before: int, after: int, context: int | None) -> 
     return context, context
 
 
-def _absolute_result_path(cwd: Path, rel_path: str) -> str:
-    return str((cwd / rel_path).resolve())
+def _reject_extra_args(extra_args: str | Sequence[str] | None) -> None:
+    if extra_args is not None:
+        raise HelperValueError(
+            helper="search helpers",
+            problem="extra_args is not supported by the fff-backed search helpers",
+            hints=("Use root/roots, globs, types, mode, context, and limit instead of backend-specific command arguments.",),
+        )
 
 
-def _split_root(resolved: Path) -> tuple[Path, list[str]]:
-    """Return ``(cwd, positional_paths)`` for ripgrep based on the resolved root.
+def _finder_items(
+    finder,
+    *,
+    query: str,
+    page_size: int,
+):
+    offset = 0
+    while True:
+        result = finder.search(query, page_index=offset, page_size=page_size)
+        items = list(result.items)
+        if not items:
+            break
+        yield from items
+        offset += len(items)
+        if offset >= int(result.total_matched):
+            break
 
-    Ripgrep requires ``cwd`` to be a directory. When the agent passes a file as
-    the search root, scope the search to that single file by using its parent
-    as ``cwd`` and appending the file name as a positional path argument.
+
+def find_files(
+    root: str | Path = ".",
+    *,
+    roots: str | Path | Sequence[str | Path] | None = None,
+    query: str = "",
+    globs: str | Sequence[str] | None = None,
+    file_types: str | Sequence[str] | None = None,
+    types: str | Sequence[str] | None = None,
+    max_total: int | None = None,
+    hidden: bool = False,
+    no_ignore: bool = False,
+    extra_args: str | Sequence[str] | None = None,
+    refresh: bool = False,
+) -> list[str]:
+    """List indexed workspace files with optional fuzzy, glob, and type filters.
+
+    ``query`` performs FFF's typo-tolerant filename search. ``globs`` and
+    ``types``/``file_types`` are deterministic filters applied to relative paths.
+    FFF respects gitignore/ignore files during indexing by default; the legacy
+    ``hidden`` and ``no_ignore`` parameters are accepted for compatibility but do
+    not alter the native indexer.
     """
-    if resolved.is_file():
-        return resolved.parent, [resolved.name]
-    return resolved, []
+
+    _reject_extra_args(extra_args)
+    if max_total is not None and max_total <= 0:
+        return []
+    if types is not None and file_types is not None:
+        raise HelperValueError(helper="find_files", problem="types and file_types are aliases; pass only one")
+    normalized_globs = _coerce_str_sequence(globs, name="globs")
+    normalized_file_types = _coerce_file_types(types if types is not None else file_types)
+    resolved_roots = _resolve_roots(root=root, roots=roots)
+
+    files: list[str] = []
+    remaining = max_total
+    for resolved in resolved_roots:
+        base_path, scope_rel = _split_root(resolved)
+        finder = _finder(base_path, refresh=refresh)
+        page_size = max(100, min(1000, remaining or 1000))
+        for item in _finder_items(finder, query=query, page_size=page_size):
+            rel_path = str(item.relative_path)
+            if not _path_allowed(
+                rel_path,
+                scope_rel=scope_rel,
+                globs=normalized_globs,
+                file_types=normalized_file_types,
+            ):
+                continue
+            files.append(_abs_path(base_path, rel_path))
+            if remaining is not None:
+                remaining -= 1
+                if remaining <= 0:
+                    return files
+    return files
 
 
-def _decode_bytes_field(field_obj: dict) -> str | None:
-    """rg --json sometimes emits {'bytes': '<base64>'} for non-UTF-8 input."""
-    encoded = field_obj.get("bytes")
-    if not encoded:
-        return None
-    import base64
+def _effective_mode(
+    *,
+    mode: SearchMode | None,
+    fixed_string: bool,
+    literal: bool | None,
+) -> str:
+    if mode is None:
+        mode = "text"
+    normalized = "text" if mode in {"plain", "literal"} else mode
+    if literal is True or fixed_string:
+        normalized = "text"
+    if normalized not in {"text", "regex", "fuzzy"}:
+        raise HelperValueError(
+            helper="search_text",
+            problem=f"mode must be one of 'text', 'regex', or 'fuzzy', got {mode!r}",
+        )
+    return normalized
 
-    try:
-        return base64.b64decode(encoded).decode("utf-8", errors="replace")
-    except Exception:
-        return None
+
+
+def _prepare_query(
+    pattern: str,
+    *,
+    mode: str,
+    ignore_case: bool,
+    case_sensitive: bool | None,
+    word: bool,
+) -> tuple[str, str, bool]:
+    """Return ``(query, fff_mode, smart_case)``."""
+
+    force_ignore_case = ignore_case or case_sensitive is False
+    force_case_sensitive = case_sensitive is True or not force_ignore_case
+    fff_mode = "plain" if mode == "text" else mode
+    query = pattern
+
+    if word:
+        if mode == "text":
+            query = re.escape(query)
+        query = rf"\b(?:{query})\b"
+        fff_mode = "regex"
+
+    if force_ignore_case:
+        if fff_mode == "regex":
+            query = f"(?i:{query})"
+            return query, fff_mode, False
+        # FFF's smart-case mode is case-insensitive only when the query has no
+        # uppercase letters. Lowercasing the needle preserves literal semantics
+        # while forcing an ignore-case search.
+        return query.lower(), fff_mode, True
+
+    return query, fff_mode, not force_case_sensitive
+
+
+def _submatch_text(line: str, start: int, end: int) -> str:
+    return line.encode("utf-8", errors="replace")[start:end].decode("utf-8", errors="replace")
+
+
+
+def _literal_submatches(pattern: str, line: str, *, ignore_case: bool) -> list[Submatch]:
+    haystack = line.lower() if ignore_case else line
+    needle = pattern.lower() if ignore_case else pattern
+    out: list[Submatch] = []
+    start_index = 0
+    while needle:
+        found = haystack.find(needle, start_index)
+        if found < 0:
+            break
+        end_index = found + len(needle)
+        start = len(line[:found].encode("utf-8", errors="replace"))
+        end = len(line[:end_index].encode("utf-8", errors="replace"))
+        out.append(Submatch(start=start, end=end, text=line[found:end_index]))
+        start_index = max(end_index, found + 1)
+    return out
+
+
+def _match_from_fff(
+    base_path: Path,
+    item,
+    *,
+    literal_pattern: str | None,
+    ignore_case: bool,
+) -> Match:
+    rel_path = str(item.relative_path)
+    ranges = list(item.match_ranges)
+    line_content = str(item.line_content)
+    # FFF's regex and fuzzy modes already return backend-accurate byte ranges.
+    # Plain mode can return broad ranges for some queries, so reconstruct exact
+    # literal spans only when the caller requested text search without word-mode
+    # regex expansion.
+    submatches = (
+        _literal_submatches(literal_pattern, line_content, ignore_case=ignore_case)
+        if literal_pattern is not None
+        else []
+    ) or [
+        Submatch(
+            start=int(match_range.start),
+            end=int(match_range.end),
+            text=_submatch_text(line_content, int(match_range.start), int(match_range.end)),
+        )
+        for match_range in ranges
+    ]
+    first_col = submatches[0].start + 1 if submatches else int(item.col) + 1
+    line_no = int(item.line_number)
+    before_lines = list(item.context_before)
+    after_lines = list(item.context_after)
+    context_before = [
+        (line_no - len(before_lines) + index, text)
+        for index, text in enumerate(before_lines)
+    ]
+    context_after = [(line_no + index + 1, text) for index, text in enumerate(after_lines)]
+    return Match(
+        path=_abs_path(base_path, rel_path),
+        rel_path=rel_path,
+        line=line_no,
+        column=first_col,
+        text=str(item.line_content),
+        submatches=submatches,
+        context_before=context_before,
+        context_after=context_after,
+    )
+
+
+def _raise_regex_error(pattern: str, error: str | None) -> None:
+    detail = (error or "invalid regex pattern").strip()
+    raise HelperRuntimeError(
+        helper="search_text",
+        problem=f"regex search failed: {detail}",
+        details={"pattern": pattern, "mode": "regex"},
+        preview_title="regex error",
+        preview=detail,
+        hints=(
+            "rt.search uses plain text by default; omit mode='regex' for exact code strings.",
+            "Use mode='regex' only when the pattern is intended to be a regular expression.",
+        ),
+    )
+
+
+def search_text(
+    pattern: str,
+    *,
+    root: str | Path = ".",
+    roots: str | Path | Sequence[str | Path] | None = None,
+    globs: str | Sequence[str] | None = None,
+    file_types: str | Sequence[str] | None = None,
+    types: str | Sequence[str] | None = None,
+    mode: SearchMode | None = None,
+    ignore_case: bool = False,
+    case_sensitive: bool | None = None,
+    fixed_string: bool = False,
+    literal: bool | None = None,
+    multiline: bool = False,
+    word: bool = False,
+    before: int = 0,
+    after: int = 0,
+    context: int | None = None,
+    max_count_per_file: int | None = None,
+    max_total: int | None = None,
+    hidden: bool = False,
+    no_ignore: bool = False,
+    extra_args: str | Sequence[str] | None = None,
+    refresh: bool = False,
+) -> list[Match]:
+    """Search file contents with FFF and return structured matches.
+
+    The default mode is plain text, which is safer for exact code snippets than
+    regular expressions.  Use ``mode="regex"`` for regex patterns or
+    ``mode="fuzzy"`` for typo-tolerant line search.  ``literal`` and
+    ``fixed_string`` are retained as compatibility aliases for plain-text mode.
+    """
+
+    _reject_extra_args(extra_args)
+    if not pattern:
+        raise HelperValueError(helper="search_text", problem="pattern must be non-empty")
+    if multiline:
+        raise HelperValueError(
+            helper="search_text",
+            problem="multiline content search is not supported by the fff-backed search helper",
+            hints=("Search for a line-local fragment, or run a custom Python scan when matching across line boundaries is required.",),
+        )
+    if types is not None and file_types is not None:
+        raise HelperValueError(helper="search_text", problem="types and file_types are aliases; pass only one")
+
+    before, after = _resolve_context_counts(before=before, after=after, context=context)
+    normalized_globs = _coerce_str_sequence(globs, name="globs")
+    normalized_file_types = _coerce_file_types(types if types is not None else file_types)
+    effective_mode = _effective_mode(mode=mode, fixed_string=fixed_string, literal=literal)
+    query, fff_mode, smart_case = _prepare_query(
+        pattern,
+        mode=effective_mode,
+        ignore_case=ignore_case,
+        case_sensitive=case_sensitive,
+        word=word,
+    )
+    if max_total is not None and max_total <= 0:
+        return []
+
+    matches: list[Match] = []
+    remaining = max_total
+    resolved_roots = _resolve_roots(root=root, roots=roots)
+    for resolved in resolved_roots:
+        base_path, scope_rel = _split_root(resolved)
+        finder = _finder(base_path, refresh=refresh)
+        cursor = None
+        has_path_filters = bool(scope_rel or normalized_globs or normalized_file_types)
+        while True:
+            # Use pages even when the caller asks for no global limit so filtered
+            # searches can skip non-matching files without asking FFF for the
+            # entire repository in one Python object.  When a small global limit
+            # is combined with path filters, request a full page so we do not
+            # crawl one disallowed match at a time before reaching an allowed file.
+            page_limit = 1000 if remaining is None or has_path_filters else min(1000, remaining)
+            try:
+                result = finder.grep(
+                    query,
+                    mode=fff_mode,
+                    max_matches_per_file=max_count_per_file or 0,
+                    smart_case=smart_case,
+                    cursor=cursor,
+                    page_limit=page_limit,
+                    before_context=before,
+                    after_context=after,
+                    classify_definitions=True,
+                )
+            except Exception as exc:
+                raise HelperRuntimeError(
+                    helper="search_text",
+                    problem=f"fff search failed for {base_path}: {exc}",
+                    details={"pattern": pattern, "mode": effective_mode},
+                ) from exc
+
+            if fff_mode == "regex" and result.regex_fallback_error:
+                _raise_regex_error(pattern, result.regex_fallback_error)
+
+            for item in result.items:
+                rel_path = str(item.relative_path)
+                if not _path_allowed(
+                    rel_path,
+                    scope_rel=scope_rel,
+                    globs=normalized_globs,
+                    file_types=normalized_file_types,
+                ):
+                    continue
+                matches.append(
+                    _match_from_fff(
+                        base_path,
+                        item,
+                        literal_pattern=pattern if effective_mode == "text" and not word else None,
+                        ignore_case=ignore_case or case_sensitive is False,
+                    )
+                )
+                if remaining is not None:
+                    remaining -= 1
+                    if remaining <= 0:
+                        return matches
+
+            if not result.has_more:
+                break
+            cursor = result.next_cursor()
+            if cursor is None:
+                break
+    return matches

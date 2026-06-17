@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
+import importlib.util
 import sqlite3
 import sys
 import threading
@@ -1146,13 +1146,13 @@ def test_runtime_emit_event_is_thread_safe_without_stdout(
 
 # ---- codesearch / codequery -----------------------------------------------
 
-requires_rg = pytest.mark.skipif(
-    shutil.which("rg") is None,
-    reason="ripgrep (`rg`) not on PATH",
+requires_fff = pytest.mark.skipif(
+    importlib.util.find_spec("fff") is None,
+    reason="fff-search package is not installed",
 )
 
 
-@requires_rg
+@requires_fff
 def test_runtime_facade_file_search_run_and_namespace_helpers(tmp_path: Path) -> None:
     rt.file(tmp_path / "pkg" / "a.py").write("def hello():\n    return 1\n")
 
@@ -1224,7 +1224,7 @@ def _make_python_workspace(root: Path) -> None:
     (root / "README.md").write_text("# project\n", encoding="utf-8")
 
 
-@requires_rg
+@requires_fff
 def test_codesearch_find_files_and_search_text(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
 
@@ -1246,7 +1246,7 @@ def test_codesearch_find_files_and_search_text(tmp_path: Path) -> None:
     assert hits[0].context_after
 
 
-@requires_rg
+@requires_fff
 def test_codesearch_accepts_file_root(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
     target = tmp_path / "src" / "a.py"
@@ -1265,7 +1265,7 @@ def test_codesearch_accepts_file_root(tmp_path: Path) -> None:
     assert world_hits == []
 
 
-@requires_rg
+@requires_fff
 def test_codesearch_accepts_multiple_roots(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -1283,7 +1283,7 @@ def test_codesearch_accepts_multiple_roots(tmp_path: Path) -> None:
     assert all(Path(h.path).is_absolute() for h in hits)
 
 
-@requires_rg
+@requires_fff
 def test_codesearch_multiple_roots_share_max_total(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -1297,7 +1297,7 @@ def test_codesearch_multiple_roots_share_max_total(tmp_path: Path) -> None:
     assert len(hits) == 2
 
 
-@requires_rg
+@requires_fff
 def test_codesearch_roots_accepts_single_path_string(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
 
@@ -1311,7 +1311,7 @@ def test_codesearch_root_and_roots_are_mutually_exclusive(tmp_path: Path) -> Non
         search_text("hello", root=tmp_path, roots=[tmp_path])
 
 
-@requires_rg
+@requires_fff
 def test_codequery_accepts_file_root(
     tmp_path: Path,
     codequery_home: Path,
@@ -1338,7 +1338,7 @@ def test_codequery_accepts_file_root(
     assert {c.path for c in captures} == {str(target.resolve())}
 
 
-@requires_rg
+@requires_fff
 def test_codesearch_search_text_fixed_string_and_max_total(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
     hits = search_text("def ", root=tmp_path, fixed_string=True, max_total=2)
@@ -1348,7 +1348,7 @@ def test_codesearch_search_text_fixed_string_and_max_total(tmp_path: Path) -> No
         assert hit.submatches[0].text == "def "
 
 
-@requires_rg
+@requires_fff
 def test_codesearch_search_text_accepts_literal_and_case_sensitive_aliases(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
 
@@ -1359,7 +1359,7 @@ def test_codesearch_search_text_accepts_literal_and_case_sensitive_aliases(tmp_p
     assert case_hits[0].submatches[0].text == "hello"
 
 
-@requires_rg
+@requires_fff
 def test_codesearch_accepts_scalar_filter_arguments(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
 
@@ -1371,25 +1371,41 @@ def test_codesearch_accepts_scalar_filter_arguments(tmp_path: Path) -> None:
 
 
 def test_codesearch_file_types_rejects_extension_patterns(tmp_path: Path) -> None:
-    with pytest.raises(HelperValueError, match="file_types uses ripgrep type aliases"):
+    with pytest.raises(HelperValueError, match="types uses aliases"):
         find_files(tmp_path, file_types=".py")
 
 
-@requires_rg
-def test_codesearch_regex_error_suggests_literal_search(tmp_path: Path) -> None:
+@requires_fff
+def test_codesearch_default_text_mode_does_not_require_regex_escaping(tmp_path: Path) -> None:
     _make_python_workspace(tmp_path)
 
-    with pytest.raises(HelperRuntimeError, match="literal=True"):
-        search_text("hello(", root=tmp_path)
+    hits = search_text("hello(", root=tmp_path, max_total=1)
 
-@requires_rg
+    assert hits[0].submatches[0].text == "hello("
+
+
+@requires_fff
+def test_codesearch_regex_error_suggests_text_search(tmp_path: Path) -> None:
+    _make_python_workspace(tmp_path)
+
+    with pytest.raises(HelperRuntimeError, match="mode='regex'"):
+        search_text("hello(", root=tmp_path, mode="regex")
+
+def test_codesearch_multiline_flag_is_explicitly_unsupported(tmp_path: Path) -> None:
+    _make_python_workspace(tmp_path)
+
+    with pytest.raises(HelperValueError, match="multiline content search is not supported"):
+        search_text("hello\n", root=tmp_path, multiline=True)
+
+
+@requires_fff
 def test_codequery_supported_languages_includes_python() -> None:
     langs = supported_symbol_languages()
     assert "python" in langs
     assert "rust" in langs
 
 
-@requires_rg
+@requires_fff
 def test_codequery_find_symbols_returns_python_definitions(
     tmp_path: Path,
     codequery_home: Path,
@@ -1411,7 +1427,7 @@ def test_codequery_find_symbols_returns_python_definitions(
     assert (codequery_home / "cache" / "codequery" / "index.sqlite").exists()
 
 
-@requires_rg
+@requires_fff
 def test_codequery_find_symbols_filters_by_kind_and_name(
     tmp_path: Path,
     codequery_home: Path,
@@ -1433,7 +1449,7 @@ def test_codequery_find_symbols_filters_by_kind_and_name(
     scalar_filters = find_symbols(tmp_path, languages="python", kinds="class")
     assert [s.name for s in scalar_filters] == ["Foo"]
 
-@requires_rg
+@requires_fff
 def test_codequery_query_code_runs_arbitrary_tree_sitter_query(
     tmp_path: Path,
     codequery_home: Path,
@@ -1454,7 +1470,7 @@ def test_codequery_query_code_runs_arbitrary_tree_sitter_query(
     assert cap.start_line == 6
 
 
-@requires_rg
+@requires_fff
 def test_codequery_cache_is_incremental(
     tmp_path: Path,
     codequery_home: Path,
@@ -1509,7 +1525,7 @@ def test_codequery_cache_is_incremental(
     assert rel_b in read_stats()
 
 
-@requires_rg
+@requires_fff
 def test_codequery_scoped_queries_do_not_prune_other_cached_files(
     tmp_path: Path,
     codequery_home: Path,
@@ -1536,7 +1552,7 @@ def test_codequery_scoped_queries_do_not_prune_other_cached_files(
     assert any(path.endswith("b.py") for path in cached_paths)
 
 
-@requires_rg
+@requires_fff
 def test_codequery_clear_cache_drops_rows(
     tmp_path: Path,
     codequery_home: Path,

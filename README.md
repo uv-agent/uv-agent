@@ -28,7 +28,7 @@ may change.
   economic formula. Compression fires only when cache savings outweigh information
   loss. Recent context is retained verbatim (K tokens) to avoid losing key details.
 - **Python managed runtime** — scripts run in a project-shared `uv` environment.
-  `uv_agent_runtime` provides helpers for read/write/edit, ripgrep search,
+  `uv_agent_runtime` provides helpers for read/write/edit, FFF-backed search,
   subprocesses, dependency installation, sub-agents, MCP clients, and more.
   Scripts serve as documentation — no opaque shell commands.
 - **Plugin system** — plain Python packages discovered via `uv_agent.plugins` entry
@@ -78,7 +78,6 @@ This design draws on the DP compaction algorithm from
 Prerequisites:
 
 - **uv** — https://docs.astral.sh/uv/getting-started/installation/
-- **ripgrep** — https://github.com/BurntSushi/ripgrep#installation
 - **Git** — needed for normal coding workflows and Worktree mode.
 
 ```powershell

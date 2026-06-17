@@ -57,7 +57,7 @@ from .textops import (
     TextComparison,
     TextFile,
 )
-from .codesearch import Match, RipgrepNotFoundError, Submatch
+from .codesearch import FffSearchNotAvailableError, Match, RipgrepNotFoundError, Submatch
 from .codequery import Capture, Symbol
 from .goal_mode import RuntimeGoalPaths
 from .lockfile import HeldFileLock
@@ -111,6 +111,7 @@ __all__ = [
     "ProcessDetail",
     "ProcessRef",
     "ReplacementResult",
+    "FffSearchNotAvailableError",
     "RipgrepNotFoundError",
     "RunEventDetail",
     "SearchResults",

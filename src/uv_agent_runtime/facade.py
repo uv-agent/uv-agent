@@ -145,10 +145,11 @@ class FileSet(CollectionResult[str]):
 
     def search(
         self,
-        pattern: str,
+        query: str,
         *,
         globs: str | Sequence[str] | None = None,
         types: str | Sequence[str] | None = None,
+        mode: codesearch.SearchMode | None = None,
         ignore_case: bool = False,
         case_sensitive: bool | None = None,
         fixed_string: bool = False,
@@ -163,12 +164,14 @@ class FileSet(CollectionResult[str]):
         hidden: bool = False,
         no_ignore: bool = False,
         extra_args: str | Sequence[str] | None = None,
+        refresh: bool = False,
     ) -> SearchResults:
         return search(
-            pattern,
+            query,
             roots=self._items,
             globs=globs,
             types=types,
+            mode=mode,
             ignore_case=ignore_case,
             case_sensitive=case_sensitive,
             fixed_string=fixed_string,
@@ -183,6 +186,7 @@ class FileSet(CollectionResult[str]):
             hidden=hidden,
             no_ignore=no_ignore,
             extra_args=extra_args,
+            refresh=refresh,
         )
 
     def symbols(
@@ -617,12 +621,13 @@ class _EventsNamespace:
 
 @_track("search")
 def search(
-    pattern: str,
+    query: str,
     *,
     root: str | Path = ".",
     roots: str | Path | Sequence[str | Path] | None = None,
     globs: str | Sequence[str] | None = None,
     types: str | Sequence[str] | None = None,
+    mode: codesearch.SearchMode | None = None,
     ignore_case: bool = False,
     case_sensitive: bool | None = None,
     fixed_string: bool = False,
@@ -637,14 +642,16 @@ def search(
     hidden: bool = False,
     no_ignore: bool = False,
     extra_args: str | Sequence[str] | None = None,
+    refresh: bool = False,
 ) -> SearchResults:
     return SearchResults(
         codesearch.search_text(
-            pattern,
+            query,
             root=root,
             roots=roots,
             globs=globs,
-            file_types=types,
+            types=types,
+            mode=mode,
             ignore_case=ignore_case,
             case_sensitive=case_sensitive,
             fixed_string=fixed_string,
@@ -659,6 +666,7 @@ def search(
             hidden=hidden,
             no_ignore=no_ignore,
             extra_args=extra_args,
+            refresh=refresh,
         )
     )
 
@@ -668,23 +676,27 @@ def files(
     root: str | Path = ".",
     *,
     roots: str | Path | Sequence[str | Path] | None = None,
+    query: str = "",
     globs: str | Sequence[str] | None = None,
     types: str | Sequence[str] | None = None,
     limit: int | None = None,
     hidden: bool = False,
     no_ignore: bool = False,
     extra_args: str | Sequence[str] | None = None,
+    refresh: bool = False,
 ) -> FileSet:
     return FileSet(
         codesearch.find_files(
-            root=root,
+            root,
             roots=roots,
+            query=query,
             globs=globs,
-            file_types=types,
+            types=types,
             max_total=limit,
             hidden=hidden,
             no_ignore=no_ignore,
             extra_args=extra_args,
+            refresh=refresh,
         )
     )
 
