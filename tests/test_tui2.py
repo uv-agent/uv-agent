@@ -5,6 +5,7 @@ import json
 import io
 import math
 import pytest
+import re
 import sys
 import threading
 from pathlib import Path
@@ -818,38 +819,101 @@ def test_first_repaint_uses_sync_output() -> None:
     assert "\x1b[J" not in rendered  # no previous frame to erase
 
 
-def test_second_repaint_erases_using_tracked_cursor_row() -> None:
+def test_second_repaint_erases_with_absolute_rows_not_relative_moves(monkeypatch) -> None:
+    # The renderer must not erase the previous frame with relative cursor-up
+    # (\x1b[<n>A) or \x1b[J: those drift when the terminal moves the cursor or
+    # scrolls between frames (window focus-in / resize), stranding old
+    # "... running" rows into scrollback.  Erasure is absolute CUP + EL only.
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
     output = io.StringIO()
     renderer = Renderer(output=output)
 
     renderer.repaint(Tui2State(composer=""))
-    expected = renderer.cursor_row
-    assert expected >= 1, "boxed composer puts the cursor below the top border"
+    top = renderer._frame_top_row
+    assert top >= 1
     output.seek(0)
     output.truncate(0)
 
     renderer.repaint(Tui2State(composer="a"))
     rendered = output.getvalue()
 
-    assert rendered.startswith(f"\x1b[?2026h\x1b[?7l\r\x1b[{expected}A\x1b[J")
+    assert rendered.startswith("\x1b[?2026h\x1b[?7l")
+    assert "\x1b[J" not in rendered  # never erase to end of screen blindly
+    assert not re.search(r"\x1b\[\d*A", rendered)  # no relative cursor-up
+    assert "\x1b[2K" in rendered  # per-row erase-line
+    assert f"\x1b[{top};1H" in rendered  # absolute anchor of the live frame
     assert "\r\n" in rendered  # CR+LF separator avoids POSIX staircase
 
 
-def test_grown_paint_area_remembers_cursor_for_next_erase() -> None:
+def test_repaint_anchors_frame_independent_of_external_cursor_drift(monkeypatch) -> None:
+    # Even if the terminal moves the cursor between frames, the next repaint
+    # re-anchors absolutely from the current terminal size, so the frame top is
+    # recomputed rather than carried as a relative offset.
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
     output = io.StringIO()
     renderer = Renderer(output=output)
 
     state = Tui2State(composer="line1\nline2\nline3", busy=True, turn_elapsed_s=1.0)
     renderer.repaint(state)
-    expected_row = renderer.cursor_row
-    assert expected_row > 1
+    first_top = renderer._frame_top_row
     output.seek(0)
     output.truncate(0)
 
     renderer.repaint(state)
-    erase = output.getvalue()
-    assert f"\x1b[{expected_row}A" in erase
-    assert "\x1b[J" in erase
+    rendered = output.getvalue()
+    assert f"\x1b[{renderer._frame_top_row};1H" in rendered
+    assert renderer._frame_top_row == first_top  # stable anchor when nothing changed
+    assert not re.search(r"\x1b\[\d*A", rendered)
+    assert "\x1b[J" not in rendered
+
+
+def test_repaint_pins_live_region_to_bottom_when_saturated(monkeypatch) -> None:
+    # Once the transcript would overflow the viewport, the live frame pins to
+    # the bottom rows so its absolute anchor stays stable across scrolls and
+    # external terminal events.
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer._transcript_rows = 500  # far beyond the 20-row viewport
+
+    renderer.repaint(Tui2State(composer="hi"))
+
+    assert renderer._frame_top_row == 20 - renderer._frame_rows + 1
+    assert renderer._frame_top_row + renderer._frame_rows - 1 == 20  # pinned to last row
+
+
+def test_repaint_floats_live_region_after_short_transcript(monkeypatch) -> None:
+    # While the screen is not full, the live region floats right after the
+    # transcript instead of jumping to the bottom.
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 40))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer._transcript_rows = 3
+    renderer._anchor_known = True
+
+    renderer.repaint(Tui2State(composer="hi"))
+
+    assert renderer._frame_top_row == 4  # transcript_rows + 1
+
+
+def test_flush_cell_redraws_post_flush_live_region(monkeypatch) -> None:
+    # Flushing a completed cell must also redraw the remaining live region just
+    # below it, so a later absolute repaint cannot overwrite the flushed cell.
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+
+    live_state = Tui2State(composer="next question")
+    renderer.flush_cell(TranscriptCell("assistant", text="done"), live_state)
+    rendered = output.getvalue()
+    plain = _plain_renderer_lines(rendered)
+
+    assert any("done" in line for line in plain)  # flushed cell text
+    assert any(line.startswith("\u256d") for line in plain)  # composer box drawn after it
+    assert renderer._has_frame
+    assert renderer._frame_rows > 0
+
+
 def _plain_renderer_lines(rendered: str) -> list[str]:
     cleaned = (
         strip_ansi(rendered)
@@ -904,10 +968,12 @@ def test_renderer_repaint_separates_live_user_from_previous_flushed_turn(monkeyp
     renderer.repaint(state)
     plain = _plain_renderer_lines(output.getvalue())
 
-    assert plain[0].strip() == ""
-    assert plain[1].startswith("› next question")
-    assert plain[2].strip() == ""
-    assert plain[3].startswith("╭")
+    visible = [line for line in plain if line.strip()]
+    user_idx = next(i for i, line in enumerate(plain) if line.startswith("› next question"))
+    assert user_idx > 0  # first repaint may reserve bottom rows before drawing
+    assert plain[user_idx - 1].strip() == ""
+    assert plain[user_idx + 1].strip() == ""
+    assert any(line.startswith("╭") for line in visible)
 
 
 def test_renderer_repaint_separates_just_flushed_tool_from_status(monkeypatch) -> None:
@@ -922,9 +988,10 @@ def test_renderer_repaint_separates_just_flushed_tool_from_status(monkeypatch) -
     renderer.repaint(state)
     plain = _plain_renderer_lines(output.getvalue())
 
-    assert plain[0].strip() == ""
-    assert "Working" in plain[1]
-    assert plain[2].startswith("╭")
+    working_idx = next(i for i, line in enumerate(plain) if "Working" in line)
+    assert working_idx > 0  # first repaint may reserve bottom rows before drawing
+    assert plain[working_idx - 1].strip() == ""
+    assert any(line.startswith("╭") for line in plain[working_idx + 1:])
 
 
 def test_flush_cell_only_uses_crlf_separators() -> None:
@@ -1102,6 +1169,7 @@ class _DummyEngine:
     class thread_store:
         threads: list[dict] = []
         events: list[dict] = []
+        history_segments: dict[str, list[dict]] = {}
         snapshots: dict[str, dict] = {}
 
         @classmethod
@@ -1167,10 +1235,16 @@ class _DummyEngine:
             return list(cls.threads)
 
         @classmethod
-        def read_history_segment(cls, *args, **kwargs):
+        def read_history_segment(cls, thread_id, *args, **kwargs):
             from uv_agent.session.store import ThreadHistorySegment
 
-            return ThreadHistorySegment(events=[], start_event_id=0, end_event_id=0, has_more=False)
+            events = list(cls.history_segments.get(thread_id, []))
+            return ThreadHistorySegment(
+                events=events,
+                start_event_id=0,
+                end_event_id=len(events),
+                has_more=False,
+            )
 
         @classmethod
         def snapshot(cls, thread_id):
@@ -1249,18 +1323,20 @@ class _DummyRenderer:
         self._has_frame = False
         self.width = 80
         self.flushed: list[TranscriptCell] = []
+        self.flush_live_states: list[object] = []
         self.clear_calls: list[str | None] = []
         self.repaint_status_messages: list[str] = []
 
     def repaint(self, state) -> None:
         self.repaint_status_messages.append(state.status_message)
 
-    def flush_cell(self, cell) -> None:
+    def flush_cell(self, cell, live_state=None) -> None:
         self.flushed.append(cell)
+        self.flush_live_states.append(live_state)
 
-    def flush_cells(self, cells) -> None:
+    def flush_cells(self, cells, live_state=None) -> None:
         for cell in cells:
-            self.flush_cell(cell)
+            self.flush_cell(cell, live_state=live_state)
 
     def clear_screen(self, *, rule=None) -> None:
         self.clear_calls.append(rule)
@@ -1274,6 +1350,7 @@ def _make_app(monkeypatch):
     engine = _DummyEngine()
     engine.thread_store.threads = []
     engine.thread_store.events = []
+    engine.thread_store.history_segments = {}
     engine.thread_store.snapshots = {}
     monkeypatch.setattr("uv_agent.tui2.app.create_engine", lambda *a, **k: engine)
     app = AnsiUvAgentApp()
@@ -1471,6 +1548,68 @@ def test_clear_command_uses_plain_clear_screen_without_separator(monkeypatch) ->
     assert "─" not in app.renderer.output.getvalue()
     assert app.state.flushed[-1].kind == "event"
     assert "cleared view" in app.state.flushed[-1].text
+
+
+def test_resume_thread_appends_history_without_clearing_screen(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [{"thread_id": "thr_saved", "title": "Saved"}]
+    app.engine.thread_store.history_segments = {
+        "thr_saved": [
+            {
+                "type": "item.user",
+                "thread_id": "thr_saved",
+                "turn_id": "turn_1",
+                "item": {"content": [{"type": "input_text", "text": "hello"}]},
+            },
+            {
+                "type": "item.model_response",
+                "thread_id": "thr_saved",
+                "turn_id": "turn_1",
+                "response_id": "resp_1",
+                "output": [
+                    {"type": "message", "content": [{"type": "output_text", "text": "final output tail"}]}
+                ],
+            },
+            {
+                "type": "turn.completed",
+                "thread_id": "thr_saved",
+                "turn_id": "turn_1",
+                "final_text": "final output tail",
+            },
+        ]
+    }
+
+    app._resume_thread("thr_saved")
+
+    assert app.renderer.clear_calls == []
+    assert [cell.kind for cell in app.renderer.flushed[:3]] == ["event", "user", "assistant"]
+    assert app.renderer.flushed[0].text.startswith(app._text("resumed"))
+    assert app.renderer.flushed[-1].text == "final output tail"
+
+
+def test_resume_thread_passes_live_state_to_batch_flush(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.thread_store.threads = [{"thread_id": "thr_saved", "title": "Saved"}]
+
+    app._resume_thread("thr_saved")
+
+    assert app.renderer.flushed
+    assert app.renderer.flushed[0].kind == "event"
+    assert app.renderer.flush_live_states[0] is app.state
+
+
+def test_resume_thread_keeps_final_history_tail_before_live_frame(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 8))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    cells = [TranscriptCell("assistant", text="final output tail")]
+
+    renderer.flush_cells(cells, live_state=Tui2State(composer="next"))
+    rendered = output.getvalue()
+
+    assert "[2J" not in rendered and "[3J" not in rendered
+    assert rendered.index("final output tail") < rendered.index("╭")
+    assert renderer._has_frame
 
 
 def test_regular_key_cancels_ctrl_c_quit_confirmation(monkeypatch) -> None:

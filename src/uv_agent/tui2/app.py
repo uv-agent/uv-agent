@@ -3100,22 +3100,18 @@ class AnsiUvAgentApp:
         self.state.last_error = None
         self._refresh_window_title()
         cells = self._history_cells_for_thread(thread_id)
-        self.state.flushed.extend(_retained_flushed_cell(cell) for cell in cells)
+        resume_cell = TranscriptCell(
+            "event",
+            text=f"{self._text('resumed')} {short_thread(thread_id)} · {self.state.title}",
+        )
+        display_cells = [resume_cell, *cells]
+        self.state.flushed.extend(_retained_flushed_cell(cell) for cell in display_cells)
         self._trim_flushed_cells()
-        if hasattr(self.renderer, "clear_screen"):
-            self.renderer.clear_screen()
-        else:
-            self.renderer._has_frame = False  # type: ignore[attr-defined]
-            self.renderer.output.write("[2J[H")
-            self.renderer.output.flush()
-        flushed_rows = self.renderer.flushed_cell_rows(cells) if hasattr(self.renderer, "flushed_cell_rows") else 0
-        self.renderer.flush_cells(cells)
         self.state.status_message = f"{self._text('resumed')} {short_thread(thread_id)}"
         self._sync_attached_run_state(run_state)
         if run_state is None or not run_state.running:
             self.state.status_message = f"{self._text('resumed')} {short_thread(thread_id)}"
-        if hasattr(self.renderer, "pad_live_region_to_bottom"):
-            self.renderer.pad_live_region_to_bottom(self.state, preceding_rows=flushed_rows)
+        self.renderer.flush_cells(display_cells, live_state=self.state)
         self._safe_repaint()
 
     def _history_cells_for_thread(self, thread_id: str) -> list[TranscriptCell]:
@@ -3975,7 +3971,10 @@ class AnsiUvAgentApp:
             run_state.user_cell = None
         cell.status = "done" if cell.status in {"running", "streaming"} else cell.status
         cell.finished_at = cell.finished_at or monotonic()
-        self.renderer.flush_cell(cell)
+        # ``state.live`` no longer holds ``cell`` (removed above), so ``self.state``
+        # is the post-flush live region the renderer should redraw beneath the
+        # freshly flushed cell.
+        self.renderer.flush_cell(cell, self.state)
         self._remember_flushed_cell(cell)
 
     # ------------------------------------------------------------------
