@@ -60,7 +60,9 @@ def model_levels_context(config: AppConfig) -> str:
         workflow_default = MODEL_LEVELS_WORKFLOW_DEFAULT_TEMPLATE.format(
             workflow_default=xml_text(workflow_default_level)
         )
-    levels = "\n".join(MODEL_LEVELS_LEVEL_TEMPLATE.format(level=xml_text(name)) for name in config.levels)
+    levels = "\n".join(
+        MODEL_LEVELS_LEVEL_TEMPLATE.format(level=xml_text(name)) for name in config.public_levels()
+    )
     return MODEL_LEVELS_TEMPLATE.format(
         default=xml_text(config.runtime.default_level),
         workflow_default=workflow_default,

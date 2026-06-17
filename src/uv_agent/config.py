@@ -110,6 +110,7 @@ class LevelConfig:
     name: str
     model: str
     params: dict[str, Any] = field(default_factory=dict)
+    hidden: bool = False
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,11 @@ class AppConfig:
     ui: UiConfig = field(default_factory=UiConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
+
+    def public_levels(self) -> dict[str, LevelConfig]:
+        """Return levels exposed in user/model-facing pickers and context."""
+
+        return {name: level for name, level in self.levels.items() if not level.hidden}
 
     def level(self, name: str | None = None) -> LevelConfig:
         level_name = name or self.runtime.default_level
@@ -413,6 +419,8 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
             continue
         level_value = dict(value)
         level_value.pop("reasoning", None)
+        hidden = level_value.get("hidden", False)
+        level_value["hidden"] = hidden if isinstance(hidden, bool) else False
         levels[name] = LevelConfig(name=name, **level_value)
     runtime_raw = _object_dict(raw.get("runtime", {}))
     compression = CompressionConfig(**_object_dict(runtime_raw.get("compression", {})))
@@ -421,9 +429,13 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         **_object_dict(runtime_raw.get("branch_name_generation", {}))
     )
     stream_retry = StreamRetryConfig(**_object_dict(runtime_raw.get("stream_retry", {})))
-    default_level = runtime_raw.get("default_level", "medium")
+    public_level_names = [name for name, level in levels.items() if not level.hidden]
+    default_level_raw = runtime_raw.get("default_level", "medium")
+    default_level = default_level_raw if isinstance(default_level_raw, str) and default_level_raw else "medium"
     if default_level not in levels and levels:
-        default_level = next(iter(levels))
+        default_level = public_level_names[0] if public_level_names else next(iter(levels))
+    elif default_level in levels and levels[default_level].hidden and public_level_names:
+        default_level = public_level_names[0]
     workflow_default_level_raw = runtime_raw.get("workflow_default_level")
     if not workflow_default_level_raw:
         # Legacy alias kept only for existing config files; model-facing context no
@@ -431,7 +443,11 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         workflow_default_level_raw = runtime_raw.get("ask_default_level")
     workflow_default_level: str | None
     if isinstance(workflow_default_level_raw, str) and workflow_default_level_raw:
-        workflow_default_level = workflow_default_level_raw if workflow_default_level_raw in levels else None
+        workflow_default_level = (
+            workflow_default_level_raw
+            if workflow_default_level_raw in levels and not levels[workflow_default_level_raw].hidden
+            else None
+        )
     else:
         workflow_default_level = None
     runtime = RuntimeConfig(

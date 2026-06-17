@@ -1225,7 +1225,7 @@ class AnsiUvAgentApp:
         view.status_message = self._text("agent_view_model_status")
 
     def _agent_view_model_options(self) -> tuple[CommandSuggestion, ...]:
-        levels = sorted(getattr(self.engine.config, "levels", {}).keys())
+        levels = sorted(self._public_config_levels())
         return tuple(
             CommandSuggestion(name, self._level_model_name(name), id=name, kind="model")
             for name in levels
@@ -1235,9 +1235,13 @@ class AnsiUvAgentApp:
         view = self.state.agent_view
         source_level = view.dispatch_level if view.dispatch_level_explicit else self.state.level
         level = source_level or self.engine.config.runtime.default_level
-        if level in getattr(self.engine.config, "levels", {}):
+        public_levels = self._public_config_levels()
+        if level in public_levels:
             return level
-        return self.engine.config.runtime.default_level
+        default = self.engine.config.runtime.default_level
+        if default in public_levels:
+            return default
+        return next(iter(public_levels), default)
 
     def _move_agent_view_model_selection(self, delta: int) -> None:
         view = self.state.agent_view
@@ -2115,7 +2119,7 @@ class AnsiUvAgentApp:
         return [item for item in pool if item.value.lower().startswith(query)]
 
     def _level_command_suggestions(self, command: str) -> tuple[CommandSuggestion, ...]:
-        levels = sorted(getattr(self.engine.config, "levels", {}).keys())
+        levels = sorted(self._public_config_levels())
         return tuple(CommandSuggestion(f"{command} {name}", "model level") for name in levels)
 
     def _refresh_command_palette(self) -> None:
@@ -2603,6 +2607,9 @@ class AnsiUvAgentApp:
         elif command == "/bg":
             self._background_current_thread()
         elif command in {"/level", "/model"} and arg:
+            if not self._is_public_level(arg):
+                self._flush(TranscriptCell("error", text=f"{self._text('unknown_level')}: {arg}"))
+                return True
             self.state.level = arg
             if self.state.thread_id and not self.state.busy:
                 self._persist_thread_level(self.state.thread_id, self.state.level)
@@ -3012,6 +3019,18 @@ class AnsiUvAgentApp:
             return str(getattr(self.engine.config.model_for_level(level), "name", "") or "")
         except Exception:
             return ""
+
+    def _public_config_levels(self) -> dict[str, Any]:
+        public_levels = getattr(self.engine.config, "public_levels", None)
+        if callable(public_levels):
+            return dict(public_levels())
+        levels = getattr(self.engine.config, "levels", {})
+        if not isinstance(levels, dict):
+            return {}
+        return {name: level for name, level in levels.items() if not getattr(level, "hidden", False)}
+
+    def _is_public_level(self, level: str | None) -> bool:
+        return bool(level and level in self._public_config_levels())
 
     def _persist_thread_level(self, thread_id: str, level: str | None) -> None:
         if not thread_id or not level:

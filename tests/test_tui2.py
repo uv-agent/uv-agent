@@ -2711,6 +2711,10 @@ def test_agent_view_dispatch_creates_worktree_thread_and_runs(monkeypatch) -> No
 
 def test_agent_view_model_picker_sets_dispatch_level(monkeypatch) -> None:
     app = _make_app(monkeypatch)
+    app.engine.config.levels = {
+        **app.engine.config.levels,
+        "title": SimpleNamespace(model="title-model", hidden=True),
+    }
     app._open_agent_view()
 
     asyncio.run(app.handle_key("m"))
@@ -3072,12 +3076,31 @@ def test_command_palette_supports_goal_subcommands(monkeypatch) -> None:
 
 def test_command_palette_supports_level_names(monkeypatch) -> None:
     app = _make_app(monkeypatch)
+    app.engine.config.levels = {
+        **app.engine.config.levels,
+        "title": SimpleNamespace(model="title-model", hidden=True),
+    }
     app.state.composer = "/level "
     app._refresh_command_palette()
 
     values = [item.value for item in app.state.command_palette_items]
     assert "/level alpha" in values
     assert "/level test" in values
+    assert "/level title" not in values
+
+
+def test_level_command_rejects_hidden_levels(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.config.levels = {
+        **app.engine.config.levels,
+        "title": SimpleNamespace(model="title-model", hidden=True),
+    }
+
+    app._handle_command("/level title")
+
+    assert app.state.level == "test"
+    assert app.state.flushed[-1].kind == "error"
+    assert "title" in app.state.flushed[-1].text
 
 
 def test_start_turn_persists_selected_level_for_new_thread(monkeypatch) -> None:

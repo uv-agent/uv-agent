@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from uv_agent.agent.context_builder import model_levels_context
 from uv_agent.config import config_paths, editable_config_path, load_config, redact_config
 from uv_agent.paths import ensure_project_local_dir, project_config_path, project_state_dir, user_config_path
 
@@ -259,6 +260,57 @@ def test_configured_levels_replace_default_level_template(tmp_path: Path) -> Non
     config = load_config(tmp_path, [config_path])
 
     assert list(config.levels) == ["small", "medium"]
+
+
+def test_hidden_levels_remain_available_for_internal_uses(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {"p": {"base_url": "https://example.com"}},
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {
+                    "main": {"model": "m"},
+                    "title": {"model": "m", "hidden": True},
+                },
+                "runtime": {"title_generation": {"model_level": "title"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert config.levels["title"].hidden is True
+    assert list(config.public_levels()) == ["main"]
+    assert config.model_for_level("title").name == "m"
+    assert config.runtime.title_generation.model_level == "title"
+    levels_context = model_levels_context(config)
+    assert "<level>main</level>" in levels_context
+    assert "<level>title</level>" not in levels_context
+
+
+def test_hidden_levels_are_not_used_as_public_defaults(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {"p": {"base_url": "https://example.com"}},
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {
+                    "internal": {"model": "m", "hidden": True},
+                    "main": {"model": "m"},
+                },
+                "runtime": {"default_level": "internal", "workflow_default_level": "internal"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert config.runtime.default_level == "main"
+    assert config.runtime.workflow_default_level is None
 
 
 def test_runtime_workflow_default_level_is_parsed(tmp_path: Path) -> None:

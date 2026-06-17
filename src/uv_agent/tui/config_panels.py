@@ -19,6 +19,15 @@ from uv_agent.tui.state import PickerItem
 
 
 class ConfigPanelMixin:
+    def _public_config_levels(self) -> dict[str, Any]:
+        public_levels = getattr(self.engine.config, "public_levels", None)
+        if callable(public_levels):
+            return dict(public_levels())
+        levels = getattr(self.engine.config, "levels", {})
+        if not isinstance(levels, dict):
+            return {}
+        return {name: level for name, level in levels.items() if not getattr(level, "hidden", False)}
+
     def _open_config_panel(self, *, replace_current: bool = False) -> None:
         self.engine.refresh_config()
         default_level = self.engine.config.runtime.default_level
@@ -104,7 +113,7 @@ class ConfigPanelMixin:
     def _open_default_level_panel(self) -> None:
         items = []
         current = self.engine.config.runtime.default_level
-        for name, level in self.engine.config.levels.items():
+        for name, level in self._public_config_levels().items():
             marker = self._text("current") if name == current else ""
             items.append(
                 PickerItem(
@@ -124,7 +133,7 @@ class ConfigPanelMixin:
     def _open_current_level_panel(self) -> None:
         items = []
         current = self.level or self.engine.config.runtime.default_level
-        for name, level in self.engine.config.levels.items():
+        for name, level in self._public_config_levels().items():
             marker = self._text("current") if name == current else ""
             items.append(
                 PickerItem(
@@ -189,7 +198,7 @@ class ConfigPanelMixin:
         self._open_panel(plain(preview), "config", self._text("config_raw"))
 
     def _set_default_level(self, name: str) -> None:
-        if name not in self.engine.config.levels:
+        if name not in self._public_config_levels():
             self._flash(f"{self._text('unknown_level')}: {name}", severity="error")
             return
         self._write_user_config_patch({"runtime": {"default_level": name}})
@@ -242,7 +251,7 @@ class ConfigPanelMixin:
         # Show which level each configured model is referenced by so users can
         # cross-reference without having to open config.json first.
         levels_by_model: dict[str, list[str]] = {}
-        for level_name, level in self.engine.config.levels.items():
+        for level_name, level in self._public_config_levels().items():
             levels_by_model.setdefault(level.model, []).append(level_name)
         for name, model in self.engine.config.models.items():
             level_refs = ", ".join(levels_by_model.get(name, [])) or "-"
@@ -318,7 +327,7 @@ class ConfigPanelMixin:
         if not name:
             self._open_models_panel()
             return
-        if name not in self.engine.config.levels:
+        if name not in self._public_config_levels():
             self._append_cell(Text.assemble((self._text("unknown_level"), "red"), " ", name), "error")
             return
         previous_level = self._current_level_for_thread(self.thread_id)
