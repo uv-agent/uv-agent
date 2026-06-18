@@ -26,6 +26,7 @@ from tree_sitter_language_pack import (
 )
 
 from . import codesearch
+from .errors import FileSelectionError, HelperRuntimeError
 from .files import resolve_workspace_path
 
 
@@ -51,7 +52,12 @@ class Capture:
     def view(self, *, context: int = 8):
         from .textops import read_file
 
-        return read_file(self.path, lines=(max(1, self.start_line - context), self.end_line + context))
+        try:
+            return read_file(self.path, lines=(max(1, self.start_line - context), self.end_line + context))
+        except FileSelectionError as exc:
+            if exc.partial_view is not None:
+                return exc.partial_view
+            raise
 
 
 @dataclass(frozen=True)
@@ -74,7 +80,12 @@ class Symbol:
     def view(self, *, context: int = 12):
         from .textops import read_file
 
-        return read_file(self.path, lines=(max(1, self.start_line - context), self.end_line + context))
+        try:
+            return read_file(self.path, lines=(max(1, self.start_line - context), self.end_line + context))
+        except FileSelectionError as exc:
+            if exc.partial_view is not None:
+                return exc.partial_view
+            raise
 
 
 # Pre-baked symbol queries. Each capture name maps directly to ``Symbol.kind``.
@@ -224,7 +235,24 @@ def _connect() -> Iterator[sqlite3.Connection]:
 
 @functools.lru_cache(maxsize=64)
 def _language(name: str) -> Language:
-    return get_language(name)  # type: ignore[arg-type]
+    language = get_language(name)  # type: ignore[arg-type]
+    if not isinstance(language, Language):
+        raise HelperRuntimeError(
+            helper="codequery",
+            problem=(
+                "tree-sitter-language-pack returned an incompatible Language object; "
+                "uv_agent_runtime.codequery requires the tree-sitter Python API"
+            ),
+            details={
+                "language": name,
+                "actual_type": f"{type(language).__module__}.{type(language).__name__}",
+            },
+            hints=(
+                "Install a compatible tree-sitter-language-pack version (<1.9).",
+                "Run `uv sync` for this project, or update the managed run_python environment if it was upgraded separately.",
+            ),
+        )
+    return language
 
 
 @functools.lru_cache(maxsize=64)

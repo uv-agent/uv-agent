@@ -1092,7 +1092,7 @@ requires-dist = [
     { name = "textual-image", extras = ["textual"], specifier = ">=0.12.0" },
     { name = "tomlkit", specifier = ">=0.15.0" },
     { name = "tree-sitter", specifier = ">=0.25.2" },
-    { name = "tree-sitter-language-pack", specifier = ">=1.8.1" },
+    { name = "tree-sitter-language-pack", specifier = ">=1.8.1,<1.9" },
     { name = "unidiff", specifier = ">=0.7.5" },
     { name = "watchfiles", specifier = ">=1.1.1" },
 ]

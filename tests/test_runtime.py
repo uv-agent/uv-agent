@@ -1232,6 +1232,19 @@ def test_codesearch_find_files_and_search_text(tmp_path: Path) -> None:
     assert sorted(Path(p).relative_to(tmp_path).as_posix() for p in files) == ["src/a.py", "src/b.py"]
     assert all(Path(p).is_absolute() for p in files)
 
+    (tmp_path / "top.py").write_text("def top():\n    return None\n", encoding="utf-8")
+    recursive_files = find_files(tmp_path, globs=["**/*.py"], refresh=True)
+    assert sorted(Path(p).relative_to(tmp_path).as_posix() for p in recursive_files) == [
+        "src/a.py",
+        "src/b.py",
+        "top.py",
+    ]
+    src_recursive_files = find_files(tmp_path, globs=["src/**/*.py"])
+    assert sorted(Path(p).relative_to(tmp_path).as_posix() for p in src_recursive_files) == [
+        "src/a.py",
+        "src/b.py",
+    ]
+
     limited_files = find_files(tmp_path, globs=["*.py"], max_total=1)
     assert len(limited_files) == 1
     assert Path(limited_files[0]).is_absolute()
@@ -1244,6 +1257,11 @@ def test_codesearch_find_files_and_search_text(tmp_path: Path) -> None:
     assert all(Path(h.path).is_absolute() for h in hits)
     assert all(h.text and h.submatches for h in hits)
     assert hits[0].context_after
+
+    edge_hit = search_text("return None", root=tmp_path / "top.py")[0]
+    edge_view = edge_hit.view(context=20)
+    assert edge_view.start_line == 1
+    assert edge_view.end_line == 2
 
 
 @requires_fff
@@ -1422,6 +1440,9 @@ def test_codequery_find_symbols_returns_python_definitions(
     assert hello.path == str((tmp_path / "src" / "a.py").resolve())
     assert hello.start_line == 1
     assert hello.end_line == 2
+    hello_view = hello.view(context=20)
+    assert hello_view.start_line == 1
+    assert hello_view.end_line == hello_view.line_count == 6
 
     # Cache was populated on disk under the isolated home.
     assert (codequery_home / "cache" / "codequery" / "index.sqlite").exists()
@@ -1468,6 +1489,9 @@ def test_codequery_query_code_runs_arbitrary_tree_sitter_query(
     assert cap.rel_path.replace("\\", "/") == "src/a.py"
     assert cap.path == str((tmp_path / "src" / "a.py").resolve())
     assert cap.start_line == 6
+    cap_view = cap.view(context=20)
+    assert cap_view.start_line == 1
+    assert cap_view.end_line == cap_view.line_count == 6
 
 
 @requires_fff

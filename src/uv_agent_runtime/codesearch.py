@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from .errors import HelperRuntimeError, HelperValueError
+from .errors import FileSelectionError, HelperRuntimeError, HelperValueError
 from .files import resolve_workspace_path
 
 SearchMode = Literal["text", "plain", "literal", "regex", "fuzzy"]
@@ -74,7 +74,12 @@ class Match:
     def view(self, *, context: int = 8):
         from .textops import read_file
 
-        return read_file(self.path, lines=self.line_range(context=context))
+        try:
+            return read_file(self.path, lines=self.line_range(context=context))
+        except FileSelectionError as exc:
+            if exc.partial_view is not None:
+                return exc.partial_view
+            raise
 
 
 _FINDER_CACHE_LIMIT = 8
@@ -231,8 +236,36 @@ def _normalize_glob(pattern: str) -> str:
     return f"!{body}" if negative else body
 
 
+def _glob_variants(pattern: str) -> tuple[str, ...]:
+    """Return fnmatch-compatible forms for common recursive glob semantics.
+
+    ``fnmatch`` treats ``**`` as ordinary ``*`` characters, so ``src/**/*.py``
+    only matches paths with at least one component below ``src``.  Agents and
+    users usually expect shell/gitignore-style ``**/`` to also match zero
+    directories.  Keeping this small expansion local preserves the existing
+    permissive basename behavior of patterns such as ``*.py``.
+    """
+
+    variants = {pattern}
+    stack = [pattern]
+    while stack:
+        current = stack.pop()
+        index = current.find("**/")
+        while index >= 0:
+            collapsed = current[:index] + current[index + 3 :]
+            if collapsed not in variants:
+                variants.add(collapsed)
+                stack.append(collapsed)
+            index = current.find("**/", index + 1)
+    return tuple(variants)
+
+
 def _matches_any_glob(rel_path: str, patterns: Sequence[str]) -> bool:
-    return any(fnmatch.fnmatchcase(rel_path, pattern) for pattern in patterns)
+    return any(
+        fnmatch.fnmatchcase(rel_path, variant)
+        for pattern in patterns
+        for variant in _glob_variants(pattern)
+    )
 
 
 def _path_allowed(
