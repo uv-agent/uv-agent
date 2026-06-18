@@ -1030,6 +1030,47 @@ def test_renderer_repaint_separates_just_flushed_tool_from_status(monkeypatch) -
     assert any(line.startswith("╭") for line in plain[working_idx + 1:])
 
 
+def test_renderer_growing_anchored_live_frame_does_not_scroll_blank_rows(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 12))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    state = Tui2State(busy=True, turn_elapsed_s=1.0, composer="")
+
+    for index in range(8):
+        renderer.flush_cell(TranscriptCell("assistant", text=f"previous {index}"), state)
+    renderer.flush_cell(
+        TranscriptCell(
+            "tool",
+            call={"name": "run_python"},
+            payload={"returncode": 0, "run_id": "run_abcdef"},
+        ),
+        state,
+    )
+    output.seek(0)
+    output.truncate(0)
+
+    state.live.append(
+        TranscriptCell(
+            "assistant",
+            text="answer head\n\n" + "\n".join(f"- point {index}" for index in range(8)),
+            status="streaming",
+        )
+    )
+    renderer.repaint(state)
+    rendered = output.getvalue()
+
+    # The live frame grows from the status/composer tail to the full viewport.
+    # Scrolling may be needed to preserve transcript rows, but it must happen
+    # before erasing the old live frame.  Clearing first is what leaked blank
+    # rows into normal scrollback as large gaps before the answer.
+    scroll = "\x1b[12;1H\n"
+    old_frame_clear = "\x1b[8;1H\x1b[2K"
+    assert scroll in rendered
+    assert old_frame_clear in rendered
+    assert rendered.index(scroll) < rendered.index(old_frame_clear)
+    assert "earlier lines hidden" in strip_ansi(rendered)
+
+
 def test_flush_cell_only_uses_crlf_separators() -> None:
     output = io.StringIO()
     Renderer(output=output).flush_cell(TranscriptCell("user", text="a\nb"))
@@ -3138,7 +3179,6 @@ def test_start_turn_keeps_user_cell_in_live_until_flushed(monkeypatch) -> None:
         assert any(cell.kind == "user" for cell in app.state.flushed)
 
     asyncio.run(run_turn())
-
 
 
 def test_resume_thread_restores_live_user_cell_before_first_response(monkeypatch) -> None:

@@ -473,15 +473,14 @@ class Renderer:
         old_top = self._frame_top_row
         old_bottom = old_top + self._frame_rows - 1
 
-        # When the live region grows upward while already pinned to the bottom,
-        # scroll the viewport up so the transcript row it now covers is pushed
-        # into real scrollback instead of being painted over.
         if new_top < old_top and old_bottom >= rows:
-            self._clear_rows(buf, old_top, old_bottom, rows)
+            # Scroll before erasing the old frame.  Clearing first pushes blank
+            # rows into normal scrollback when the viewport scrolls, which shows
+            # up later as large gaps between completed transcript cells.
             delta = old_top - new_top
             buf.append(self._cup(rows, 1) + "\n" * delta)
-            old_top = new_top
-            old_bottom = 0
+            old_top = max(1, old_top - delta)
+            old_bottom = max(0, old_bottom - delta)
 
         clear_top = min(new_top, old_top)
         clear_bottom = max(new_top + height - 1, old_bottom)
