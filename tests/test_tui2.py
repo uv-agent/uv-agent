@@ -2950,6 +2950,19 @@ def test_agent_view_input_shift_enter_inserts_newline(monkeypatch) -> None:
     assert app.state.agent_view.composer == "a\nb"
 
 
+def test_agent_view_input_option_enter_inserts_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("i"))
+    asyncio.run(app.handle_key("a"))
+    asyncio.run(app.handle_key("<O-ENTER>"))
+    asyncio.run(app.handle_key("b"))
+
+    assert app.state.agent_view.interaction_mode == "input"
+    assert app.state.agent_view.composer == "a\nb"
+
+
 def test_agent_view_input_ctrl_j_inserts_newline(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app._open_agent_view()
@@ -3310,6 +3323,14 @@ def test_shift_enter_inserts_newline(monkeypatch) -> None:
     assert app.state.composer == "hello\n"
 
 
+def test_option_enter_inserts_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "hello"
+    asyncio.run(app.handle_key("<O-ENTER>"))
+
+    assert app.state.composer == "hello\n"
+
+
 def test_ctrl_j_inserts_newline(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.state.composer = "hello"
@@ -3537,6 +3558,38 @@ def test_terminal_reads_shift_enter_as_s_enter() -> None:
     terminal._windows = False
 
     assert terminal.read_key() == "<S-ENTER>"
+
+
+def test_terminal_detects_macos(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert Terminal()._macos is True
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert Terminal()._macos is False
+
+
+def test_darwin_terminal_reads_option_enter_meta_cr_as_o_enter() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b\r"))
+    terminal._windows = False
+    terminal._macos = True
+
+    assert terminal.read_key() == "<O-ENTER>"
+
+
+def test_darwin_terminal_reads_option_enter_meta_lf_as_o_enter() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b\n"))
+    terminal._windows = False
+    terminal._macos = True
+
+    assert terminal.read_key() == "<O-ENTER>"
+
+
+def test_darwin_terminal_reads_csi_alt_enter_as_o_enter() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b[27;3;13~"))
+    terminal._windows = False
+    terminal._macos = True
+
+    assert terminal.read_key() == "<O-ENTER>"
 
 
 def _install_fake_msvcrt(monkeypatch, text: str) -> None:

@@ -28,6 +28,7 @@ class Terminal(AbstractContextManager["Terminal"]):
         self._old_input_mode: int | None = None
         self._old_output_mode: int | None = None
         self._windows = os.name == "nt"
+        self._macos = sys.platform == "darwin"
         self._raw_fd: int | None = None  # cached fd for unbuffered POSIX reads
 
     def __enter__(self) -> "Terminal":
@@ -94,8 +95,13 @@ class Terminal(AbstractContextManager["Terminal"]):
             return self._coalesce_unbracketed_paste(ch)
         # Terminals report arrows, modified Enter and bracketed paste as CSI
         # sequences.  Bracketed paste must be returned as one key so pasted
-        # newlines don't look like Enter presses to the app.
+        # newlines don't look like Enter presses to the app.  macOS
+        # terminals may encode Option+Enter as Meta+CR/LF when Option is
+        # configured as Meta, so normalize that two-byte form before
+        # treating the leading escape as a standalone Esc key.
         second = self._read_char_after_escape()
+        if self._macos and second in {"\r", "\n"}:
+            return "<O-ENTER>"
         if second != "[":
             return "\x1b"
         return self._read_csi_key()
@@ -342,6 +348,8 @@ class Terminal(AbstractContextManager["Terminal"]):
             return "<C-ENTER>"
         if sequence == "\x1b[27;2;13~":
             return "<S-ENTER>"
+        if self._macos and sequence == "\x1b[27;3;13~":
+            return "<O-ENTER>"
         if sequence == "\x1b[200~":
             return PASTE_PREFIX + self._read_bracketed_paste()
         return "\x1b"

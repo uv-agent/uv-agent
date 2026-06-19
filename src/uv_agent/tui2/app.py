@@ -150,7 +150,7 @@ HELP_TEXT = (
     "  /quit              exit the TUI\n"
     "  /help              show this help\n"
     "\n"
-    "Keys: Enter send/select · Ctrl/Shift+Enter or Ctrl+J newline · / command palette · @ mentions · ↑/↓ history\n"
+    "Keys: Enter send/select · Ctrl/Shift+Enter, macOS Option+Enter, or Ctrl+J newline · / command palette · @ mentions · ↑/↓ history\n"
     "      Ctrl+A Agent View · Ctrl+E line end · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt\n"
     "Agent View: normal mode uses j/k/Enter/Space/c/d/D; i starts a task, m chooses its model, r replies, ? opens help."
 )
@@ -917,7 +917,7 @@ class AnsiUvAgentApp:
                     self._safe_repaint()
                     return True
             return await self.submit()
-        if key in {"\n", "<C-ENTER>", "<S-ENTER>"}:  # Ctrl+J (\n), Ctrl+Enter and Shift+Enter insert a newline.
+        if key in {"\n", "<C-ENTER>", "<S-ENTER>", "<O-ENTER>"}:  # Ctrl+J, Ctrl/Shift+Enter, and macOS Option+Enter insert a newline.
             if key != "<C-ENTER>" and self._skip_next_lf_after_plain_cr:
                 self._mark_plain_input()
                 self._safe_repaint()
@@ -1154,7 +1154,7 @@ class AnsiUvAgentApp:
             await self._submit_agent_view_input()
             self._safe_repaint()
             return True
-        if key in {"\n", "<C-ENTER>", "<S-ENTER>"}:  # Ctrl+J (\n), Ctrl+Enter and Shift+Enter insert a newline.
+        if key in {"\n", "<C-ENTER>", "<S-ENTER>", "<O-ENTER>"}:  # Ctrl+J, Ctrl/Shift+Enter, and macOS Option+Enter insert a newline.
             self._insert_agent_view_text("\n")
         elif key == "\x01":
             self._move_agent_view_to_line_start()
