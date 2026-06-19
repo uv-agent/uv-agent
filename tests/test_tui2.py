@@ -920,6 +920,39 @@ def test_repaint_floats_live_region_after_short_transcript(monkeypatch) -> None:
     assert not re.search(r"\x1b\[\d+B", rendered)
 
 
+def test_live_frame_growth_clips_visible_transcript_rows(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    history = TranscriptCell("user", text="\n".join(f"history {index}" for index in range(10)))
+
+    renderer.flush_cell(history, Tui2State(composer=""))
+    assert renderer._transcript_rows == 10
+    assert not renderer._frame_anchored
+
+    state = Tui2State(
+        composer="/",
+        command_palette_open=True,
+        command_palette_items=[CommandSuggestion(f"/cmd{index}", f"command {index}") for index in range(12)],
+    )
+    renderer.repaint(state)
+
+    # Opening the palette makes the live frame tall enough to scroll the
+    # viewport.  The renderer must remember only the transcript rows still
+    # visible above that tall frame; otherwise closing the palette later paints
+    # the composer at the old pre-scroll row and leaves a large blank band.
+    assert renderer._frame_anchored
+    assert renderer._transcript_rows == 20 - renderer._frame_rows
+
+    state.command_palette_open = False
+    state.command_palette_items = []
+    state.composer = ""
+    renderer.repaint(state)
+
+    assert renderer._frame_top_row == renderer._transcript_rows + 1
+    assert renderer._frame_top_row < 11  # would have used the stale 10-row history count
+
+
 def test_flush_cell_redraws_post_flush_live_region(monkeypatch) -> None:
     # Flushing a completed cell must also redraw the remaining live region just
     # below it, so a later absolute repaint cannot overwrite the flushed cell.

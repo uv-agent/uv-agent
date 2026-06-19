@@ -107,6 +107,21 @@ class Renderer:
 
         return max(1, min(self._transcript_rows + 1, rows - height + 1))
 
+    def _cap_transcript_rows_above_live(self, rows: int, height: int) -> None:
+        """Keep ``_transcript_rows`` as the visible rows above the live frame.
+
+        A large picker can make a previously floating live frame scroll the
+        viewport for the first time.  Rows scrolled off by that live frame cannot
+        reappear when the picker closes, so later smaller frames must anchor
+        immediately after the *remaining* visible transcript rows rather than the
+        pre-scroll count.  Otherwise the renderer paints the composer too low and
+        leaves a large blank band between history and the input box.
+        """
+
+        max_visible = max(0, rows - height)
+        if self._transcript_rows > max_visible:
+            self._transcript_rows = max_visible
+
     def _clear_rows(self, buf: list[str], top: int, bottom: int, rows: int) -> None:
         for row in range(max(1, top), min(rows, bottom) + 1):
             buf.append(self._cup(row, 1) + self._EL)
@@ -143,9 +158,11 @@ class Renderer:
 
     def _frame_is_anchored_after_append(self, rows: int, height: int) -> bool:
         if self._anchor_known:
+            self._cap_transcript_rows_above_live(rows, height)
             return True
         if self._transcript_rows + height >= rows:
             self._anchor_known = True
+            self._cap_transcript_rows_above_live(rows, height)
             return True
         return False
 
@@ -479,8 +496,10 @@ class Renderer:
             # up later as large gaps between completed transcript cells.
             delta = old_top - new_top
             buf.append(self._cup(rows, 1) + "\n" * delta)
+            self._transcript_rows = max(0, self._transcript_rows - delta)
             old_top = max(1, old_top - delta)
             old_bottom = max(0, old_bottom - delta)
+        self._cap_transcript_rows_above_live(rows, height)
 
         clear_top = min(new_top, old_top)
         clear_bottom = max(new_top + height - 1, old_bottom)
