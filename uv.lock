@@ -212,9 +212,16 @@ wheels = [
 
 [[package]]
 name = "fff-search"
-version = "0.1.0"
+version = "0.9.6"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/71/ce/27ac3204e38af8d0e3e43daf61ef3c3b2e42fdf8a4f1a180409fefa339b6/fff_search-0.1.0.tar.gz", hash = "sha256:422e62328f79a7b4aecbf49109cadcdbbd971c0b34b6f3e346b4093cbcda92dc", size = 2092442, upload-time = "2026-06-16T23:13:07.622Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a2/a9/08b59a16e6b508be86210b27c4d0830ac3625744fc4c205929f9a52c33ee/fff_search-0.9.6.tar.gz", hash = "sha256:d20cc2928b106272163377416a9f521b4c5ebb0971e09cc7d8a3a651baae304d", size = 2094217, upload-time = "2026-06-21T18:57:19.81Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/da/94a9cf5a33c16c08788bb69afb4883a1f5629c362578fd02aa1eb58e2618/fff_search-0.9.6-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:7020358dbeccc09ff72c4a634b7f10930938f290ff1c76ccc0bc7b0b9dbcbb72", size = 2327193, upload-time = "2026-06-21T18:57:11.794Z" },
+    { url = "https://files.pythonhosted.org/packages/40/2a/25ae77be1c882745d851855f88c54373a66c4f4d1f9ebdaf86c4116a9edb/fff_search-0.9.6-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:8c54f82d981f7f3ba9def45980a7556866320fde84cb4ce6250d60ec74953e7a", size = 2194691, upload-time = "2026-06-21T18:57:13.426Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/72/cf251c086199e50274dc8c1801f1d145880a4009900456f1d6ca30b1d513/fff_search-0.9.6-cp310-abi3-manylinux_2_38_aarch64.whl", hash = "sha256:d5c253f5b413550dcc76a5baf1f5ee150ffa2e85bb9a2d6e5dc0cb4108399d4e", size = 2661330, upload-time = "2026-06-21T18:57:14.91Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/b7/5f563627176508015e32d0d15da46acd26c2272e480309cd887e99cb6554/fff_search-0.9.6-cp310-abi3-manylinux_2_38_x86_64.whl", hash = "sha256:963e9830ad07d8580f350a3000953d5288737592373e0603a0510e6a287aa446", size = 2708573, upload-time = "2026-06-21T18:57:16.547Z" },
+    { url = "https://files.pythonhosted.org/packages/25/d5/54aac5ea6093edb1eabbb13906ebb2a4afaa2f56f53f4e5dc1145de8b462/fff_search-0.9.6-cp310-abi3-win_amd64.whl", hash = "sha256:44b8a923a4dd7acadef03ba07eca658c134e68d8117329ca2f90f22cf8feebeb", size = 2847480, upload-time = "2026-06-21T18:57:18.268Z" },
+]
 
 [[package]]
 name = "h11"
@@ -1082,7 +1089,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.103.1" },
-    { name = "fff-search", specifier = ">=0.1.0" },
+    { name = "fff-search", specifier = ">=0.9.6" },
     { name = "mcp", specifier = ">=1.27.1" },
     { name = "openai", specifier = ">=2.36.0" },
     { name = "pillow", specifier = ">=12.0.0" },
