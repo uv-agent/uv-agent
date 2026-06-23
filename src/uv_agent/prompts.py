@@ -237,10 +237,11 @@ COMPACTION_JUDGE_REQUEST_TAG = "compaction_judge_request"
 CONTEXT_COMPACTION_REQUEST_TAG = "context_compaction_request"
 COMPACTION_CONTINUATION_TAG = "compaction_continuation"
 PLUGIN_RUNTIME_HELPERS_TAG = "plugin_runtime_helpers"
+PLUGIN_CONTEXT_TAG = "plugin_context"
 
-# Purpose: markers for synthetic pre-user context. These messages are regenerated
-# at context epoch boundaries and should not be retained as ordinary conversation
-# history during compaction or replay.
+# Purpose: markers for synthetic pre-user context. These messages are model-visible
+# context blocks rather than ordinary user conversation and should not be retained
+# as conversation history during compaction.
 PRE_USER_CONTEXT_MARKERS = (
     f"<{RUNTIME_ENVIRONMENT_TAG}>",
     f"<{MODEL_LEVELS_TAG}>",
@@ -254,6 +255,7 @@ PRE_USER_CONTEXT_MARKERS = (
     f"<{AVAILABLE_SKILLS_TAG}>",
     f"<{AVAILABLE_MCP_SERVERS_TAG}>",
     f"<{CONTEXT_UPDATE_TAG}",
+    f"<{PLUGIN_CONTEXT_TAG}",
 )
 
 # Purpose: extra wrappers used only by compaction. They distinguish summaries,

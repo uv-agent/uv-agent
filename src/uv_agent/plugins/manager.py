@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import inspect
 import logging
 import re
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,12 +17,16 @@ from uv_agent.config import PluginsConfig
 from uv_agent.paths import uv_agent_home
 from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
 
-from .context import PluginContext
+from .context import PluginContext, TurnContextBlock, TurnPrepareRequest
 from .events import EventBus
 from .helpers import RuntimeHelperRegistry, RuntimeHelperSpec
 from . import hookspecs
 
 PLUGIN_ENTRY_POINT_GROUP = "uv_agent.plugins"
+PREPARE_TURN_HOOK_TIMEOUT_S = 2.0
+PREPARE_TURN_BLOCK_MAX_CHARS = 8_192
+PREPARE_TURN_TOTAL_MAX_CHARS = 32_768
+PREPARE_TURN_TRUNCATION_SUFFIX = "\n...[plugin context truncated]"
 
 
 @dataclass
@@ -74,6 +80,68 @@ class PluginManager:
 
     def resolve_helper(self, name: str) -> dict[str, Any]:
         return self.helpers.resolve_payload(name)
+
+    async def prepare_turn(self, request: TurnPrepareRequest) -> list[TurnContextBlock]:
+        """Collect additive pre-user context from started plugins.
+
+        This hook runs on the critical path before the model request is built, so
+        each plugin is isolated: failures are logged and surfaced as plugin events
+        without blocking other plugins or the current turn.
+        """
+
+        blocks: list[TurnContextBlock] = []
+        seen_dedupe_keys: set[tuple[str, str]] = set()
+        remaining = PREPARE_TURN_TOTAL_MAX_CHARS
+        for record in list(self._records.values()):
+            if remaining <= 0:
+                break
+            if record.status.state != "started":
+                continue
+            try:
+                results = record.plugin_manager.hook.uv_agent_prepare_turn(
+                    context=record.context,
+                    request=request,
+                )
+                for result in results:
+                    resolved = await _resolve_hook_result(result, timeout_s=PREPARE_TURN_HOOK_TIMEOUT_S)
+                    for raw_block in _iter_turn_context_blocks(resolved):
+                        block = _normalize_turn_context_block(record.name, raw_block)
+                        if block is None:
+                            continue
+                        if block.dedupe_key:
+                            dedupe_key = (record.name, block.dedupe_key)
+                            if dedupe_key in seen_dedupe_keys:
+                                continue
+                            seen_dedupe_keys.add(dedupe_key)
+                        text = _truncate_context_text(block.text, min(PREPARE_TURN_BLOCK_MAX_CHARS, remaining))
+                        if not text:
+                            continue
+                        blocks.append(
+                            TurnContextBlock(
+                                text=text,
+                                placement=block.placement,
+                                dedupe_key=block.dedupe_key,
+                                metadata=block.metadata,
+                                plugin=record.name,
+                            )
+                        )
+                        remaining -= len(text)
+                        if remaining <= 0:
+                            break
+                    if remaining <= 0:
+                        break
+            except Exception as exc:
+                record.context.logger.exception("Plugin prepare_turn hook failed")
+                self._publish(
+                    {
+                        "type": "plugin.hook_failed",
+                        "plugin": record.name,
+                        "hook": "uv_agent_prepare_turn",
+                        "error_type": exc.__class__.__name__,
+                        "message": str(exc) or repr(exc),
+                    }
+                )
+        return blocks
 
     def start_background(self) -> asyncio.Task[None]:
         if self._task is None or self._task.done():
@@ -224,8 +292,75 @@ class PluginManager:
 
 async def _await_hook_results(results: list[Any]) -> None:
     for result in results:
-        if result is not None:
-            await result
+        await _resolve_hook_result(result)
+
+
+async def _resolve_hook_result(result: Any, *, timeout_s: float | None = None) -> Any:
+    if result is None:
+        return None
+    if inspect.isawaitable(result):
+        if timeout_s is None:
+            return await result
+        return await asyncio.wait_for(result, timeout=timeout_s)
+    return result
+
+
+def _iter_turn_context_blocks(value: Any) -> Iterable[TurnContextBlock]:
+    if value is None:
+        return
+    if isinstance(value, TurnContextBlock):
+        yield value
+        return
+    if isinstance(value, str):
+        yield TurnContextBlock(text=value)
+        return
+    if isinstance(value, dict):
+        yield _turn_context_block_from_mapping(value)
+        return
+    if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+        for item in value:
+            yield from _iter_turn_context_blocks(item)
+        return
+    raise TypeError(f"Unsupported turn context block result: {type(value).__name__}")
+
+
+def _turn_context_block_from_mapping(value: dict[str, Any]) -> TurnContextBlock:
+    metadata = value.get("metadata")
+    return TurnContextBlock(
+        text=str(value.get("text") or ""),
+        placement=str(value.get("placement") or "before_user"),  # type: ignore[arg-type]
+        dedupe_key=None if value.get("dedupe_key") is None else str(value.get("dedupe_key")),
+        metadata=dict(metadata) if isinstance(metadata, dict) else {},
+    )
+
+
+def _normalize_turn_context_block(plugin: str, block: TurnContextBlock) -> TurnContextBlock | None:
+    placement = str(block.placement or "before_user")
+    if placement != "before_user":
+        raise ValueError(f"Unsupported turn context placement from {plugin}: {placement!r}")
+    text = str(block.text or "").strip()
+    if not text:
+        return None
+    dedupe_key = str(block.dedupe_key).strip() if block.dedupe_key else None
+    metadata = dict(block.metadata) if isinstance(block.metadata, dict) else {}
+    return TurnContextBlock(
+        text=text,
+        placement="before_user",
+        dedupe_key=dedupe_key or None,
+        metadata=metadata,
+        plugin=plugin,
+    )
+
+
+def _truncate_context_text(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit <= len(PREPARE_TURN_TRUNCATION_SUFFIX):
+        return text[:limit]
+    keep = limit - len(PREPARE_TURN_TRUNCATION_SUFFIX)
+    return text[:keep].rstrip() + PREPARE_TURN_TRUNCATION_SUFFIX
 
 
 def _safe_plugin_name(name: str) -> str:

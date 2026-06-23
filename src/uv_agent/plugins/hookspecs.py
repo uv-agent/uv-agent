@@ -20,3 +20,8 @@ async def uv_agent_start(context):
 @hookspec
 async def uv_agent_stop(context):
     """Stop a uv-agent plugin."""
+
+
+@hookspec
+async def uv_agent_prepare_turn(context, request):
+    """Return additive pre-user context blocks for the current turn."""

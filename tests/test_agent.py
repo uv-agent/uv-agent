@@ -67,6 +67,7 @@ from uv_agent.model import (
 from uv_agent.runner import PythonRunner
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult
 from uv_agent.session import ThreadLockedError, ThreadStore
+from uv_agent.plugins import TurnContextBlock
 
 
 class BlockingModelClient(FakeModelClient):
@@ -208,6 +209,9 @@ class DelayedPluginManager:
 
     def resolve_helper(self, name: str) -> dict[str, Any]:
         return self.engine.runtime_helpers.resolve_payload(name)
+
+    async def prepare_turn(self, request):
+        return []
 
 
 class CompletedOnlyStreamClient(FakeModelClient):
@@ -4970,6 +4974,165 @@ async def test_run_turn_waits_for_plugin_start_before_context_update(tmp_path: P
     assert events[-1]["type"] == "turn.completed"
     request_text = "\n".join(message_item_text(item) for item in client.requests[0]["input"])
     assert '<helper name="delayed_helper" plugin="delayed-plugin">Delayed helper.</helper>' in request_text
+
+
+@pytest.mark.asyncio
+async def test_run_turn_injects_plugin_pre_user_context_before_user_message(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "done",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    class InjectingPluginManager:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def start_background(self) -> asyncio.Task[None]:
+            async def start() -> None:
+                return None
+
+            return asyncio.create_task(start())
+
+        def helper_specs(self):
+            return []
+
+        def resolve_helper(self, name: str) -> dict[str, Any]:
+            return {"found": False, "name": name}
+
+        async def prepare_turn(self, request):
+            self.requests.append(request)
+            return [
+                TurnContextBlock(
+                    text="Current time: 2026-06-22T12:00:00+00:00",
+                    dedupe_key="current-time",
+                    plugin="time-plugin",
+                )
+            ]
+
+    plugins = InjectingPluginManager()
+    engine.plugins = plugins  # type: ignore[assignment]
+
+    events = [event async for event in engine.run_turn(user_text="hello")]
+
+    assert events[-1]["type"] == "turn.completed"
+    assert len(plugins.requests) == 1
+    request = plugins.requests[0]
+    assert request.user_text == "hello"
+    assert request.is_first_turn is True
+    assert request.last_assistant_completed_at is None
+    request_texts = [message_item_text(item) for item in client.requests[0]["input"] if item.get("type") == "message"]
+    plugin_index = next(index for index, text in enumerate(request_texts) if text.startswith('<plugin_context plugin="time-plugin"'))
+    user_index = request_texts.index("hello")
+    assert plugin_index < user_index
+    assert "Current time: 2026-06-22T12:00:00+00:00" in request_texts[plugin_index]
+
+    thread_id = events[-1]["thread_id"]
+    stored_plugin_contexts = [
+        event for event in engine.thread_store.read(thread_id) if event["type"] == "item.plugin_context"
+    ]
+    assert len(stored_plugin_contexts) == 1
+    assert stored_plugin_contexts[0]["plugin"] == "time-plugin"
+    assert stored_plugin_contexts[0]["dedupe_key"] == "current-time"
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_request_includes_previous_completion_times(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    client = CompletedOnlyStreamClient(
+        [
+            {
+                "id": "resp_1",
+                "output_text": "first",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "first"}],
+                    }
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "second",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "second"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+
+    class RecordingPluginManager:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def start_background(self) -> asyncio.Task[None]:
+            async def start() -> None:
+                return None
+
+            return asyncio.create_task(start())
+
+        def helper_specs(self):
+            return []
+
+        def resolve_helper(self, name: str) -> dict[str, Any]:
+            return {"found": False, "name": name}
+
+        async def prepare_turn(self, request):
+            self.requests.append(request)
+            return []
+
+    plugins = RecordingPluginManager()
+    engine.plugins = plugins  # type: ignore[assignment]
+
+    first_events = [event async for event in engine.run_turn(user_text="first request")]
+    thread_id = first_events[-1]["thread_id"]
+    await asyncio.sleep(0)
+    second_events = [event async for event in engine.run_turn(user_text="second request", thread_id=thread_id)]
+
+    assert second_events[-1]["type"] == "turn.completed"
+    assert len(plugins.requests) == 2
+    assert plugins.requests[0].is_new_thread is True
+    assert plugins.requests[0].is_first_turn is True
+    assert plugins.requests[0].last_turn_completed_at is None
+    assert plugins.requests[0].last_assistant_completed_at is None
+    assert plugins.requests[1].is_new_thread is False
+    assert plugins.requests[1].is_first_turn is False
+    assert plugins.requests[1].last_turn_completed_at is not None
+    assert plugins.requests[1].last_assistant_completed_at is not None
 
 
 

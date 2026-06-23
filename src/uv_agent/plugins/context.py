@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
 
@@ -25,6 +25,33 @@ class SubmittedTurn:
             if event is None:
                 return
             yield event
+
+
+@dataclass(frozen=True)
+class TurnPrepareRequest:
+    """Read-only information passed to pre-user context hooks."""
+
+    thread_id: str
+    turn_id: str
+    user_text: str
+    level: str | None = None
+    is_new_thread: bool = False
+    is_first_turn: bool = False
+    created_at: str | None = None
+    last_turn_completed_at: str | None = None
+    last_assistant_completed_at: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TurnContextBlock:
+    """A model-visible context block to insert before the current user message."""
+
+    text: str
+    placement: Literal["before_user"] = "before_user"
+    dedupe_key: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    plugin: str = ""
 
 
 class PluginContext:

@@ -67,7 +67,7 @@ from uv_agent.mcp_config import McpInstructionsPreview, McpServerSummary, discov
 from uv_agent.mcp_probe import McpInstructionsProbe
 from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
-from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn
+from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, TurnContextBlock, TurnPrepareRequest
 from uv_agent.plugins.helpers import RuntimeHelperRegistry
 from uv_agent.prompts import (
     BRANCH_NAME_GENERATION_PROMPT,
@@ -101,6 +101,7 @@ from uv_agent.prompts import (
     GOAL_MODE_ENABLED_STATUS_FRAGMENT,
     MCP_OMITTED_TEMPLATE,
     PLUGIN_HELPER_ENTRY_TEMPLATE,
+    PLUGIN_CONTEXT_TAG,
     PLUGIN_HELPERS_FOOTER,
     PRE_USER_CONTEXT_MARKERS,
     REMOVED_MCP_SERVER_TEMPLATE,
@@ -412,6 +413,7 @@ class RunTurnPrelude:
     input_items: list[dict[str, Any]]
     request_input_items: list[dict[str, Any]]
     turn_started_event: dict[str, Any]
+    prepare_request: TurnPrepareRequest
     user_item: dict[str, Any]
     image_events: list[dict[str, Any]]
 
@@ -589,6 +591,7 @@ class AgentEngine:
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         await self._ensure_plugins_started()
+        is_new_thread = thread_id is None
         thread_id = thread_id or await asyncio.to_thread(self.thread_store.create_thread, "New thread")
         with self.thread_store.lock_thread(thread_id):
             prelude = await asyncio.to_thread(
@@ -598,6 +601,7 @@ class AgentEngine:
                 level=level,
                 image_paths=image_paths,
                 cancel_event=cancel_event,
+                is_new_thread=is_new_thread,
             )
             turn_id = prelude.turn_id
             system_instructions = prelude.system_instructions
@@ -639,6 +643,13 @@ class AgentEngine:
                     yield event
                 compacted_this_turn = judge_state.compacted
 
+            plugin_context_blocks = await self.plugins.prepare_turn(prelude.prepare_request)
+            self._append_plugin_context_items(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                turn_input=turn_input,
+                blocks=plugin_context_blocks,
+            )
             self._append_current_user_items(
                 thread_id=thread_id,
                 turn_id=turn_id,
@@ -870,6 +881,7 @@ class AgentEngine:
         level: str | None,
         image_paths: list[str | Path] | None,
         cancel_event: asyncio.Event | None,
+        is_new_thread: bool = False,
     ) -> RunTurnPrelude:
         self._raise_if_cancelled(cancel_event)
         self.refresh_config(force=True)
@@ -878,11 +890,32 @@ class AgentEngine:
         system_instructions = self._system_instructions_for_turn(thread_id)
         turn_id = new_id("turn")
         should_generate_title = self._should_generate_title(thread_id)
+        metadata = dict(self.thread_store.thread_metadata(thread_id))
+        last_turn_completed_at = self._latest_event_created_at(
+            thread_id,
+            event_types={"turn.completed"},
+        )
+        last_assistant_completed_at = self._latest_event_created_at(
+            thread_id,
+            event_types={"item.model_response", "item.assistant"},
+        )
         turn_input = self._prepare_turn_input(thread_id, level=level)
         input_items = turn_input.input_items
         request_input_items = turn_input.request_input_items()
         pre_user_items = self._pre_user_context_items(thread_id)
         turn_started_event = self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
+        prepare_request = TurnPrepareRequest(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            user_text=user_text,
+            level=level,
+            is_new_thread=is_new_thread,
+            is_first_turn=int(metadata.get("user_message_count") or 0) == 0,
+            created_at=str(turn_started_event.get("created_at") or "") or None,
+            last_turn_completed_at=last_turn_completed_at,
+            last_assistant_completed_at=last_assistant_completed_at,
+            metadata=metadata,
+        )
         user_item = message_item("user", user_text)
 
         # ``_reconstruct_input`` already places persisted post-compaction
@@ -931,9 +964,54 @@ class AgentEngine:
             input_items=input_items,
             request_input_items=request_input_items,
             turn_started_event=turn_started_event,
+            prepare_request=prepare_request,
             user_item=user_item,
             image_events=image_events,
         )
+
+    def _latest_event_created_at(self, thread_id: str, *, event_types: set[str]) -> str | None:
+        events, _ = self.thread_store.read_recent_events(thread_id, limit=1, event_types=event_types)
+        if not events:
+            return None
+        created_at = events[-1].get("created_at")
+        return str(created_at) if created_at else None
+
+    def _append_plugin_context_items(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        turn_input: TurnInputState,
+        blocks: list[TurnContextBlock],
+    ) -> None:
+        for block in blocks:
+            text = self._plugin_context_text(block)
+            if not text:
+                continue
+            self.thread_store.append(
+                thread_id,
+                "item.plugin_context",
+                turn_id=turn_id,
+                plugin=block.plugin,
+                placement=block.placement,
+                dedupe_key=block.dedupe_key,
+                metadata=block.metadata,
+                text=text,
+            )
+            item = message_item("user", text)
+            turn_input.input_items.append(item)
+            turn_input.pending_items.append(copy.deepcopy(item))
+
+    @staticmethod
+    def _plugin_context_text(block: TurnContextBlock) -> str:
+        body = str(block.text or "").strip()
+        if not body:
+            return ""
+        plugin = block.plugin or "unknown"
+        attrs = [f'plugin="{_xml_attr(plugin)}"']
+        if block.dedupe_key:
+            attrs.append(f'dedupe_key="{_xml_attr(block.dedupe_key)}"')
+        return f"<{PLUGIN_CONTEXT_TAG} {' '.join(attrs)}>\n{body}\n</{PLUGIN_CONTEXT_TAG}>"
 
     def _append_current_user_items(
         self,
@@ -2229,6 +2307,7 @@ class AgentEngine:
 
         return event.get("type") in {
             "item.user",
+            "item.plugin_context",
             "item.assistant",
             "item.model_response",
             "item.tool_output",
@@ -3152,6 +3231,13 @@ class AgentEngine:
             events_after_context: list[dict[str, Any]] = []
             reached_replayable_history = False
             for event in events:
+                if event.get("type") == "item.plugin_context":
+                    # Plugin context belongs to the turn that requested it.  Unlike
+                    # regenerated epoch context (rules/runtime/workflow), keep it
+                    # with the following user message after a compaction checkpoint.
+                    reached_replayable_history = True
+                    events_after_context.append(event)
+                    continue
                 pre_user_item = self._pre_user_event_item(event)
                 if pre_user_item is not None and not reached_replayable_history:
                     pre_user_events.append(pre_user_item)
@@ -3227,6 +3313,8 @@ class AgentEngine:
     def _pre_user_event_item(self, event: dict[str, Any]) -> dict[str, Any] | None:
         event_type = event.get("type")
         if event_type == "item.context_update":
+            text = str(event.get("text") or "")
+        elif event_type == "item.plugin_context":
             text = str(event.get("text") or "")
         elif event_type == "item.goal_mode_notice":
             text = str(event.get("text") or "")

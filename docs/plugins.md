@@ -17,12 +17,13 @@ A plugin can:
 - subscribe to the agent event stream for notifications, relays, audit logs, or
   integrations;
 - submit a user turn programmatically and consume that turn's event stream;
+- add bounded, additive context immediately before the current user message;
 - keep private data in a per-plugin SQLite database;
 - write diagnostic logs to a per-plugin log file.
 
-Plugins cannot intercept, rewrite, or veto model input/output in this first
-version. They also do not add direct model tools; model-visible actions continue
-to flow through `run_python`.
+Plugins cannot rewrite or veto existing model input/output in this first
+version. The pre-user context hook is additive only. Plugins also do not add
+direct model tools; model-visible actions continue to flow through `run_python`.
 
 ## Discovery And Enablement
 
@@ -248,6 +249,48 @@ call stack. If a plugin wants to start another turn in reaction to an event, it
 should schedule a new task, for example `asyncio.create_task(...)`, to avoid
 recursive event loops.
 
+
+## Pre-user Context Hook
+
+### `uv_agent_prepare_turn(context, request)`
+
+Called after a turn id has been created and before the current user message is
+added to the model request. The hook may return `TurnContextBlock` objects,
+plain strings, dictionaries with a `text` field, or lists containing those values.
+Returned blocks are inserted as user-role context immediately before the current
+user message. Existing history, system instructions, and the user text cannot be
+modified by this hook.
+
+```python
+from datetime import datetime, timezone
+
+from uv_agent.plugins import TurnContextBlock
+
+
+@hookimpl
+async def uv_agent_prepare_turn(context, request):
+    if not request.is_first_turn and request.last_assistant_completed_at is not None:
+        return []
+    return [
+        TurnContextBlock(
+            text=f"Current time: {datetime.now(timezone.utc).isoformat()}",
+            dedupe_key="current-time",
+        )
+    ]
+```
+
+The host wraps each block in a model-visible `<plugin_context plugin="...">`
+container, persists it as `item.plugin_context`, and replays it with the turn.
+This keeps plugin-provided context auditable and prevents it from being treated as
+ordinary user conversation during compaction.
+
+`request` includes the current `thread_id`, `turn_id`, `user_text`, selected
+`level`, whether this call created a new thread, whether this is the first user
+message in the thread, the current turn timestamp, the previous completed turn
+timestamp, the latest assistant/model-response timestamp, and a metadata snapshot.
+Hook failures are logged and emitted as `plugin.hook_failed` events; the current
+turn continues without that plugin's context.
+
 ## Event Bus
 
 Plugins subscribe with `context.events.subscribe(...)`:
@@ -281,6 +324,7 @@ Common public event types include:
 | `plugin.first_load` | The plugin was seen for the first time on this machine. |
 | `plugin.starting` / `plugin.started` | Plugin lifecycle progress. |
 | `plugin.failed` | Plugin start/stop failed. |
+| `plugin.hook_failed` | A non-lifecycle plugin hook failed; the turn continued. |
 | `plugin.stopping` / `plugin.stopped` | Plugin shutdown progress. |
 | `turn.started` | A user turn starts. |
 | `assistant.delta` | Assistant text streaming delta. |
@@ -309,7 +353,8 @@ optional keys rather than assuming every field is present.
 - Plugin runtime helpers are synchronous host functions. Wrap async SDKs behind a
   synchronous function if a helper must call them.
 - Plugins are discovered at startup/first turn; there is no hot reload.
-- Plugins cannot inject TUI commands, alter model messages, or bypass
-  `run_python` as the model's action surface.
+- Plugins cannot inject TUI commands, rewrite existing model messages, or
+  bypass `run_python` as the model's action surface. The pre-user context hook is
+  additive and persisted for auditability.
 - Avoid logging secrets. uv-agent stores plugin logs under user state, but plugin
   code is responsible for redacting its own sensitive values.
