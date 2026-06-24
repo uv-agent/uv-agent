@@ -2996,6 +2996,18 @@ def test_agent_view_input_option_enter_inserts_newline(monkeypatch) -> None:
     assert app.state.agent_view.composer == "a\nb"
 
 
+def test_agent_view_input_alt_enter_inserts_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app._open_agent_view()
+
+    asyncio.run(app.handle_key("i"))
+    asyncio.run(app.handle_key("a"))
+    asyncio.run(app.handle_key("<A-ENTER>"))
+    asyncio.run(app.handle_key("b"))
+
+    assert app.state.agent_view.composer == "a\nb"
+
+
 def test_agent_view_input_ctrl_j_inserts_newline(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app._open_agent_view()
@@ -3364,6 +3376,14 @@ def test_option_enter_inserts_newline(monkeypatch) -> None:
     assert app.state.composer == "hello\n"
 
 
+def test_alt_enter_inserts_newline(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.state.composer = "hello"
+    asyncio.run(app.handle_key("<A-ENTER>"))
+
+    assert app.state.composer == "hello\n"
+
+
 def test_ctrl_j_inserts_newline(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.state.composer = "hello"
@@ -3608,6 +3628,12 @@ def test_darwin_terminal_reads_option_enter_meta_cr_as_o_enter() -> None:
 
     assert terminal.read_key() == "<O-ENTER>"
 
+def test_terminal_reads_csi_alt_enter_as_a_enter() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b[27;3;13~"))
+    terminal._windows = False
+    terminal._macos = False
+
+    assert terminal.read_key() == "<A-ENTER>"
 
 def test_darwin_terminal_reads_option_enter_meta_lf_as_o_enter() -> None:
     terminal = Terminal(stdin=io.StringIO("\x1b\n"))

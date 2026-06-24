@@ -348,8 +348,8 @@ class Terminal(AbstractContextManager["Terminal"]):
             return "<C-ENTER>"
         if sequence == "\x1b[27;2;13~":
             return "<S-ENTER>"
-        if self._macos and sequence == "\x1b[27;3;13~":
-            return "<O-ENTER>"
+        if sequence == "\x1b[27;3;13~":
+            return "<O-ENTER>" if self._macos else "<A-ENTER>"
         if sequence == "\x1b[200~":
             return PASTE_PREFIX + self._read_bracketed_paste()
         return "\x1b"
