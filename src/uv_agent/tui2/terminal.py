@@ -95,13 +95,14 @@ class Terminal(AbstractContextManager["Terminal"]):
             return self._coalesce_unbracketed_paste(ch)
         # Terminals report arrows, modified Enter and bracketed paste as CSI
         # sequences.  Bracketed paste must be returned as one key so pasted
-        # newlines don't look like Enter presses to the app.  macOS
-        # terminals may encode Option+Enter as Meta+CR/LF when Option is
-        # configured as Meta, so normalize that two-byte form before
-        # treating the leading escape as a standalone Esc key.
+        # newlines don't look like Enter presses to the app.  Many terminals
+        # (including alacritty and macOS terminals configured with Option as
+        # Meta) encode Alt/Option+Enter as Meta+CR/LF, so normalize that
+        # two-byte form before treating the leading escape as a standalone Esc
+        # key.  macOS keeps the Option branding; everywhere else it is Alt.
         second = self._read_char_after_escape()
-        if self._macos and second in {"\r", "\n"}:
-            return "<O-ENTER>"
+        if second in {"\r", "\n"}:
+            return "<O-ENTER>" if self._macos else "<A-ENTER>"
         if second != "[":
             return "\x1b"
         return self._read_csi_key()
@@ -350,6 +351,9 @@ class Terminal(AbstractContextManager["Terminal"]):
             return "<S-ENTER>"
         if sequence == "\x1b[27;3;13~":
             return "<O-ENTER>" if self._macos else "<A-ENTER>"
+        # Kitty keyboard protocol: Alt+Enter (key 13, modifier 3).
+        if sequence == "\x1b[13;3u":
+            return "<A-ENTER>"
         if sequence == "\x1b[200~":
             return PASTE_PREFIX + self._read_bracketed_paste()
         return "\x1b"

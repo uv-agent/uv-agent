@@ -3635,6 +3635,30 @@ def test_terminal_reads_csi_alt_enter_as_a_enter() -> None:
 
     assert terminal.read_key() == "<A-ENTER>"
 
+def test_terminal_reads_meta_cr_as_a_enter() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b\r"))
+    terminal._windows = False
+    terminal._macos = False
+
+    assert terminal.read_key() == "<A-ENTER>"
+
+
+def test_terminal_reads_meta_lf_as_a_enter() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b\n"))
+    terminal._windows = False
+    terminal._macos = False
+
+    assert terminal.read_key() == "<A-ENTER>"
+
+
+def test_terminal_reads_kitty_alt_enter_as_a_enter() -> None:
+    terminal = Terminal(stdin=io.StringIO("\x1b[13;3u"))
+    terminal._windows = False
+    terminal._macos = False
+
+    assert terminal.read_key() == "<A-ENTER>"
+
+
 def test_darwin_terminal_reads_option_enter_meta_lf_as_o_enter() -> None:
     terminal = Terminal(stdin=io.StringIO("\x1b\n"))
     terminal._windows = False
