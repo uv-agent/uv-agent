@@ -1225,6 +1225,31 @@ def test_renderer_disables_autowrap_during_paint() -> None:
     assert "\x1b[?7h" in closed
 
 
+def test_renderer_close_reuses_anchored_live_region_for_shell_prompt(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 20))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    renderer._transcript_rows = 500
+    renderer._anchor_known = True
+
+    renderer.repaint(Tui2State(composer="/", command_palette_open=True, command_palette_items=[CommandSuggestion("/help")]))
+    frame_top = renderer._frame_top_row
+    frame_bottom = renderer._frame_top_row + renderer._frame_rows - 1
+    assert renderer._frame_anchored
+    assert frame_bottom > frame_top
+    output.seek(0)
+    output.truncate(0)
+
+    renderer.close()
+    closed = output.getvalue()
+
+    # The live frame is erased top-to-bottom, then the cursor returns to the top
+    # of that erased area so the shell prompt does not appear after a tall block
+    # of blank status/composer/picker rows.
+    assert closed.rfind(f"\x1b[{frame_top};1H") > closed.rfind(f"\x1b[{frame_bottom};1H")
+    assert closed.endswith(f"\x1b[{frame_top};1H\x1b[?7h\x1b[?2026l\x1b[0m")
+
+
 # ---------------------------------------------------------------------------
 # Key handling: Ctrl combos, history, Tab completion
 # ---------------------------------------------------------------------------

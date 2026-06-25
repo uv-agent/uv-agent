@@ -532,7 +532,13 @@ class Renderer:
         buf = [self._SYNC_ON + self._AUTOWRAP_OFF]
         if self._has_frame:
             if self._frame_anchored:
-                self._clear_rows(buf, self._frame_top_row, self._frame_top_row + self._frame_rows - 1, rows)
+                frame_top = max(1, min(self._frame_top_row, rows))
+                self._clear_rows(buf, frame_top, frame_top + self._frame_rows - 1, rows)
+                # Reuse the cleared live frame for the shell prompt.  Leaving the
+                # cursor on the bottom cleared row makes the erased status,
+                # picker, and composer area look like a block of blank output
+                # after the final transcript cell.
+                buf.append(self._cup(frame_top, 1))
             else:
                 self._clear_floating_frame(buf)
         # Always restore DECAWM so the shell the user returns to does not inherit
