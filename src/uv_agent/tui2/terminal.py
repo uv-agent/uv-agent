@@ -50,8 +50,10 @@ class Terminal(AbstractContextManager["Terminal"]):
         # bracketed paste.  tui2 does not enable mouse reporting itself, but
         # Windows Terminal can get stuck in a state where the mouse wheel is
         # routed to the application instead of scrolling the scrollback; these
-        # resets are a defensive cleanup.
-        self.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?2004l\x1b[0m\n")
+        # resets are a defensive cleanup.  ``tty.setraw`` disables POSIX output
+        # post-processing, so a bare LF would move down without returning to
+        # column zero and leave the shell prompt visually indented after exit.
+        self.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?2004l\x1b[0m\r")
         if not self._windows and self._old_termios is not None:
             import termios
 

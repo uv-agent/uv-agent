@@ -3866,6 +3866,18 @@ def test_unbracketed_paste_fallback_does_not_swallow_stringio_input() -> None:
     assert terminal.read_key() == "b"
 
 
+def test_terminal_exit_cleanup_uses_carriage_return_not_raw_newline() -> None:
+    output = io.StringIO()
+    terminal = Terminal(stdin=io.StringIO(""), stdout=output)
+    terminal._windows = False
+
+    terminal.__exit__(None, None, None)
+
+    rendered = output.getvalue()
+    assert rendered.endswith("\r")
+    assert "\n" not in rendered
+
+
 def test_terminal_key_reader_uses_one_thread_for_repeated_keyboardinterrupt(monkeypatch) -> None:
     class InterruptingTerminal:
         _windows = True
@@ -3946,6 +3958,41 @@ def test_command_palette_scrolls_to_selected_item() -> None:
 
     assert "/cmd9" in plain
     assert "/cmd0" not in plain
+    assert "↑" in plain
+
+
+def test_command_palette_renders_below_composer_without_moving_input_row() -> None:
+    closed = Tui2State(composer="/")
+    _closed_lines, closed_cursor_row, _ = render_live_with_cursor(closed, 80, 0)
+    state = Tui2State(
+        composer="/",
+        command_palette_open=True,
+        command_palette_items=[CommandSuggestion("/help", "show help")],
+    )
+
+    lines, cursor_row, _ = render_live_with_cursor(state, 80, 0)
+    plain = [strip_ansi(line) for line in lines]
+
+    composer_input = next(index for index, line in enumerate(plain) if line.startswith("│ › /"))
+    palette_item = next(index for index, line in enumerate(plain) if "/help" in line)
+    assert cursor_row == closed_cursor_row
+    assert composer_input < palette_item
+
+
+def test_command_palette_below_composer_is_bounded_by_live_height() -> None:
+    state = Tui2State(
+        composer="/",
+        command_palette_open=True,
+        command_palette_index=9,
+        command_palette_items=[CommandSuggestion(f"/cmd{i}", f"command {i}") for i in range(12)],
+    )
+
+    lines, cursor_row, _ = render_live_with_cursor(state, 80, 0, max_height=8)
+    plain = "\n".join(strip_ansi(line) for line in lines)
+
+    assert len(lines) <= 8
+    assert cursor_row < len(lines)
+    assert plain.index("│ › /") < plain.index("/cmd9")
     assert "↑" in plain
 
 

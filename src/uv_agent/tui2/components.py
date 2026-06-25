@@ -591,7 +591,7 @@ def render_command_palette(
     *,
     max_rows: int = 8,
 ) -> list[str]:
-    """Render the slash-command palette above the composer."""
+    """Render the slash-command and picker panel near the composer."""
 
     inner = max(8, width - 4)
     window_size = max(1, max_rows)
@@ -640,6 +640,26 @@ def render_command_palette(
             rows.append(sgr(theme.command_palette_border, "│ ") + more + pad + sgr(theme.command_palette_border, " │"))
     rows.append(sgr(theme.command_palette_border, "╰" + "─" * (width - 2) + "╯"))
     return rows
+
+
+def _command_palette_max_item_rows(items: list[CommandSuggestion], max_total_rows: int) -> int:
+    """Return ``render_command_palette(max_rows=...)`` for a total row cap.
+
+    The palette always needs top/bottom borders plus at least one content row.
+    When not all items fit, it also needs one hidden-count marker row.  Keeping
+    this calculation explicit lets the live renderer cap picker growth without
+    silently pushing the terminal viewport and manufacturing blank scrollback.
+    """
+
+    if max_total_rows < 3:
+        return 0
+    item_count = len(items) if items else 1
+    rows_without_marker = max_total_rows - 2
+    if item_count <= rows_without_marker:
+        return max(1, item_count)
+    if max_total_rows < 4:
+        return 0
+    return max(1, max_total_rows - 3)
 
 
 # ---------------------------------------------------------------------------
@@ -1294,7 +1314,7 @@ def render_live_with_cursor(
     preceding_kind: str | None = None,
     has_preceding_transcript: bool | None = None,
 ) -> tuple[list[str], int, int]:
-    """Render in-flight cells, optional status lines, and the boxed composer.
+    """Render in-flight cells, status lines, composer, and picker panel.
 
     When ``max_height`` is set, the live region is bounded to that many
     rows.  Cell lines are dropped from the front (replaced with a ``…
@@ -1347,16 +1367,29 @@ def render_live_with_cursor(
         language=state.language,
         image_token_numbers=state.image_token_numbers,
     )
-    palette_lines = (
-        render_command_palette(
-            state.command_palette_items,
-            state.command_palette_index,
-            width,
-            theme,
-        )
-        if state.command_palette_open
-        else []
-    )
+    palette_lines: list[str] = []
+    if state.command_palette_open:
+        palette_max_rows: int | None = None
+        if max_height is not None:
+            # Reserve one row for live transcript content when present so a tall
+            # picker cannot consume the whole repaintable frame.  The transcript
+            # content itself may later be collapsed to a hidden-lines marker.
+            chrome_gap_rows = 1 if transcript_before_chrome else 0
+            min_cell_rows = 1 if cell_lines else 0
+            fixed_rows = len(composer_lines) + len(status_lines) + chrome_gap_rows + min_cell_rows
+            palette_max_rows = _command_palette_max_item_rows(
+                state.command_palette_items,
+                max_height - fixed_rows,
+            )
+        if palette_max_rows != 0:
+            kwargs = {"max_rows": palette_max_rows} if palette_max_rows is not None else {}
+            palette_lines = render_command_palette(
+                state.command_palette_items,
+                state.command_palette_index,
+                width,
+                theme,
+                **kwargs,
+            )
 
     if max_height is not None and cell_lines:
         # Reserve the transcript/chrome separator whenever a transcript cell is
@@ -1378,12 +1411,11 @@ def render_live_with_cursor(
     if transcript_before_chrome and (not lines or lines[-1].strip()):
         lines.append("")
     lines.extend(status_lines)
-    if palette_lines:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.extend(palette_lines)
     cursor_row = len(lines) + row
     lines.extend(composer_lines)
+    # Pickers are intentionally below the composer: the input row stays at the
+    # same live-frame offset while the suggestion panel grows downward.
+    lines.extend(palette_lines)
     bounded = [truncate_visible(line, width) for line in lines]
     return bounded, cursor_row, col
 
