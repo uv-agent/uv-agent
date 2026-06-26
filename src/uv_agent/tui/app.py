@@ -392,7 +392,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         super().__init__()
         self.project_root = project_root
         self.engine = create_engine(project_root)
-        self.engine.workflow_executor.start()
+        workflow_executor = getattr(self.engine, "workflow_executor", None)
+        if workflow_executor is not None:
+            workflow_executor.start()
         self.language = detect_user_language(self.engine.config.ui.language)
         self.thread_id: str | None = None
         self.level: str | None = None

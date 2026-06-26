@@ -298,6 +298,10 @@ def _create_host_lease_schema(connection: sqlite3.Connection) -> None:
 
 
 def _ensure_workflow_executor_columns(connection: sqlite3.Connection) -> None:
+    table = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'workflow_nodes'").fetchone()
+    if table is None:
+        _create_workflow_schema(connection)
+        return
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflow_nodes)")}
     if "executor_id" not in columns:
         connection.execute("ALTER TABLE workflow_nodes ADD COLUMN executor_id TEXT")
