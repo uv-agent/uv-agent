@@ -3971,6 +3971,16 @@ def test_command_palette_render_shows_selection() -> None:
     assert "show help" in plain
 
 
+def test_command_palette_uses_fixed_height_for_short_results() -> None:
+    empty = render_command_palette([], 0, 80)
+    one = render_command_palette([CommandSuggestion("/help", "show help")], 0, 80)
+    many = render_command_palette([CommandSuggestion(f"/cmd{i}") for i in range(12)], 0, 80)
+
+    assert len(empty) == len(one) == len(many) == 8
+    assert "No matching commands" in "\n".join(strip_ansi(line) for line in empty)
+    assert "/help" in "\n".join(strip_ansi(line) for line in one)
+
+
 def test_command_palette_scrolls_to_selected_item() -> None:
     state = Tui2State(
         composer="/",

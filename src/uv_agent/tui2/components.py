@@ -51,6 +51,11 @@ def _resolve_language(value: UserLanguage | str | None) -> UserLanguage:
 # change every 100/12 ≈ 8.33 characters of streamed content.
 _BREATH_CHARS_PER_PHASE = max(1, round(100 / 12))
 
+# Total rows used by the command palette in the live frame.  Keeping this
+# fixed prevents the suggestion list from expanding with the number of matches
+# and repeatedly pushing the terminal viewport upward.
+_COMMAND_PALETTE_TOTAL_ROWS = 8
+
 
 def _breath_frame(cell: TranscriptCell) -> int:
     """Return the breath animation phase index for *cell*.
@@ -589,12 +594,25 @@ def render_command_palette(
     width: int,
     theme: AnsiTheme = DEFAULT_THEME,
     *,
-    max_rows: int = 8,
+    max_rows: int = _COMMAND_PALETTE_TOTAL_ROWS,
 ) -> list[str]:
-    """Render the slash-command and picker panel near the composer."""
+    """Render the slash-command and picker panel near the composer.
 
+    ``max_rows`` is a total frame-row budget, not a number of matches.  The
+    rendered palette pads short result sets to that height so opening the panel
+    does not change the live-frame height as matches are filtered.  When many
+    results are available, one content row is reserved for the hidden-count
+    marker and the choices scroll inside the fixed-height panel.
+    """
+
+    total_rows = max(0, max_rows)
+    if total_rows < 3:
+        return []
     inner = max(8, width - 4)
-    window_size = max(1, max_rows)
+    content_rows = max(1, total_rows - 2)
+    item_count = len(items) if items else 1
+    needs_marker = bool(items) and item_count > content_rows
+    window_size = max(1, content_rows - (1 if needs_marker else 0))
     if items:
         selected = max(0, min(selected, len(items) - 1))
         start = min(max(0, selected - window_size + 1), max(0, len(items) - window_size))
@@ -605,10 +623,12 @@ def render_command_palette(
     hidden_before = start
     hidden_after = max(0, len(items) - (start + len(visible)))
     rows = [sgr(theme.command_palette_border, "╭" + "─" * (width - 2) + "╮")]
+    used_content_rows = 0
     if not visible:
         text = sgr(theme.muted, "No matching commands")
         pad = " " * max(0, inner - visible_len(text))
         rows.append(sgr(theme.command_palette_border, "│ ") + text + pad + sgr(theme.command_palette_border, " │"))
+        used_content_rows += 1
     else:
         for index, item in enumerate(visible):
             absolute_index = start + index
@@ -622,13 +642,10 @@ def render_command_palette(
                 desc_parts.append(item.meta)
             desc = f" — {' · '.join(desc_parts)}" if desc_parts else ""
             text = marker + sgr(value_style, item.value) + sgr(theme.muted, desc)
-            pad = " " * max(0, inner - visible_len(text))
-            rows.append(
-                sgr(theme.command_palette_border, "│ ")
-                + truncate_visible(text, inner)
-                + pad
-                + sgr(theme.command_palette_border, " │")
-            )
+            rendered = truncate_visible(text, inner)
+            pad = " " * max(0, inner - visible_len(rendered))
+            rows.append(sgr(theme.command_palette_border, "│ ") + rendered + pad + sgr(theme.command_palette_border, " │"))
+            used_content_rows += 1
         if hidden_before or hidden_after:
             parts: list[str] = []
             if hidden_before:
@@ -636,30 +653,32 @@ def render_command_palette(
             if hidden_after:
                 parts.append(f"↓ {hidden_after}")
             more = sgr(theme.muted, "… " + " · ".join(parts))
-            pad = " " * max(0, inner - visible_len(more))
-            rows.append(sgr(theme.command_palette_border, "│ ") + more + pad + sgr(theme.command_palette_border, " │"))
+            rendered = truncate_visible(more, inner)
+            pad = " " * max(0, inner - visible_len(rendered))
+            rows.append(sgr(theme.command_palette_border, "│ ") + rendered + pad + sgr(theme.command_palette_border, " │"))
+            used_content_rows += 1
+    empty = " " * inner
+    while used_content_rows < content_rows:
+        rows.append(sgr(theme.command_palette_border, "│ ") + empty + sgr(theme.command_palette_border, " │"))
+        used_content_rows += 1
     rows.append(sgr(theme.command_palette_border, "╰" + "─" * (width - 2) + "╯"))
     return rows
 
 
-def _command_palette_max_item_rows(items: list[CommandSuggestion], max_total_rows: int) -> int:
-    """Return ``render_command_palette(max_rows=...)`` for a total row cap.
+def _command_palette_rows_for_live_frame(*, available_rows: int | None) -> int:
+    """Return the fixed palette height that fits in the live frame.
 
-    The palette always needs top/bottom borders plus at least one content row.
-    When not all items fit, it also needs one hidden-count marker row.  Keeping
-    this calculation explicit lets the live renderer cap picker growth without
-    silently pushing the terminal viewport and manufacturing blank scrollback.
+    The normal palette height is fixed, but very small terminals can leave less
+    room than that after the composer/status/live rows are reserved.  In that
+    case we shrink to the largest usable palette rather than letting it cover
+    live output or overflow the repaintable region.
     """
 
-    if max_total_rows < 3:
+    if available_rows is None:
+        return _COMMAND_PALETTE_TOTAL_ROWS
+    if available_rows < 3:
         return 0
-    item_count = len(items) if items else 1
-    rows_without_marker = max_total_rows - 2
-    if item_count <= rows_without_marker:
-        return max(1, item_count)
-    if max_total_rows < 4:
-        return 0
-    return max(1, max_total_rows - 3)
+    return min(_COMMAND_PALETTE_TOTAL_ROWS, available_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1369,26 +1388,23 @@ def render_live_with_cursor(
     )
     palette_lines: list[str] = []
     if state.command_palette_open:
-        palette_max_rows: int | None = None
+        palette_available_rows: int | None = None
         if max_height is not None:
-            # Reserve one row for live transcript content when present so a tall
-            # picker cannot consume the whole repaintable frame.  The transcript
+            # Reserve one row for live transcript content when present so the
+            # picker never consumes the whole repaintable frame.  The transcript
             # content itself may later be collapsed to a hidden-lines marker.
             chrome_gap_rows = 1 if transcript_before_chrome else 0
             min_cell_rows = 1 if cell_lines else 0
             fixed_rows = len(composer_lines) + len(status_lines) + chrome_gap_rows + min_cell_rows
-            palette_max_rows = _command_palette_max_item_rows(
-                state.command_palette_items,
-                max_height - fixed_rows,
-            )
-        if palette_max_rows != 0:
-            kwargs = {"max_rows": palette_max_rows} if palette_max_rows is not None else {}
+            palette_available_rows = max_height - fixed_rows
+        palette_rows = _command_palette_rows_for_live_frame(available_rows=palette_available_rows)
+        if palette_rows:
             palette_lines = render_command_palette(
                 state.command_palette_items,
                 state.command_palette_index,
                 width,
                 theme,
-                **kwargs,
+                max_rows=palette_rows,
             )
 
     if max_height is not None and cell_lines:
