@@ -70,6 +70,7 @@ from uv_agent.paths import uv_agent_home
 from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, TurnContextBlock, TurnPrepareRequest
 from uv_agent.plugins.helpers import RuntimeHelperRegistry
 from uv_agent.turn_manager import TurnManager
+from uv_agent.scheduler import SchedulerService
 from uv_agent.prompts import (
     BRANCH_NAME_GENERATION_PROMPT,
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
@@ -472,6 +473,11 @@ class AgentEngine:
         if rpc_server is not None:
             rpc_server.register_method("helper.resolve", self.plugins.resolve_helper)
             rpc_server.register_method("helper.call", self.plugins.call_helper)
+            rpc_server.register_method("scheduler.create", self.scheduler.create)
+            rpc_server.register_method("scheduler.update", self.scheduler.update)
+            rpc_server.register_method("scheduler.list", self.scheduler.list)
+            rpc_server.register_method("scheduler.delete", self.scheduler.delete)
+            rpc_server.register_method("scheduler.run_now", self.scheduler.run_now)
         self._plugins_started = False
         self._plugins_start_task: asyncio.Task[None] | None = None
         self._last_judge: dict[str, Any] | None = None
@@ -482,6 +488,12 @@ class AgentEngine:
         self.turn_manager = TurnManager(
             self,
             max_concurrent_turns=getattr(self.config.runtime, "max_concurrent_turns", 4),
+        )
+        self.scheduler = SchedulerService(
+            self.thread_store.data_dir,
+            self.config.scheduler,
+            helper_resolver=self.plugins.resolve_helper,
+            helper_caller=self.plugins.call_helper,
         )
 
     def _publish_host_event(self, event: dict[str, Any]) -> None:

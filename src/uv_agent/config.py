@@ -194,6 +194,14 @@ class PluginsConfig:
 
 
 @dataclass(frozen=True)
+class SchedulerConfig:
+    max_concurrent_jobs: int = 8
+    run_history_retention_days: int = 7
+    default_misfire_policy: str = "skip"
+    default_overlap_policy: str = "skip"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     providers: dict[str, ProviderConfig]
     models: dict[str, ModelConfig]
@@ -202,6 +210,7 @@ class AppConfig:
     runner: RunnerConfig
     ui: UiConfig = field(default_factory=UiConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
 
     def public_levels(self) -> dict[str, LevelConfig]:
@@ -480,6 +489,13 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         if isinstance(value, dict)
     }
     plugins = PluginsConfig(disabled=disabled, config=plugin_config)
+    scheduler_raw = _object_dict(raw.get("scheduler", {}))
+    scheduler = SchedulerConfig(
+        max_concurrent_jobs=max(1, int(scheduler_raw.get("max_concurrent_jobs", 8))),
+        run_history_retention_days=max(1, int(scheduler_raw.get("run_history_retention_days", 7))),
+        default_misfire_policy=str(scheduler_raw.get("default_misfire_policy", "skip")),
+        default_overlap_policy=str(scheduler_raw.get("default_overlap_policy", "skip")),
+    )
     pricing = parse_pricing(raw.get("pricing", {}))
     return AppConfig(
         providers=providers,
@@ -494,6 +510,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
             ),
         ),
         plugins=plugins,
+        scheduler=scheduler,
         pricing=pricing,
     )
 

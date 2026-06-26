@@ -6,7 +6,7 @@ from pathlib import Path
 from uv_agent.time import utc_now_iso
 
 DB_FILENAME = "uv-agent.sqlite3"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SQLITE_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
 
@@ -59,9 +59,14 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     if existing_version == "1":
         _migrate_v1_to_v2(connection)
         _migrate_v2_to_v3(connection)
+        _migrate_v3_to_v4(connection)
         return
     if existing_version == "2":
         _migrate_v2_to_v3(connection)
+        _migrate_v3_to_v4(connection)
+        return
+    if existing_version == "3":
+        _migrate_v3_to_v4(connection)
         return
     raise StateDbError(
         f"Unsupported state database schema version {existing_version}; "
@@ -192,6 +197,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             """
         )
         _create_workflow_schema(connection)
+        _create_scheduler_schema(connection)
         connection.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -207,6 +213,7 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
 
     with connection:
         _create_workflow_schema(connection)
+        _create_scheduler_schema(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             ("2",),
@@ -224,6 +231,63 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             (str(SCHEMA_VERSION),),
         )
+
+
+def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
+    """Add persistent scheduler tables."""
+
+    with connection:
+        _create_scheduler_schema(connection)
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+
+
+def _create_scheduler_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schedules (
+          schedule_id TEXT PRIMARY KEY,
+          name TEXT,
+          description TEXT,
+          kind TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          action_json TEXT NOT NULL,
+          timing_json TEXT NOT NULL,
+          timezone TEXT,
+          next_run_at TEXT,
+          misfire_policy TEXT NOT NULL DEFAULT 'skip',
+          overlap_policy TEXT NOT NULL DEFAULT 'skip',
+          owner_type TEXT NOT NULL DEFAULT 'agent',
+          owner_name TEXT,
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_schedules_enabled_next_run
+          ON schedules(enabled, next_run_at);
+
+        CREATE TABLE IF NOT EXISTS schedule_runs (
+          run_id TEXT PRIMARY KEY,
+          schedule_id TEXT,
+          status TEXT NOT NULL,
+          action_json TEXT NOT NULL,
+          schedule_snapshot_json TEXT NOT NULL,
+          result_json TEXT NOT NULL DEFAULT '{}',
+          error_json TEXT NOT NULL DEFAULT '{}',
+          workflow_id TEXT,
+          due_at TEXT,
+          started_at TEXT NOT NULL,
+          completed_at TEXT,
+          FOREIGN KEY(schedule_id) REFERENCES schedules(schedule_id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_started
+          ON schedule_runs(schedule_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_schedule_runs_started
+          ON schedule_runs(started_at DESC);
+        """
+    )
 
 
 def _create_workflow_schema(connection: sqlite3.Connection) -> None:

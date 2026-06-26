@@ -80,6 +80,7 @@ from .threads import (
     ThreadView,
 )
 from . import workflow as workflow
+from . import scheduler as scheduler
 
 if os.environ.get(MANAGED_RUN_ENV):
     install_friendly_excepthook()
@@ -151,6 +152,7 @@ __all__ = [
     "restore",
     "run",
     "search",
+    "scheduler",
     "snapshot",
     "symbols",
     "threads",
