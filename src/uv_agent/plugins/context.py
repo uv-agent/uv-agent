@@ -10,7 +10,7 @@ from typing import Any, Literal
 from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
 
 from .events import EventBus, raise_if_reentrant_submit
-from .helpers import RuntimeHelperRegistry, RuntimeHelperSpec
+from .helpers import RuntimeHelperRegistry, RuntimeHelperSpec, payload_from_call
 
 
 @dataclass
@@ -84,21 +84,26 @@ class PluginContext:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-    def register_runtime_helper(
+    def register_handler(
         self,
         name: str,
-        fn: Callable[..., Any],
+        fn: Callable[[dict[str, Any]], Any],
         *,
-        doc: str | None = None,
-        schema: dict[str, Any] | None = None,
+        doc: str,
+        schema: dict[str, Any],
+        timeout_s: float | None = None,
     ) -> RuntimeHelperSpec:
-        return self._helper_registry.register(
+        return self._helper_registry.register_handler(
             plugin=self.name,
             name=name,
             fn=fn,
             doc=doc,
             schema=schema,
+            timeout_s=timeout_s,
         )
+
+    async def call_handler(self, name: str, payload: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+        return await self._helper_registry.call(name, payload_from_call([payload] if payload is not None else [], kwargs))
 
     def open_db(self) -> sqlite3.Connection:
         path = self.data_dir / "data.sqlite3"

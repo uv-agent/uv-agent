@@ -194,11 +194,12 @@ class DelayedPluginManager:
     async def _start(self) -> None:
         self.started.set()
         await self.release.wait()
-        self.engine.runtime_helpers.register(
+        self.engine.runtime_helpers.register_handler(
             plugin="delayed-plugin",
             name="delayed_helper",
-            fn=lambda: None,
+            fn=lambda payload: {"ok": True},
             doc="Delayed helper.",
+            schema={"type": "object", "properties": {}},
         )
 
     async def stop(self) -> None:
@@ -4967,11 +4968,12 @@ def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) ->
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
     )
-    engine.runtime_helpers.register(
+    engine.runtime_helpers.register_handler(
         plugin="demo-plugin",
         name="demo_helper",
-        fn=lambda: None,
+        fn=lambda payload: {"ok": True},
         doc="Demo helper.",
+        schema={"type": "object", "properties": {"name": {"type": "string"}, "count": {"type": "integer", "default": 1}}, "required": ["name"]},
     )
 
     update = engine._turn_context_update(None)
@@ -4983,7 +4985,9 @@ def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) ->
         "使用 helper 的 name 属性作为 Python 中的 import/callable 名称；"
         "plugin 属性只标识提供方 plugin。"
     ) in text
-    assert '<helper name="demo_helper" plugin="demo-plugin">Demo helper.</helper>' in text
+    assert '<helper name="demo_helper" plugin="demo-plugin">' in text
+    assert '<signature>rt.demo_helper(name: str, count: int = 1) -&gt; Any</signature>' in text
+    assert '<description>Demo helper.</description>' in text
 
 
 @pytest.mark.asyncio
@@ -5030,7 +5034,8 @@ async def test_run_turn_waits_for_plugin_start_before_context_update(tmp_path: P
     assert plugins.start_count == 1
     assert events[-1]["type"] == "turn.completed"
     request_text = "\n".join(message_item_text(item) for item in client.requests[0]["input"])
-    assert '<helper name="delayed_helper" plugin="delayed-plugin">Delayed helper.</helper>' in request_text
+    assert '<helper name="delayed_helper" plugin="delayed-plugin">' in request_text
+    assert '<description>Delayed helper.</description>' in request_text
 
 
 @pytest.mark.asyncio

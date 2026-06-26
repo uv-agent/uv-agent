@@ -155,8 +155,20 @@ class JsonRpcDispatcher:
     def _call_host(self, name: str, params: dict[str, Any], *, session: RunSession) -> Any:
         try:
             return self._methods.call(name, params, context=session.context)
-        except KeyError as exc:
-            raise JsonRpcError(METHOD_NOT_FOUND, "Method not found", data={"method": f"call.{name}"}) from exc
+        except KeyError:
+            helper = self._methods.get("helper.call")
+            if helper is None:
+                raise JsonRpcError(METHOD_NOT_FOUND, "Method not found", data={"method": f"call.{name}"})
+            try:
+                args = list(params.get("args") or []) if set(params).issubset({"args", "kwargs"}) else []
+                kwargs = dict(params.get("kwargs") or {}) if set(params).issubset({"args", "kwargs"}) else dict(params)
+                return helper(name=name, args=args, kwargs=kwargs)
+            except Exception as exc:
+                raise JsonRpcError(
+                    BUSINESS_ERROR,
+                    f"{exc.__class__.__name__}: {exc}",
+                    data={"type": exc.__class__.__name__, "traceback": "".join(traceback.format_exception(exc))},
+                ) from exc
         except Exception as exc:
             raise JsonRpcError(
                 BUSINESS_ERROR,

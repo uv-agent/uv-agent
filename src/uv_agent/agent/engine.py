@@ -470,6 +470,7 @@ class AgentEngine:
         rpc_server = getattr(self.runner, "rpc_server", None)
         if rpc_server is not None:
             rpc_server.register_method("helper.resolve", self.plugins.resolve_helper)
+            rpc_server.register_method("helper.call", self.plugins.call_helper)
         self._plugins_started = False
         self._plugins_start_task: asyncio.Task[None] | None = None
         self._last_judge: dict[str, Any] | None = None
@@ -4249,16 +4250,57 @@ class AgentEngine:
         # the changed plugin. Startup-time loading means the current block-level
         # refresh is enough for now.
         for helper in helpers:
-            doc = xml_text(helper.doc or "")
             lines.append(
                 PLUGIN_HELPER_ENTRY_TEMPLATE.format(
                     name=xml_text(helper.name),
                     plugin=xml_text(helper.plugin),
-                    doc=doc,
+                    signature=xml_text(_handler_signature(helper.name, helper.schema)),
+                    doc=xml_text(helper.doc),
                 )
             )
         lines.append(PLUGIN_HELPERS_FOOTER)
         return "\n".join(lines)
+
+def _handler_signature(name: str, schema: dict[str, Any]) -> str:
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    required = set(schema.get("required") or []) if isinstance(schema, dict) else set()
+    if not isinstance(properties, dict) or not properties:
+        return f"rt.{name}(payload: dict) -> Any"
+    parts = []
+    for prop_name, prop_schema in properties.items():
+        if not isinstance(prop_schema, dict):
+            typ = "Any"
+            default = None
+        else:
+            typ = _json_schema_type_name(prop_schema.get("type"), prop_schema.get("enum"))
+            default = prop_schema.get("default")
+        if prop_name in required:
+            parts.append(f"{prop_name}: {typ}")
+        elif "default" in (prop_schema if isinstance(prop_schema, dict) else {}):
+            parts.append(f"{prop_name}: {typ} = {default!r}")
+        else:
+            parts.append(f"{prop_name}: {typ} | None = None")
+    return f"rt.{name}({', '.join(parts)}) -> Any"
+
+
+def _json_schema_type_name(value: Any, enum: Any = None) -> str:
+    if isinstance(enum, list) and enum and all(isinstance(item, str) for item in enum[:8]):
+        return "Literal[" + ", ".join(repr(item) for item in enum[:8]) + "]"
+    values = value if isinstance(value, list) else [value]
+    mapped = []
+    for item in values:
+        mapped.append({
+            "string": "str",
+            "boolean": "bool",
+            "integer": "int",
+            "number": "float",
+            "object": "dict",
+            "array": "list",
+            "null": "None",
+        }.get(str(item), "Any"))
+    result = " | ".join(dict.fromkeys(mapped))
+    return result or "Any"
+
 
 def tool_attachment_context_items(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return a neutral assistant bridge followed by tool-produced image context."""

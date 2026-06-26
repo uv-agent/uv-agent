@@ -81,6 +81,11 @@ class PluginManager:
     def resolve_helper(self, name: str) -> dict[str, Any]:
         return self.helpers.resolve_payload(name)
 
+    async def call_helper(self, name: str, args: list[Any] | None = None, kwargs: dict[str, Any] | None = None) -> Any:
+        from .helpers import payload_from_call
+
+        return await self.helpers.call(name, payload_from_call(list(args or []), dict(kwargs or {})))
+
     async def prepare_turn(self, request: TurnPrepareRequest) -> list[TurnContextBlock]:
         """Collect additive pre-user context from started plugins.
 

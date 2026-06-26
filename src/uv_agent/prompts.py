@@ -427,7 +427,7 @@ AVAILABLE_MCP_SERVERS_FOOTER = f"</{AVAILABLE_MCP_SERVERS_TAG}>"
 
 # Purpose: plugin-provided runtime helpers are appended after the built-in helper
 # block so the model knows which additional callables can be imported in run_python.
-PLUGIN_HELPER_ENTRY_TEMPLATE = '<helper name="{name}" plugin="{plugin}">{doc}</helper>'
+PLUGIN_HELPER_ENTRY_TEMPLATE = '<helper name="{name}" plugin="{plugin}">\n<signature>{signature}</signature>\n<description>{doc}</description>\n<usage>Call as rt.{name}(...) with keyword arguments, or rt.{name}({{...}}) with one payload dict.</usage>\n</helper>'
 PLUGIN_HELPERS_FOOTER = f"</{PLUGIN_RUNTIME_HELPERS_TAG}>"
 
 # Purpose: dynamic-context removal notices name skills/MCP servers that were
