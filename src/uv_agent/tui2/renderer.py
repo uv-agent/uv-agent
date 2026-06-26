@@ -491,14 +491,35 @@ class Renderer:
         old_bottom = old_top + self._frame_rows - 1
 
         if new_top < old_top and old_bottom >= rows:
-            # Scroll before erasing the old frame.  Clearing first pushes blank
-            # rows into normal scrollback when the viewport scrolls, which shows
-            # up later as large gaps between completed transcript cells.
-            delta = old_top - new_top
-            buf.append(self._cup(rows, 1) + "\n" * delta)
-            self._transcript_rows = max(0, self._transcript_rows - delta)
-            old_top = max(1, old_top - delta)
-            old_bottom = max(0, old_bottom - delta)
+            # The live tail grew while pinned to the bottom.  That is normal when
+            # the user starts the next prompt after an assistant response, because
+            # the frame expands from composer-only to user/status/composer.  Keep
+            # at least one visible transcript row above the live frame; otherwise
+            # a very tall repaint can make the composer appear to eat the final
+            # assistant line.
+            desired_delta = old_top - new_top
+            max_scroll = max(0, self._transcript_rows - 1)
+            delta = min(desired_delta, max_scroll)
+            if delta > 0:
+                buf.append(self._cup(rows, 1) + "\n" * delta)
+                self._transcript_rows = max(0, self._transcript_rows - delta)
+                old_top = max(1, old_top - delta)
+                old_bottom = max(0, old_bottom - delta)
+            if delta < desired_delta:
+                new_top = old_top
+                available_height = max(1, rows - new_top + 1)
+                if len(lines) > available_height:
+                    # Preserve the leading live cell (usually the just-submitted
+                    # user prompt or a hidden-lines marker) and the bottom chrome.
+                    keep_tail = max(0, available_height - 1)
+                    dropped_after_head = len(lines) - available_height
+                    lines = [lines[0], *lines[-keep_tail:]] if keep_tail else [lines[0]]
+                    if cursor_row > 0:
+                        cursor_row = max(0, cursor_row - dropped_after_head)
+                    cursor_row = min(cursor_row, len(lines) - 1)
+                    height = len(lines)
+                else:
+                    height = len(lines)
         self._cap_transcript_rows_above_live(rows, height)
 
         clear_top = min(new_top, old_top)

@@ -998,6 +998,73 @@ def _max_empty_run(lines: list[str]) -> int:
     return max(longest, current)
 
 
+def _terminal_screen_lines(rendered: str, *, cols: int, rows: int) -> list[str]:
+    """Interpret the small CSI subset emitted by ``Renderer`` in tests.
+
+    ``_plain_renderer_lines`` is useful for append-only assertions, but it cannot
+    tell whether CUP/EL repaint sequences would erase or scroll an already visible
+    transcript row.  This lightweight emulator covers the renderer's output
+    primitives: SGR/private modes are ignored, CUP/HPA/CUU move the cursor,
+    EL clears one row, and CR/LF apply raw-terminal cursor movement with normal
+    viewport scrolling.
+    """
+
+    screen = [[" " for _ in range(cols)] for _ in range(rows)]
+    row = 0
+    col = 0
+    i = 0
+
+    def scroll_up() -> None:
+        screen.pop(0)
+        screen.append([" " for _ in range(cols)])
+
+    while i < len(rendered):
+        ch = rendered[i]
+        if ch == "\x1b":
+            match = re.match(r"\x1b\[([?0-9;]*)([A-Za-z])", rendered[i:])
+            if match:
+                params = match.group(1)
+                command = match.group(2)
+                i += match.end()
+                if command == "H":
+                    parts = [part for part in params.split(";") if part and not part.startswith("?")]
+                    target_row = int(parts[0]) if parts else 1
+                    target_col = int(parts[1]) if len(parts) > 1 else 1
+                    row = max(0, min(rows - 1, target_row - 1))
+                    col = max(0, min(cols - 1, target_col - 1))
+                elif command == "G":
+                    parts = [part for part in params.split(";") if part and not part.startswith("?")]
+                    target_col = int(parts[0]) if parts else 1
+                    col = max(0, min(cols - 1, target_col - 1))
+                elif command == "A":
+                    amount = int(params or "1")
+                    row = max(0, row - amount)
+                elif command == "K":
+                    screen[row] = [" " for _ in range(cols)]
+                # SGR/private-mode toggles do not affect plain cell contents.
+                continue
+            # Unknown escape: skip ESC only and let the following bytes surface if
+            # a future renderer starts emitting something this helper does not know.
+            i += 1
+            continue
+        if ch == "\r":
+            col = 0
+        elif ch == "\n":
+            if row == rows - 1:
+                scroll_up()
+            else:
+                row += 1
+        else:
+            if ch >= " " and col < cols:
+                screen[row][col] = ch
+                col += 1
+                if col >= cols:
+                    col = cols - 1
+        i += 1
+
+    return ["".join(line).rstrip() for line in screen]
+
+
 def test_flush_cell_separates_user_from_middle_process_and_turns() -> None:
     output = io.StringIO()
     renderer = Renderer(output=output)
@@ -1061,6 +1128,37 @@ def test_renderer_repaint_separates_just_flushed_tool_from_status(monkeypatch) -
     assert working_idx > 0  # transcript/chrome separator before status
     assert plain[working_idx - 1].strip() == ""
     assert any(line.startswith("╭") for line in plain[working_idx + 1:])
+
+
+def test_user_submit_after_assistant_tail_preserves_last_visible_line(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (60, 6))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    state = Tui2State(composer="")
+
+    # On very short terminals, the next-prompt live frame can be taller than the
+    # rows below the completed assistant answer.  The renderer may collapse live
+    # chrome, but it must not scroll away the last visible answer row.
+    renderer.flush_cell(TranscriptCell("assistant", text="old 0"), state)
+    renderer.flush_cell(
+        TranscriptCell(
+            "assistant",
+            text="\n".join(f"tail line {index}" for index in range(1, 9)),
+        ),
+        state,
+    )
+    assert renderer._frame_anchored
+
+    state.live.append(TranscriptCell("user", text="new user"))
+    state.busy = True
+    state.status_message = "running"
+    renderer.repaint(state)
+
+    screen = _terminal_screen_lines(output.getvalue(), cols=60, rows=6)
+    tail_index = next(index for index, line in enumerate(screen) if "tail line 8" in line)
+    user_index = next(index for index, line in enumerate(screen) if line.startswith("› new user"))
+
+    assert tail_index < user_index
 
 
 def test_renderer_growing_anchored_live_frame_does_not_scroll_blank_rows(monkeypatch) -> None:

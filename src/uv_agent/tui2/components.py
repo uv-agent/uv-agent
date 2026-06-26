@@ -1414,9 +1414,16 @@ def render_live_with_cursor(
         reserved = len(composer_lines) + len(status_lines) + len(palette_lines) + chrome_gap_rows
         available = max(1, max_height - reserved)
         if len(cell_lines) > available:
-            dropped = len(cell_lines) - available + 1
-            marker = sgr(theme.muted, f"…  {dropped} earlier lines hidden in live; full text on completion")
-            cell_lines = [marker] + cell_lines[dropped:]
+            if available <= 1:
+                # On very short terminals the marker itself can consume the only
+                # row available for live transcript content.  Prefer showing the
+                # newest meaningful line (typically the just-submitted user
+                # prompt) over a marker that hides it.
+                cell_lines = cell_lines[-available:]
+            else:
+                dropped = len(cell_lines) - available + 1
+                marker = sgr(theme.muted, f"…  {dropped} earlier lines hidden in live; full text on completion")
+                cell_lines = [marker] + cell_lines[dropped:]
 
     lines: list[str] = list(cell_lines)
     # Keep exactly one blank row between the transcript and the bottom chrome as
