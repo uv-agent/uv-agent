@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import builtins
-import concurrent.futures
 import json
 import os
 import re
@@ -9,12 +8,11 @@ import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Callable, Literal
 
 from .events import emit_event
-from .textops import CommandTextResult, run_process_text
 
 DB_FILENAME = "uv-agent.sqlite3"
 SQLITE_BUSY_TIMEOUT_MS = 30_000
@@ -321,30 +319,16 @@ class WorkflowHandle:
             if _expired(start, timeout_s):
                 return WorkflowWaitResult(self.workflow_id, "timeout", snapshot)
 
-            ready_checkpoints = self._ready_nodes(kind="checkpoint")
-            if ready_checkpoints:
-                checkpoint = self._reach_checkpoint(ready_checkpoints[0])
-                snapshot = self.snapshot()
-                return WorkflowWaitResult(self.workflow_id, "checkpoint", snapshot, checkpoint=_checkpoint_payload(checkpoint))
-
-            ready_agents = self._ready_nodes(kind=None, executable_only=True)
-            if ready_agents:
-                self._run_ready_nodes(ready_agents, start=start, timeout_s=timeout_s)
-                if _expired(start, timeout_s):
-                    return WorkflowWaitResult(self.workflow_id, "timeout", self.snapshot())
-                continue
-
+            # Ready executable/checkpoint nodes are advanced by the host-side WorkflowExecutor.
             nodes = self._nodes()
             pending = [node for node in nodes if node["status"] == "pending"]
             failed = [node for node in nodes if node["status"] == "failed"]
             running = [node for node in nodes if node["status"] == "running"]
             if running:
-                # A previous wait was interrupted after marking nodes running. The
-                # subprocesses are owned by that old run_python process, so the
-                # safest resumable state is to return control to the main Agent for a decision.
-                error = {"running_nodes": [row["node_id"] for row in running]}
-                self._set_workflow_status("failed", error=error)
-                return WorkflowWaitResult(self.workflow_id, "failed", self.snapshot(), error=error)
+                if _expired(start, timeout_s):
+                    return WorkflowWaitResult(self.workflow_id, "timeout", self.snapshot())
+                sleep(0.5)
+                continue
             if failed and (until == "next_yield" or not pending):
                 error = {"failed_nodes": [row["node_id"] for row in failed]}
                 self._set_workflow_status("failed", error=error)
@@ -352,11 +336,10 @@ class WorkflowHandle:
             if not pending:
                 self._set_workflow_status("completed")
                 return WorkflowWaitResult(self.workflow_id, "completed", self.snapshot(), final=self._final_payload())
-            # Pending nodes exist but none are runnable, usually because a dependency
-            # failed or was cancelled. Return a failed boundary instead of spinning.
-            error = {"blocked_nodes": [row["node_id"] for row in pending]}
-            self._set_workflow_status("failed", error=error)
-            return WorkflowWaitResult(self.workflow_id, "failed", self.snapshot(), error=error)
+            if _expired(start, timeout_s):
+                return WorkflowWaitResult(self.workflow_id, "timeout", self.snapshot())
+            sleep(0.5)
+            continue
 
     def snapshot(self) -> dict[str, Any]:
         workflow = dict(self._workflow_row())
@@ -752,80 +735,6 @@ class WorkflowHandle:
                 ready.append(row)
         return ready
 
-    def _run_ready_nodes(self, nodes: list[sqlite3.Row], *, start: float, timeout_s: float | None) -> None:
-        state = self._workflow_state()
-        concurrency = max(1, int(state.get("concurrency") or min(4, len(nodes)) or 1))
-        batch = nodes[:concurrency]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as executor:
-            futures = [executor.submit(self._execute_node, dict(row), start, timeout_s) for row in batch]
-            for future in concurrent.futures.as_completed(futures):
-                future.result()
-
-    def _execute_node(self, node: dict[str, Any], start: float, workflow_timeout_s: float | None) -> None:
-        node_id = str(node["node_id"])
-        now = _utc_now_iso()
-        with _connect(self._state_dir) as db:
-            db.execute(
-                "UPDATE workflow_nodes SET status = 'running', started_at = ? WHERE node_id = ? AND status = 'pending'",
-                (now, node_id),
-            )
-        emit_event("workflow.node.started", workflow_id=self.workflow_id, node_id=node_id, key=node.get("key"), node_kind=node.get("kind"))
-        metadata = _json_loads(node.get("metadata_json"), default={})
-        timeout_s = metadata.get("timeout_s")
-        remaining = _remaining(start, workflow_timeout_s)
-        if timeout_s is not None and remaining is not None:
-            timeout_s = min(float(timeout_s), remaining)
-        elif remaining is not None:
-            timeout_s = remaining
-        prompt = str(node.get("prompt") or "")
-        level = str(node.get("model_level") or self._workflow_row()["default_model_level"] or "") or None
-        result = _run_workflow_node(
-            prompt,
-            workflow_id=self.workflow_id,
-            node_id=node_id,
-            level=level,
-            timeout_s=timeout_s,
-            state_dir=self._state_dir,
-        )
-        completed_at = _utc_now_iso()
-        thread_id = _extract_workflow_node_thread_id(result.stderr)
-        result_json = {
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "timed_out": result.timed_out,
-            "thread_id": thread_id,
-            "model_level": level,
-        }
-        status = "completed" if result.returncode == 0 and not result.timed_out else "failed"
-        error = {} if status == "completed" else {"returncode": result.returncode, "stderr": result.stderr, "timed_out": result.timed_out}
-        with _connect(self._state_dir) as db:
-            db.execute(
-                """
-                UPDATE workflow_nodes
-                SET status = ?, completed_at = ?, thread_id = ?, result_summary = ?, result_json = ?, error_json = ?
-                WHERE node_id = ?
-                """,
-                (status, completed_at, thread_id, result.stdout, _json_dumps(result_json), _json_dumps(error), node_id),
-            )
-            db.execute("UPDATE workflows SET updated_at = ? WHERE workflow_id = ?", (completed_at, self.workflow_id))
-        emit_event(
-            "workflow.node.completed" if status == "completed" else "workflow.node.failed",
-            workflow_id=self.workflow_id,
-            node_id=node_id,
-            key=node.get("key"),
-            returncode=result.returncode,
-            timed_out=result.timed_out,
-            thread_id=thread_id,
-        )
-        self._write_event(
-            "workflow.node.completed" if status == "completed" else "workflow.node.failed",
-            node_id=node_id,
-            returncode=result.returncode,
-            timed_out=result.timed_out,
-            thread_id=thread_id,
-        )
-
     def _reach_checkpoint(self, node: sqlite3.Row) -> sqlite3.Row:
         checkpoint = self._checkpoint_for_node(node["node_id"])
         if checkpoint is None:
@@ -968,41 +877,6 @@ def active_snapshots(
     return [resume(row["workflow_id"], state_dir=base).snapshot() for row in rows]
 
 
-def _run_workflow_node(
-    prompt: str,
-    *,
-    workflow_id: str,
-    node_id: str,
-    level: str | None,
-    timeout_s: float | None,
-    state_dir: Path,
-) -> CommandTextResult:
-    args = [os.environ.get("UV_BIN") or "uv", "run", "uv-agent"]
-    if level:
-        args.extend(["--level", level])
-    args.extend(
-        [
-            "--thread-kind",
-            "workflow_node",
-            "--workflow-id",
-            workflow_id,
-            "--node-id",
-            node_id,
-        ]
-    )
-    parent_thread_id = os.environ.get("UV_AGENT_RUNTIME_THREAD_ID")
-    parent_turn_id = os.environ.get("UV_AGENT_RUNTIME_TURN_ID")
-    parent_run_id = os.environ.get("UV_AGENT_RUNTIME_RUN_ID")
-    if parent_thread_id:
-        args.extend(["--parent-thread", parent_thread_id])
-    if parent_turn_id:
-        args.extend(["--parent-turn", parent_turn_id])
-    if parent_run_id:
-        args.extend(["--parent-run", parent_run_id])
-    args.extend(["--project-state-dir", str(state_dir), "--no-stream", "workflow-node", prompt])
-    return run_process_text(args, cwd=os.environ.get("UV_AGENT_RUNTIME_PROJECT_ROOT") or None, timeout_s=timeout_s)
-
-
 def _connect(base: Path) -> sqlite3.Connection:
     base.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(base / DB_FILENAME, timeout=30.0)
@@ -1049,6 +923,8 @@ def _ensure_workflow_schema(connection: sqlite3.Connection) -> None:
               created_at TEXT NOT NULL,
               started_at TEXT,
               completed_at TEXT,
+              executor_id TEXT,
+              lease_until TEXT,
               FOREIGN KEY(workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS workflow_checkpoints (
@@ -1083,6 +959,11 @@ def _ensure_workflow_schema(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_workflows_parent_thread ON workflows(parent_thread_id, status);
             """
         )
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflow_nodes)")}
+        if "executor_id" not in columns:
+            connection.execute("ALTER TABLE workflow_nodes ADD COLUMN executor_id TEXT")
+        if "lease_until" not in columns:
+            connection.execute("ALTER TABLE workflow_nodes ADD COLUMN lease_until TEXT")
 
 
 def _state_dir(state_dir: str | Path | None) -> Path:

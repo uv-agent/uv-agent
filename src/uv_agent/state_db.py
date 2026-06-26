@@ -6,7 +6,7 @@ from pathlib import Path
 from uv_agent.time import utc_now_iso
 
 DB_FILENAME = "uv-agent.sqlite3"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SQLITE_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
 
@@ -67,6 +67,10 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         return
     if existing_version == "3":
         _migrate_v3_to_v4(connection)
+        _migrate_v4_to_v5(connection)
+        return
+    if existing_version == "4":
+        _migrate_v4_to_v5(connection)
         return
     raise StateDbError(
         f"Unsupported state database schema version {existing_version}; "
@@ -238,10 +242,30 @@ def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
 
     with connection:
         _create_scheduler_schema(connection)
+        _ensure_workflow_executor_columns(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             (str(SCHEMA_VERSION),),
         )
+
+
+def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
+    """Add host-side WorkflowExecutor lease columns."""
+
+    with connection:
+        _ensure_workflow_executor_columns(connection)
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+
+
+def _ensure_workflow_executor_columns(connection: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflow_nodes)")}
+    if "executor_id" not in columns:
+        connection.execute("ALTER TABLE workflow_nodes ADD COLUMN executor_id TEXT")
+    if "lease_until" not in columns:
+        connection.execute("ALTER TABLE workflow_nodes ADD COLUMN lease_until TEXT")
 
 
 def _create_scheduler_schema(connection: sqlite3.Connection) -> None:

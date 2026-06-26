@@ -4,41 +4,54 @@ from pathlib import Path
 from typing import Any
 
 import uv_agent_runtime as rt
-from uv_agent_runtime.textops import CommandTextResult
 
 
-def test_workflow_wait_reaches_checkpoint_and_resumes(monkeypatch, tmp_path: Path) -> None:
+def test_workflow_wait_polls_host_executor_state(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thr_parent")
     monkeypatch.setenv("UV_AGENT_RUNTIME_TURN_ID", "turn_parent")
     monkeypatch.setenv("UV_AGENT_RUNTIME_RUN_ID", "run_parent")
-    calls: list[list[str]] = []
 
-    def fake_run_process_text(args: list[str], **kwargs: Any) -> CommandTextResult:
-        calls.append(args)
-        return CommandTextResult(args=args, returncode=0, stdout="final node output\n", stderr="[workflow-node-thread] thr_node\n")
-
-    monkeypatch.setattr(rt.workflow, "run_process_text", fake_run_process_text)
+    # workflow.wait only observes persisted state; there is no subprocess-based
+    # workflow-node execution hook left in the runtime helper.
 
     wf = rt.workflow.start(objective="demo", default_model_level="deep")
     node = wf.agent("Investigate the demo", key="investigate")
-    wf.checkpoint(key="after_investigation", after=node, reason="Review direction", options=["continue", "abort"])
+    checkpoint = wf.checkpoint(key="after_investigation", after=node, reason="Review direction", options=["continue", "abort"])
 
-    result = wf.wait()
+    assert wf.wait(timeout_s=0.01).status == "timeout"
 
+    now = rt.workflow._utc_now_iso()
+    with rt.workflow._connect(tmp_path) as db:
+        db.execute(
+            """
+            UPDATE workflow_nodes
+            SET status = 'completed', completed_at = ?, thread_id = 'thr_node', result_summary = ?,
+                result_json = ?, error_json = '{}'
+            WHERE node_id = ?
+            """,
+            (now, "final node output\n", rt.workflow._json_dumps({"thread_id": "thr_node", "status": "completed"}), node.node_id),
+        )
+        db.execute(
+            "UPDATE workflow_nodes SET status = 'completed', completed_at = ? WHERE node_id = ?",
+            (now, checkpoint.node_id),
+        )
+        db.execute("UPDATE workflow_checkpoints SET status = 'unresolved' WHERE checkpoint_id = ?", (checkpoint.checkpoint_id,))
+        db.execute(
+            "UPDATE workflows SET status = 'checkpoint', current_checkpoint_id = ?, updated_at = ? WHERE workflow_id = ?",
+            (checkpoint.checkpoint_id, now, wf.workflow_id),
+        )
+
+    result = wf.wait(timeout_s=0.5)
     assert result.status == "checkpoint"
     assert "after_investigation" in result.summary()
     assert wf.inspect("investigate") == "final node output\n"
-    assert "workflow-node" in calls[0]
-    assert "ask" not in calls[0]
-    assert "--level" in calls[0]
-    assert "deep" in calls[0]
     assert wf.graph()["nodes"][0]["prompt"] == "Investigate the demo"
     assert "result" not in wf.graph()["nodes"][0]
-    assert wf.graph(include_results=True)["nodes"][0]["result"]["stdout"] == "final node output\n"
+    assert wf.graph(include_results=True)["nodes"][0]["result"]["thread_id"] == "thr_node"
 
     wf.continue_checkpoint("after_investigation", resolution={"action": "continue"})
-    completed = wf.wait()
+    completed = wf.wait(timeout_s=0.5)
 
     assert completed.status == "completed"
     assert completed.summary() == "final node output\n"

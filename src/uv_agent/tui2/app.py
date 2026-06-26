@@ -387,6 +387,7 @@ class AnsiUvAgentApp:
     def __init__(self, project_root: Path | None = None, *, data_dir: Path | None = None) -> None:
         self.project_root = (project_root or Path.cwd()).resolve()
         self.engine = create_engine(self.project_root, data_dir=data_dir)
+        self.engine.workflow_executor.start()
         ui_config = getattr(self.engine.config, "ui", None)
         self.language = detect_user_language(getattr(ui_config, "language", None))
         self.state = Tui2State(
