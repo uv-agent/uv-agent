@@ -6,7 +6,7 @@ from pathlib import Path
 from uv_agent.time import utc_now_iso
 
 DB_FILENAME = "uv-agent.sqlite3"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SQLITE_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
 
@@ -60,17 +60,26 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         _migrate_v1_to_v2(connection)
         _migrate_v2_to_v3(connection)
         _migrate_v3_to_v4(connection)
+        _migrate_v4_to_v5(connection)
+        _migrate_v5_to_v6(connection)
         return
     if existing_version == "2":
         _migrate_v2_to_v3(connection)
         _migrate_v3_to_v4(connection)
+        _migrate_v4_to_v5(connection)
+        _migrate_v5_to_v6(connection)
         return
     if existing_version == "3":
         _migrate_v3_to_v4(connection)
         _migrate_v4_to_v5(connection)
+        _migrate_v5_to_v6(connection)
         return
     if existing_version == "4":
         _migrate_v4_to_v5(connection)
+        _migrate_v5_to_v6(connection)
+        return
+    if existing_version == "5":
+        _migrate_v5_to_v6(connection)
         return
     raise StateDbError(
         f"Unsupported state database schema version {existing_version}; "
@@ -202,6 +211,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         )
         _create_workflow_schema(connection)
         _create_scheduler_schema(connection)
+        _create_host_lease_schema(connection)
         connection.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -218,6 +228,7 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
     with connection:
         _create_workflow_schema(connection)
         _create_scheduler_schema(connection)
+        _create_host_lease_schema(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             ("2",),
@@ -254,10 +265,36 @@ def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
 
     with connection:
         _ensure_workflow_executor_columns(connection)
+        _create_host_lease_schema(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             (str(SCHEMA_VERSION),),
         )
+
+
+def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
+    """Add host daemon lease table."""
+
+    with connection:
+        _create_host_lease_schema(connection)
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+
+
+def _create_host_lease_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS host_leases (
+          name TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          pid INTEGER,
+          heartbeat_at TEXT NOT NULL,
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        """
+    )
 
 
 def _ensure_workflow_executor_columns(connection: sqlite3.Connection) -> None:

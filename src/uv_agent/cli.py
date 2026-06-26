@@ -13,9 +13,9 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["tui2", "tui", "workflow-node"],
+        choices=["tui2", "tui", "workflow-node", "daemon"],
         default="tui2",
-        help="Run the default ANSI TUI, Textual TUI, or execute a workflow node.",
+        help="Run the default ANSI TUI, Textual TUI, daemon, or execute a workflow node.",
     )
     parser.add_argument("--level", default=None, help="Model level to use for workflow-node mode.")
     parser.add_argument("--thread", default=None, help="Thread id to resume in workflow-node mode.")
@@ -36,12 +36,18 @@ def main() -> None:
         help="Project state directory for workflow-node mode.",
     )
     parser.add_argument("--no-stream", action="store_true", help="Only print the final answer in workflow-node mode.")
+    parser.add_argument("--replace", action="store_true", help="Replace an existing daemon for this project state.")
     parser.add_argument("prompt", nargs="*", help="Prompt text for workflow-node mode.")
     args = parser.parse_args()
     if args.command == "tui2":
         from uv_agent.tui2.app import AnsiUvAgentApp
 
         AnsiUvAgentApp(project_root=Path.cwd()).run()
+        return
+    if args.command == "daemon":
+        from uv_agent.daemon import run_daemon
+
+        asyncio.run(run_daemon(project_root=Path.cwd(), data_dir=Path(args.project_state_dir) if args.project_state_dir else None, replace=args.replace))
         return
     if args.command == "workflow-node":
         prompt = " ".join(args.prompt).strip()

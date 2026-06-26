@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from uv_agent.agent.context_builder import model_levels_context
-from uv_agent.config import config_paths, editable_config_path, load_config, redact_config
+from uv_agent.config import config_paths, editable_config_path, load_config, parse_config, redact_config
 from uv_agent.paths import ensure_project_local_dir, project_config_path, project_state_dir, user_config_path
 
 
@@ -525,3 +525,25 @@ def test_project_local_dir_does_not_overwrite_existing_gitignore(tmp_path: Path)
     ensure_project_local_dir(project_root)
 
     assert existing.read_text(encoding="utf-8") == "custom\n"
+
+
+def test_parse_scheduler_config(tmp_path: Path) -> None:
+    config = parse_config(
+        {
+            "providers": {"openai": {"base_url": "https://example.com", "api_key": "secret"}},
+            "models": {"gpt": {"provider": "openai", "model": "gpt"}},
+            "levels": {"medium": {"model": "gpt"}},
+            "scheduler": {
+                "max_concurrent_jobs": 3,
+                "run_history_retention_days": 9,
+                "default_misfire_policy": "run_once",
+                "default_overlap_policy": "replace",
+            },
+        },
+        tmp_path,
+    )
+
+    assert config.scheduler.max_concurrent_jobs == 3
+    assert config.scheduler.run_history_retention_days == 9
+    assert config.scheduler.default_misfire_policy == "run_once"
+    assert config.scheduler.default_overlap_policy == "replace"

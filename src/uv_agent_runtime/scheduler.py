@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import os
 from typing import Any
 
 from . import transport
@@ -34,4 +35,8 @@ def _normalize(value: dict[str, Any]) -> dict[str, Any]:
     at = result.get("at")
     if isinstance(at, datetime):
         result["at"] = at.isoformat()
+    if result.get("prompt") and not result.get("thread_id"):
+        thread_id = os.environ.get("UV_AGENT_RUNTIME_THREAD_ID")
+        if thread_id:
+            result["thread_id"] = thread_id
     return result

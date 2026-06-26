@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import signal
+from contextlib import suppress
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from uv_agent.app_factory import create_engine
+from uv_agent.ids import new_id
+from uv_agent.state_db import connect_state_db
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+@dataclass
+class DaemonLease:
+    data_dir: Path
+    name: str = "daemon"
+    stale_after_s: float = 30.0
+    heartbeat_interval_s: float = 5.0
+    owner_id: str = field(default_factory=lambda: new_id("host"))
+    _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _stop: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+
+    def acquire(self, *, replace: bool = False) -> None:
+        now = _now()
+        with connect_state_db(self.data_dir) as db:
+            row = db.execute("SELECT * FROM host_leases WHERE name = ?", (self.name,)).fetchone()
+            if row is not None and self._fresh(dict(row)):
+                pid = int(row["pid"] or 0)
+                if not replace:
+                    raise RuntimeError(f"uv-agent daemon is already running (pid={pid}, owner={row['owner_id']})")
+                self._terminate_old(pid)
+            db.execute(
+                """
+                INSERT OR REPLACE INTO host_leases(name, owner_id, pid, heartbeat_at, metadata_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (self.name, self.owner_id, os.getpid(), now, json.dumps({"started_at": now}, sort_keys=True)),
+            )
+
+    def start_heartbeat(self) -> None:
+        if self._task is None or self._task.done():
+            self._stop = asyncio.Event()
+            self._task = asyncio.create_task(self._heartbeat_loop(), name="uv-agent-daemon-heartbeat")
+
+    async def release(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+        with connect_state_db(self.data_dir) as db:
+            db.execute("DELETE FROM host_leases WHERE name = ? AND owner_id = ?", (self.name, self.owner_id))
+
+    async def _heartbeat_loop(self) -> None:
+        while not self._stop.is_set():
+            with connect_state_db(self.data_dir) as db:
+                db.execute(
+                    "UPDATE host_leases SET heartbeat_at = ?, pid = ? WHERE name = ? AND owner_id = ?",
+                    (_now(), os.getpid(), self.name, self.owner_id),
+                )
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.heartbeat_interval_s)
+            except asyncio.TimeoutError:
+                pass
+
+    def _fresh(self, row: dict[str, Any]) -> bool:
+        try:
+            heartbeat = datetime.fromisoformat(str(row.get("heartbeat_at", "")).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if heartbeat < datetime.now(UTC) - timedelta(seconds=self.stale_after_s):
+            return False
+        pid = int(row.get("pid") or 0)
+        return pid <= 0 or _pid_alive(pid)
+
+    def _terminate_old(self, pid: int) -> None:
+        if pid <= 0 or pid == os.getpid() or not _pid_alive(pid):
+            return
+        os.kill(pid, signal.SIGTERM)
+        # This path runs before the async service loop starts; use a simple sleep loop.
+        import time
+        stop_at = time.monotonic() + self.stale_after_s
+        while time.monotonic() < stop_at:
+            if not _pid_alive(pid):
+                return
+            time.sleep(0.1)
+        raise RuntimeError(f"Timed out waiting for existing daemon pid={pid} to exit")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def run_daemon(*, project_root: Path, data_dir: Path | None = None, replace: bool = False) -> None:
+    engine = create_engine(project_root, data_dir=data_dir)
+    lease = DaemonLease(engine.thread_store.data_dir)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop.set)
+    try:
+        lease.acquire(replace=replace)
+        lease.start_heartbeat()
+        await engine.plugins.start()
+        engine.workflow_executor.start()
+        engine.scheduler.start()
+        print(f"uv-agent daemon started pid={os.getpid()} state={engine.thread_store.data_dir}", flush=True)
+        await stop.wait()
+    finally:
+        await engine.aclose()
+        await lease.release()
+        print("uv-agent daemon stopped", flush=True)

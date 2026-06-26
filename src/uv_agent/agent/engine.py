@@ -490,6 +490,7 @@ class AgentEngine:
             self.config.scheduler,
             helper_resolver=self.plugins.resolve_helper,
             helper_caller=self.plugins.call_helper,
+            thread_store=self.thread_store,
         )
         self.workflow_executor = WorkflowExecutor(self.thread_store.data_dir, self.turn_manager, self.thread_store)
         if rpc_server is not None:
@@ -515,6 +516,7 @@ class AgentEngine:
             close()
 
     async def aclose(self) -> None:
+        await self.scheduler.stop()
         await self.workflow_executor.stop()
         await self.turn_manager.aclose()
         await self.plugins.stop()

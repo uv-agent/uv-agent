@@ -969,6 +969,15 @@ WorkflowHandle.update_checkpoint(checkpoint: str, **patch: Any) -> CheckpointHan
 WorkflowHandle.apply_graph_patch(patch: Mapping[str, Any]) -> dict[str, Any]</signature>
 <returns>WorkflowWaitResult.summary() 返回 checkpoint/failure/timeout handoff 或最终节点输出，不做 workflow 层截断。inspect(node) 返回节点的最终模型输出，不返回其内部 tool log。</returns>
 </function>
+<function name="scheduler">
+<description>创建、修改、查询、删除和立即运行 daemon 持久定时任务。action 必须在 helper 或 prompt 中二选一；helper 调用插件/host runtime handler，prompt 每次触发创建新的 Workflow。</description>
+<signature>rt.scheduler.create(*, kind: Literal["once", "interval", "cron"], helper: str | None = None, prompt: str | None = None, payload: dict[str, Any] | None = None, at: datetime | str | None = None, every: datetime.timedelta | dict[str, Any] | None = None, cron: str | None = None, timezone: str | None = None, name: str | None = None, description: str | None = None, thread_id: str | None = None, objective: str | None = None, model_level: str | None = None, timeout_s: float | None = None, conflict: Literal["queue", "reject", "interrupt", "guide"] = "queue", misfire_policy: Literal["skip", "run_once", "catch_up"] = "skip", overlap_policy: Literal["skip", "allow", "queue", "replace"] = "skip", enabled: bool = True, metadata: dict[str, Any] | None = None, allow_missing: bool = False) -> dict[str, Any]
+rt.scheduler.update(schedule_id: str, **changes: Any) -> dict[str, Any]
+rt.scheduler.list(*, enabled: bool | None = None, limit: int = 100) -> list[dict[str, Any]]
+rt.scheduler.delete(schedule_id: str) -> dict[str, Any]
+rt.scheduler.run_now(schedule_id: str) -> dict[str, Any]</signature>
+<rule>时间参数不接受自然语言；once 使用 at，interval 使用 every，cron 使用五字段 cron。delete 硬删除 schedule；运行历史保留到 daemon 清理。</rule>
+</function>
 <function name="misc">
 <description>目录、路径、patch/diff/snapshot 和文本工具。</description>
 <signature>rt.cd(path: str | Path) -> Path
