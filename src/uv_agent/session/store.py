@@ -489,6 +489,51 @@ class ThreadStore:
     def list_subthreads(self, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
         return self._list_threads(kind="subagent", parent_thread_id=parent_thread_id)
 
+
+    def get_external_thread(self, *, owner_plugin: str, source: str, external_id: str) -> str | None:
+        source = str(source).strip()
+        external_id = str(external_id).strip()
+        owner_plugin = str(owner_plugin).strip()
+        if not source or not external_id or not owner_plugin:
+            raise ValueError("owner_plugin, source and external_id are required")
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM threads WHERE kind = 'thread' ORDER BY updated_at DESC").fetchall()
+        for row in rows:
+            metadata = _metadata_from_row(row)
+            if (
+                metadata.get("owner_type") == "plugin"
+                and metadata.get("owner_plugin") == owner_plugin
+                and metadata.get("external_source") == source
+                and metadata.get("external_id") == external_id
+            ):
+                return str(metadata["thread_id"])
+        return None
+
+    def get_or_create_external_thread(
+        self,
+        *,
+        owner_plugin: str,
+        source: str,
+        external_id: str,
+        title: str = "New thread",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        existing = self.get_external_thread(owner_plugin=owner_plugin, source=source, external_id=external_id)
+        if existing is not None:
+            return existing
+        thread_id = self.create_thread(title or "New thread", kind="thread")
+        updates = dict(metadata or {})
+        updates.update(
+            {
+                "owner_type": "plugin",
+                "owner_plugin": str(owner_plugin),
+                "external_source": str(source),
+                "external_id": str(external_id),
+            }
+        )
+        self.update_thread_metadata(thread_id, updates=updates)
+        return thread_id
+
     def thread_digest(
         self,
         thread_id: str,

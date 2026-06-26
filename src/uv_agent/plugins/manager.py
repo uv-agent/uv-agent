@@ -58,6 +58,7 @@ class PluginManager:
         events: EventBus,
         helper_registry: RuntimeHelperRegistry,
         submitter,
+        thread_store=None,
         user_state_dir: Path | None = None,
     ) -> None:
         self.config = config
@@ -66,6 +67,8 @@ class PluginManager:
         self.events = events
         self.helpers = helper_registry
         self._submitter = submitter
+        self._thread_store = thread_store
+        self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._records: dict[str, _PluginRecord] = {}
         self._task: asyncio.Task[None] | None = None
         self._started = False
@@ -193,6 +196,8 @@ class PluginManager:
                 logger=logger,
                 helper_registry=self.helpers,
                 submitter=self._submitter,
+                task_factory=self._create_task,
+                thread_store=self._thread_store,
             )
             manager = pluggy.PluginManager("uv_agent")
             manager.add_hookspecs(hookspecs)
@@ -231,7 +236,8 @@ class PluginManager:
                 }
             )
             return
-        record.status.state = "started"
+        if record.status.state != "warning":
+            record.status.state = "started"
         self._publish({"type": "plugin.started", "plugin": record.name})
 
     async def _stop_record(self, record: _PluginRecord) -> None:
@@ -255,8 +261,49 @@ class PluginManager:
                 }
             )
             return
+        await self._cancel_record_tasks(record)
         record.status.state = "stopped"
         self._publish({"type": "plugin.stopped", "plugin": record.name})
+
+
+    def _create_task(self, plugin: str, coro, name: str | None = None) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coro, name=name or f"uv-agent-plugin-{plugin}")
+        self._tasks.setdefault(plugin, set()).add(task)
+
+        def done(completed: asyncio.Task[Any]) -> None:
+            self._tasks.get(plugin, set()).discard(completed)
+            if completed.cancelled():
+                return
+            exc = completed.exception()
+            if exc is None:
+                return
+            record = self._records.get(plugin)
+            if record is not None and record.status.state in {"started", "starting"}:
+                record.status.state = "warning"
+                record.status.error_type = exc.__class__.__name__
+                record.status.message = str(exc) or repr(exc)
+                record.context.logger.exception("Plugin task failed", exc_info=exc)
+            self._publish(
+                {
+                    "type": "plugin.task_failed",
+                    "plugin": plugin,
+                    "task": completed.get_name(),
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc) or repr(exc),
+                }
+            )
+
+        task.add_done_callback(done)
+        return task
+
+    async def _cancel_record_tasks(self, record: _PluginRecord, *, timeout_s: float = 5.0) -> None:
+        tasks = list(self._tasks.get(record.name, set()))
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.wait(tasks, timeout=timeout_s)
+        self._tasks.pop(record.name, None)
 
     def _publish(self, event: dict[str, Any]) -> None:
         self.events.publish(event)

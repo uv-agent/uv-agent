@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -54,6 +54,47 @@ class TurnContextBlock:
     plugin: str = ""
 
 
+class PluginThreadAPI:
+    """Narrow thread mapping API exposed to plugins."""
+
+    def __init__(self, *, plugin: str, thread_store) -> None:
+        self._plugin = plugin
+        self._thread_store = thread_store
+
+    def get_external_thread(self, *, source: str, external_id: str) -> str | None:
+        return self._thread_store.get_external_thread(
+            owner_plugin=self._plugin,
+            source=source,
+            external_id=external_id,
+        )
+
+    def get_or_create_external_thread(
+        self,
+        *,
+        source: str,
+        external_id: str,
+        title: str = "New thread",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        return self._thread_store.get_or_create_external_thread(
+            owner_plugin=self._plugin,
+            source=source,
+            external_id=external_id,
+            title=title,
+            metadata=metadata,
+        )
+
+    def metadata(self, thread_id: str) -> dict[str, Any]:
+        return self._thread_store.thread_metadata(thread_id)
+
+    def update_metadata(self, thread_id: str, metadata: dict[str, Any]) -> None:
+        self._thread_store.update_thread_metadata(thread_id, updates=dict(metadata))
+
+    def recent_events(self, thread_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        events, _ = self._thread_store.read_recent_events(thread_id, limit=limit)
+        return events
+
+
 class PluginContext:
     """Capabilities exposed to one uv-agent plugin."""
 
@@ -70,6 +111,8 @@ class PluginContext:
         logger,
         helper_registry: RuntimeHelperRegistry,
         submitter: Callable[..., Any],
+        task_factory: Callable[[str, Coroutine[Any, Any, Any], str | None], asyncio.Task[Any]],
+        thread_store,
     ) -> None:
         self.name = name
         self.project_root = project_root
@@ -81,8 +124,13 @@ class PluginContext:
         self.logger = logger
         self._helper_registry = helper_registry
         self._submitter = submitter
+        self._task_factory = task_factory
+        self.threads = PluginThreadAPI(plugin=name, thread_store=thread_store)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+
+    def create_task(self, coro: Coroutine[Any, Any, Any], *, name: str | None = None) -> asyncio.Task[Any]:
+        return self._task_factory(self.name, coro, name)
 
     def register_handler(
         self,

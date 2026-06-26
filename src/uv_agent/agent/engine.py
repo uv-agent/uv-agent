@@ -466,6 +466,7 @@ class AgentEngine:
             events=self.events,
             helper_registry=self.runtime_helpers,
             submitter=self._plugin_submit_turn,
+            thread_store=self.thread_store,
         )
         rpc_server = getattr(self.runner, "rpc_server", None)
         if rpc_server is not None:

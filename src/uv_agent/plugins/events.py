@@ -109,10 +109,18 @@ def raise_if_reentrant_submit() -> None:
 
 
 def _matches(subscription: _Subscription, event: dict[str, Any], event_type: str) -> bool:
-    if event_type not in subscription.kinds:
+    if not any(_kind_matches(pattern, event_type) for pattern in subscription.kinds):
         return False
     if subscription.thread_id is not None and event.get("thread_id") != subscription.thread_id:
         return False
     if subscription.turn_id is not None and event.get("turn_id") != subscription.turn_id:
         return False
     return True
+
+
+def _kind_matches(pattern: str, event_type: str) -> bool:
+    if pattern == "*":
+        return True
+    if pattern.endswith(".*"):
+        return event_type.startswith(pattern[:-1])
+    return pattern == event_type
