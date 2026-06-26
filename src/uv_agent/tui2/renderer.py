@@ -53,6 +53,11 @@ class Renderer:
         self._anchor_known = False
         self.spinner_frame = 0
         self._last_flushed_kind: str | None = None
+        # Row count for the latest completed transcript cell, excluding the
+        # separator gap before it.  Growth of ephemeral chrome such as command
+        # palettes may scroll older history, but should not consume the visible
+        # tail of the most recent answer.
+        self._last_flushed_rows = 0
 
     # ------------------------------------------------------------------
     # Compat shims for existing call sites/tests.
@@ -122,6 +127,59 @@ class Renderer:
         if self._transcript_rows > max_visible:
             self._transcript_rows = max_visible
 
+    def _transcript_rows_to_preserve_on_growth(self, state: Tui2State) -> int:
+        """Return visible transcript rows that live-frame growth must keep.
+
+        The last assistant cell is what the user is usually reading when they
+        open the slash palette or start another prompt.  Preserving only one row
+        is enough for most live growth, but multi-row assistant tails need their
+        whole visible cell to avoid the palette looking like it swallowed part of
+        the answer.  Other cell kinds can still scroll normally so large history
+        blocks do not permanently starve transient UI chrome.
+        """
+
+        if self._transcript_rows <= 0:
+            return 0
+        preserve = max(1, self._last_flushed_rows)
+        if state.command_palette_open and self._last_flushed_kind == "assistant":
+            return min(self._transcript_rows, preserve)
+        # Non-palette growth (for example, the next user prompt) may need more
+        # room for live status, but should still keep at least the final row.
+        return min(self._transcript_rows, 1)
+
+    def _rerender_live_with_height(
+        self,
+        state: Tui2State,
+        cols: int,
+        rows: int,
+        height: int,
+    ) -> tuple[list[str], int, int]:
+        """Render live content for an already-decided viewport height.
+
+        ``render_live_with_cursor`` tries to respect ``max_height`` but the
+        composer has a minimum shape.  Apply a final defensive clip so repainting
+        never writes beyond the rows the renderer decided are safe to touch.
+        """
+
+        height = max(1, height)
+        lines, cursor_row, cursor_col = self._render_live(state, cols, rows, max_height=height)
+        if len(lines) <= height:
+            return lines, cursor_row, cursor_col
+
+        dropped = len(lines) - height
+        if lines and lines[0].strip():
+            keep_tail = max(0, height - 1)
+            clipped = [lines[0], *lines[-keep_tail:]] if keep_tail else [lines[0]]
+            dropped_after_head = len(lines) - len(clipped)
+            if cursor_row > 0:
+                cursor_row = max(0, cursor_row - dropped_after_head)
+            cursor_row = min(cursor_row, len(clipped) - 1)
+            return clipped, cursor_row, cursor_col
+
+        clipped = lines[dropped:]
+        cursor_row = max(0, min(cursor_row - dropped, len(clipped) - 1))
+        return clipped, cursor_row, cursor_col
+
     def _clear_rows(self, buf: list[str], top: int, bottom: int, rows: int) -> None:
         for row in range(max(1, top), min(rows, bottom) + 1):
             buf.append(self._cup(row, 1) + self._EL)
@@ -171,13 +229,15 @@ class Renderer:
         state: Tui2State,
         cols: int,
         rows: int,
+        *,
+        max_height: int | None = None,
     ) -> tuple[list[str], int, int]:
-        max_height = max(3, rows - 1)
+        live_max_height = max(3, max_height if max_height is not None else rows - 1)
         return render_live_with_cursor(
             state,
             self.width,
             self.spinner_frame,
-            max_height=max_height,
+            max_height=live_max_height,
             preceding_kind=self._last_flushed_kind,
             has_preceding_transcript=self._last_flushed_kind is not None,
         )
@@ -333,6 +393,7 @@ class Renderer:
         if self._transcript_rows >= rows:
             self._anchor_known = True
         self._last_flushed_kind = cell.kind
+        self._last_flushed_rows = len(cell_lines)
         self._reset_frame()
 
         if live_lines:
@@ -423,6 +484,7 @@ class Renderer:
         self._write("".join(buf))
         self._reset_frame()
         self._last_flushed_kind = None
+        self._last_flushed_rows = 0
 
     def repaint(self, state: Tui2State) -> None:
         cols, rows = terminal_size()
@@ -462,6 +524,17 @@ class Renderer:
 
         height = len(lines)
         if not self._frame_anchored:
+            if state.command_palette_open:
+                preserve_rows = self._transcript_rows_to_preserve_on_growth(state)
+                available_height = max(1, rows - preserve_rows)
+                if height > available_height:
+                    lines, cursor_row, cursor_col = self._rerender_live_with_height(
+                        state,
+                        cols,
+                        rows,
+                        available_height,
+                    )
+                    height = len(lines)
             self._clear_floating_frame(buf)
             buf.append("\r\n".join(lines))
             anchored = self._frame_is_anchored_after_append(rows, height)
@@ -491,14 +564,14 @@ class Renderer:
         old_bottom = old_top + self._frame_rows - 1
 
         if new_top < old_top and old_bottom >= rows:
-            # The live tail grew while pinned to the bottom.  That is normal when
-            # the user starts the next prompt after an assistant response, because
-            # the frame expands from composer-only to user/status/composer.  Keep
-            # at least one visible transcript row above the live frame; otherwise
-            # a very tall repaint can make the composer appear to eat the final
-            # assistant line.
+            # Scroll before erasing the old frame, but never scroll away the
+            # visible tail of the latest completed transcript cell.  Command
+            # palettes are transient chrome; if there is not enough room after
+            # preserving that tail, shrink the palette instead of consuming the
+            # answer the user is reading.
             desired_delta = old_top - new_top
-            max_scroll = max(0, self._transcript_rows - 1)
+            preserve_rows = self._transcript_rows_to_preserve_on_growth(state)
+            max_scroll = max(0, self._transcript_rows - preserve_rows)
             delta = min(desired_delta, max_scroll)
             if delta > 0:
                 buf.append(self._cup(rows, 1) + "\n" * delta)
@@ -508,18 +581,13 @@ class Renderer:
             if delta < desired_delta:
                 new_top = old_top
                 available_height = max(1, rows - new_top + 1)
-                if len(lines) > available_height:
-                    # Preserve the leading live cell (usually the just-submitted
-                    # user prompt or a hidden-lines marker) and the bottom chrome.
-                    keep_tail = max(0, available_height - 1)
-                    dropped_after_head = len(lines) - available_height
-                    lines = [lines[0], *lines[-keep_tail:]] if keep_tail else [lines[0]]
-                    if cursor_row > 0:
-                        cursor_row = max(0, cursor_row - dropped_after_head)
-                    cursor_row = min(cursor_row, len(lines) - 1)
-                    height = len(lines)
-                else:
-                    height = len(lines)
+                lines, cursor_row, cursor_col = self._rerender_live_with_height(
+                    state,
+                    cols,
+                    rows,
+                    available_height,
+                )
+                height = len(lines)
         self._cap_transcript_rows_above_live(rows, height)
 
         clear_top = min(new_top, old_top)
@@ -568,3 +636,4 @@ class Renderer:
         self._write("".join(buf))
         self._reset_frame()
         self._last_flushed_kind = None
+        self._last_flushed_rows = 0

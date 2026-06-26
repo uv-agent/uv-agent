@@ -1161,6 +1161,40 @@ def test_user_submit_after_assistant_tail_preserves_last_visible_line(monkeypatc
     assert tail_index < user_index
 
 
+def test_command_palette_preserves_latest_assistant_tail(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (60, 8))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    state = Tui2State(composer="")
+
+    renderer.flush_cell(TranscriptCell("assistant", text="old 0"), state)
+    renderer.flush_cell(TranscriptCell("assistant", text="old 1"), state)
+    renderer.flush_cell(
+        TranscriptCell(
+            "assistant",
+            text="\n".join(f"tail line {index}" for index in range(1, 9)),
+        ),
+        state,
+    )
+    assert renderer._frame_anchored
+
+    state.composer = "/"
+    state.command_palette_open = True
+    state.command_palette_index = 5
+    state.command_palette_items = [
+        CommandSuggestion(f"/cmd{index}", f"command {index}") for index in range(12)
+    ]
+    renderer.repaint(state)
+
+    screen = _terminal_screen_lines(output.getvalue(), cols=60, rows=8)
+    tail_indices = [index for index, line in enumerate(screen) if "tail line" in line]
+    composer_index = next(index for index, line in enumerate(screen) if line.startswith("│ › /"))
+
+    assert len(tail_indices) == 2
+    assert tail_indices[-1] < composer_index
+    assert any("tail line 8" in line for line in screen)
+
+
 def test_renderer_growing_anchored_live_frame_does_not_scroll_blank_rows(monkeypatch) -> None:
     monkeypatch.setattr("uv_agent.tui2.renderer.terminal_size", lambda default=(100, 30): (80, 12))
     output = io.StringIO()
