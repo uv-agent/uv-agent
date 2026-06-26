@@ -110,6 +110,7 @@ TOKEN_ESTIMATION_WARNING = 'Provider 的 token 用量不可用；上下文压缩
 COMPACTION_TOOL_ERROR_STDERR = '错误：上下文压缩期间不允许调用工具。请用清晰的 Markdown 格式返回压缩摘要。'
 
 INTERRUPTED_TOOL_ERROR = '工具调用未完成，因为用户中断了本轮。不要假定该工具已成功运行。'
+GUIDED_INPUT_CONTEXT_BRIDGE = 'A newer user message arrived while this task was running. This turn stopped at a safe boundary so the next turn can continue from the newer user message.'
 
 ACTIVE_CWD_NOTICE_TEMPLATE = """<active_cwd_notice>
 run_python 的活动工作目录现在是 {active_cwd_rel}（线程打开时位于 {initial_cwd_rel}）。相对路径与目录规则均跟随活动工作目录。

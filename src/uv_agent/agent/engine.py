@@ -69,6 +69,7 @@ from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
 from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, TurnContextBlock, TurnPrepareRequest
 from uv_agent.plugins.helpers import RuntimeHelperRegistry
+from uv_agent.turn_manager import TurnManager
 from uv_agent.prompts import (
     BRANCH_NAME_GENERATION_PROMPT,
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
@@ -85,6 +86,7 @@ from uv_agent.prompts import (
     COMPACTION_TOOL_ERROR_STDERR,
     COMPACTION_CONTINUE_WITHOUT_CURRENT_USER,
     INTERRUPTED_TOOL_ERROR,
+    GUIDED_INPUT_CONTEXT_BRIDGE,
     ACTIVE_CWD_NOTICE_TEMPLATE,
     CONTEXT_REMOVED_ALL,
     CONTEXT_REMOVED_SOME_PREFIX,
@@ -475,6 +477,10 @@ class AgentEngine:
         self._context_stats_cache: dict[tuple[str | None, str | None], tuple[float, ContextStats]] = {}
         self._turns_since_db_checkpoint: int = 0
         self._db_checkpoint_interval: int = 50
+        self.turn_manager = TurnManager(
+            self,
+            max_concurrent_turns=getattr(self.config.runtime, "max_concurrent_turns", 4),
+        )
 
     def _publish_host_event(self, event: dict[str, Any]) -> None:
         """Best-effort publish a host event; never raise."""
@@ -492,6 +498,7 @@ class AgentEngine:
             close()
 
     async def aclose(self) -> None:
+        await self.turn_manager.aclose()
         await self.plugins.stop()
         model_close = getattr(self.model_client, "aclose", None)
         if callable(model_close):
@@ -527,6 +534,23 @@ class AgentEngine:
             # unexpected manager-level failures should not block an agent turn.
             return
 
+    async def submit_turn(
+        self,
+        *,
+        user_text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        image_paths: list[str | Path] | None = None,
+        conflict: str = "queue",
+    ):
+        return await self.turn_manager.submit_turn(
+            user_text=user_text,
+            thread_id=thread_id,
+            level=level,
+            image_paths=image_paths,
+            conflict=conflict,  # type: ignore[arg-type]
+        )
+
     async def _plugin_submit_turn(
         self,
         *,
@@ -535,20 +559,24 @@ class AgentEngine:
         level: str | None = None,
         image_paths: list[Path] | None = None,
     ) -> SubmittedTurn:
+        handle = await self.turn_manager.submit_turn(
+            user_text=text,
+            thread_id=thread_id,
+            level=level,
+            image_paths=image_paths,
+            conflict="queue",
+        )
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         started: asyncio.Future[tuple[str, str]] = asyncio.get_running_loop().create_future()
 
-        async def run() -> None:
+        async def forward_events() -> None:
             try:
-                async for event in self.run_turn(
-                    user_text=text,
-                    thread_id=thread_id,
-                    level=level,
-                    image_paths=image_paths,
-                ):
+                async for event in handle.events():
                     if event.get("type") == "turn.started" and not started.done():
-                        started.set_result((str(event.get("thread_id")), str(event.get("turn_id"))))
+                        started.set_result((str(event.get("thread_id") or ""), str(event.get("turn_id") or "")))
                     await queue.put(event)
+                if not started.done():
+                    started.set_result((handle.thread_id or thread_id or "", handle.turn_id or ""))
             except Exception as exc:
                 if not started.done():
                     started.set_exception(exc)
@@ -556,7 +584,7 @@ class AgentEngine:
             finally:
                 await queue.put(None)
 
-        asyncio.create_task(run(), name="uv-agent-plugin-submit-turn")
+        asyncio.create_task(forward_events(), name="uv-agent-plugin-submit-turn-forward")
         submitted_thread_id, submitted_turn_id = await started
         return SubmittedTurn(thread_id=submitted_thread_id, turn_id=submitted_turn_id, _queue=queue)
 
@@ -589,6 +617,7 @@ class AgentEngine:
         level: str | None = None,
         image_paths: list[str | Path] | None = None,
         cancel_event: asyncio.Event | None = None,
+        guide_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         await self._ensure_plugins_started()
         is_new_thread = thread_id is None
@@ -733,6 +762,32 @@ class AgentEngine:
                             )
                         turn_input.note_tool_attachments(round_attachments)
                     request_input_items = turn_input.request_input_items()
+                    if guide_event is not None and guide_event.is_set():
+                        self.thread_store.append(
+                            thread_id,
+                            "item.assistant",
+                            turn_id=turn_id,
+                            text=GUIDED_INPUT_CONTEXT_BRIDGE,
+                        )
+                        interrupted_event = self.thread_store.append(
+                            thread_id,
+                            "turn.interrupted",
+                            turn_id=turn_id,
+                            reason="guided_input",
+                            partial_stream=stream_state.saw_stream_output,
+                        )
+                        yield self._publish_event({
+                            "type": "turn.interrupted",
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                            "reason": "guided_input",
+                            "partial_stream": stream_state.saw_stream_output,
+                            "created_at": interrupted_event.get("created_at"),
+                            "completed_at": interrupted_event.get("created_at"),
+                        })
+                        if title_task is not None:
+                            title_task.cancel()
+                        return
                     if self._will_compact_after_tool_results(
                         thread_id,
                         input_items,

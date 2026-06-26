@@ -157,6 +157,7 @@ class RuntimeConfig:
     workflow_default_level: str | None = None
     store_provider_response: bool = False
     max_agent_rounds: int = 100
+    max_concurrent_turns: int = 4
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     title_generation: TitleGenerationConfig = field(default_factory=TitleGenerationConfig)
     branch_name_generation: BranchNameGenerationConfig = field(default_factory=BranchNameGenerationConfig)
@@ -455,6 +456,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         workflow_default_level=workflow_default_level,
         store_provider_response=runtime_raw.get("store_provider_response", False),
         max_agent_rounds=runtime_raw.get("max_agent_rounds", 100),
+        max_concurrent_turns=max(1, int(runtime_raw.get("max_concurrent_turns", 4))),
         compression=compression,
         title_generation=title_generation,
         branch_name_generation=branch_name_generation,

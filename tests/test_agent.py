@@ -2884,6 +2884,63 @@ async def test_agent_retry_turn_resumes_pending_tool_call(tmp_path: Path) -> Non
     assert response_output[0] not in request_input
 
 
+
+@pytest.mark.asyncio
+async def test_guide_event_stops_after_tool_output_with_bridge(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    runner = SimpleRunner()
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_1",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_guide",
+                        "name": "run_python",
+                        "arguments": json.dumps({"code": "print('guide')"}),
+                    }
+                ],
+            },
+            {
+                "id": "resp_2",
+                "output_text": "should not be requested",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "should not be requested"}],
+                    }
+                ],
+            },
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=runner,  # type: ignore[arg-type]
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    guide_event = asyncio.Event()
+    events: list[dict[str, Any]] = []
+
+    async for event in engine.run_turn(user_text="run it", guide_event=guide_event):
+        events.append(event)
+        if event["type"] == "tool.started":
+            guide_event.set()
+
+    assert events[-1]["type"] == "turn.interrupted"
+    assert events[-1]["reason"] == "guided_input"
+    assert len(client.requests) == 1
+    stored = engine.thread_store.read(events[-1]["thread_id"])
+    assert any(event["type"] == "item.tool_output" for event in stored)
+    bridge = next(event for event in stored if event["type"] == "item.assistant")
+    assert "newer user message" in bridge["text"]
+
+
 def test_reconstruct_input_closes_interrupted_pending_tool_call(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
