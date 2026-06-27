@@ -20,6 +20,7 @@ def test_state_db_initializes_schema_and_pragmas(tmp_path: Path) -> None:
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             )
         }
+        workflow_node_columns = {row["name"] for row in db.execute("PRAGMA table_info(workflow_nodes)")}
 
     assert db_path.exists()
     assert version["value"] == str(SCHEMA_VERSION)
@@ -38,6 +39,7 @@ def test_state_db_initializes_schema_and_pragmas(tmp_path: Path) -> None:
         "workflow_checkpoints",
         "workflow_events",
     } <= tables
+    assert {"executor_id", "lease_until"} <= workflow_node_columns
 
 
 def test_state_db_initialization_is_idempotent(tmp_path: Path) -> None:

@@ -387,9 +387,6 @@ class AnsiUvAgentApp:
     def __init__(self, project_root: Path | None = None, *, data_dir: Path | None = None) -> None:
         self.project_root = (project_root or Path.cwd()).resolve()
         self.engine = create_engine(self.project_root, data_dir=data_dir)
-        workflow_executor = getattr(self.engine, "workflow_executor", None)
-        if workflow_executor is not None:
-            workflow_executor.start()
         ui_config = getattr(self.engine.config, "ui", None)
         self.language = detect_user_language(getattr(ui_config, "language", None))
         self.state = Tui2State(
@@ -798,6 +795,9 @@ class AnsiUvAgentApp:
 
     async def run_async(self) -> None:
         with Terminal() as terminal:
+            workflow_executor = getattr(self.engine, "workflow_executor", None)
+            if workflow_executor is not None:
+                workflow_executor.start()
             self._ticker_task = asyncio.create_task(self._ticker())
             self._refresh_window_title()
             self._safe_repaint()

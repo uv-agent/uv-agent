@@ -393,6 +393,8 @@ def _create_workflow_schema(connection: sqlite3.Connection) -> None:
           created_at TEXT NOT NULL,
           started_at TEXT,
           completed_at TEXT,
+          executor_id TEXT,
+          lease_until TEXT,
           FOREIGN KEY(workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
         );
 

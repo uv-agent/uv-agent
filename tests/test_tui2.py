@@ -10,6 +10,7 @@ import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from uv_agent.tui.formatting import RUNTIME_EVENT_EVENT_ID_KEY, RUNTIME_EVENT_RUN_ID_KEY, renderable_plain, structured_event_markup
 from uv_agent.tui2.ansi import strip_ansi, visible_len
@@ -1394,6 +1395,17 @@ class _DummyEngine:
         self.goal_states: dict[str, SimpleNamespace] = {}
         self.branch_slug = "test-task"
         self.branch_slug_requests: list[dict[str, object]] = []
+        self.workflow_executor = SimpleNamespace(started=False)
+
+        def start_workflow_executor() -> None:
+            asyncio.get_running_loop()
+            self.workflow_executor.started = True
+
+        self.workflow_executor.start = start_workflow_executor
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     class config:
         class runtime:
@@ -1623,6 +1635,32 @@ def _make_app(monkeypatch):
     app = AnsiUvAgentApp()
     app.renderer = _DummyRenderer()
     return app
+
+
+@pytest.mark.asyncio
+async def test_run_async_starts_workflow_executor_after_event_loop_is_running(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    assert app.engine.workflow_executor.started is False
+
+    class _Context:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        async def read_key(self):
+            return "q"
+
+    monkeypatch.setattr(tui2_app, "Terminal", _Context)
+    monkeypatch.setattr(tui2_app, "TerminalKeyReader", lambda terminal: _Context())
+    monkeypatch.setattr(app, "handle_key", AsyncMock(return_value=False))
+    app.renderer.close = lambda: None
+
+    await app.run_async()
+
+    assert app.engine.workflow_executor.started is True
+    assert app.engine.closed is True
 
 
 def test_ctrl_c_requires_second_press_to_exit_when_idle(monkeypatch) -> None:

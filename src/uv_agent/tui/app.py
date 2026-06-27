@@ -392,9 +392,6 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         super().__init__()
         self.project_root = project_root
         self.engine = create_engine(project_root)
-        workflow_executor = getattr(self.engine, "workflow_executor", None)
-        if workflow_executor is not None:
-            workflow_executor.start()
         self.language = detect_user_language(self.engine.config.ui.language)
         self.thread_id: str | None = None
         self.level: str | None = None
@@ -499,6 +496,9 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
                     yield Static("", id="composer-footer")
 
     def on_mount(self) -> None:
+        workflow_executor = getattr(self.engine, "workflow_executor", None)
+        if workflow_executor is not None:
+            workflow_executor.start()
         self.query_one(EmptyState).tick()
         self._refresh_status(self._text("idle"))
         self.set_interval(0.16, self._tick, name="spinner")
@@ -510,11 +510,11 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
         self._refresh_composer_overlay()
         self._refresh_top_bar()
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
         self._mention_file_watcher_stop.set()
         if self._mention_file_watcher_worker is not None:
             self._mention_file_watcher_worker.cancel()
-        self.engine.close()
+        await self.engine.aclose()
         if self._stream_render_timer is not None:
             self._stream_render_timer.stop()
             self._stream_render_timer = None
