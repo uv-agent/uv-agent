@@ -2775,7 +2775,13 @@ def test_openai_sdk_connection_errors_are_retryable_provider_errors() -> None:
 async def test_agent_retry_turn_retries_model_request_without_new_user_message(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
-    config = make_test_config(project_root)
+    # This test verifies manual retry-turn reconstruction, not automatic provider
+    # stream backoff.  Disable auto retries so CI does not spend the default
+    # 1+2+4+8+16 seconds before the turn reaches its retryable error state.
+    config = make_test_config(
+        project_root,
+        stream_retry=StreamRetryConfig(max_retries=0, base=1.0, factor=2.0, max=30.0, jitter=0.0),
+    )
     first_client = FailingStreamClient(openai_connection_error())
     engine = AgentEngine(
         config=config,
