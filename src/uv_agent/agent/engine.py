@@ -59,18 +59,18 @@ from uv_agent.goal_mode import (
     GoalState,
     ensure_goal_files,
     read_goal_state,
-    render_goal_mode_notice,
 )
 from uv_agent.ids import new_id
 from uv_agent.agent.messages import assistant_output_item, message_item, message_item_text
-from uv_agent.mcp_config import McpInstructionsPreview, McpServerSummary, discover_mcp_servers, render_mcp_entry
+from uv_agent.mcp_config import McpInstructionsPreview
 from uv_agent.mcp_probe import McpInstructionsProbe
 from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
-from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, TurnContextBlock, TurnPrepareRequest
-from uv_agent.plugins.helpers import RuntimeHelperRegistry
+from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, TurnContextBlock, TurnPrepareRequest, UserInput
+from uv_agent.plugins.manager import RESERVED_RUNTIME_NAMESPACES
+from uv_agent.plugins.registry import RuntimeNamespaceRegistry
 from uv_agent.turn_manager import TurnManager
-from uv_agent.scheduler import SchedulerService
+from uv_agent.scheduler import SchedulerService, scheduler_config_from_plugin_config
 from uv_agent.workflow_executor import WorkflowExecutor
 from uv_agent.prompts import (
     BRANCH_NAME_GENERATION_PROMPT,
@@ -95,24 +95,14 @@ from uv_agent.prompts import (
     CONTEXT_REMOVED_SOME_SUFFIX,
     CONTEXT_UPDATE_CURRENT_PREFIX,
     CONTEXT_UPDATE_CURRENT_SUFFIX,
-    SKILLS_HEADER,
-    MCP_SERVERS_HEADER,
     PLUGIN_HELPERS_HEADER,
     TOOL_OUTPUT_TRUNCATED_MARKER,
     TOOL_OUTPUT_OMITTED_NOTE,
-    AVAILABLE_MCP_SERVERS_FOOTER,
-    AVAILABLE_SKILLS_FOOTER,
-    GOAL_MODE_ENABLED_STATUS_FRAGMENT,
-    MCP_OMITTED_TEMPLATE,
     PLUGIN_HELPER_ENTRY_TEMPLATE,
     PLUGIN_CONTEXT_TAG,
     PLUGIN_HELPERS_FOOTER,
     PRE_USER_CONTEXT_MARKERS,
-    REMOVED_MCP_SERVER_TEMPLATE,
-    REMOVED_SKILL_TEMPLATE,
-    SKILLS_OMITTED_TEMPLATE,
     TOOL_OUTPUT_SHORTENED_NOTE,
-    WORKTREE_ACTIVE_STATUS_FRAGMENT,
 )
 from uv_agent.project_rules import (
     ProjectRuleContext,
@@ -123,12 +113,10 @@ from uv_agent.project_rules import (
 from uv_agent.runner import PythonRunRequest, PythonRunner, RunnerEvent
 from uv_agent.runner.scriptenv import direct_dependencies
 from uv_agent.session.store import ThreadSnapshot, ThreadStore
-from uv_agent.skills import SkillSummary, discover_skills, render_skill_entry
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.agent.tool_results import function_output, model_tool_payload
 from uv_agent.helper_calls import extract_runtime_helper_calls, runtime_corrected_helper_calls
-from uv_agent.worktree import render_worktree_notice
-from uv_agent.workflow_context import active_workflows_compaction_section, render_workflow_context
+from uv_agent.workflow_context import active_workflows_compaction_section
 
 
 async def _await_next_stream_event(awaitable: Awaitable[Any]) -> Any:
@@ -229,6 +217,13 @@ def _removed_context_text(removed: list[str], previous_parts: dict[str, dict[str
             )
     return "".join(lines)
 
+
+
+def _wrap_agent_context(tag: str, body: str) -> str:
+    body = str(body or "").strip()
+    if not body:
+        return f"<{tag} />"
+    return f"<{tag}>\n{body}\n</{tag}>"
 
 def _xml_attr(value: object) -> str:
     return xml_escape(str(value), quote=True)
@@ -418,8 +413,16 @@ class RunTurnPrelude:
     request_input_items: list[dict[str, Any]]
     turn_started_event: dict[str, Any]
     prepare_request: TurnPrepareRequest
-    user_item: dict[str, Any]
-    image_events: list[dict[str, Any]]
+    user_items: list[dict[str, Any]]
+    image_events_by_user: list[list[dict[str, Any]]]
+
+    @property
+    def user_item(self) -> dict[str, Any]:
+        return self.user_items[0]
+
+    @property
+    def image_events(self) -> list[dict[str, Any]]:
+        return [event for events in self.image_events_by_user for event in events]
 
 
 @dataclass(frozen=True)
@@ -450,6 +453,12 @@ class AgentEngine:
         self.runner = runner
         self.thread_store = thread_store
         self.host_events = host_events or HostEventBus()
+        if getattr(self.thread_store, "_host_events", None) is None:
+            # Construction sites in tests and embedders often provide a bare
+            # ThreadStore.  Plugins observe thread-state changes through the
+            # host event bus, so attach the shared bus here without changing the
+            # public ThreadStore constructor contract.
+            self.thread_store._host_events = self.host_events
         self.project_root = project_root
         self.attachments = AttachmentStore(attachments_dir or thread_store.data_dir / "attachments")
         self._last_config_refresh_at = 0.0
@@ -461,7 +470,7 @@ class AgentEngine:
         self._mcp_instructions_probe.start()
         self.events = EventBus()
         self.host_events.register_plugin_bus(self.events)
-        self.runtime_helpers = RuntimeHelperRegistry()
+        self.runtime_helpers = RuntimeNamespaceRegistry(reserved=RESERVED_RUNTIME_NAMESPACES)
         self.plugins = PluginManager(
             config=self.config.plugins,
             project_root=self.project_root,
@@ -469,6 +478,7 @@ class AgentEngine:
             helper_registry=self.runtime_helpers,
             submitter=self._plugin_submit_turn,
             thread_store=self.thread_store,
+            host=self,
         )
         rpc_server = getattr(self.runner, "rpc_server", None)
         if rpc_server is not None:
@@ -487,9 +497,9 @@ class AgentEngine:
         )
         self.scheduler = SchedulerService(
             self.thread_store.data_dir,
-            self.config.scheduler,
-            helper_resolver=self.plugins.resolve_helper,
-            helper_caller=self.plugins.call_helper,
+            scheduler_config_from_plugin_config(self.config.plugins.plugin_config("builtin.scheduler")),
+            action_resolver=self.plugins.resolve_action,
+            action_caller=self.plugins.call_action,
             thread_store=self.thread_store,
         )
         self.workflow_executor = WorkflowExecutor(self.thread_store.data_dir, self.turn_manager, self.thread_store)
@@ -558,6 +568,7 @@ class AgentEngine:
         self,
         *,
         user_text: str,
+        user_inputs: list[UserInput] | None = None,
         thread_id: str | None = None,
         level: str | None = None,
         image_paths: list[str | Path] | None = None,
@@ -633,6 +644,7 @@ class AgentEngine:
         self,
         *,
         user_text: str,
+        user_inputs: list[UserInput] | None = None,
         thread_id: str | None = None,
         level: str | None = None,
         image_paths: list[str | Path] | None = None,
@@ -646,6 +658,7 @@ class AgentEngine:
             prelude = await asyncio.to_thread(
                 self._prepare_run_turn_prelude,
                 user_text=user_text,
+                user_inputs=user_inputs,
                 thread_id=thread_id,
                 level=level,
                 image_paths=image_paths,
@@ -699,12 +712,17 @@ class AgentEngine:
                 turn_input=turn_input,
                 blocks=plugin_context_blocks,
             )
+            self._append_agent_turn_context_items(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                turn_input=turn_input,
+            )
             self._append_current_user_items(
                 thread_id=thread_id,
                 turn_id=turn_id,
                 turn_input=turn_input,
-                user_item=prelude.user_item,
-                image_events=prelude.image_events,
+                user_items=prelude.user_items,
+                image_events_by_user=prelude.image_events_by_user,
             )
             request_input_items = turn_input.request_input_items()
             for event in prelude.image_events:
@@ -956,6 +974,7 @@ class AgentEngine:
         level: str | None,
         image_paths: list[str | Path] | None,
         cancel_event: asyncio.Event | None,
+        user_inputs: list[UserInput] | None = None,
         is_new_thread: bool = False,
     ) -> RunTurnPrelude:
         self._raise_if_cancelled(cancel_event)
@@ -974,6 +993,12 @@ class AgentEngine:
             thread_id,
             event_types={"item.model_response", "item.assistant"},
         )
+        normalized_user_inputs = list(user_inputs) if user_inputs is not None else [
+            UserInput(text=user_text, image_paths=tuple(image_paths or ()))
+        ]
+        if not normalized_user_inputs:
+            normalized_user_inputs = [UserInput(text=user_text, image_paths=tuple(image_paths or ())) ]
+        first_user_text = normalized_user_inputs[0].text
         turn_input = self._prepare_turn_input(thread_id, level=level)
         input_items = turn_input.input_items
         request_input_items = turn_input.request_input_items()
@@ -982,7 +1007,7 @@ class AgentEngine:
         prepare_request = TurnPrepareRequest(
             thread_id=thread_id,
             turn_id=turn_id,
-            user_text=user_text,
+            user_text=first_user_text,
             level=level,
             is_new_thread=is_new_thread,
             is_first_turn=int(metadata.get("user_message_count") or 0) == 0,
@@ -991,7 +1016,7 @@ class AgentEngine:
             last_assistant_completed_at=last_assistant_completed_at,
             metadata=metadata,
         )
-        user_item = message_item("user", user_text)
+        user_items = [message_item("user", item.text) for item in normalized_user_inputs]
 
         # ``_reconstruct_input`` already places persisted post-compaction
         # context ahead of the compacted history. If this turn emits additional
@@ -1007,23 +1032,26 @@ class AgentEngine:
             input_items.extend(pre_user_items)
             request_input_items.extend(pre_user_items)
         turn_input.pending_items.extend(pre_user_items)
-        image_events: list[dict[str, Any]] = []
-        for image_path in image_paths or []:
-            attachment = self.attachments.register_image(
-                image_path,
-                cwd=self.project_root,
-                thread_id=thread_id,
-                note="pasted from clipboard",
-            )
-            payload = attachment.to_event_payload()
-            image_events.append(
-                {
-                    "type": "image.attachment",
-                    "thread_id": thread_id,
-                    "turn_id": turn_id,
-                    "attachment": payload,
-                }
-            )
+        image_events_by_user: list[list[dict[str, Any]]] = []
+        for user_input in normalized_user_inputs:
+            events: list[dict[str, Any]] = []
+            for image_path in user_input.image_paths:
+                attachment = self.attachments.register_image(
+                    image_path,
+                    cwd=self.project_root,
+                    thread_id=thread_id,
+                    note="pasted from clipboard",
+                )
+                payload = attachment.to_event_payload()
+                events.append(
+                    {
+                        "type": "image.attachment",
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "attachment": payload,
+                    }
+                )
+            image_events_by_user.append(events)
 
         self._warm_model_backend_for_level(level)
         if should_generate_title:
@@ -1040,8 +1068,8 @@ class AgentEngine:
             request_input_items=request_input_items,
             turn_started_event=turn_started_event,
             prepare_request=prepare_request,
-            user_item=user_item,
-            image_events=image_events,
+            user_items=user_items,
+            image_events_by_user=image_events_by_user,
         )
 
     def _latest_event_created_at(self, thread_id: str, *, event_types: set[str]) -> str | None:
@@ -1059,6 +1087,14 @@ class AgentEngine:
         turn_input: TurnInputState,
         blocks: list[TurnContextBlock],
     ) -> None:
+        """Append transitional rendered turn context returned by legacy seams.
+
+        New plugins should enqueue structured turn context through
+        ``PluginContextBroker``. This method remains only so any in-flight
+        integration that still returns ``TurnContextBlock`` fails soft while the
+        engine consumes the new broker-backed item group below.
+        """
+
         for block in blocks:
             text = self._plugin_context_text(block)
             if not text:
@@ -1067,26 +1103,42 @@ class AgentEngine:
                 thread_id,
                 "item.plugin_context",
                 turn_id=turn_id,
-                plugin=block.plugin,
-                placement=block.placement,
-                dedupe_key=block.dedupe_key,
-                metadata=block.metadata,
+                plugin=getattr(block, "plugin", ""),
+                metadata=getattr(block, "metadata", {}),
                 text=text,
             )
             item = message_item("user", text)
             turn_input.input_items.append(item)
             turn_input.pending_items.append(copy.deepcopy(item))
 
+    def _append_agent_turn_context_items(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        turn_input: TurnInputState,
+    ) -> None:
+        broker = getattr(self.plugins, "contexts", None)
+        if broker is None or not hasattr(broker, "turn_context_text"):
+            return
+        text = str(broker.turn_context_text(thread_id) or "").strip()
+        if not text:
+            return
+        wrapped = _wrap_agent_context("agent_turn_context", text)
+        self.thread_store.append(thread_id, "item.agent_turn_context", turn_id=turn_id, text=wrapped)
+        item = message_item("user", wrapped)
+        turn_input.input_items.append(item)
+        turn_input.pending_items.append(copy.deepcopy(item))
+
     @staticmethod
     def _plugin_context_text(block: TurnContextBlock) -> str:
-        body = str(block.text or "").strip()
+        body = str(getattr(block, "text", "") or "").strip()
         if not body:
             return ""
-        plugin = block.plugin or "unknown"
+        plugin = getattr(block, "plugin", "") or "unknown"
+        tag = getattr(block, "tag", "") or PLUGIN_CONTEXT_TAG
         attrs = [f'plugin="{_xml_attr(plugin)}"']
-        if block.dedupe_key:
-            attrs.append(f'dedupe_key="{_xml_attr(block.dedupe_key)}"')
-        return f"<{PLUGIN_CONTEXT_TAG} {' '.join(attrs)}>\n{body}\n</{PLUGIN_CONTEXT_TAG}>"
+        return f"<{tag} {' '.join(attrs)}>\n{body}\n</{tag}>"
 
     def _append_current_user_items(
         self,
@@ -1094,27 +1146,29 @@ class AgentEngine:
         thread_id: str,
         turn_id: str,
         turn_input: TurnInputState,
-        user_item: dict[str, Any],
-        image_events: list[dict[str, Any]],
+        user_items: list[dict[str, Any]],
+        image_events_by_user: list[list[dict[str, Any]]],
     ) -> None:
-        """Persist and append the real user task after optional pre-turn work."""
+        """Persist and append all external user messages after optional pre-turn work."""
 
-        self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
-        turn_input.input_items.append(user_item)
-        turn_input.pending_items.append(copy.deepcopy(user_item))
-        for event in image_events:
-            attachment = event.get("attachment") if isinstance(event, dict) else None
-            if not isinstance(attachment, dict):
-                continue
-            self.thread_store.append(
-                thread_id,
-                "item.image_attachment",
-                turn_id=turn_id,
-                attachment=attachment,
-            )
-            image_item = image_message_item(attachment)
-            turn_input.input_items.append(image_item)
-            turn_input.pending_items.append(copy.deepcopy(image_item))
+        for index, user_item in enumerate(user_items):
+            self.thread_store.append(thread_id, "item.user", turn_id=turn_id, item=user_item)
+            turn_input.input_items.append(user_item)
+            turn_input.pending_items.append(copy.deepcopy(user_item))
+            events = image_events_by_user[index] if index < len(image_events_by_user) else []
+            for event in events:
+                attachment = event.get("attachment") if isinstance(event, dict) else None
+                if not isinstance(attachment, dict):
+                    continue
+                self.thread_store.append(
+                    thread_id,
+                    "item.image_attachment",
+                    turn_id=turn_id,
+                    attachment=attachment,
+                )
+                image_item = image_message_item(attachment)
+                turn_input.input_items.append(image_item)
+                turn_input.pending_items.append(copy.deepcopy(image_item))
 
     def _warm_model_backend_for_level(self, level: str | None) -> None:
         if not self._model_client_uses_builtin_lazy_provider_imports():
@@ -2383,6 +2437,7 @@ class AgentEngine:
         return event.get("type") in {
             "item.user",
             "item.plugin_context",
+            "item.agent_turn_context",
             "item.assistant",
             "item.model_response",
             "item.tool_output",
@@ -3306,8 +3361,8 @@ class AgentEngine:
             events_after_context: list[dict[str, Any]] = []
             reached_replayable_history = False
             for event in events:
-                if event.get("type") == "item.plugin_context":
-                    # Plugin context belongs to the turn that requested it.  Unlike
+                if event.get("type") in {"item.plugin_context", "item.agent_turn_context"}:
+                    # Turn context belongs to the turn that requested it. Unlike
                     # regenerated epoch context (rules/runtime/workflow), keep it
                     # with the following user message after a compaction checkpoint.
                     reached_replayable_history = True
@@ -3389,13 +3444,9 @@ class AgentEngine:
         event_type = event.get("type")
         if event_type == "item.context_update":
             text = str(event.get("text") or "")
+        elif event_type in {"item.agent_epoch_context", "item.agent_epoch_context_update", "item.agent_turn_context"}:
+            text = str(event.get("text") or "")
         elif event_type == "item.plugin_context":
-            text = str(event.get("text") or "")
-        elif event_type == "item.goal_mode_notice":
-            text = str(event.get("text") or "")
-        elif event_type == "item.worktree_notice":
-            text = str(event.get("text") or "")
-        elif event_type == "item.workflow_context":
             text = str(event.get("text") or "")
         elif event_type == "item.rules_loaded" and event.get("source") in {
             "project",
@@ -3456,43 +3507,56 @@ class AgentEngine:
         return saw_partial and not saw_model_response
 
     def _runtime_context_items(self, thread_id: str | None = None) -> list[dict[str, Any]]:
-        update = self._turn_context_update(thread_id)
-        if update is None:
+        """Return current epoch context items using the active context pipeline.
+
+        The previous fingerprint/diff implementation lived entirely in Engine and
+        rediscovered every dynamic domain (skills, MCP, plugin helpers) on demand.
+        The plugin refactor moves those domains behind PluginContextBroker: Engine
+        now sends one full epoch context item per epoch and then only explicit
+        plugin-published updates.
+        """
+
+        core_text = self._turn_context_text()
+        if not thread_id:
+            return [message_item("user", core_text)] if core_text else []
+
+        broker = getattr(self.plugins, "contexts", None)
+        has_full_epoch = self.thread_store.has_event_after_latest_compaction(
+            thread_id,
+            event_types={"item.agent_epoch_context"},
+        )
+        if not has_full_epoch:
+            if broker is not None and self._has_compaction(thread_id) and hasattr(broker, "replay_after_compaction"):
+                broker.replay_after_compaction(thread_id)
+            if broker is not None and hasattr(broker, "full_context_text"):
+                main_agent = self._is_main_agent_thread(thread_id)
+                text = broker.full_context_text(
+                    thread_id,
+                    core_texts=[core_text],
+                    include_document=lambda document: document.attrs.get("scope") != "main_agent" or main_agent,
+                )
+            else:
+                text = core_text
+            text = _wrap_agent_context("agent_epoch_context", str(text or "").strip())
+            self.thread_store.append(thread_id, "item.agent_epoch_context", text=text)
+            return [message_item("user", text)]
+
+        if broker is None or not hasattr(broker, "update_context_text"):
             return []
-        if thread_id:
-            self.thread_store.append(
-                thread_id,
-                "item.context_update",
-                context_fingerprint=update["fingerprint"],
-                context_state=update["state"],
-                context_kind="runtime",
-                removed=update["removed"],
-                text=update["text"],
-            )
-        return [message_item("user", update["text"])]
+        text = str(broker.update_context_text(thread_id) or "").strip()
+        if not text:
+            return []
+        self.thread_store.append(thread_id, "item.agent_epoch_context_update", text=text)
+        return [message_item("user", text)]
 
     def _pre_user_context_items(self, thread_id: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for text in self._rule_context_texts(thread_id):
             items.append(message_item("user", text))
         items.extend(self._runtime_context_items(thread_id))
-        items.extend(self._workflow_context_items(thread_id))
-        items.extend(self._goal_context_items(thread_id))
-        items.extend(self._worktree_context_items(thread_id))
         return items
 
 
-    def _workflow_context_items(self, thread_id: str) -> list[dict[str, Any]]:
-        if not self._is_main_agent_thread(thread_id):
-            return []
-        if self.thread_store.has_event_after_latest_compaction(
-            thread_id,
-            event_types={"item.workflow_context"},
-        ):
-            return []
-        text = render_workflow_context()
-        self.thread_store.append(thread_id, "item.workflow_context", text=text)
-        return [message_item("user", text)]
 
     def _is_main_agent_thread(self, thread_id: str) -> bool:
         try:
@@ -3578,53 +3642,8 @@ class AgentEngine:
         enabled = isinstance(raw_goal, dict) and bool(raw_goal.get("enabled"))
         return read_goal_state(self.thread_store.data_dir, thread_id, enabled=enabled)
 
-    def _goal_context_items(self, thread_id: str) -> list[dict[str, Any]]:
-        notice = self._goal_mode_notice_text(thread_id)
-        if not notice:
-            return []
-        status = "enabled" if GOAL_MODE_ENABLED_STATUS_FRAGMENT in notice else "disabled"
-        self.thread_store.append(
-            thread_id,
-            "item.goal_mode_notice",
-            text=notice,
-            status=status,
-        )
-        return [message_item("user", notice)]
 
-    def _goal_mode_notice_text(self, thread_id: str) -> str:
-        state = self.goal_state(thread_id)
-        if state is None:
-            return ""
-        previous_notice = self._latest_goal_notice_status(thread_id)
-        if state.enabled:
-            if previous_notice in {"enabled", "pending_disabled"}:
-                return ""
-            return render_goal_mode_notice(state, status="enabled")
-        if previous_notice == "pending_disabled":
-            return render_goal_mode_notice(state, status="disabled")
-        return ""
 
-    def _latest_goal_notice_status(self, thread_id: str) -> str | None:
-        events, _ = self.thread_store.read_after_latest_compaction(
-            thread_id,
-            event_types={"item.goal_mode_notice", "thread.goal_mode_updated", "thread.goal_files_reset"},
-        )
-        status: str | None = None
-        for event in events:
-            event_type = event.get("type")
-            if event_type == "item.goal_mode_notice":
-                status = str(event.get("status") or "") or None
-            elif event_type == "thread.goal_mode_updated":
-                enabled = bool(event.get("enabled"))
-                if enabled:
-                    status = "pending_enabled"
-                else:
-                    status = "pending_disabled"
-            elif event_type == "thread.goal_files_reset":
-                # Reset is only allowed while disabled; it does not require a
-                # model-visible notice unless the mode is enabled afterwards.
-                status = None
-        return status
 
     @staticmethod
     def _goal_files_payload(state: GoalState) -> dict[str, str]:
@@ -3634,62 +3653,9 @@ class AgentEngine:
             "notes": str(state.paths.notes),
         }
 
-    def _worktree_context_items(self, thread_id: str) -> list[dict[str, Any]]:
-        notice = self._worktree_notice_text(thread_id)
-        if not notice:
-            return []
-        status = "active" if WORKTREE_ACTIVE_STATUS_FRAGMENT in notice else "deleted"
-        self.thread_store.append(
-            thread_id,
-            "item.worktree_notice",
-            text=notice,
-            status=status,
-        )
-        return [message_item("user", notice)]
 
-    def _worktree_notice_text(self, thread_id: str) -> str:
-        state = self._worktree_state(thread_id)
-        if state is None:
-            return ""
-        previous_notice = self._latest_worktree_notice_status(thread_id)
-        status = str(state.get("worktree_status") or "").strip()
-        if status == "active":
-            if previous_notice == "active":
-                return ""
-            return render_worktree_notice(state, status="active")
-        if status == "deleted" and previous_notice == "pending_deleted":
-            return render_worktree_notice(state, status="deleted")
-        return ""
 
-    def _worktree_state(self, thread_id: str) -> dict[str, Any] | None:
-        try:
-            metadata = self.thread_store.thread_metadata(thread_id)
-        except FileNotFoundError:
-            return None
-        status = str(metadata.get("worktree_status") or "").strip()
-        if status not in {"active", "deleted"}:
-            return None
-        branch = str(metadata.get("worktree_branch") or "").strip()
-        path = str(metadata.get("worktree_path") or "").strip()
-        if not branch or not path:
-            return None
-        return dict(metadata)
 
-    def _latest_worktree_notice_status(self, thread_id: str) -> str | None:
-        events, _ = self.thread_store.read_after_latest_compaction(
-            thread_id,
-            event_types={"item.worktree_notice", "thread.worktree_created", "thread.worktree_deleted"},
-        )
-        status: str | None = None
-        for event in events:
-            event_type = event.get("type")
-            if event_type == "item.worktree_notice":
-                status = str(event.get("status") or "") or None
-            elif event_type == "thread.worktree_created":
-                status = "pending_active"
-            elif event_type == "thread.worktree_deleted":
-                status = "pending_deleted"
-        return status
 
     def _rule_context_texts(self, thread_id: str) -> list[str]:
         state = self._rule_state(thread_id)
@@ -4018,116 +3984,13 @@ class AgentEngine:
         *,
         previous_parts: dict[str, dict[str, Any]] | None = None,
     ) -> list[ContextPart]:
-        previous_parts = previous_parts or {}
-        parts: list[ContextPart] = [
+        del previous_parts
+        return [
             ContextPart("runtime_environment", "runtime_environment", self._runtime_environment_context()),
-            ContextPart("model_levels", "model_levels", self._model_levels_context()),
             ContextPart("runtime_helpers", "runtime_helpers", self._runtime_helpers_context()),
         ]
-        plugin_part = self._plugin_runtime_helpers_context()
-        if plugin_part:
-            parts.append(ContextPart("plugin_runtime_helpers", "plugin_runtime_helpers", plugin_part, dynamic=True))
-        skills = discover_skills(self.project_root)
-        if skills:
-            parts.extend(self._skill_context_parts(skills))
 
-        mcp_servers = discover_mcp_servers(self.project_root)
-        if mcp_servers:
-            parts.extend(self._mcp_context_parts(mcp_servers, previous_parts=previous_parts))
-        return parts
 
-    def _skill_context_parts(self, skills: list[SkillSummary]) -> list[ContextPart]:
-        parts = [
-            ContextPart(
-                "skills/header",
-                "skills",
-                (
-                    SKILLS_HEADER
-                ),
-            )
-        ]
-        for skill in skills[:10]:
-            parts.append(
-                ContextPart(
-                    f"skills/{_context_item_id(skill.key)}",
-                    "skills",
-                    render_skill_entry(skill),
-                    dynamic=True,
-                    metadata={
-                        "kind": "skill",
-                        "name": skill.name,
-                        "scope": skill.scope,
-                        "path": str(skill.path),
-                    },
-                )
-            )
-        if len(skills) > 10:
-            parts.append(
-                ContextPart(
-                    "skills/omitted",
-                    "skills",
-                    SKILLS_OMITTED_TEMPLATE.format(count=len(skills) - 10),
-                    dynamic=True,
-                )
-            )
-        parts.append(ContextPart("skills/footer", "skills", AVAILABLE_SKILLS_FOOTER))
-        return parts
-
-    def _mcp_context_parts(
-        self,
-        servers: list[McpServerSummary],
-        *,
-        previous_parts: dict[str, dict[str, Any]],
-    ) -> list[ContextPart]:
-        instructions = self._mcp_instructions_probe.snapshot()
-        parts = [
-            ContextPart(
-                "mcp/header",
-                "mcp",
-                (
-                    MCP_SERVERS_HEADER
-                ),
-            )
-        ]
-        for server in servers[:10]:
-            part_id = f"mcp/{_context_item_id(server.key)}"
-            previous_metadata = previous_parts.get(part_id, {}).get("metadata")
-            previous_instructions = _mcp_preview_from_metadata(
-                previous_metadata.get("instructions")
-                if isinstance(previous_metadata, dict)
-                else None
-            )
-            preview = instructions.get(server.key) or (
-                previous_instructions
-                if previous_instructions is not None
-                else None
-            )
-            parts.append(
-                ContextPart(
-                    part_id,
-                    "mcp",
-                    render_mcp_entry(server, preview),
-                    dynamic=True,
-                    metadata={
-                        "kind": "mcp",
-                        "name": server.name,
-                        "scope": server.scope,
-                        "config": str(server.path),
-                        "instructions": _mcp_preview_metadata(preview),
-                    },
-                )
-            )
-        if len(servers) > 10:
-            parts.append(
-                ContextPart(
-                    "mcp/omitted",
-                    "mcp",
-                    MCP_OMITTED_TEMPLATE.format(count=len(servers) - 10),
-                    dynamic=True,
-                )
-            )
-        parts.append(ContextPart("mcp/footer", "mcp", AVAILABLE_MCP_SERVERS_FOOTER))
-        return parts
 
     def project_rule_context(self) -> ProjectRuleContext:
         """Load AGENTS.md context for status/debug display."""

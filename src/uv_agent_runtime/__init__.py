@@ -30,7 +30,6 @@ from .facade import (
     events,
     file,
     files,
-    goals,
     look_at,
     mcp,
     normalize,
@@ -59,7 +58,6 @@ from .textops import (
 )
 from .codesearch import FffSearchNotAvailableError, Match, RipgrepNotFoundError, Submatch
 from .codequery import Capture, Symbol
-from .goal_mode import RuntimeGoalPaths
 from .lockfile import HeldFileLock
 from .mcp import McpClient, McpResult, McpServerConfig
 from .patch import PatchResult
@@ -140,7 +138,6 @@ __all__ = [
     "events",
     "file",
     "files",
-    "goals",
     "look_at",
     "mcp",
     "normalize",
@@ -171,6 +168,35 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+class _HostNamespaceProxy:
+    """Lazy proxy for one plugin-provided runtime helper namespace."""
+
+    def __init__(self, namespace: str, resolved: dict[str, Any]) -> None:
+        self.__name__ = namespace
+        self.__doc__ = str(resolved.get("doc") or f"Host-provided runtime namespace {namespace}.")
+        self._namespace = namespace
+        self._functions = {
+            str(item.get("name")): item
+            for item in resolved.get("functions", [])
+            if isinstance(item, dict) and item.get("name")
+        }
+
+    def __getattr__(self, name: str) -> Any:
+        if not name.isidentifier() or name.startswith("_"):
+            raise AttributeError(name)
+        full_name = f"{self._namespace}.{name}"
+        transport = import_module(".transport", __name__)
+        resolved = transport.resolve_host_helper(full_name)
+        if not resolved.get("found") and name not in self._functions:
+            raise AttributeError(name)
+        helper = _host_function(full_name, resolved or self._functions.get(name) or {})
+        setattr(self, name, helper)
+        return helper
+
+    def __dir__(self) -> list[str]:
+        return sorted({*self.__dict__, *self._functions})
+
+
 def _dynamic_host_helper(name: str) -> Any:
     if not name.isidentifier() or name.startswith("_"):
         return None
@@ -178,15 +204,28 @@ def _dynamic_host_helper(name: str) -> Any:
     resolved = transport.resolve_host_helper(name)
     if not resolved.get("found"):
         return None
+    kind = resolved.get("kind")
+    if kind == "namespace":
+        if resolved.get("transport") == "local_module" and resolved.get("module"):
+            return import_module(str(resolved["module"]))
+        return _HostNamespaceProxy(name, resolved)
+    if kind == "function" and resolved.get("transport") == "local_module" and resolved.get("module"):
+        module = import_module(str(resolved["module"]))
+        return getattr(module, str(resolved.get("function") or name.rpartition(".")[2]))
+    return _host_function(str(resolved.get("name") or name), resolved)
+
+
+def _host_function(full_name: str, resolved: dict[str, Any]) -> Any:
+    transport = import_module(".transport", __name__)
 
     def helper(*args: Any, **kwargs: Any) -> Any:
-        return transport.call_host(name, *args, **kwargs)
+        return transport.call_host(full_name, *args, **kwargs)
 
-    helper.__name__ = name
-    helper.__qualname__ = name
-    helper.__doc__ = str(resolved.get("doc") or f"Host-provided runtime helper {name}.")
+    helper.__name__ = full_name.rpartition(".")[2] or full_name
+    helper.__qualname__ = full_name
+    helper.__doc__ = str(resolved.get("doc") or f"Host-provided runtime helper {full_name}.")
     helper_tracking = import_module(".helper_tracking", __name__)
-    return helper_tracking.tracked_helper(helper, name=name)
+    return helper_tracking.tracked_helper(helper, name=full_name)
 
 
 def __dir__() -> list[str]:

@@ -34,6 +34,7 @@ from uv_agent.tui2.app import _retained_flushed_cell, TUI2_RETAINED_FLUSHED_TEXT
 from uv_agent.tui2.renderer import Renderer
 from uv_agent.tui2.terminal import PASTE_PREFIX, Terminal, TerminalKeyReader
 from uv_agent.tui2.theme import DEFAULT_THEME, sgr
+from uv_agent.plugins import CommandResult, SetComposerAction, TranscriptAction
 
 
 # ---------------------------------------------------------------------------
@@ -1388,11 +1389,93 @@ def test_renderer_close_reuses_anchored_live_region_for_shell_prompt(monkeypatch
 # ---------------------------------------------------------------------------
 
 
+class _DummyPluginCommands:
+    def __init__(self, engine: "_DummyEngine") -> None:
+        self.engine = engine
+
+    def command_suggestions(self):
+        return [SimpleNamespace(name="/goal", description="goal-mode subcommands", plugin="builtin.goal")]
+
+    def picker_items(self, picker_id, query=""):
+        if picker_id != "goal.commands":
+            return []
+        items = [
+            SimpleNamespace(value="/goal enable", description="enable goal mode", id="", kind="plugin-command", meta="builtin.goal"),
+            SimpleNamespace(value="/goal disable", description="disable goal mode", id="", kind="plugin-command", meta="builtin.goal"),
+            SimpleNamespace(value="/goal reset", description="reset goal state", id="", kind="plugin-command", meta="builtin.goal"),
+            SimpleNamespace(value="/goal status", description="show goal mode status", id="", kind="plugin-command", meta="builtin.goal"),
+        ]
+        needle = str(query or "").lower()
+        return [item for item in items if not needle or needle in item.value.lower() or needle in item.description.lower()]
+
+    def call_command(self, name, payload=None):
+        if name != "/goal":
+            raise LookupError(name)
+        data = dict(payload or {})
+        arg = str(data.get("arg") or "").strip()
+        thread_id = data.get("thread_id")
+        parts = arg.split(None, 1)
+        op = (parts[0] if parts else "status").lower()
+        rest = parts[1] if len(parts) > 1 else ""
+        if op not in {"enable", "disable", "reset", "status"}:
+            return CommandResult((TranscriptAction("error", "usage: /goal enable [objective] | disable | reset | status"),))
+        if not thread_id:
+            if op == "enable":
+                objective = rest.strip()
+                return CommandResult((
+                    TranscriptAction(
+                        "event",
+                        f"goal mode enabled for next message · objective: {objective or '—'}",
+                        metadata={"goal_pending": True, "goal_enabled": True, "goal_objective": objective},
+                    ),
+                    SetComposerAction(""),
+                ))
+            if op == "disable":
+                return CommandResult((
+                    TranscriptAction(
+                        "event",
+                        "goal mode disabled",
+                        metadata={"goal_pending": False, "goal_enabled": False, "goal_objective": ""},
+                    ),
+                    SetComposerAction(""),
+                ))
+            if op == "status":
+                return CommandResult((TranscriptAction("event", "goal mode: disabled (no active thread)"),))
+            return CommandResult((TranscriptAction("error", "/goal reset requires an active thread — send a message first"),))
+        if op == "enable":
+            state = self.engine.enable_goal_mode(thread_id, objective=rest)
+            return CommandResult((TranscriptAction(
+                "event",
+                f"goal mode enabled · objective: {state.objective or '—'}",
+                metadata={"goal_pending": False, "goal_enabled": True, "goal_objective": state.objective or ""},
+            ),))
+        if op == "disable":
+            self.engine.disable_goal_mode(thread_id)
+            return CommandResult((TranscriptAction(
+                "event",
+                "goal mode disabled",
+                metadata={"goal_pending": False, "goal_enabled": False},
+            ),))
+        if op == "reset":
+            state = self.engine.reset_goal_files(thread_id, objective=rest)
+            return CommandResult((TranscriptAction(
+                "event",
+                "goal state reset",
+                metadata={"goal_pending": False, "goal_enabled": False, "goal_objective": state.objective or ""},
+            ),))
+        state = self.engine.goal_state(thread_id)
+        if state is None:
+            return CommandResult((TranscriptAction("event", "goal mode: disabled (no state yet)"),))
+        status = "enabled" if state.status == "enabled" else "disabled"
+        return CommandResult((TranscriptAction("event", f"goal mode: {status}\nobjective: {state.objective or '—'}"),))
+
+
 class _DummyEngine:
     def __init__(self) -> None:
         self.turns: list[dict[str, object]] = []
         self.goal_updates: list[dict[str, object]] = []
         self.goal_states: dict[str, SimpleNamespace] = {}
+        self.plugins = _DummyPluginCommands(self)
         self.branch_slug = "test-task"
         self.branch_slug_requests: list[dict[str, object]] = []
         self.workflow_executor = SimpleNamespace(started=False)
@@ -2186,10 +2269,11 @@ def test_command_palette_lists_status_command() -> None:
     assert "/status" in values
 
 
-def test_command_palette_lists_bg_command() -> None:
+def test_command_palette_hides_agent_view_commands() -> None:
     values = [item.value for item in TOP_LEVEL_COMMANDS]
 
-    assert "/bg" in values
+    assert "/agents" not in values
+    assert "/bg" not in values
 
 
 def test_status_command_flushes_context_summary(monkeypatch) -> None:
@@ -2833,7 +2917,7 @@ def test_ctrl_a_opens_agent_view_from_empty_composer(monkeypatch) -> None:
     assert app.state.mode == "agent_view"
 
 
-def test_agents_command_opens_agent_view(monkeypatch) -> None:
+def test_agents_command_is_not_registered(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.engine.thread_store.threads = [
         {"thread_id": "thr_1", "title": "Alpha", "last_text": "hello", "agent_view_joined": True},
@@ -2841,8 +2925,9 @@ def test_agents_command_opens_agent_view(monkeypatch) -> None:
 
     app._handle_command("/agents")
 
-    assert app.state.mode == "agent_view"
-    assert app.state.agent_view.rows[0].thread_id == "thr_1"
+    assert app.state.mode == "transcript"
+    assert app.state.flushed[-1].kind == "error"
+    assert "unknown command: /agents" in app.state.flushed[-1].text
 
 
 def test_agents_command_does_not_join_current_thread(monkeypatch) -> None:
@@ -2853,8 +2938,7 @@ def test_agents_command_does_not_join_current_thread(monkeypatch) -> None:
     app._handle_command("/agents")
 
     assert "agent_view_joined" not in app.engine.thread_store.threads[0]
-    assert app.state.mode == "agent_view"
-    assert app.state.agent_view.rows == []
+    assert app.state.mode == "transcript"
 
 
 def test_agent_view_omits_ordinary_threads_until_joined(monkeypatch) -> None:
@@ -2870,23 +2954,24 @@ def test_agent_view_omits_ordinary_threads_until_joined(monkeypatch) -> None:
     assert [row.thread_id for row in app.state.agent_view.rows] == ["thr_joined", "thr_worktree"]
 
 
-def test_bg_command_joins_current_thread_to_agent_view(monkeypatch) -> None:
+def test_bg_command_is_not_registered(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.engine.thread_store.threads = [{"thread_id": "thr_plain", "title": "Plain"}]
     app.state.thread_id = "thr_plain"
 
     app._handle_command("/bg")
 
-    assert app.engine.thread_store.threads[0]["agent_view_joined"] is True
-    assert app.engine.thread_store.threads[0]["agent_view_source"] == "bg_command"
-    assert [row.thread_id for row in app.state.agent_view.rows] == ["thr_plain"]
+    assert "agent_view_joined" not in app.engine.thread_store.threads[0]
+    assert app.state.mode == "transcript"
+    assert app.state.flushed[-1].kind == "error"
+    assert "unknown command: /bg" in app.state.flushed[-1].text
 
 
-def test_bg_command_selects_running_current_thread(monkeypatch) -> None:
+def test_agent_view_can_still_select_running_current_thread(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app.engine.thread_store.threads = [
         {"thread_id": "thr_other", "title": "Other", "agent_view_joined": True},
-        {"thread_id": "thr_current", "title": "Current"},
+        {"thread_id": "thr_current", "title": "Current", "agent_view_joined": True},
     ]
     app.state.thread_id = "thr_current"
     run_state = tui2_app.ThreadRunState(thread_id="thr_current")
@@ -2898,7 +2983,7 @@ def test_bg_command_selects_running_current_thread(monkeypatch) -> None:
     run_state.task = RunningTask()  # type: ignore[assignment]
     app._thread_runs["thr_current"] = run_state
 
-    app._handle_command("/bg")
+    app._open_agent_view()
 
     assert app.state.mode == "agent_view"
     assert run_state.task is not None and not run_state.task.done()

@@ -191,6 +191,103 @@ def test_runtime_rpc_server_maps_method_errors(tmp_path: Path) -> None:
         server.close()
 
 
+def test_runtime_rpc_server_supports_dynamic_namespace_proxy(tmp_path: Path, monkeypatch) -> None:
+    import uv_agent_runtime as rt
+
+    server = RuntimeRPCServer()
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
+    server.register_method(
+        "helper.resolve",
+        lambda name: {
+            "demo": {
+                "found": True,
+                "kind": "namespace",
+                "name": "demo",
+                "plugin": "demo-plugin",
+                "doc": "Demo namespace.",
+                "transport": "rpc",
+                "functions": [{"name": "greet", "full_name": "demo.greet", "doc": "Greet.", "schema": {"type": "object"}}],
+            },
+            "demo.greet": {
+                "found": True,
+                "kind": "function",
+                "name": "demo.greet",
+                "namespace": "demo",
+                "function": "greet",
+                "plugin": "demo-plugin",
+                "doc": "Greet.",
+                "schema": {"type": "object"},
+                "transport": "rpc",
+            },
+        }.get(name, {"found": False, "name": name}),
+    )
+    server.register_method("helper.call", lambda name, args=None, kwargs=None: {"name": name, "payload": dict(kwargs or {})})
+    try:
+        handle = server.open_session(
+            run_id="run_rpc",
+            thread_id=None,
+            turn_id=None,
+            cwd=tmp_path,
+            structured_events=[],
+            writer=writer,
+        )
+        try:
+            monkeypatch.setenv("UV_AGENT_RPC_URL", server.url)
+            monkeypatch.setenv("UV_AGENT_RPC_TOKEN", handle.token)
+            rt.__dict__.pop("demo", None)
+
+            assert rt.demo.greet(name="Ada") == {"name": "demo.greet", "payload": {"name": "Ada"}}
+        finally:
+            handle.close()
+            rt.__dict__.pop("demo", None)
+    finally:
+        server.close()
+
+
+def test_runtime_rpc_server_supports_local_module_namespace(tmp_path: Path, monkeypatch) -> None:
+    import uv_agent_runtime as rt
+
+    server = RuntimeRPCServer()
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
+    server.register_method(
+        "helper.resolve",
+        lambda name: {
+            "found": True,
+            "kind": "namespace",
+            "name": "json",
+            "plugin": "demo-plugin",
+            "doc": "JSON module.",
+            "transport": "local_module",
+            "module": "json",
+            "functions": [],
+        }
+        if name == "json"
+        else {"found": False, "name": name},
+    )
+    try:
+        handle = server.open_session(
+            run_id="run_rpc",
+            thread_id=None,
+            turn_id=None,
+            cwd=tmp_path,
+            structured_events=[],
+            writer=writer,
+        )
+        try:
+            monkeypatch.setenv("UV_AGENT_RPC_URL", server.url)
+            monkeypatch.setenv("UV_AGENT_RPC_TOKEN", handle.token)
+            rt.__dict__.pop("json", None)
+
+            assert rt.json.loads('{"ok": true}') == {"ok": True}
+        finally:
+            handle.close()
+            rt.__dict__.pop("json", None)
+    finally:
+        server.close()
+
+
 def _run_store(tmp_path: Path, run_id: str) -> RunLogStore:
     store = RunLogStore(tmp_path)
     store.create_run_record(

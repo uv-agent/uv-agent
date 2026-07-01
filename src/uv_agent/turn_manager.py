@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Any, Literal, TYPE_CHECKING
 
 from uv_agent.ids import new_id
+from uv_agent.plugins.context import UserInput
 
 if TYPE_CHECKING:
     from uv_agent.agent.engine import AgentEngine
 
 TurnConflict = Literal["queue", "reject", "interrupt", "guide"]
-_TAKEOVER_SEPARATOR = "\n---\n"
 
 
 class TurnConflictError(RuntimeError):
@@ -31,10 +31,9 @@ class TurnHandle:
     """
 
     request_id: str
-    user_text: str
+    user_inputs: list[UserInput]
     thread_id: str | None
     level: str | None = None
-    image_paths: list[str | Path] = field(default_factory=list)
     conflict: TurnConflict = "queue"
     status: Literal["queued", "running", "completed", "failed", "interrupted", "cancelled", "merged"] = "queued"
     turn_id: str | None = None
@@ -45,6 +44,17 @@ class TurnHandle:
     guide_event: asyncio.Event = field(default_factory=asyncio.Event)
     _queue: asyncio.Queue[dict[str, Any] | None] = field(default_factory=asyncio.Queue)
     _done: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @property
+    def user_text(self) -> str:
+        return self.user_inputs[0].text if self.user_inputs else ""
+
+    @property
+    def image_paths(self) -> list[str | Path]:
+        paths: list[str | Path] = []
+        for item in self.user_inputs:
+            paths.extend(item.image_paths)
+        return paths
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         while True:
@@ -103,10 +113,9 @@ class TurnManager:
             raise ValueError(f"Unsupported turn conflict policy: {conflict!r}")
         handle = TurnHandle(
             request_id=new_id("req"),
-            user_text=str(user_text),
+            user_inputs=[UserInput(text=str(user_text), image_paths=tuple(image_paths or []))],
             thread_id=thread_id,
             level=level,
-            image_paths=list(image_paths or []),
             conflict=conflict,
         )
         if thread_id is None:
@@ -169,13 +178,12 @@ class TurnManager:
             pending = list(state.queue)
             state.queue.clear()
             if pending:
-                state.takeover.user_text = _TAKEOVER_SEPARATOR.join([*(item.user_text for item in pending), incoming.user_text])
-                images: list[str | Path] = []
+                merged_inputs: list[UserInput] = []
                 for item in pending:
-                    images.extend(item.image_paths)
+                    merged_inputs.extend(item.user_inputs)
                     self._mark_merged(item, state.takeover)
-                images.extend(incoming.image_paths)
-                state.takeover.image_paths = images
+                merged_inputs.extend(incoming.user_inputs)
+                state.takeover.user_inputs = merged_inputs
             return
         self._merge_into_takeover_locked(state, incoming)
         if mode == "interrupt":
@@ -187,8 +195,7 @@ class TurnManager:
         if takeover is None:
             raise RuntimeError("takeover buffer is not initialized")
         if incoming is not takeover:
-            takeover.user_text = _TAKEOVER_SEPARATOR.join([takeover.user_text, incoming.user_text])
-            takeover.image_paths.extend(incoming.image_paths)
+            takeover.user_inputs.extend(incoming.user_inputs)
             self._mark_merged(incoming, takeover)
 
     @staticmethod
@@ -237,9 +244,9 @@ class TurnManager:
             async with self._semaphore:
                 async for event in self.engine.run_turn(
                     user_text=handle.user_text,
+                    user_inputs=handle.user_inputs,
                     thread_id=handle.thread_id,
                     level=handle.level,
-                    image_paths=handle.image_paths,
                     cancel_event=handle.cancel_event,
                     guide_event=handle.guide_event,
                 ):

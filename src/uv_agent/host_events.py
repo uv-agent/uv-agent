@@ -35,10 +35,10 @@ class HostEventBus:
     own tasks inside a synchronous wrapper.
 
     The plugin event system is wired in as a subsystem via
-    ``register_plugin_bus``.  Events whose type starts with ``plugin.`` or whose
-    ``scope`` is ``"plugin"`` are forwarded to the plugin bus so external plugins
-    can observe host lifecycle events without host code needing to know about
-    plugins.
+    ``register_plugin_bus``.  Events whose type starts with ``plugin.``, whose ``scope`` is
+    ``"plugin"``, or persisted thread events are forwarded to the plugin bus so
+    external plugins can observe host lifecycle/thread-state events without host
+    code needing to know about plugins.
     """
 
     def __init__(self) -> None:
@@ -126,7 +126,7 @@ class HostEventBus:
             return
         event_type = str(event.get("type") or "")
         scope = str(event.get("scope") or "")
-        if scope != "plugin" and not event_type.startswith("plugin."):
+        if scope != "plugin" and not event_type.startswith("plugin.") and event_type != "thread.event_stored":
             return
         try:
             plugin_bus.publish(event)

@@ -38,6 +38,9 @@ def test_state_db_initializes_schema_and_pragmas(tmp_path: Path) -> None:
         "workflow_nodes",
         "workflow_checkpoints",
         "workflow_events",
+        "plugin_kv",
+        "plugin_documents",
+        "plugin_document_indexes",
     } <= tables
     assert {"executor_id", "lease_until"} <= workflow_node_columns
 
@@ -94,3 +97,27 @@ def test_state_db_migrates_v2_database_to_helper_calls(tmp_path: Path) -> None:
 
     assert version["value"] == str(SCHEMA_VERSION)
     assert "helper_calls_json" in columns
+
+
+def test_state_db_migrates_v6_database_to_plugin_storage(tmp_path: Path) -> None:
+    db_path = state_db_path(tmp_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta(key, value) VALUES ('schema_version', '6');
+            """
+        )
+
+    with connect_state_db(tmp_path) as db:
+        version = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        tables = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+
+    assert version["value"] == str(SCHEMA_VERSION)
+    assert {"plugin_kv", "plugin_documents", "plugin_document_indexes"} <= tables

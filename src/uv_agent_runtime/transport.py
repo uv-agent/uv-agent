@@ -77,17 +77,17 @@ def resolve_host_helper(name: str) -> dict[str, Any]:
     return response["result"]
 
 
-def call_host(name: str, *args: Any, **kwargs: Any) -> Any:
+def call_host(helper_name: str, *args: Any, **kwargs: Any) -> Any:
     """Call a host-registered helper from inside a managed runtime script."""
 
     if not _rpc_configured():
-        raise RuntimeError(f"Host RPC is not configured; cannot call {name!r}")
+        raise RuntimeError(f"Host RPC is not configured; cannot call {helper_name!r}")
     request_id = _next_request_id()
     response = _post_jsonrpc(
         {
             "jsonrpc": JSONRPC_VERSION,
             "id": request_id,
-            "method": f"call.{name}",
+            "method": f"call.{helper_name}",
             "params": {"args": list(args), "kwargs": kwargs},
         },
         expect_response=True,

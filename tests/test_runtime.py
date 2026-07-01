@@ -23,7 +23,6 @@ from uv_agent_runtime.dependencies import add_dependency, run_python_env_dir
 from uv_agent_runtime.errors import CommandError, FileSelectionError, HelperRuntimeError, HelperValueError
 from uv_agent_runtime.events import emit_event, emit_progress, emit_result
 from uv_agent_runtime.files import list_files, read_json, read_text, write_json, write_text
-from uv_agent_runtime.goal_mode import goal_paths
 from uv_agent_runtime.helper_stats import helper_stats_db_path
 from uv_agent_runtime.mcp import connect_declared, connect_named, connect_stdio, connect_url, list_declared_servers
 from uv_agent_runtime.patch import apply_patch
@@ -1006,29 +1005,6 @@ def test_runtime_thread_view_can_select_previous_epochs(tmp_path: Path) -> None:
     assert first["epochs"][0]["compaction"]["text"] == "summary"
     assert first["turns"][0]["user_messages"][0]["text"] == "hello"
     assert [turn["turn_id"] for turn in all_epochs["turns"]] == ["t1", "t2"]
-
-
-def test_runtime_goal_paths_uses_runner_thread_environment(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
-    monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thr_goal")
-
-    paths = rt.goals.paths()
-
-    assert paths.directory == tmp_path / "goals" / "thr_goal"
-    assert paths.state == paths.directory / "goal.json"
-    assert paths.checklist == paths.directory / "checklist.md"
-    assert paths.notes == paths.directory / "notes.md"
-
-
-def test_runtime_goal_paths_requires_thread_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("UV_AGENT_RUNTIME_STATE_DIR", raising=False)
-    monkeypatch.delenv("UV_AGENT_RUNTIME_THREAD_ID", raising=False)
-
-    with pytest.raises(RuntimeError, match="goal_paths requires"):
-        rt.goals.paths()
 
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from uv_agent.agent.context_builder import model_levels_context
 from uv_agent.config import config_paths, editable_config_path, load_config, parse_config, redact_config
+from uv_agent.scheduler import scheduler_config_from_plugin_config
 from uv_agent.paths import ensure_project_local_dir, project_config_path, project_state_dir, user_config_path
 
 
@@ -301,7 +302,7 @@ def test_hidden_levels_are_not_used_as_public_defaults(tmp_path: Path) -> None:
                     "internal": {"model": "m", "hidden": True},
                     "main": {"model": "m"},
                 },
-                "runtime": {"default_level": "internal", "workflow_default_level": "internal"},
+                "runtime": {"default_level": "internal"},
             }
         ),
         encoding="utf-8",
@@ -310,21 +311,91 @@ def test_hidden_levels_are_not_used_as_public_defaults(tmp_path: Path) -> None:
     config = load_config(tmp_path, [config_path])
 
     assert config.runtime.default_level == "main"
-    assert config.runtime.workflow_default_level is None
 
 
-def test_runtime_workflow_default_level_is_parsed(tmp_path: Path) -> None:
+def test_plugin_config_map_is_parsed(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
             {
                 "providers": {"p": {"base_url": "https://example.com"}},
                 "models": {"m": {"provider": "p", "model": "remote"}},
-                "levels": {
-                    "fast": {"model": "m"},
-                    "deep": {"model": "m"},
+                "levels": {"fast": {"model": "m"}, "deep": {"model": "m"}},
+                "plugins": {
+                    "builtin.workflow": {
+                        "enabled": True,
+                        "config": {"default_level": "deep", "node_timeout_s": 120},
+                    },
+                    "third.demo": {
+                        "enabled": False,
+                        "config": {"nested": {"x": 1}},
+                    },
                 },
-                "runtime": {"default_level": "fast", "workflow_default_level": "deep"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert config.plugins.enabled("builtin.workflow") is True
+    assert config.plugins.plugin_config("builtin.workflow") == {"default_level": "deep", "node_timeout_s": 120}
+    assert config.plugins.enabled("third.demo") is False
+    assert config.plugins.plugin_config("third.demo") == {"nested": {"x": 1}}
+    assert config.plugins.enabled("missing", default=False) is False
+    copied = config.plugins.plugin_config("third.demo")
+    copied["nested"]["x"] = 99
+    assert config.plugins.plugin_config("third.demo") == {"nested": {"x": 1}}
+
+
+def test_plugin_config_layers_deep_merge_without_replacing_other_plugins(tmp_path: Path) -> None:
+    user_path = tmp_path / "user.json"
+    project_path = tmp_path / "project.json"
+    user_path.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "builtin.workflow": {
+                        "enabled": True,
+                        "config": {"default_level": "fast", "nested": {"a": 1, "b": 2}},
+                    },
+                    "third.demo": {"config": {"kept": True}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    project_path.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "builtin.workflow": {"config": {"nested": {"b": 3}, "timeout_s": 5}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [user_path, project_path])
+
+    assert config.plugins.enabled("builtin.workflow") is True
+    assert config.plugins.plugin_config("builtin.workflow") == {
+        "default_level": "fast",
+        "nested": {"a": 1, "b": 3},
+        "timeout_s": 5,
+    }
+    assert config.plugins.plugin_config("third.demo") == {"kept": True}
+
+
+def test_legacy_workflow_default_level_fields_are_ignored(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {"p": {"base_url": "https://example.com"}},
+                "models": {"m": {"provider": "p", "model": "remote"}},
+                "levels": {"fast": {"model": "m"}, "deep": {"model": "m"}},
+                "runtime": {"default_level": "fast", "workflow_default_level": "deep", "ask_default_level": "deep"},
             }
         ),
         encoding="utf-8",
@@ -333,45 +404,8 @@ def test_runtime_workflow_default_level_is_parsed(tmp_path: Path) -> None:
     config = load_config(tmp_path, [config_path])
 
     assert config.runtime.default_level == "fast"
-    assert config.runtime.workflow_default_level == "deep"
-
-
-def test_runtime_workflow_default_level_ignored_when_unknown(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "providers": {"p": {"base_url": "https://example.com"}},
-                "models": {"m": {"provider": "p", "model": "remote"}},
-                "levels": {"fast": {"model": "m"}},
-                "runtime": {"workflow_default_level": "missing"},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    config = load_config(tmp_path, [config_path])
-
-    assert config.runtime.workflow_default_level is None
-
-
-def test_runtime_legacy_ask_default_level_maps_to_workflow_default(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "providers": {"p": {"base_url": "https://example.com"}},
-                "models": {"m": {"provider": "p", "model": "remote"}},
-                "levels": {"fast": {"model": "m"}, "deep": {"model": "m"}},
-                "runtime": {"ask_default_level": "deep"},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    config = load_config(tmp_path, [config_path])
-
-    assert config.runtime.workflow_default_level == "deep"
+    assert not hasattr(config.runtime, "workflow_default_level")
+    assert config.plugins.plugin_config("builtin.workflow") == {}
 
 
 def test_default_title_and_compression_levels_do_not_assume_small(tmp_path: Path) -> None:
@@ -527,23 +561,29 @@ def test_project_local_dir_does_not_overwrite_existing_gitignore(tmp_path: Path)
     assert existing.read_text(encoding="utf-8") == "custom\n"
 
 
-def test_parse_scheduler_config(tmp_path: Path) -> None:
+def test_parse_scheduler_plugin_config(tmp_path: Path) -> None:
     config = parse_config(
         {
             "providers": {"openai": {"base_url": "https://example.com", "api_key": "secret"}},
             "models": {"gpt": {"provider": "openai", "model": "gpt"}},
             "levels": {"medium": {"model": "gpt"}},
-            "scheduler": {
-                "max_concurrent_jobs": 3,
-                "run_history_retention_days": 9,
-                "default_misfire_policy": "run_once",
-                "default_overlap_policy": "replace",
+            "plugins": {
+                "builtin.scheduler": {
+                    "config": {
+                        "max_concurrent_jobs": 3,
+                        "run_history_retention_days": 9,
+                        "default_misfire_policy": "run_once",
+                        "default_overlap_policy": "replace",
+                    }
+                }
             },
         },
         tmp_path,
     )
 
-    assert config.scheduler.max_concurrent_jobs == 3
-    assert config.scheduler.run_history_retention_days == 9
-    assert config.scheduler.default_misfire_policy == "run_once"
-    assert config.scheduler.default_overlap_policy == "replace"
+    scheduler = scheduler_config_from_plugin_config(config.plugins.plugin_config("builtin.scheduler"))
+    assert scheduler.max_concurrent_jobs == 3
+    assert scheduler.run_history_retention_days == 9
+    assert scheduler.default_misfire_policy == "run_once"
+    assert scheduler.default_overlap_policy == "replace"
+    assert not hasattr(config, "scheduler")

@@ -154,7 +154,6 @@ class StreamRetryConfig:
 @dataclass(frozen=True)
 class RuntimeConfig:
     default_level: str = "medium"
-    workflow_default_level: str | None = None
     store_provider_response: bool = False
     max_agent_rounds: int = 100
     max_concurrent_turns: int = 4
@@ -188,17 +187,32 @@ class RunnerConfig:
 
 
 @dataclass(frozen=True)
-class PluginsConfig:
-    disabled: list[str] = field(default_factory=list)
-    config: dict[str, dict[str, Any]] = field(default_factory=dict)
+class PluginConfigBlock:
+    """Merged config for one plugin id.
+
+    Plugin enablement is a separate override from the plugin-owned ``config``
+    object.  This mirrors the public config file shape and lets user/project
+    layers deep-merge nested plugin settings without accidentally replacing the
+    enabled flag.
+    """
+
+    enabled: bool | None = None
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class SchedulerConfig:
-    max_concurrent_jobs: int = 8
-    run_history_retention_days: int = 7
-    default_misfire_policy: str = "skip"
-    default_overlap_policy: str = "skip"
+class PluginsConfig:
+    """Plugin config keyed directly by plugin id."""
+
+    entries: dict[str, PluginConfigBlock] = field(default_factory=dict)
+
+    def enabled(self, plugin_id: str, *, default: bool = True) -> bool:
+        entry = self.entries.get(plugin_id)
+        return default if entry is None or entry.enabled is None else entry.enabled
+
+    def plugin_config(self, plugin_id: str) -> dict[str, Any]:
+        entry = self.entries.get(plugin_id)
+        return copy.deepcopy(entry.config) if entry is not None else {}
 
 
 @dataclass(frozen=True)
@@ -210,7 +224,6 @@ class AppConfig:
     runner: RunnerConfig
     ui: UiConfig = field(default_factory=UiConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
-    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
 
     def public_levels(self) -> dict[str, LevelConfig]:
@@ -298,10 +311,7 @@ def default_config(project_root: Path) -> dict[str, Any]:
             "max_run_logs": 200,
             "scriptenv_index_url": None,
         },
-        "plugins": {
-            "disabled": [],
-            "config": {},
-        },
+        "plugins": {},
         "pricing": {
             "currency": "USD",
             "unit": "1M_tokens",
@@ -446,23 +456,8 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         default_level = public_level_names[0] if public_level_names else next(iter(levels))
     elif default_level in levels and levels[default_level].hidden and public_level_names:
         default_level = public_level_names[0]
-    workflow_default_level_raw = runtime_raw.get("workflow_default_level")
-    if not workflow_default_level_raw:
-        # Legacy alias kept only for existing config files; model-facing context no
-        # longer uses ask terminology.
-        workflow_default_level_raw = runtime_raw.get("ask_default_level")
-    workflow_default_level: str | None
-    if isinstance(workflow_default_level_raw, str) and workflow_default_level_raw:
-        workflow_default_level = (
-            workflow_default_level_raw
-            if workflow_default_level_raw in levels and not levels[workflow_default_level_raw].hidden
-            else None
-        )
-    else:
-        workflow_default_level = None
     runtime = RuntimeConfig(
         default_level=default_level,
-        workflow_default_level=workflow_default_level,
         store_provider_response=runtime_raw.get("store_provider_response", False),
         max_agent_rounds=runtime_raw.get("max_agent_rounds", 100),
         max_concurrent_turns=max(1, int(runtime_raw.get("max_concurrent_turns", 4))),
@@ -481,21 +476,18 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
     )
     ui_raw = _object_dict(raw.get("ui", {}))
     plugins_raw = _object_dict(raw.get("plugins", {}))
-    disabled_raw = plugins_raw.get("disabled", [])
-    disabled = [str(item) for item in disabled_raw if isinstance(item, str)] if isinstance(disabled_raw, list) else []
-    plugin_config = {
-        str(name): dict(value)
-        for name, value in _object_dict(plugins_raw.get("config", {})).items()
-        if isinstance(value, dict)
-    }
-    plugins = PluginsConfig(disabled=disabled, config=plugin_config)
-    scheduler_raw = _object_dict(raw.get("scheduler", {}))
-    scheduler = SchedulerConfig(
-        max_concurrent_jobs=max(1, int(scheduler_raw.get("max_concurrent_jobs", 8))),
-        run_history_retention_days=max(1, int(scheduler_raw.get("run_history_retention_days", 7))),
-        default_misfire_policy=str(scheduler_raw.get("default_misfire_policy", "skip")),
-        default_overlap_policy=str(scheduler_raw.get("default_overlap_policy", "skip")),
-    )
+    plugin_entries: dict[str, PluginConfigBlock] = {}
+    for plugin_id, value in plugins_raw.items():
+        if not isinstance(value, dict):
+            continue
+        data = _object_dict(value)
+        enabled_raw = data.get("enabled")
+        enabled = enabled_raw if isinstance(enabled_raw, bool) else None
+        plugin_entries[str(plugin_id)] = PluginConfigBlock(
+            enabled=enabled,
+            config=_object_dict(data.get("config", {})),
+        )
+    plugins = PluginsConfig(entries=plugin_entries)
     pricing = parse_pricing(raw.get("pricing", {}))
     return AppConfig(
         providers=providers,
@@ -510,7 +502,6 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
             ),
         ),
         plugins=plugins,
-        scheduler=scheduler,
         pricing=pricing,
     )
 

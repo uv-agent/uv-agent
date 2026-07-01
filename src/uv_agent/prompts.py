@@ -255,6 +255,9 @@ PRE_USER_CONTEXT_MARKERS = (
     f"<{WORKFLOW_CONTEXT_TAG}",
     f"<{AVAILABLE_SKILLS_TAG}>",
     f"<{AVAILABLE_MCP_SERVERS_TAG}>",
+    "<agent_epoch_context",
+    "<agent_epoch_context_update",
+    "<agent_turn_context",
     f"<{CONTEXT_UPDATE_TAG}",
     f"<{PLUGIN_CONTEXT_TAG}",
 )
@@ -761,7 +764,6 @@ import uv_agent_runtime as rt
 <rule>runtime helpers 是脚本中使用的普通 Python 对象，不是独立的工具调用；当多个 helpers 服务同一工作单元时，在同一个脚本中导入一次 `uv_agent_runtime as rt` 后组合使用。</rule>
 <rule>不要仅因为下一步要用另一个 helper、读文件、搜索或运行外部命令，就发起新的 run_python 调用。对方向已经明确的后续步骤，用 Python 编排：根据 helper 结果分支、遍历文件或命令、用 Python libraries 解析结构化输出，并收集一份摘要。只有当结果会改变整体方向、需要用户确认或涉及破坏性操作时，才先返回摘要并拆成下一次调用。</rule>
 <rule>用 Python 方式替代 shell 习惯：适合时用 `rt.file(path).read()` 代替 cat，用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find，用 `rt.run("cmd", "arg")` 代替 raw subprocess 或 shell pipelines 来运行普通命令。</rule>
-<rule>skill 文件用 `rt.file(skill_path).read()` 读取 SKILL.md；skills 或 docs 中展示的命令用 `rt.run(...)` 运行，并在同一脚本中处理可预见的后续解析或回退逻辑。</rule>
 </usage_pattern>
 
 <common_types>
@@ -855,23 +857,6 @@ ThreadDetailResult = {thread_id: str | None, requested_ids: list[str], requested
 ProcessDetail = {id: str, kind: str, status: str, summary: str, thread_id: str | None, turn_id: str | None, event_id: int | None, event_ref: str | None, run_id?: str, returncode?: int | None, timed_out?: bool, interrupted?: bool, code?: BoundedText, stdout?: BoundedText, stderr?: BoundedText, helper_calls?: list[HelperCall], structured_events?: list[dict], events?: list[RunEventDetail], output?: BoundedText, raw_event?: dict}
 BoundedText = {text: str, chars: int, truncated: bool, limit: int}</signature>
 </type>
-<type name="McpClient and workflow types">
-<signature>McpClient.start() -> None
-McpClient.close() -> None
-McpClient.initialize() -> McpResult
-McpClient.list_tools() -> list[dict[str, Any]]
-McpClient.call_tool(name: str, arguments: dict[str, Any] | None = None) -> McpResult
-McpResult(value: Any, raw: Any)
-WorkflowWaitResult.summary() -> str
-NodeResult.text() -> str
-NodeResult.raise_for_error() -> NodeResult
-NodeHandle.wait(*, timeout_s: float | None = None) -> NodeResult
-NodeHandle.result() -> NodeResult | None
-NodeHandle.inspect() -> str | dict[str, Any]
-NodeGroupHandle.wait(*, timeout_s: float | None = None) -> list[NodeResult]
-NodeGroupHandle.completed() -> list[NodeResult]
-NodeGroupHandle.failed() -> list[NodeResult]</signature>
-</type>
 </common_types>
 
 <function name="file">
@@ -924,14 +909,6 @@ rt.threads.digest(thread_id: str, *, state_dir: str | Path | None = None, kind: 
 rt.threads.view(thread_id: str, *, state_dir: str | Path | None = None, kind: str | None = None, epoch: Literal["latest", "all"] | int | Sequence[int | str] = "latest", max_turns: int | None = None, max_text_chars: int = 12000, max_item_chars: int = 4000, max_process_refs: int = 500) -> ThreadView
 rt.threads.detail(*, state_dir: str | Path | None = None, thread_id: str | None = None, ids: str | Sequence[str] | None = None, turn_ids: str | Sequence[str] | None = None, max_code_chars: int = 4000, max_output_chars: int = 4000, max_events: int = 100, include_raw_events: bool = False) -> ThreadDetailResult</signature>
 </function>
-<function name="mcp">
-<description>从 Python 中发现并调用 declared MCP servers。先调用 client.initialize()，并在 list 或 call tools 前检查返回的 instructions。</description>
-<signature>rt.mcp.list(*, config_paths: list[str | Path] | None = None, cwd: str | Path | None = None) -> list[dict[str, Any]]
-rt.mcp.connect(name: str, *, config_paths: list[str | Path] | None = None, cwd: str | Path | None = None, timeout: float | None = 30) -> McpClient
-rt.mcp.connect_url(url: str, *, transport: Literal["streamable_http", "sse"] = "streamable_http", timeout: float | None = 30) -> McpClient
-rt.mcp.connect_stdio(command: Sequence[str], *, cwd: str | None = None, env: Mapping[str, str] | None = None, timeout: float | None = 30) -> McpClient
-rt.mcp.connect_declared(name: str, *, config_path: str | Path = ".agents/mcp.json", cwd: str | None = None, timeout: float | None = 30) -> McpClient</signature>
-</function>
 <function name="events">
 <description>向 host 发送结构化事件、进度、结果或图片附件。</description>
 <signature>rt.events.emit(kind: str, **payload: Any) -> dict[str, Any]
@@ -939,44 +916,6 @@ rt.events.progress(message: str, **payload: Any) -> dict[str, Any]
 rt.events.result(**payload: Any) -> dict[str, Any]
 rt.events.look_at(path: str | Path, *, note: str = "") -> dict[str, Any]
 rt.look_at(path: str | Path, *, note: str = "") -> dict[str, Any]</signature>
-</function>
-<function name="workflow">
-<description>为独立或长时间运行的模型工作构建持久任务图。创建节点、显式调用 wait()、检查 checkpoints/results，并在方向变化时修改 pending graph。</description>
-<signature>rt.workflow.start(objective: str, *, key: str | None = None, default_model_level: str | None = None, metadata: Mapping[str, Any] | None = None, state_dir: str | Path | None = None) -> WorkflowHandle
-rt.workflow.resume(workflow_id: str, *, state_dir: str | Path | None = None) -> WorkflowHandle
-rt.workflow.list(status: str | None = None, limit: int = 20, *, state_dir: str | Path | None = None) -> list[dict[str, Any]]
-rt.workflow.agent(prompt: str, *, model_level: str | None = None, timeout_s: float | None = None) -> NodeHandle
-WorkflowHandle.agent(prompt: str, *, key: str | None = None, after: Any = None, model_level: str | None = None, timeout_s: float | None = None, metadata: Mapping[str, Any] | None = None) -> NodeHandle
-WorkflowHandle.agent_many(items: Iterable[Any], *, key: str | None = None, prompt: str | Callable[[Any], str] | None = None, concurrency: int | None = None, after: Any = None, model_level: str | None = None) -> NodeGroupHandle
-WorkflowHandle.review(*, key: str | None = None, checkpoint: str | None = None, prompt: str, model_level: str | None = None, after: Any = None) -> NodeHandle
-WorkflowHandle.checkpoint(*, key: str, reason: str, after: Any = None, options: Sequence[str] | None = None, recommended_action: str | None = None) -> CheckpointHandle
-WorkflowHandle.continue_checkpoint(checkpoint: str, *, resolution: Mapping[str, Any] | None = None) -> None
-WorkflowHandle.branch(*, key: str, from_checkpoint: str | None = None, tasks: Iterable[str] | None = None, metadata: Mapping[str, Any] | None = None) -> NodeGroupHandle
-WorkflowHandle.cancel(reason: str | None = None) -> None
-WorkflowHandle.complete(result: Any = None) -> None
-WorkflowHandle.wait(*, timeout_s: float | None = None, until: str = "next_yield") -> WorkflowWaitResult
-WorkflowHandle.snapshot() -> dict[str, Any]
-WorkflowHandle.graph(*, include_results: bool = False) -> dict[str, Any]
-WorkflowHandle.describe_graph() -> str
-WorkflowHandle.inspect(node: str) -> str | dict[str, Any]
-WorkflowHandle.nodes(*, status: str | None = None, kind: str | None = None) -> list[dict[str, Any]]
-WorkflowHandle.update_node(node: str, **patch: Any) -> NodeHandle
-WorkflowHandle.remove_node(node: str, *, cascade: bool = False) -> None
-WorkflowHandle.replace_node(node: str, *, kind: str | None = None, prompt: str | None = None, dependencies: Any = None, **patch: Any) -> NodeHandle
-WorkflowHandle.add_dependency(node: str, depends_on: str) -> None
-WorkflowHandle.remove_dependency(node: str, depends_on: str) -> None
-WorkflowHandle.update_checkpoint(checkpoint: str, **patch: Any) -> CheckpointHandle
-WorkflowHandle.apply_graph_patch(patch: Mapping[str, Any]) -> dict[str, Any]</signature>
-<returns>WorkflowWaitResult.summary() 返回 checkpoint/failure/timeout handoff 或最终节点输出，不做 workflow 层截断。inspect(node) 返回节点的最终模型输出，不返回其内部 tool log。</returns>
-</function>
-<function name="scheduler">
-<description>创建、修改、查询、删除和立即运行 daemon 持久定时任务。action 必须在 helper 或 prompt 中二选一；helper 调用插件/host runtime handler，prompt 每次触发创建新的 Workflow。</description>
-<signature>rt.scheduler.create(*, kind: Literal["once", "interval", "cron"], helper: str | None = None, prompt: str | None = None, payload: dict[str, Any] | None = None, at: datetime | str | None = None, every: datetime.timedelta | dict[str, Any] | None = None, cron: str | None = None, timezone: str | None = None, name: str | None = None, description: str | None = None, thread_id: str | None = None, objective: str | None = None, model_level: str | None = None, timeout_s: float | None = None, conflict: Literal["queue", "reject", "interrupt", "guide"] = "queue", misfire_policy: Literal["skip", "run_once", "catch_up"] = "skip", overlap_policy: Literal["skip", "allow", "queue", "replace"] = "skip", enabled: bool = True, metadata: dict[str, Any] | None = None, allow_missing: bool = False) -> dict[str, Any]
-rt.scheduler.update(schedule_id: str, **changes: Any) -> dict[str, Any]
-rt.scheduler.list(*, enabled: bool | None = None, limit: int = 100) -> list[dict[str, Any]]
-rt.scheduler.delete(schedule_id: str) -> dict[str, Any]
-rt.scheduler.run_now(schedule_id: str) -> dict[str, Any]</signature>
-<rule>时间参数不接受自然语言；once 使用 at，interval 使用 every，cron 使用五字段 cron。delete 硬删除 schedule；运行历史保留到 daemon 清理。</rule>
 </function>
 <function name="misc">
 <description>目录、路径、patch/diff/snapshot 和文本工具。</description>
@@ -992,13 +931,12 @@ rt.compare(left: str, right: str, *, ignore_eol: bool = False, ignore_final_newl
 rt.normalize(text: str, *, eol: Literal["lf", "crlf", "cr"] | None = "lf", final_newline: bool | None = None) -> str
 rt.snapshot(paths: Sequence[str | Path] | None = None, *, root: str | Path = ".") -> Snapshot
 rt.restore(snapshot: Snapshot) -> list[str]
-rt.transaction(paths: Sequence[str | Path] | None = None, *, root: str | Path = ".") -> Iterator[Snapshot]
-rt.goals.paths() -> RuntimeGoalPaths</signature>
+rt.transaction(paths: Sequence[str | Path] | None = None, *, root: str | Path = ".") -> Iterator[Snapshot]</signature>
 </function>
 
 <helper_selection>
 <rule>列出的 helpers 是普通 Python 对象，可在同一脚本中与标准库代码和控制流组合使用；在脚本内用 pathlib、os、json 等模块做衔接逻辑；适合时优先使用 helpers，尤其是处理仓库文本的 `rt.file(...)`，因为它会保留 newline style、BOM、final newline、line counts 和行范围视图等元数据。</rule>
-<rule>按任务选择：workflow=独立/长时间运行的模型任务图；discovery=rt.files/rt.search/rt.symbols/rt.query（rt.search 默认精确文本；正则用 mode="regex"；容错行搜索用 mode="fuzzy"；路径 pattern 用 globs；语言/扩展名别名用 types）；reading=rt.file(path).read；edit=用 File.replace 替换唯一小段文本，用 File.edit/insert_after/insert_before/delete_lines 处理 anchored ranges/inserts；完整文件或生成的内容用 File.write；thread history=rt.threads.list/view/detail；dependencies=import 前使用 rt.deps.add。</rule>
+<rule>按任务选择：discovery=rt.files/rt.search/rt.symbols/rt.query（rt.search 默认精确文本；正则用 mode="regex"；容错行搜索用 mode="fuzzy"；路径 pattern 用 globs；语言/扩展名别名用 types）；reading=rt.file(path).read；edit=用 File.replace 替换唯一小段文本，用 File.edit/insert_after/insert_before/delete_lines 处理 anchored ranges/inserts；完整文件或生成的内容用 File.write；thread history=rt.threads.list/view/detail；dependencies=import 前使用 rt.deps.add。</rule>
 <rule>普通外部命令（包括 skills 或 docs 中展示的 shell commands），优先用 `rt.run(...)` 而不是 raw subprocess；只有需要自定义进程控制时才使用 raw subprocess。</rule>
 <rule>数据量较大时，优先提取字段、行范围、head/tail 或生成摘要。</rule>
 <rule>不要猜测 helper signatures；当精确签名重要时，检查 uv_agent_runtime 实现。</rule>

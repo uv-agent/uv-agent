@@ -6,49 +6,40 @@ import inspect
 import logging
 import re
 import sqlite3
-from collections.abc import Iterable
+import traceback
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import pluggy
 
 from uv_agent.config import PluginsConfig
 from uv_agent.paths import uv_agent_home
 from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
 
-from .context import PluginContext, TurnContextBlock, TurnPrepareRequest
+from .api import PluginManifest, PluginStatus, SetupPlugin, normalize_manifest
+from .context import PluginContext, PluginContextBroker, TurnContextBlock, TurnPrepareRequest, maybe_await
 from .events import EventBus
-from .helpers import RuntimeHelperRegistry, RuntimeHelperSpec
-from . import hookspecs
+from .registry import ActionRegistry, CommandRegistry, RuntimeFunctionSpec, RuntimeNamespaceRegistry, UiRegistry
+from .storage import PluginStorage, indexes_from_storage_schema
+from .helpers import payload_from_call
 
 PLUGIN_ENTRY_POINT_GROUP = "uv_agent.plugins"
-PREPARE_TURN_HOOK_TIMEOUT_S = 2.0
-PREPARE_TURN_BLOCK_MAX_CHARS = 8_192
-PREPARE_TURN_TOTAL_MAX_CHARS = 32_768
-PREPARE_TURN_TRUNCATION_SUFFIX = "\n...[plugin context truncated]"
-
-
-@dataclass
-class PluginStatus:
-    name: str
-    state: str = "discovered"
-    first_load: bool = False
-    message: str = ""
-    error_type: str | None = None
+CORE_COMMANDS = {"/help", "/quit", "/clear", "/new", "/cancel", "/status", "/threads", "/show", "/image", "/level", "/model", "/title"}
+RESERVED_RUNTIME_NAMESPACES = {
+    "file", "files", "search", "symbols", "query", "patch", "apply_patch", "diff", "compare",
+    "snapshot", "restore", "transaction", "run", "deps", "cd", "pwd", "path", "events", "look_at", "threads",
+}
 
 
 @dataclass
 class _PluginRecord:
-    name: str
-    entry_point: importlib.metadata.EntryPoint
-    context: PluginContext
-    plugin_manager: pluggy.PluginManager
-    status: PluginStatus = field(default_factory=lambda: PluginStatus(name=""))
+    plugin: SetupPlugin
+    context: PluginContext | None = None
+    status: PluginStatus = field(default_factory=lambda: PluginStatus(id=""))
 
 
 class PluginManager:
-    """Discover, start, and stop uv-agent plugins without blocking the TUI."""
+    """Discover, configure, and start manifest/setup uv-agent plugins."""
 
     def __init__(
         self,
@@ -56,18 +47,24 @@ class PluginManager:
         config: PluginsConfig,
         project_root: Path,
         events: EventBus,
-        helper_registry: RuntimeHelperRegistry,
+        helper_registry: RuntimeNamespaceRegistry,
         submitter,
         thread_store=None,
         user_state_dir: Path | None = None,
+        host: Any = None,
     ) -> None:
         self.config = config
         self.project_root = project_root
         self.user_state_dir = user_state_dir or uv_agent_home()
         self.events = events
-        self.helpers = helper_registry
+        self.runtime = helper_registry
+        self.actions = ActionRegistry()
+        self.commands = CommandRegistry(reserved=CORE_COMMANDS)
+        self.ui = UiRegistry()
+        self.contexts = PluginContextBroker()
         self._submitter = submitter
         self._thread_store = thread_store
+        self._host = host
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._records: dict[str, _PluginRecord] = {}
         self._task: asyncio.Task[None] | None = None
@@ -78,78 +75,68 @@ class PluginManager:
     def records(self) -> list[PluginStatus]:
         return [record.status for record in self._records.values()]
 
-    def helper_specs(self) -> list[RuntimeHelperSpec]:
-        return self.helpers.list()
+    def context_for(self, plugin_id: str) -> PluginContext | None:
+        record = self._records.get(plugin_id)
+        return record.context if record is not None else None
+
+    def helper_specs(self) -> list[RuntimeFunctionSpec]:
+        return [function for namespace in self.runtime.list_namespaces() for function in namespace.functions]
+
+    def helper_namespaces(self):
+        return self.runtime.list_namespaces()
 
     def resolve_helper(self, name: str) -> dict[str, Any]:
-        return self.helpers.resolve_payload(name)
+        return self.runtime.resolve_payload(name)
 
-    async def call_helper(self, name: str, args: list[Any] | None = None, kwargs: dict[str, Any] | None = None) -> Any:
-        from .helpers import payload_from_call
+    async def call_helper(
+        self,
+        name: str,
+        args: list[Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        context: Any = None,
+    ) -> Any:
+        return await self.runtime.call(name, payload_from_call(list(args or []), dict(kwargs or {})), context=context)
 
-        return await self.helpers.call(name, payload_from_call(list(args or []), dict(kwargs or {})))
+    def resolve_action(self, action_id: str) -> dict[str, Any]:
+        spec = self.actions.get(action_id)
+        if spec is None:
+            return {"found": False, "action_id": action_id}
+        return {
+            "found": True,
+            "action_id": spec.action_id,
+            "plugin": spec.plugin,
+            "doc": spec.doc,
+            "schema": spec.schema,
+        }
+
+    async def call_action(self, action_id: str, payload: dict[str, Any] | None = None, *, context: Any = None) -> Any:
+        return await self.actions.call(action_id, payload or {}, context=context)
+
+    def command_suggestions(self):
+        return self.commands.list()
+
+    def call_command(self, name: str, payload: dict[str, Any] | None = None) -> Any:
+        spec = self.commands.get(name)
+        if spec is None:
+            raise LookupError(f"Unknown command: {name}")
+        data = dict(payload or {})
+        kwargs: dict[str, Any] = {"payload": data}
+        context = self.context_for(spec.plugin)
+        if context is not None and _accepts_context(spec.handler):
+            kwargs["context"] = context
+        result = spec.handler(**kwargs)
+        if inspect.isawaitable(result):
+            raise RuntimeError("Async plugin commands cannot be called from the synchronous TUI path")
+        return result
+
+    def picker_items(self, picker_id: str, query: str = ""):
+        return self.ui.picker_items(picker_id, query=query)
 
     async def prepare_turn(self, request: TurnPrepareRequest) -> list[TurnContextBlock]:
-        """Collect additive pre-user context from started plugins.
-
-        This hook runs on the critical path before the model request is built, so
-        each plugin is isolated: failures are logged and surfaced as plugin events
-        without blocking other plugins or the current turn.
-        """
-
-        blocks: list[TurnContextBlock] = []
-        seen_dedupe_keys: set[tuple[str, str]] = set()
-        remaining = PREPARE_TURN_TOTAL_MAX_CHARS
-        for record in list(self._records.values()):
-            if remaining <= 0:
-                break
-            if record.status.state != "started":
-                continue
-            try:
-                results = record.plugin_manager.hook.uv_agent_prepare_turn(
-                    context=record.context,
-                    request=request,
-                )
-                for result in results:
-                    resolved = await _resolve_hook_result(result, timeout_s=PREPARE_TURN_HOOK_TIMEOUT_S)
-                    for raw_block in _iter_turn_context_blocks(resolved):
-                        block = _normalize_turn_context_block(record.name, raw_block)
-                        if block is None:
-                            continue
-                        if block.dedupe_key:
-                            dedupe_key = (record.name, block.dedupe_key)
-                            if dedupe_key in seen_dedupe_keys:
-                                continue
-                            seen_dedupe_keys.add(dedupe_key)
-                        text = _truncate_context_text(block.text, min(PREPARE_TURN_BLOCK_MAX_CHARS, remaining))
-                        if not text:
-                            continue
-                        blocks.append(
-                            TurnContextBlock(
-                                text=text,
-                                placement=block.placement,
-                                dedupe_key=block.dedupe_key,
-                                metadata=block.metadata,
-                                plugin=record.name,
-                            )
-                        )
-                        remaining -= len(text)
-                        if remaining <= 0:
-                            break
-                    if remaining <= 0:
-                        break
-            except Exception as exc:
-                record.context.logger.exception("Plugin prepare_turn hook failed")
-                self._publish(
-                    {
-                        "type": "plugin.hook_failed",
-                        "plugin": record.name,
-                        "hook": "uv_agent_prepare_turn",
-                        "error_type": exc.__class__.__name__,
-                        "message": str(exc) or repr(exc),
-                    }
-                )
-        return blocks
+        # Provider hooks were removed by the refactor.  Keep this method as a
+        # zero-cost transitional seam for Engine while turn context moves through
+        # PluginContextBroker instead of pluggy hooks.
+        return []
 
     def start_background(self) -> asyncio.Task[None]:
         if self._task is None or self._task.done():
@@ -162,8 +149,8 @@ class PluginManager:
                 return
             self._started = True
             self._discover()
-            for record in list(self._records.values()):
-                await self._start_record(record)
+            for plugin_id in self._load_order():
+                await self._start_record(self._records[plugin_id])
 
     async def stop(self) -> None:
         if self._task is not None and not self._task.done():
@@ -176,61 +163,122 @@ class PluginManager:
         await self.events.drain()
 
     def _discover(self) -> None:
-        disabled = set(self.config.disabled)
-        for entry_point in importlib.metadata.entry_points(group=PLUGIN_ENTRY_POINT_GROUP):
-            name = entry_point.name
-            if name in disabled:
+        for setup_plugin in _builtin_plugins():
+            self._add_discovered(setup_plugin)
+        for entry_point in sorted(importlib.metadata.entry_points(group=PLUGIN_ENTRY_POINT_GROUP), key=lambda item: item.name):
+            try:
+                setup_plugin = _normalize_plugin_object(entry_point.load())
+            except Exception as exc:
+                plugin_id = str(getattr(entry_point, "name", "entry-point"))
+                self._records[plugin_id] = _PluginRecord(
+                    plugin=SetupPlugin(
+                        manifest=PluginManifest(plugin_id, "0", plugin_id, "invalid plugin"),
+                        setup=lambda _ctx: None,
+                    ),
+                    status=PluginStatus(id=plugin_id, state="failed", message=str(exc) or repr(exc), error_type=exc.__class__.__name__),
+                )
                 continue
-            if name in self._records:
-                continue
-            first_load = self._mark_first_load(name)
-            logger = self._logger_for(name)
-            context = PluginContext(
-                name=name,
-                project_root=self.project_root,
-                user_state_dir=self.user_state_dir,
-                data_dir=self._plugin_dir(name),
-                log_dir=self._plugin_dir(name) / "logs",
-                config=dict(self.config.config.get(name, {})),
-                events=self.events,
-                logger=logger,
-                helper_registry=self.helpers,
-                submitter=self._submitter,
-                task_factory=self._create_task,
-                thread_store=self._thread_store,
+            self._add_discovered(setup_plugin)
+
+    def _add_discovered(self, plugin: SetupPlugin) -> None:
+        manifest = plugin.manifest
+        existing = self._records.get(manifest.id)
+        if existing is not None:
+            status = PluginStatus(
+                id=f"{manifest.id}#duplicate",
+                display_name=manifest.display_name,
+                state="failed",
+                builtin=manifest.builtin,
+                message=f"Duplicate plugin id {manifest.id!r}",
+                error_type="DuplicatePluginId",
             )
-            manager = pluggy.PluginManager("uv_agent")
-            manager.add_hookspecs(hookspecs)
-            status = PluginStatus(name=name, state="discovered", first_load=first_load)
-            record = _PluginRecord(
-                name=name,
-                entry_point=entry_point,
-                context=context,
-                plugin_manager=manager,
-                status=status,
-            )
-            self._records[name] = record
-            self._publish({"type": "plugin.discovered", "plugin": name, "first_load": first_load})
-            if first_load:
-                self._publish({"type": "plugin.first_load", "plugin": name})
+            self._records[status.id] = _PluginRecord(plugin=plugin, status=status)
+            return
+        first_load = self._mark_first_load(manifest.id)
+        enabled = self.config.enabled(manifest.id, default=manifest.default_enabled)
+        state = "discovered" if enabled else "disabled"
+        status = PluginStatus(
+            id=manifest.id,
+            display_name=manifest.display_name,
+            state=state,
+            builtin=manifest.builtin,
+            first_load=first_load,
+        )
+        self._records[manifest.id] = _PluginRecord(plugin=plugin, status=status)
+        self._publish({"type": "plugin.discovered", "plugin": manifest.id, "first_load": first_load, "builtin": manifest.builtin})
+        if first_load:
+            self._publish({"type": "plugin.first_load", "plugin": manifest.id})
+
+    def _load_order(self) -> list[str]:
+        pending = [plugin_id for plugin_id, record in self._records.items() if record.status.state != "disabled"]
+        pending.sort(key=lambda plugin_id: (self._records[plugin_id].plugin.manifest.priority, plugin_id))
+        resolved: list[str] = []
+        seen: set[str] = set()
+        while pending:
+            progressed = False
+            for plugin_id in list(pending):
+                deps = set(self._records[plugin_id].plugin.manifest.dependencies)
+                if deps <= seen:
+                    resolved.append(plugin_id)
+                    seen.add(plugin_id)
+                    pending.remove(plugin_id)
+                    progressed = True
+            if not progressed:
+                # Preserve deterministic failure ordering for dependency cycles.
+                resolved.extend(pending)
+                break
+        return resolved
 
     async def _start_record(self, record: _PluginRecord) -> None:
+        manifest = record.plugin.manifest
+        if record.status.state in {"disabled", "failed"}:
+            return
+        missing = [dep for dep in manifest.dependencies if self._records.get(dep) is None or self._records[dep].status.state != "started"]
+        if missing:
+            record.status.state = "failed"
+            record.status.error_type = "MissingDependency"
+            record.status.message = f"Missing required plugin dependencies: {', '.join(missing)}"
+            self._publish({"type": "plugin.failed", "plugin": manifest.id, "message": record.status.message})
+            return
         record.status.state = "starting"
-        self._publish({"type": "plugin.starting", "plugin": record.name})
+        self._publish({"type": "plugin.starting", "plugin": manifest.id})
+        logger = self._logger_for(manifest.id)
+        storage = PluginStorage(
+            plugin_id=manifest.id,
+            project_data_dir=self._thread_store.data_dir if self._thread_store is not None else self.project_root / ".uv-agent",
+            global_data_dir=self.user_state_dir,
+            indexes=indexes_from_storage_schema(manifest.storage_schema),
+        )
+        context = PluginContext(
+            manifest=manifest,
+            project_root=self.project_root,
+            user_state_dir=self.user_state_dir,
+            config=self.config.plugin_config(manifest.id),
+            events=self.events,
+            logger=logger,
+            runtime_registry=self.runtime,
+            action_registry=self.actions,
+            command_registry=self.commands,
+            ui_registry=self.ui,
+            context_broker=self.contexts,
+            storage=storage,
+            submitter=self._submitter,
+            task_factory=self._create_task,
+            thread_store=self._thread_store,
+            host=self._host,
+        )
+        record.context = context
         try:
-            plugin = record.entry_point.load()
-            record.plugin_manager.register(plugin, name=record.name)
-            results = record.plugin_manager.hook.uv_agent_start(context=record.context)
-            await _await_hook_results(results)
+            await maybe_await(record.plugin.setup(context))
         except Exception as exc:
             record.status.state = "failed"
             record.status.error_type = exc.__class__.__name__
             record.status.message = str(exc) or repr(exc)
-            record.context.logger.exception("Plugin start failed")
+            logger.exception("Plugin setup failed")
             self._publish(
                 {
                     "type": "plugin.failed",
-                    "plugin": record.name,
+                    "plugin": manifest.id,
                     "error_type": record.status.error_type,
                     "message": record.status.message,
                 }
@@ -238,33 +286,25 @@ class PluginManager:
             return
         if record.status.state != "warning":
             record.status.state = "started"
-        self._publish({"type": "plugin.started", "plugin": record.name})
+        self._publish({"type": "plugin.started", "plugin": manifest.id})
 
     async def _stop_record(self, record: _PluginRecord) -> None:
-        if record.status.state not in {"started", "failed"}:
+        if record.status.state not in {"started", "warning", "failed"}:
             return
-        self._publish({"type": "plugin.stopping", "plugin": record.name})
+        manifest = record.plugin.manifest
+        self._publish({"type": "plugin.stopping", "plugin": manifest.id})
         try:
-            results = record.plugin_manager.hook.uv_agent_stop(context=record.context)
-            await _await_hook_results(results)
+            if record.plugin.stop is not None and record.context is not None:
+                await maybe_await(record.plugin.stop(record.context))
         except Exception as exc:
-            record.context.logger.exception("Plugin stop failed")
             record.status.state = "failed"
             record.status.error_type = exc.__class__.__name__
             record.status.message = str(exc) or repr(exc)
-            self._publish(
-                {
-                    "type": "plugin.failed",
-                    "plugin": record.name,
-                    "error_type": exc.__class__.__name__,
-                    "message": str(exc) or repr(exc),
-                }
-            )
+            self._publish({"type": "plugin.failed", "plugin": manifest.id, "error_type": exc.__class__.__name__, "message": str(exc) or repr(exc)})
             return
-        await self._cancel_record_tasks(record)
+        await self._cancel_record_tasks(manifest.id)
         record.status.state = "stopped"
-        self._publish({"type": "plugin.stopped", "plugin": record.name})
-
+        self._publish({"type": "plugin.stopped", "plugin": manifest.id})
 
     def _create_task(self, plugin: str, coro, name: str | None = None) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro, name=name or f"uv-agent-plugin-{plugin}")
@@ -282,57 +322,50 @@ class PluginManager:
                 record.status.state = "warning"
                 record.status.error_type = exc.__class__.__name__
                 record.status.message = str(exc) or repr(exc)
-                record.context.logger.exception("Plugin task failed", exc_info=exc)
-            self._publish(
-                {
-                    "type": "plugin.task_failed",
-                    "plugin": plugin,
-                    "task": completed.get_name(),
-                    "error_type": exc.__class__.__name__,
-                    "message": str(exc) or repr(exc),
-                }
-            )
+                if record.context is not None:
+                    record.context.logger.error("Plugin task failed", exc_info=exc)
+            self._publish({"type": "plugin.task_failed", "plugin": plugin, "task": completed.get_name(), "error_type": exc.__class__.__name__, "message": str(exc) or repr(exc)})
 
         task.add_done_callback(done)
         return task
 
-    async def _cancel_record_tasks(self, record: _PluginRecord, *, timeout_s: float = 5.0) -> None:
-        tasks = list(self._tasks.get(record.name, set()))
+    async def _cancel_record_tasks(self, plugin: str, *, timeout_s: float = 5.0) -> None:
+        tasks = list(self._tasks.get(plugin, set()))
         if not tasks:
             return
         for task in tasks:
             task.cancel()
         await asyncio.wait(tasks, timeout=timeout_s)
-        self._tasks.pop(record.name, None)
+        self._tasks.pop(plugin, None)
 
     def _publish(self, event: dict[str, Any]) -> None:
         self.events.publish(event)
 
-    def _plugin_dir(self, name: str) -> Path:
-        return self.user_state_dir / "plugins" / _safe_plugin_name(name)
+    def _plugin_dir(self, plugin_id: str) -> Path:
+        return self.user_state_dir / "plugins" / _safe_plugin_name(plugin_id)
 
     def _registry_db_path(self) -> Path:
         return self.user_state_dir / "plugins" / "registry.sqlite3"
 
-    def _mark_first_load(self, name: str) -> bool:
+    def _mark_first_load(self, plugin_id: str) -> bool:
         path = self._registry_db_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path, timeout=SQLITE_TIMEOUT_SECONDS) as db:
             db.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
             db.execute("PRAGMA journal_mode=WAL")
-            db.execute("CREATE TABLE IF NOT EXISTS loaded_plugins (name TEXT PRIMARY KEY, first_seen_at TEXT NOT NULL)")
-            row = db.execute("SELECT name FROM loaded_plugins WHERE name = ?", (name,)).fetchone()
+            db.execute("CREATE TABLE IF NOT EXISTS loaded_plugins (id TEXT PRIMARY KEY, first_seen_at TEXT NOT NULL)")
+            row = db.execute("SELECT id FROM loaded_plugins WHERE id = ?", (plugin_id,)).fetchone()
             if row is not None:
                 return False
             from uv_agent.time import utc_now_iso
 
-            db.execute("INSERT INTO loaded_plugins(name, first_seen_at) VALUES (?, ?)", (name, utc_now_iso()))
+            db.execute("INSERT INTO loaded_plugins(id, first_seen_at) VALUES (?, ?)", (plugin_id, utc_now_iso()))
             return True
 
-    def _logger_for(self, name: str) -> logging.Logger:
-        logger = logging.getLogger(f"uv_agent.plugins.{name}")
+    def _logger_for(self, plugin_id: str) -> logging.Logger:
+        logger = logging.getLogger(f"uv_agent.plugins.{plugin_id}")
         logger.setLevel(logging.INFO)
-        log_dir = self._plugin_dir(name) / "logs"
+        log_dir = self._plugin_dir(plugin_id) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "plugin.log"
         if not any(isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path for handler in logger.handlers):
@@ -342,79 +375,48 @@ class PluginManager:
         return logger
 
 
-async def _await_hook_results(results: list[Any]) -> None:
-    for result in results:
-        await _resolve_hook_result(result)
+def _builtin_plugins() -> list[SetupPlugin]:
+    try:
+        from uv_agent.builtin import builtin_plugins
+    except Exception:
+        return []
+    return list(builtin_plugins())
 
 
-async def _resolve_hook_result(result: Any, *, timeout_s: float | None = None) -> Any:
-    if result is None:
-        return None
-    if inspect.isawaitable(result):
-        if timeout_s is None:
-            return await result
-        return await asyncio.wait_for(result, timeout=timeout_s)
-    return result
-
-
-def _iter_turn_context_blocks(value: Any) -> Iterable[TurnContextBlock]:
-    if value is None:
-        return
-    if isinstance(value, TurnContextBlock):
-        yield value
-        return
-    if isinstance(value, str):
-        yield TurnContextBlock(text=value)
-        return
-    if isinstance(value, dict):
-        yield _turn_context_block_from_mapping(value)
-        return
-    if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
-        for item in value:
-            yield from _iter_turn_context_blocks(item)
-        return
-    raise TypeError(f"Unsupported turn context block result: {type(value).__name__}")
-
-
-def _turn_context_block_from_mapping(value: dict[str, Any]) -> TurnContextBlock:
-    metadata = value.get("metadata")
-    return TurnContextBlock(
-        text=str(value.get("text") or ""),
-        placement=str(value.get("placement") or "before_user"),  # type: ignore[arg-type]
-        dedupe_key=None if value.get("dedupe_key") is None else str(value.get("dedupe_key")),
-        metadata=dict(metadata) if isinstance(metadata, dict) else {},
-    )
-
-
-def _normalize_turn_context_block(plugin: str, block: TurnContextBlock) -> TurnContextBlock | None:
-    placement = str(block.placement or "before_user")
-    if placement != "before_user":
-        raise ValueError(f"Unsupported turn context placement from {plugin}: {placement!r}")
-    text = str(block.text or "").strip()
-    if not text:
-        return None
-    dedupe_key = str(block.dedupe_key).strip() if block.dedupe_key else None
-    metadata = dict(block.metadata) if isinstance(block.metadata, dict) else {}
-    return TurnContextBlock(
-        text=text,
-        placement="before_user",
-        dedupe_key=dedupe_key or None,
-        metadata=metadata,
-        plugin=plugin,
-    )
-
-
-def _truncate_context_text(text: str, limit: int) -> str:
-    if limit <= 0:
-        return ""
-    if len(text) <= limit:
-        return text
-    if limit <= len(PREPARE_TURN_TRUNCATION_SUFFIX):
-        return text[:limit]
-    keep = limit - len(PREPARE_TURN_TRUNCATION_SUFFIX)
-    return text[:keep].rstrip() + PREPARE_TURN_TRUNCATION_SUFFIX
+def _normalize_plugin_object(value: Any) -> SetupPlugin:
+    if isinstance(value, SetupPlugin):
+        return value
+    if callable(value) and not hasattr(value, "manifest"):
+        value = value()
+        if isinstance(value, SetupPlugin):
+            return value
+    if isinstance(value, Mapping):
+        manifest = normalize_manifest(value.get("manifest"))
+        setup = value.get("setup")
+        stop = value.get("stop")
+        if not callable(setup):
+            raise TypeError(f"Plugin {manifest.id!r} setup is not callable")
+        return SetupPlugin(manifest=manifest, setup=setup, stop=stop if callable(stop) else None)
+    manifest_value = getattr(value, "manifest", None)
+    setup = getattr(value, "setup", None)
+    if manifest_value is not None and callable(setup):
+        stop = getattr(value, "stop", None)
+        return SetupPlugin(manifest=normalize_manifest(manifest_value), setup=setup, stop=stop if callable(stop) else None)
+    raise TypeError(f"Unsupported plugin object: {type(value).__name__}")
 
 
 def _safe_plugin_name(name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-_.")
     return safe or "plugin"
+
+
+
+def _accepts_context(fn: Callable[..., Any]) -> bool:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+    return "context" in signature.parameters

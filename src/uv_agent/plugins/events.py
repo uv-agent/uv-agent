@@ -11,7 +11,7 @@ from typing import Any
 
 from .errors import ReentrantSubmitError
 
-EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
+EventHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
 _IN_EVENT_HANDLER: contextvars.ContextVar[bool] = contextvars.ContextVar("uv_agent_plugin_event_handler", default=False)
 
 
@@ -45,8 +45,6 @@ class EventBus:
         thread_id: str | None = None,
         turn_id: str | None = None,
     ) -> Callable[[], None]:
-        if not inspect.iscoroutinefunction(handler):
-            raise TypeError("Plugin event handlers must be async functions")
         kind_set = frozenset([kinds] if isinstance(kinds, str) else kinds)
         if not kind_set:
             raise ValueError("At least one event kind is required")
@@ -78,7 +76,21 @@ class EventBus:
         for subscription in subscriptions:
             if not _matches(subscription, event, event_type):
                 continue
-            task = asyncio.create_task(self._run_handler(subscription, dict(event)))
+            event_copy = dict(event)
+            if not inspect.iscoroutinefunction(subscription.handler):
+                self._run_sync_handler(subscription, event_copy)
+                continue
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # Some host events are published from synchronous code paths
+                # (for example direct ThreadStore mutations in the TUI/tests).
+                # Running the async handler to completion keeps plugin-owned
+                # context in sync instead of dropping those events merely because
+                # no loop is currently active.
+                asyncio.run(self._run_handler(subscription, event_copy))
+                continue
+            task = loop.create_task(self._run_handler(subscription, event_copy))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
@@ -93,10 +105,36 @@ class EventBus:
         for task in pending:
             task.cancel()
 
+    def _run_sync_handler(self, subscription: _Subscription, event: dict[str, Any]) -> None:
+        token = _IN_EVENT_HANDLER.set(True)
+        try:
+            result = subscription.handler(event)
+            if result is not None and inspect.isawaitable(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(self._await_handler(subscription, result, event))
+                else:
+                    task = loop.create_task(self._await_handler(subscription, result, event))
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
+        except Exception:
+            subscription.logger.exception("Plugin event handler failed for %s", event.get("type"))
+        finally:
+            _IN_EVENT_HANDLER.reset(token)
+
+    async def _await_handler(self, subscription: _Subscription, awaitable: Awaitable[None], event: dict[str, Any]) -> None:
+        try:
+            await awaitable
+        except Exception:
+            subscription.logger.exception("Plugin event handler failed for %s", event.get("type"))
+
     async def _run_handler(self, subscription: _Subscription, event: dict[str, Any]) -> None:
         token = _IN_EVENT_HANDLER.set(True)
         try:
-            await subscription.handler(event)
+            result = subscription.handler(event)
+            if result is not None and inspect.isawaitable(result):
+                await result
         except Exception:
             subscription.logger.exception("Plugin event handler failed for %s", event.get("type"))
         finally:

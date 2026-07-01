@@ -6,7 +6,7 @@ from pathlib import Path
 from uv_agent.time import utc_now_iso
 
 DB_FILENAME = "uv-agent.sqlite3"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SQLITE_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
 
@@ -56,35 +56,25 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     if existing_version is None:
         _create_schema(connection)
         return
-    if existing_version == "1":
-        _migrate_v1_to_v2(connection)
-        _migrate_v2_to_v3(connection)
-        _migrate_v3_to_v4(connection)
-        _migrate_v4_to_v5(connection)
-        _migrate_v5_to_v6(connection)
-        return
-    if existing_version == "2":
-        _migrate_v2_to_v3(connection)
-        _migrate_v3_to_v4(connection)
-        _migrate_v4_to_v5(connection)
-        _migrate_v5_to_v6(connection)
-        return
-    if existing_version == "3":
-        _migrate_v3_to_v4(connection)
-        _migrate_v4_to_v5(connection)
-        _migrate_v5_to_v6(connection)
-        return
-    if existing_version == "4":
-        _migrate_v4_to_v5(connection)
-        _migrate_v5_to_v6(connection)
-        return
-    if existing_version == "5":
-        _migrate_v5_to_v6(connection)
-        return
-    raise StateDbError(
-        f"Unsupported state database schema version {existing_version}; "
-        f"expected {SCHEMA_VERSION}"
-    )
+
+    migrations = {
+        "1": _migrate_v1_to_v2,
+        "2": _migrate_v2_to_v3,
+        "3": _migrate_v3_to_v4,
+        "4": _migrate_v4_to_v5,
+        "5": _migrate_v5_to_v6,
+        "6": _migrate_v6_to_v7,
+    }
+    version = existing_version
+    while version != str(SCHEMA_VERSION):
+        migrate = migrations.get(str(version))
+        if migrate is None:
+            raise StateDbError(
+                f"Unsupported state database schema version {version}; "
+                f"expected {SCHEMA_VERSION}"
+            )
+        migrate(connection)
+        version = _read_schema_version(connection)
 
 
 def _create_schema(connection: sqlite3.Connection) -> None:
@@ -212,6 +202,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         _create_workflow_schema(connection)
         _create_scheduler_schema(connection)
         _create_host_lease_schema(connection)
+        _create_plugin_storage_schema(connection)
         connection.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -244,7 +235,7 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
             connection.execute("ALTER TABLE runs ADD COLUMN helper_calls_json TEXT")
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-            (str(SCHEMA_VERSION),),
+            ("3",),
         )
 
 
@@ -256,7 +247,7 @@ def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
         _ensure_workflow_executor_columns(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-            (str(SCHEMA_VERSION),),
+            ("4",),
         )
 
 
@@ -268,7 +259,7 @@ def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
         _create_host_lease_schema(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-            (str(SCHEMA_VERSION),),
+            ("5",),
         )
 
 
@@ -279,7 +270,18 @@ def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
         _create_host_lease_schema(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-            (str(SCHEMA_VERSION),),
+            ("6",),
+        )
+
+
+def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
+    """Add core-managed plugin storage tables."""
+
+    with connection:
+        _create_plugin_storage_schema(connection)
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("7",),
         )
 
 
@@ -307,6 +309,50 @@ def _ensure_workflow_executor_columns(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE workflow_nodes ADD COLUMN executor_id TEXT")
     if "lease_until" not in columns:
         connection.execute("ALTER TABLE workflow_nodes ADD COLUMN lease_until TEXT")
+
+
+def _create_plugin_storage_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS plugin_kv (
+          plugin_id TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          scope_id TEXT NOT NULL DEFAULT '',
+          key TEXT NOT NULL,
+          value_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(plugin_id, scope, scope_id, key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_plugin_kv_scope_key
+          ON plugin_kv(plugin_id, scope, scope_id, key);
+
+        CREATE TABLE IF NOT EXISTS plugin_documents (
+          plugin_id TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          scope_id TEXT NOT NULL DEFAULT '',
+          collection TEXT NOT NULL,
+          doc_id TEXT NOT NULL,
+          body_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(plugin_id, scope, scope_id, collection, doc_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_plugin_documents_collection_updated
+          ON plugin_documents(plugin_id, scope, scope_id, collection, updated_at DESC, doc_id);
+
+        CREATE TABLE IF NOT EXISTS plugin_document_indexes (
+          plugin_id TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          scope_id TEXT NOT NULL DEFAULT '',
+          collection TEXT NOT NULL,
+          field TEXT NOT NULL,
+          value TEXT NOT NULL,
+          doc_id TEXT NOT NULL,
+          PRIMARY KEY(plugin_id, scope, scope_id, collection, field, value, doc_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_plugin_document_indexes_lookup
+          ON plugin_document_indexes(plugin_id, scope, scope_id, collection, field, value);
+        """
+    )
 
 
 def _create_scheduler_schema(connection: sqlite3.Connection) -> None:

@@ -67,7 +67,7 @@ from uv_agent.model import (
 from uv_agent.runner import PythonRunner
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult
 from uv_agent.session import ThreadLockedError, ThreadStore
-from uv_agent.plugins import TurnContextBlock
+from uv_agent.plugins import PluginContextBroker
 
 
 class BlockingModelClient(FakeModelClient):
@@ -186,6 +186,7 @@ class DelayedPluginManager:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.start_count = 0
+        self.contexts = PluginContextBroker()
 
     def start_background(self) -> asyncio.Task[None]:
         self.start_count += 1
@@ -194,22 +195,20 @@ class DelayedPluginManager:
     async def _start(self) -> None:
         self.started.set()
         await self.release.wait()
-        self.engine.runtime_helpers.register_handler(
+        self.contexts.publish(
             plugin="delayed-plugin",
-            name="delayed_helper",
-            fn=lambda payload: {"ok": True},
-            doc="Delayed helper.",
-            schema={"type": "object", "properties": {}},
+            tag="delayed_status",
+            body={"state": "ready"},
         )
 
     async def stop(self) -> None:
         self.release.set()
 
     def helper_specs(self):
-        return self.engine.runtime_helpers.list()
+        return []
 
     def resolve_helper(self, name: str) -> dict[str, Any]:
-        return self.engine.runtime_helpers.resolve_payload(name)
+        return {"found": False, "name": name}
 
     async def prepare_turn(self, request):
         return []
@@ -3729,10 +3728,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert str(runner.scriptenv_dir / "pyproject.toml") in turn_context
     assert "uv-agent&gt;=0.6.2" not in turn_context
     assert "<dependency>requests&gt;=2</dependency>" in turn_context
-    assert "<model_levels>" in turn_context
-    assert "<default>medium</default>" in turn_context
-    assert "<level>small</level>" in turn_context
-    assert "<level>medium</level>" in turn_context
+    assert "<model_levels>" not in turn_context
     assert "</runtime_helpers>" in turn_context
     assert "import uv_agent_runtime as rt" in turn_context
     assert "<common_types>" in turn_context
@@ -3742,7 +3738,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "Match.file() -> File" in turn_context
     assert "SearchResults(CollectionResult[Match])" in turn_context
     assert "ThreadDetailResult" in turn_context
-    assert "McpClient.initialize()" in turn_context
+    assert "McpClient.initialize()" not in turn_context
     assert '<function name="file">' in turn_context
     assert "rt.file(path: str | Path) -> File" in turn_context
     assert "File.read(" in turn_context
@@ -3767,18 +3763,17 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "rt.threads.list" in turn_context
     assert "rt.threads.view" in turn_context
     assert "rt.threads.detail" in turn_context
-    assert '<function name="mcp">' in turn_context
-    assert "rt.mcp.connect" in turn_context
-    assert "client.initialize()" in turn_context
-    assert "检查返回的 instructions" in turn_context
-    assert '<function name="workflow">' in turn_context
-    assert "rt.workflow.start" in turn_context
-    assert "构建持久任务图" in turn_context
+    assert '<function name="mcp">' not in turn_context
+    assert "rt.mcp.connect" not in turn_context
+    assert '<function name="workflow">' not in turn_context
+    assert "rt.workflow.start" not in turn_context
     assert '<function name="misc">' in turn_context
     assert "rt.cd(path" in turn_context
     assert "rt.patch" in turn_context
     assert "rt.convert_patch" in turn_context
     assert "rt.snapshot" in turn_context
+    assert "rt.goals.paths" not in turn_context
+    assert "RuntimeGoalPaths" not in turn_context
     assert "run_digest" not in turn_context
     assert "read_file" not in turn_context
     assert "write_file" not in turn_context
@@ -3809,8 +3804,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "用 `rt.file(path).read()` 代替 cat" in turn_context
     assert "用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find" in turn_context
     assert "用 `rt.run(" in turn_context and "代替 raw subprocess" in turn_context
-    assert "skill 文件用 `rt.file(skill_path).read()` 读取 SKILL.md" in turn_context
-    assert "在同一脚本中处理可预见的后续解析或回退逻辑" in turn_context
+    assert "skill 文件用 `rt.file(skill_path).read()` 读取 SKILL.md" not in turn_context
     assert '<example name="round-1-find">' in turn_context
     assert "查找并理解" in turn_context
     assert "并行搜索多个 pattern、一次读取多个相关文件" in turn_context
@@ -3894,14 +3888,14 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "rt.cd" in turn_context
     assert "demo (project)" not in prompt
 
-    assert '<skill name="demo" scope="project"' in turn_context
-    assert "available_mcp_servers" in turn_context
-    assert '<mcp_server name="demo" scope="project"' in turn_context
-    assert "<description>Demo MCP</description>" in turn_context
-    assert '<instructions truncated="false">Use demo tools carefully.</instructions>' in turn_context
+    assert '<skill name="demo" scope="project"' not in turn_context
+    assert "available_mcp_servers" not in turn_context
+    assert '<mcp_server name="demo" scope="project"' not in turn_context
+    assert "<description>Demo MCP</description>" not in turn_context
+    assert '<instructions truncated="false">Use demo tools carefully.</instructions>' not in turn_context
     assert mcp_probe.started is True
-    assert "遇到适合任务的 skill 时" in turn_context
-    assert "遇到适合任务的 MCP server 时" in turn_context
+    assert "遇到适合任务的 skill 时" not in turn_context
+    assert "遇到适合任务的 MCP server 时" not in turn_context
 
 
 def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_path: Path) -> None:
@@ -3938,9 +3932,10 @@ def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_p
     prompt = engine.system_instructions()
     turn_context = engine._turn_context_text()
 
-    assert "<default>deep</default>" in turn_context
-    assert "<level>fast</level>" in turn_context
-    assert "<level>deep</level>" in turn_context
+    assert "<model_levels>" not in turn_context
+    assert "<default>deep</default>" not in turn_context
+    assert "<level>fast</level>" not in turn_context
+    assert "<level>deep</level>" not in turn_context
     assert 'level="small"' not in prompt
     assert 'model_level="large"' not in prompt
     assert "small/medium/large" not in prompt
@@ -4699,17 +4694,17 @@ async def test_system_instructions_refresh_after_compaction(tmp_path: Path) -> N
     engine.config = make_test_config(project_root, api="chat_completions", default_level="small")
     [event async for event in engine.run_turn(user_text="two", thread_id=thread_id)]
 
-    assert "<default>medium</default>" in str(client.requests[0]["input"])
-    assert "<default>small</default>" in str(client.requests[1]["input"])
+    assert "<agent_epoch_context>" in str(client.requests[0]["input"])
+    assert "<agent_epoch_context>" in str(client.requests[1]["input"])
+    assert "<model_levels>" not in str(client.requests[0]["input"])
+    assert "<model_levels>" not in str(client.requests[1]["input"])
     stored = engine.thread_store.read(thread_id)
     assert sum(1 for event in stored if event["type"] == "item.system_instructions") == 2
 
 
-def test_dynamic_runtime_context_reappears_after_compaction_epoch(tmp_path: Path) -> None:
+def test_plugin_epoch_context_reappears_after_compaction_epoch(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
-    skill_dir = project_root / ".agents" / "skills" / "demo"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
+    project_root.mkdir()
     config = make_test_config(project_root)
     engine = AgentEngine(
         config=config,
@@ -4719,23 +4714,27 @@ def test_dynamic_runtime_context_reappears_after_compaction_epoch(tmp_path: Path
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread()
+    engine.plugins.contexts.publish(
+        plugin="demo-plugin",
+        tag="demo_status",
+        body={"state": "ready"},
+    )
 
     first = engine._runtime_context_items(thread_id)
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
     second = engine._runtime_context_items(thread_id)
 
-    assert '<skill name="demo" scope="project"' in str(first)
-    assert '<skill name="demo" scope="project"' in str(second)
+    assert "<agent_demo_status>" in str(first)
+    assert "<agent_demo_status>" in str(second)
+    assert "<agent_epoch_context>" in str(second)
     assert "<runtime_environment>" in str(second)
-    assert "<model_levels>" in str(second)
     assert "<runtime_helpers>" in str(second)
+    assert "<model_levels>" not in str(second)
 
 
-def test_runtime_context_is_not_repeated_after_compaction_epoch_update(tmp_path: Path) -> None:
+def test_plugin_epoch_context_is_not_repeated_after_compaction_epoch_update(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
-    skill_dir = project_root / ".agents" / "skills" / "demo"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
+    project_root.mkdir()
     config = make_test_config(project_root)
     engine = AgentEngine(
         config=config,
@@ -4745,17 +4744,22 @@ def test_runtime_context_is_not_repeated_after_compaction_epoch_update(tmp_path:
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread()
+    engine.plugins.contexts.publish(
+        plugin="demo-plugin",
+        tag="demo_status",
+        body={"state": "ready"},
+    )
 
     engine._runtime_context_items(thread_id)
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
     after_compaction = engine._runtime_context_items(thread_id)
     repeated = engine._runtime_context_items(thread_id)
 
-    assert '<skill name="demo" scope="project"' in str(after_compaction)
+    assert "<agent_demo_status>" in str(after_compaction)
     assert repeated == []
 
 
-def test_runtime_context_skill_change_sends_incremental_section_only(tmp_path: Path) -> None:
+def test_plugin_epoch_publish_sends_incremental_section_only(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -4769,41 +4773,29 @@ def test_runtime_context_skill_change_sends_incremental_section_only(tmp_path: P
     thread_id = engine.thread_store.create_thread()
 
     first = engine._runtime_context_items(thread_id)
-    skill_dir = project_root / ".agents" / "skills" / "demo"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# Demo\nUse this for demo work.\n", encoding="utf-8")
+    engine.plugins.contexts.publish(
+        plugin="skills-plugin",
+        tag="available_skills",
+        body={"skill": {"name": "demo", "scope": "project"}},
+    )
     second = engine._runtime_context_items(thread_id)
 
     first_text = message_item_text(first[0])
-    assert first_text.startswith("<runtime_environment>")
-    assert "<context_update" not in first_text
+    assert first_text.startswith("<agent_epoch_context>\n")
     assert "<runtime_environment>" in first_text
-    assert "<model_levels>" in first_text
     assert "<runtime_helpers>" in first_text
     text = message_item_text(second[0])
-    assert text.startswith('<context_update id="runtime_context" status="current">\n')
-    assert text.endswith("</context_update>")
-    assert "以下运行时上下文是当前增量更新" in text
-    assert "The following runtime context" not in text
-    assert "changed:" not in text
-    assert "fingerprint:" not in text
-    assert "<available_skills>" not in text
-    assert '<skill name="demo" scope="project"' in text
-    assert text.index('<skill name="demo" scope="project"') < text.rindex("</context_update>")
+    assert text.startswith("<agent_epoch_context_update>\n")
+    assert text.endswith("</agent_epoch_context_update>")
+    assert '<agent_available_skills operation="publish">' in text
+    assert "<name>demo</name>" in text
     assert "<runtime_environment>" not in text
-    assert "<model_levels>" not in text
     assert "<runtime_helpers>" not in text
 
 
-def test_runtime_context_mcp_removal_sends_removal_only(tmp_path: Path) -> None:
+def test_plugin_epoch_remove_sends_removal_only(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
-    agents_dir = project_root / ".agents"
-    agents_dir.mkdir(parents=True)
-    mcp_path = agents_dir / "mcp.json"
-    mcp_path.write_text(
-        "{\"servers\":{\"demo\":{\"command\":\"python\",\"description\":\"Demo MCP\"}}}",
-        encoding="utf-8",
-    )
+    project_root.mkdir()
     config = make_test_config(project_root)
     engine = AgentEngine(
         config=config,
@@ -4814,106 +4806,78 @@ def test_runtime_context_mcp_removal_sends_removal_only(tmp_path: Path) -> None:
         mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
     thread_id = engine.thread_store.create_thread()
+    engine.plugins.contexts.publish(
+        plugin="mcp-plugin",
+        tag="available_mcp_servers",
+        body={"server": {"name": "demo", "description": "Demo MCP"}},
+    )
 
     first = engine._runtime_context_items(thread_id)
-    mcp_path.unlink()
+    engine.plugins.contexts.remove(plugin="mcp-plugin", tag="available_mcp_servers", reason="removed")
     second = engine._runtime_context_items(thread_id)
 
-    assert "<available_mcp_servers>" in message_item_text(first[0])
+    assert "<agent_available_mcp_servers>" in message_item_text(first[0])
     text = message_item_text(second[0])
-    assert text.startswith('<context_update id="runtime_context" status="current">\n')
-    assert text.endswith("</context_update>")
-    assert "removed:" not in text
-    assert "fingerprint:" not in text
-    assert "<context_update_removed id=\"runtime_context\">" in text
-    assert '<removed_mcp_server name="demo" scope="project"' in text
-    assert text.index("<context_update_removed") < text.index("</context_update_removed>") < text.rindex("</context_update>")
-    assert "<available_mcp_servers>" not in text
-    assert '<mcp_server name="demo"' not in text
+    assert text.startswith("<agent_epoch_context_update>\n")
+    assert '<agent_available_mcp_servers operation="remove">' in text
+    assert "<reason>removed</reason>" in text
     assert "<runtime_environment>" not in text
-    assert "<model_levels>" not in text
     assert "<runtime_helpers>" not in text
 
 
-def test_runtime_context_mcp_instruction_change_sends_single_server_only(tmp_path: Path) -> None:
+def test_plugin_epoch_update_sends_single_document_only(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
-    agents_dir = project_root / ".agents"
-    agents_dir.mkdir(parents=True)
-    mcp_path = agents_dir / "mcp.json"
-    mcp_path.write_text(
-        json.dumps(
-            {
-                "servers": {
-                    "first": {"command": "python", "description": "First MCP"},
-                    "second": {"command": "python", "description": "Second MCP"},
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
+    project_root.mkdir()
     config = make_test_config(project_root)
-    probe = FakeMcpInstructionsProbe()
     engine = AgentEngine(
         config=config,
         model_client=FakeModelClient([]),
         runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
-        mcp_instructions_probe=probe,
+        mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
     thread_id = engine.thread_store.create_thread()
+    engine.plugins.contexts.publish(
+        plugin="mcp-plugin",
+        tag="mcp_server",
+        body={"name": "first", "instructions": "old"},
+    )
+    engine._runtime_context_items(thread_id)
 
-    first = engine._runtime_context_items(thread_id)
-    probe.instructions[("project", "second", str(mcp_path))] = McpInstructionsPreview(
-        "Use the second MCP carefully.",
-        truncated=False,
+    engine.plugins.contexts.update(
+        plugin="mcp-plugin",
+        tag="mcp_server",
+        body={"name": "first", "instructions": "Use the first MCP carefully."},
     )
     second = engine._runtime_context_items(thread_id)
 
-    assert '<mcp_server name="first"' in message_item_text(first[0])
-    assert '<mcp_server name="second"' in message_item_text(first[0])
     text = message_item_text(second[0])
-    assert text.startswith('<context_update id="runtime_context" status="current">\n')
-    assert text.endswith("</context_update>")
-    assert "changed:" not in text
-    assert "fingerprint:" not in text
-    assert '<mcp_server name="second" scope="project"' in text
-    assert '<instructions truncated="false">Use the second MCP carefully.</instructions>' in text
-    assert text.index('<mcp_server name="second" scope="project"') < text.rindex("</context_update>")
-    assert '<mcp_server name="first"' not in text
-    assert "<available_mcp_servers>" not in text
+    assert text.startswith("<agent_epoch_context_update>\n")
+    assert '<agent_mcp_server operation="update">' in text
+    assert "<instructions>Use the first MCP carefully.</instructions>" in text
+    assert "<runtime_environment>" not in text
 
 
-def test_runtime_context_restart_preserves_mcp_instructions_until_probe_refresh(tmp_path: Path) -> None:
+def test_runtime_context_restart_preserves_sent_epoch_until_plugins_republish(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
-    agents_dir = project_root / ".agents"
-    agents_dir.mkdir(parents=True)
-    mcp_path = agents_dir / "mcp.json"
-    mcp_path.write_text(
-        json.dumps(
-            {"servers": {"demo": {"command": "python", "description": "Demo MCP"}}}
-        ),
-        encoding="utf-8",
-    )
+    project_root.mkdir()
     config = make_test_config(project_root)
     store = ThreadStore(tmp_path / "state")
-    probe = FakeMcpInstructionsProbe(
-        {
-            ("project", "demo", str(mcp_path)): McpInstructionsPreview(
-                "Use persisted MCP instructions.",
-                truncated=False,
-            )
-        }
-    )
     first_engine = AgentEngine(
         config=config,
         model_client=FakeModelClient([]),
         runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
         thread_store=store,
         project_root=project_root,
-        mcp_instructions_probe=probe,
+        mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
     thread_id = store.create_thread()
+    first_engine.plugins.contexts.publish(
+        plugin="mcp-plugin",
+        tag="mcp_server",
+        body={"name": "demo", "instructions": "Use persisted MCP instructions."},
+    )
 
     first = first_engine._runtime_context_items(thread_id)
     restarted_engine = AgentEngine(
@@ -4926,7 +4890,7 @@ def test_runtime_context_restart_preserves_mcp_instructions_until_probe_refresh(
     )
     second = restarted_engine._runtime_context_items(thread_id)
 
-    assert '<instructions truncated="false">Use persisted MCP instructions.</instructions>' in str(first)
+    assert "Use persisted MCP instructions." in str(first)
     assert second == []
 
 
@@ -4948,8 +4912,8 @@ def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> N
     text = update["text"]
     assert text.startswith("<runtime_environment>")
     assert "<context_update" not in text
-    assert text.index("<runtime_environment>") < text.index("<model_levels>")
-    assert text.index("<model_levels>") < text.index("<runtime_helpers>")
+    assert text.index("<runtime_environment>") < text.index("<runtime_helpers>")
+    assert "<model_levels>" not in text
     assert text.index('name="file"') < text.index('name="search"')
     assert text.index('name="search"') < text.index('name="files"')
     assert text.index('name="files"') < text.index('name="symbols"')
@@ -4957,13 +4921,14 @@ def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> N
     assert text.index('name="query"') < text.index('name="run"')
     assert text.index('name="run"') < text.index('name="deps"')
     assert text.index('name="deps"') < text.index('name="threads"')
-    assert text.index('name="threads"') < text.index('name="mcp"')
-    assert text.index('name="mcp"') < text.index('name="events"')
-    assert text.index('name="events"') < text.index('name="workflow"')
-    assert text.index('name="workflow"') < text.index('name="misc"')
+    assert text.index('name="threads"') < text.index('name="events"')
+    assert text.index('name="events"') < text.index('name="misc"')
+    assert 'name="mcp"' not in text
+    assert 'name="workflow"' not in text
+    assert 'name="scheduler"' not in text
 
 
-def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) -> None:
+def test_plugin_epoch_context_is_grouped_after_core_context(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -4974,26 +4939,23 @@ def test_plugin_runtime_helpers_context_clarifies_helper_name(tmp_path: Path) ->
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
     )
-    engine.runtime_helpers.register_handler(
+    thread_id = engine.thread_store.create_thread()
+    engine.plugins.contexts.publish(
         plugin="demo-plugin",
-        name="demo_helper",
-        fn=lambda payload: {"ok": True},
-        doc="Demo helper.",
-        schema={"type": "object", "properties": {"name": {"type": "string"}, "count": {"type": "integer", "default": 1}}, "required": ["name"]},
+        tag="demo_helper",
+        body={"signature": "rt.demo.helper(name: str) -> Any", "description": "Demo helper."},
     )
 
-    update = engine._turn_context_update(None)
+    items = engine._runtime_context_items(thread_id)
 
-    assert update is not None
-    text = update["text"]
-    assert text.index("<runtime_helpers>") < text.index("<plugin_runtime_helpers>")
-    assert (
-        "使用 helper 的 name 属性作为 Python 中的 import/callable 名称；"
-        "plugin 属性只标识提供方 plugin。"
-    ) in text
-    assert '<helper name="demo_helper" plugin="demo-plugin">' in text
-    assert '<signature>rt.demo_helper(name: str, count: int = 1) -&gt; Any</signature>' in text
-    assert '<description>Demo helper.</description>' in text
+    assert len(items) == 1
+    text = message_item_text(items[0])
+    assert text.startswith("<agent_epoch_context>\n")
+    assert text.index("<runtime_helpers>") < text.index("<agent_demo_helper>")
+    assert "<signature>rt.demo.helper(name: str) -&gt; Any</signature>" in text
+    assert "<description>Demo helper.</description>" in text
+    stored = engine.thread_store.read_events(thread_id, event_types={"item.agent_epoch_context"})
+    assert len(stored) == 1
 
 
 @pytest.mark.asyncio
@@ -5040,8 +5002,9 @@ async def test_run_turn_waits_for_plugin_start_before_context_update(tmp_path: P
     assert plugins.start_count == 1
     assert events[-1]["type"] == "turn.completed"
     request_text = "\n".join(message_item_text(item) for item in client.requests[0]["input"])
-    assert '<helper name="delayed_helper" plugin="delayed-plugin">' in request_text
-    assert '<description>Delayed helper.</description>' in request_text
+    assert "<agent_epoch_context>" in request_text
+    assert "<agent_delayed_status>" in request_text
+    assert "<state>ready</state>" in request_text
 
 
 @pytest.mark.asyncio
@@ -5075,6 +5038,7 @@ async def test_run_turn_injects_plugin_pre_user_context_before_user_message(tmp_
     class InjectingPluginManager:
         def __init__(self) -> None:
             self.requests = []
+            self.contexts = PluginContextBroker()
 
         def start_background(self) -> asyncio.Task[None]:
             async def start() -> None:
@@ -5090,13 +5054,13 @@ async def test_run_turn_injects_plugin_pre_user_context_before_user_message(tmp_
 
         async def prepare_turn(self, request):
             self.requests.append(request)
-            return [
-                TurnContextBlock(
-                    text="Current time: 2026-06-22T12:00:00+00:00",
-                    dedupe_key="current-time",
-                    plugin="time-plugin",
-                )
-            ]
+            self.contexts.enqueue_turn(
+                plugin="time-plugin",
+                thread_id=request.thread_id,
+                tag="current_time",
+                body={"value": "2026-06-22T12:00:00+00:00"},
+            )
+            return []
 
     plugins = InjectingPluginManager()
     engine.plugins = plugins  # type: ignore[assignment]
@@ -5110,18 +5074,18 @@ async def test_run_turn_injects_plugin_pre_user_context_before_user_message(tmp_
     assert request.is_first_turn is True
     assert request.last_assistant_completed_at is None
     request_texts = [message_item_text(item) for item in client.requests[0]["input"] if item.get("type") == "message"]
-    plugin_index = next(index for index, text in enumerate(request_texts) if text.startswith('<plugin_context plugin="time-plugin"'))
+    plugin_index = next(index for index, text in enumerate(request_texts) if text.startswith("<agent_turn_context>"))
     user_index = request_texts.index("hello")
     assert plugin_index < user_index
-    assert "Current time: 2026-06-22T12:00:00+00:00" in request_texts[plugin_index]
+    assert "<agent_current_time>" in request_texts[plugin_index]
+    assert "2026-06-22T12:00:00+00:00" in request_texts[plugin_index]
 
     thread_id = events[-1]["thread_id"]
     stored_plugin_contexts = [
-        event for event in engine.thread_store.read(thread_id) if event["type"] == "item.plugin_context"
+        event for event in engine.thread_store.read(thread_id) if event["type"] == "item.agent_turn_context"
     ]
     assert len(stored_plugin_contexts) == 1
-    assert stored_plugin_contexts[0]["plugin"] == "time-plugin"
-    assert stored_plugin_contexts[0]["dedupe_key"] == "current-time"
+    assert "<agent_current_time>" in stored_plugin_contexts[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -5229,6 +5193,19 @@ def test_workflow_context_xml_has_compact_prompt_format() -> None:
         compile(code, "<workflow_context_example>", "exec")
 
 
+def start_builtin_plugins(engine: AgentEngine) -> None:
+    asyncio.run(engine.plugins.start())
+
+
+def context_text(items: list[dict[str, Any]]) -> str:
+    return "\n".join(message_item_text(item) for item in items)
+
+
+def enable_plugin_goal(engine: AgentEngine, thread_id: str, objective: str = "") -> None:
+    start_builtin_plugins(engine)
+    engine.plugins.call_command("/goal", {"arg": f"enable {objective}".strip(), "thread_id": thread_id})
+
+
 def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -5242,10 +5219,11 @@ def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -
     )
     thread_id = engine.thread_store.create_thread()
 
-    first = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
-    repeated = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
+    start_builtin_plugins(engine)
+    first = context_text(engine._pre_user_context_items(thread_id))
+    repeated = context_text(engine._pre_user_context_items(thread_id))
 
-    assert '<workflow_context scope="main_agent" status="current">' in first
+    assert '<agent_workflow_context scope="main_agent">' in first
     assert 'example name="create_investigation_graph"' in first
     assert 'example name="inspect_first_checkpoint_and_extend_graph"' in first
     assert 'example name="inspect_review_checkpoint_and_finalize"' in first
@@ -5254,12 +5232,11 @@ def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -
     assert "wf.continue_checkpoint" in first
     assert "Workflow " + "replaces " + "ask" not in first
     assert "verify.final" in first
-    assert '<workflow_context scope="main_agent" status="current">' not in repeated
+    assert '<agent_workflow_context scope="main_agent">' not in repeated
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
-    after_compaction = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
-    assert '<workflow_context scope="main_agent" status="current">' in after_compaction
-
+    after_compaction = context_text(engine._pre_user_context_items(thread_id))
+    assert '<agent_workflow_context scope="main_agent">' in after_compaction
 
 def test_workflow_context_is_not_sent_to_workflow_node_threads(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
@@ -5292,8 +5269,9 @@ def test_workflow_context_is_pre_user_context_and_not_retained(tmp_path: Path) -
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread()
+    start_builtin_plugins(engine)
     workflow_item = next(
-        item for item in engine._pre_user_context_items(thread_id) if "<workflow_context" in message_item_text(item)
+        item for item in engine._pre_user_context_items(thread_id) if "<agent_workflow_context" in message_item_text(item)
     )
 
     assert engine._is_pre_user_context_item(workflow_item)
@@ -5326,7 +5304,7 @@ def test_compaction_summary_appends_active_workflows(tmp_path: Path, monkeypatch
     assert wf.workflow_id in summary
     assert "workflow.resume" in summary
 
-def test_goal_mode_notice_emits_once_per_epoch_and_after_disable(tmp_path: Path) -> None:
+def test_goal_plugin_context_emits_once_per_epoch_and_after_disable(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -5339,31 +5317,28 @@ def test_goal_mode_notice_emits_once_per_epoch_and_after_disable(tmp_path: Path)
     )
     thread_id = engine.thread_store.create_thread()
 
-    enabled_state = engine.enable_goal_mode(thread_id, objective="Ship the goal feature")
-    first = engine._pre_user_context_items(thread_id)
+    enable_plugin_goal(engine, thread_id, "Ship the goal feature")
+    first_text = context_text(engine._pre_user_context_items(thread_id))
     repeated = engine._pre_user_context_items(thread_id)
 
-    first_text = "\n".join(message_item_text(item) for item in first)
-    assert '<goal_mode status="enabled">' in first_text
+    assert '<agent_goal_mode status="enabled">' in first_text
     assert "Ship the goal feature" in first_text
-    assert str(enabled_state.paths.checklist) in first_text
-    assert '<goal_mode status="enabled">' not in str(repeated)
+    assert "rt.goal.*" in first_text
+    assert "<agent_goal_mode" not in str(repeated)
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
     after_compaction = engine._pre_user_context_items(thread_id)
-    assert '<goal_mode status="enabled">' in str(after_compaction)
+    assert "<agent_goal_mode" in str(after_compaction)
 
-    engine.disable_goal_mode(thread_id)
-    disabled = engine._pre_user_context_items(thread_id)
+    engine.plugins.call_command("/goal", {"arg": "disable", "thread_id": thread_id})
+    disabled_text = context_text(engine._pre_user_context_items(thread_id))
     repeated_disabled = engine._pre_user_context_items(thread_id)
-    disabled_text = "\n".join(message_item_text(item) for item in disabled)
-    assert '<goal_mode status="disabled">' in disabled_text
-    assert disabled_text.index("<files>") < disabled_text.index("<rules>") < disabled_text.index("</rules>")
-    assert '<rule>现有目标文件会保留' in disabled_text
-    assert '<goal_mode status="disabled">' not in str(repeated_disabled)
+    assert '<agent_goal_mode operation="remove">' in disabled_text
+    assert "Goal mode disabled" in disabled_text
+    assert "<agent_goal_mode" not in str(repeated_disabled)
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t2", text="summary", usage={})
-    assert '<goal_mode' not in str(engine._pre_user_context_items(thread_id))
+    assert "<agent_goal_mode" not in str(engine._pre_user_context_items(thread_id))
 
 
 @pytest.mark.asyncio
@@ -5395,15 +5370,16 @@ async def test_goal_mode_enable_notice_reaches_first_send(tmp_path: Path) -> Non
     )
     thread_id = engine.thread_store.create_thread()
 
-    engine.enable_goal_mode(thread_id, objective="lazy goal")
+    await engine.plugins.start()
+    engine.plugins.call_command("/goal", {"arg": "enable lazy goal", "thread_id": thread_id})
     events = [event async for event in engine.run_turn(user_text="start", thread_id=thread_id)]
 
     assert any(event.get("type") == "turn.completed" for event in events)
     request_text = "\n".join(message_item_text(item) for item in model_client.requests[0]["input"])
-    assert '<goal_mode status="enabled">' in request_text
+    assert '<agent_goal_mode status="enabled">' in request_text
+    assert '<agent_turn_context>' in request_text
     assert "lazy goal" in request_text
-    assert engine.thread_store.read_events(thread_id, event_types={"item.goal_mode_notice"})
-
+    assert engine.thread_store.read_events(thread_id, event_types={"item.agent_epoch_context", "item.agent_turn_context"})
 
 def test_goal_mode_reenable_before_next_turn_emits_enabled_notice(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
@@ -5417,17 +5393,18 @@ def test_goal_mode_reenable_before_next_turn_emits_enabled_notice(tmp_path: Path
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread()
-    engine.enable_goal_mode(thread_id)
-    assert '<goal_mode status="enabled">' in str(engine._pre_user_context_items(thread_id))
+    enable_plugin_goal(engine, thread_id)
+    assert '<agent_goal_mode status="enabled">' in str(engine._pre_user_context_items(thread_id))
 
-    engine.disable_goal_mode(thread_id)
-    engine.reset_goal_files(thread_id, objective="fresh goal")
-    engine.enable_goal_mode(thread_id)
+    engine.plugins.call_command("/goal", {"arg": "disable", "thread_id": thread_id})
+    engine.plugins.call_command("/goal", {"arg": "reset fresh goal", "thread_id": thread_id})
+    engine.plugins.call_command("/goal", {"arg": "enable", "thread_id": thread_id})
 
-    notice = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(thread_id))
-    assert '<goal_mode status="enabled">' in notice
-    assert '<goal_mode status="disabled">' not in notice
+    notice = context_text(engine._pre_user_context_items(thread_id))
+    assert '<agent_goal_mode operation="publish" status="enabled">' in notice
+    assert '<agent_goal_mode operation="remove">' in notice
     assert "fresh goal" in notice
+
 
 
 def test_goal_mode_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
@@ -5442,18 +5419,18 @@ def test_goal_mode_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread()
-    engine.enable_goal_mode(thread_id)
+    enable_plugin_goal(engine, thread_id)
     pre_user_items = engine._pre_user_context_items(thread_id)
-    goal_item = next(item for item in pre_user_items if "<goal_mode" in message_item_text(item))
+    goal_item = next(item for item in pre_user_items if "<agent_goal_mode" in message_item_text(item))
     engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=message_item("user", "do work"))
 
     assert engine._is_pre_user_context_item(goal_item)
     assert retain_item_after_compaction(goal_item) is False
     reconstructed = engine._reconstruct_input(thread_id)
     reconstructed_texts = [message_item_text(item) for item in reconstructed]
-    goal_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<goal_mode" in item_text)
-    assert "<runtime_helpers>" in reconstructed_texts[0]
-    assert goal_index < reconstructed_texts.index("do work")
+    goal_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<agent_goal_mode" in item_text)
+    runtime_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<runtime_helpers>" in item_text)
+    assert runtime_index <= goal_index < reconstructed_texts.index("do work")
     assert "do work" in reconstructed_texts
 
 
@@ -5469,6 +5446,7 @@ def test_worktree_notice_emits_once_per_epoch_and_after_delete(tmp_path: Path) -
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread("Worktree feature")
+    start_builtin_plugins(engine)
     worktree_path = project_root / ".uv-agent" / "worktrees" / "feature"
 
     engine.thread_store.append(
@@ -5486,15 +5464,15 @@ def test_worktree_notice_emits_once_per_epoch_and_after_delete(tmp_path: Path) -
     first = engine._pre_user_context_items(thread_id)
     repeated = engine._pre_user_context_items(thread_id)
 
-    first_text = "\n".join(message_item_text(item) for item in first)
-    assert '<worktree status="active">' in first_text
+    first_text = context_text(first)
+    assert '<agent_worktree status="active">' in first_text
     assert str(worktree_path) in first_text
-    assert "origin workspace" in first_text and "不是" in first_text
-    assert '<worktree status="active">' not in str(repeated)
+    assert "Git worktree" in first_text
+    assert '<agent_worktree' not in str(repeated)
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
     after_compaction = engine._pre_user_context_items(thread_id)
-    assert '<worktree status="active">' in str(after_compaction)
+    assert '<agent_worktree status="active">' in str(after_compaction)
 
     engine.thread_store.append(
         thread_id,
@@ -5509,68 +5487,13 @@ def test_worktree_notice_emits_once_per_epoch_and_after_delete(tmp_path: Path) -
     engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(project_root))
     deleted = engine._pre_user_context_items(thread_id)
     repeated_deleted = engine._pre_user_context_items(thread_id)
-    assert '<worktree status="deleted">' in str(deleted)
+    assert '<agent_worktree operation="update" status="deleted">' in str(deleted)
+    assert '<agent_worktree operation="remove">' in str(deleted)
     assert "def456" in str(deleted)
-    assert '<worktree status="deleted">' not in str(repeated_deleted)
+    assert '<agent_worktree' not in str(repeated_deleted)
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t2", text="summary", usage={})
-    assert "<worktree" not in str(engine._pre_user_context_items(thread_id))
-
-
-@pytest.mark.asyncio
-async def test_worktree_notice_reaches_first_send_and_coexists_with_goal_mode(tmp_path: Path) -> None:
-    project_root = tmp_path / "project"
-    project_root.mkdir()
-    config = make_test_config(project_root, title_generation=TitleGenerationConfig(enabled=False))
-    model_client = CompletedOnlyStreamClient(
-        [
-            {
-                "id": "resp_1",
-                "output_text": "done",
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "done"}],
-                    }
-                ],
-            }
-        ]
-    )
-    engine = AgentEngine(
-        config=config,
-        model_client=model_client,
-        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
-        thread_store=ThreadStore(tmp_path / "state"),
-        project_root=project_root,
-    )
-    thread_id = engine.thread_store.create_thread("Goal worktree")
-    worktree_path = project_root / ".uv-agent" / "worktrees" / "feature"
-    engine.enable_goal_mode(thread_id, objective="ship from worktree")
-    engine.thread_store.append(
-        thread_id,
-        "thread.worktree_created",
-        worktree_status="active",
-        worktree_branch="feature",
-        worktree_path=str(worktree_path),
-        worktree_base_ref="HEAD",
-        worktree_origin_root=str(project_root),
-        worktree_head="abc123",
-        worktree_created_at="2026-01-01T00:00:00Z",
-    )
-    engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
-
-    events = [event async for event in engine.run_turn(user_text="start", thread_id=thread_id)]
-
-    assert any(event.get("type") == "turn.completed" for event in events)
-    request_text = "\n".join(message_item_text(item) for item in model_client.requests[0]["input"])
-    assert '<goal_mode status="enabled">' in request_text
-    assert '<worktree status="active">' in request_text
-    assert request_text.index("<runtime_helpers>") < request_text.index('<workflow_context scope="main_agent" status="current">')
-    assert request_text.index('<workflow_context scope="main_agent" status="current">') < request_text.index('<goal_mode status="enabled">')
-    assert request_text.index('<goal_mode status="enabled">') < request_text.index('<worktree status="active">')
-    assert engine.thread_store.read_events(thread_id, event_types={"item.worktree_notice"})
-
+    assert "<agent_worktree" not in str(engine._pre_user_context_items(thread_id))
 
 def test_worktree_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
@@ -5584,6 +5507,7 @@ def test_worktree_notice_is_pre_user_context_and_not_retained(tmp_path: Path) ->
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread("Worktree")
+    start_builtin_plugins(engine)
     worktree_path = project_root / ".uv-agent" / "worktrees" / "feature"
     engine.thread_store.append(
         thread_id,
@@ -5596,7 +5520,7 @@ def test_worktree_notice_is_pre_user_context_and_not_retained(tmp_path: Path) ->
     )
     engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
     pre_user_items = engine._pre_user_context_items(thread_id)
-    worktree_item = next(item for item in pre_user_items if "<worktree" in message_item_text(item))
+    worktree_item = next(item for item in pre_user_items if "<agent_worktree" in message_item_text(item))
     engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=message_item("user", "do work"))
 
     assert engine._is_pre_user_context_item(worktree_item)
@@ -5604,8 +5528,8 @@ def test_worktree_notice_is_pre_user_context_and_not_retained(tmp_path: Path) ->
     reconstructed = engine._reconstruct_input(thread_id)
     reconstructed_texts = [message_item_text(item) for item in reconstructed]
     runtime_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<runtime_helpers>" in item_text)
-    worktree_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<worktree" in item_text)
-    assert runtime_index < worktree_index < reconstructed_texts.index("do work")
+    worktree_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<agent_worktree" in item_text)
+    assert runtime_index <= worktree_index < reconstructed_texts.index("do work")
     assert "do work" in reconstructed_texts
 
 
@@ -5841,6 +5765,7 @@ def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_p
         project_root=project_root,
     )
     thread_id = engine.thread_store.create_thread()
+    start_builtin_plugins(engine)
     engine.thread_store.append(
         thread_id,
         "item.compaction",
@@ -5864,12 +5789,13 @@ def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_p
     texts = [message_item_text(item) for item in prelude.input_items if item.get("type") == "message"]
     assert texts[0].startswith("<workspace_rules")
     assert "Reloaded rule." in texts[0]
-    runtime_index = next(index for index, text in enumerate(texts) if text.startswith("<runtime_environment>"))
-    workflow_index = next(index for index, text in enumerate(texts) if text.startswith('<workflow_context scope="main_agent" status="current">'))
+    runtime_index = next(index for index, text in enumerate(texts) if text.startswith("<agent_epoch_context>"))
     handoff_index = next(index for index, text in enumerate(texts) if text.startswith("<compaction_handoff>"))
-    assert "<context_update" not in texts[runtime_index]
+    assert "<runtime_environment>" in texts[runtime_index]
     assert "<runtime_helpers>" in texts[runtime_index]
-    assert runtime_index < workflow_index < handoff_index
+    assert "<model_levels>" not in texts[runtime_index]
+    assert "<agent_workflow_context" in texts[runtime_index]
+    assert runtime_index < handoff_index
     handoff = texts[handoff_index]
     assert "kept request" in handoff
     assert "<retained_history>" in handoff
@@ -5941,12 +5867,13 @@ async def test_mid_turn_compaction_readds_epoch_context_before_continuing(tmp_pa
     continued_texts = [message_item_text(item) for item in continued_input if item.get("type") == "message"]
     assert continued_texts[0].startswith("<workspace_rules")
     assert "Mid-turn rule." in continued_texts[0]
-    runtime_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<runtime_environment>"))
-    workflow_index = next(index for index, text in enumerate(continued_texts) if text.startswith('<workflow_context scope="main_agent" status="current">'))
+    runtime_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<agent_epoch_context>"))
     handoff_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<compaction_handoff>"))
-    assert "<context_update" not in continued_texts[runtime_index]
+    assert "<runtime_environment>" in continued_texts[runtime_index]
     assert "<runtime_helpers>" in continued_texts[runtime_index]
-    assert runtime_index < workflow_index < handoff_index
+    assert "<model_levels>" not in continued_texts[runtime_index]
+    assert "<agent_workflow_context" in continued_texts[runtime_index]
+    assert runtime_index < handoff_index
     handoff = continued_texts[handoff_index]
     assert "<retained_history>" in handoff
     assert "<retained_history_message" not in handoff

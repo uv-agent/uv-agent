@@ -19,12 +19,10 @@ from uv_agent.environment import detect_user_language
 
 from uv_agent.ids import new_id
 from uv_agent.i18n import tr
-from uv_agent.mcp_config import discover_mcp_servers
 from uv_agent.notifications import play_terminal_buzzer
 from uv_agent.paths import project_tui_clipboard_dir, uv_agent_home
 from uv_agent.session import ThreadLockedError
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
-from uv_agent.skills import discover_skills
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.helper_calls import extract_import_anchor_chains, format_import_anchor_chains
 from uv_agent.tui.formatting import format_elapsed, short_block, short_thread, tool_call_code
@@ -136,14 +134,9 @@ HELP_TEXT = (
     "  /clear             clear view and start a new thread\n"
     "  /threads           choose a thread to resume\n"
     "  /status            show model/context/thread status\n"
-    "  /skills            list skills and insert @skill mentions\n"
-    "  /mcp               list MCP servers and insert @mcp mentions\n"
     "  /image             attach clipboard image as [Image #N]\n"
     "  /show [run]        choose or show a run script and output\n"
     "  /level <name>      switch model level\n"
-    "  /goal <op>         enable | disable | reset | status\n"
-    "  /agents            open Agent View dashboard (normal/input/help modes)\n"
-    "  /bg                add the current thread to Agent View\n"
     "  /cancel            interrupt the running turn\n"
     "  /model <name>      alias for /level\n"
     "  /title <text>      rename the current thread\n"
@@ -158,18 +151,15 @@ HELP_TEXT = (
 
 # Values ending in a space accept more input; the command palette keeps them in
 # the composer instead of submitting immediately.
+
+
 TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
     CommandSuggestion("/clear", "clear view and start a new thread"),
     CommandSuggestion("/threads", "choose a thread to resume"),
     CommandSuggestion("/status", "show model/context/thread status"),
-    CommandSuggestion("/skills", "list skills and insert @skill mentions"),
-    CommandSuggestion("/mcp", "list MCP servers and insert @mcp mentions"),
     CommandSuggestion("/image", "attach clipboard image as [Image #N]"),
     CommandSuggestion("/show", "choose a run to inspect"),
     CommandSuggestion("/level ", "switch model level"),
-    CommandSuggestion("/goal ", "goal-mode subcommands"),
-    CommandSuggestion("/agents", "open Agent View dashboard"),
-    CommandSuggestion("/bg", "add current thread to Agent View"),
     CommandSuggestion("/cancel", "interrupt the running turn"),
     CommandSuggestion("/model ", "alias for /level"),
     CommandSuggestion("/title ", "rename current thread"),
@@ -177,12 +167,6 @@ TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
     CommandSuggestion("/help", "show help"),
 )
 
-GOAL_COMMANDS: tuple[CommandSuggestion, ...] = (
-    CommandSuggestion("/goal enable", "enable goal mode with optional objective"),
-    CommandSuggestion("/goal disable", "disable goal mode"),
-    CommandSuggestion("/goal reset", "reset goal files with optional objective"),
-    CommandSuggestion("/goal status", "show goal state"),
-)
 
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 IMAGE_TOKEN_RE = re.compile(r"\[Image #(\d+)\]")
@@ -794,6 +778,15 @@ class AnsiUvAgentApp:
         asyncio.run(self.run_async())
 
     async def run_async(self) -> None:
+        starter = getattr(self.engine, "start_plugins_background", None)
+        if callable(starter):
+            try:
+                await starter()
+            except Exception:
+                # Plugin startup failures are surfaced through plugin status; the
+                # TUI should still open so users can inspect /status or continue
+                # with core commands.
+                pass
         with Terminal() as terminal:
             workflow_executor = getattr(self.engine, "workflow_executor", None)
             if workflow_executor is not None:
@@ -2111,15 +2104,56 @@ class AnsiUvAgentApp:
         query = text.lower()
         if query.startswith("/show "):
             return self._run_picker_items(query[len("/show ") :], command_values=True)
-        if query.startswith("/goal ") or query == "/goal":
-            pool = GOAL_COMMANDS if query != "/goal" else TOP_LEVEL_COMMANDS
+        if query.startswith("/goal "):
+            pool = tuple(self._plugin_picker_suggestions("goal.commands", query[len("/goal ") :]))
+        elif query == "/goal":
+            pool = (*TOP_LEVEL_COMMANDS, *self._plugin_command_suggestions())
         elif query.startswith("/level ") or query == "/level":
             pool = self._level_command_suggestions("/level") if query != "/level" else TOP_LEVEL_COMMANDS
         elif query.startswith("/model ") or query == "/model":
             pool = self._level_command_suggestions("/model") if query != "/model" else TOP_LEVEL_COMMANDS
         else:
-            pool = TOP_LEVEL_COMMANDS
+            pool = (*TOP_LEVEL_COMMANDS, *self._plugin_command_suggestions())
         return [item for item in pool if item.value.lower().startswith(query)]
+
+    def _plugin_command_suggestions(self) -> tuple[CommandSuggestion, ...]:
+        plugins = getattr(self.engine, "plugins", None)
+        suggestions = getattr(plugins, "command_suggestions", None)
+        if not callable(suggestions):
+            return ()
+        try:
+            commands = suggestions()
+        except Exception:
+            return ()
+        items: list[CommandSuggestion] = []
+        for command in commands:
+            value = str(getattr(command, "name", "") or "")
+            if not value:
+                continue
+            description = str(getattr(command, "description", "") or "plugin command")
+            items.append(CommandSuggestion(value, description, kind="plugin-command", meta=str(getattr(command, "plugin", "") or "")))
+        return tuple(items)
+
+    def _plugin_picker_suggestions(self, picker_id: str, query: str = "") -> list[CommandSuggestion]:
+        plugins = getattr(self.engine, "plugins", None)
+        picker_items = getattr(plugins, "picker_items", None)
+        if not callable(picker_items):
+            return []
+        try:
+            items = picker_items(picker_id, query)
+        except Exception:
+            return []
+        return [
+            CommandSuggestion(
+                str(getattr(item, "value", "") or ""),
+                str(getattr(item, "description", "") or ""),
+                id=str(getattr(item, "id", "") or ""),
+                kind=str(getattr(item, "kind", "mention") or "mention"),
+                meta=str(getattr(item, "meta", "") or ""),
+            )
+            for item in items
+            if getattr(item, "value", "")
+        ]
 
     def _level_command_suggestions(self, command: str) -> tuple[CommandSuggestion, ...]:
         levels = sorted(self._public_config_levels())
@@ -2176,7 +2210,7 @@ class AnsiUvAgentApp:
                 run_id = run_id.split()[-1]
             self._show_run_detail(run_id)
             return True
-        if mode in {"skill", "mcp", "mention"}:
+        if mode in {"skill", "mcp", "plugin-picker", "mention"}:
             self._accept_mention_item(item)
             self._close_command_palette()
             return True
@@ -2301,39 +2335,10 @@ class AnsiUvAgentApp:
         return items[:20]
 
     def _skill_mention_suggestions(self, needle: str = "") -> list[CommandSuggestion]:
-        items: list[CommandSuggestion] = []
-        for skill in discover_skills(self.project_root):
-            haystack = f"{skill.name} {skill.description} {skill.scope}".lower()
-            if needle and needle not in haystack:
-                continue
-            items.append(
-                CommandSuggestion(
-                    f"@skill:{skill.name}",
-                    skill.description,
-                    id=skill.name,
-                    kind="skill-mention",
-                    meta=f"{skill.scope} · {skill.path}",
-                )
-            )
-        return items[:30]
+        return self._plugin_picker_suggestions("skills", needle)
 
     def _mcp_mention_suggestions(self, needle: str = "") -> list[CommandSuggestion]:
-        items: list[CommandSuggestion] = []
-        for server in discover_mcp_servers(self.project_root):
-            haystack = f"{server.name} {server.description} {server.scope} {server.transport}".lower()
-            if needle and needle not in haystack:
-                continue
-            endpoint = f" · {server.endpoint}" if server.endpoint else ""
-            items.append(
-                CommandSuggestion(
-                    f"@mcp:{server.name}",
-                    server.description,
-                    id=server.name,
-                    kind="mcp-mention",
-                    meta=f"{server.scope} · {server.transport}{endpoint}",
-                )
-            )
-        return items[:30]
+        return self._plugin_picker_suggestions("mcp", needle)
 
     def _open_thread_picker(self) -> None:
         threads = self.engine.thread_store.list_threads()
@@ -2360,18 +2365,17 @@ class AnsiUvAgentApp:
         self._open_picker("thread", items)
 
     def _open_skill_picker(self) -> None:
-        items = self._skill_mention_suggestions("")
-        if not items:
-            self._flush(TranscriptCell("event", text="(no skills discovered)"))
-            return
-        self._open_picker("skill", items)
+        self._open_plugin_picker("skills", empty_text="(no skills discovered)", mode="skill")
 
     def _open_mcp_picker(self) -> None:
-        items = self._mcp_mention_suggestions("")
+        self._open_plugin_picker("mcp", empty_text="(no MCP servers declared)", mode="mcp")
+
+    def _open_plugin_picker(self, picker_id: str, *, empty_text: str = "(no items)", mode: str = "plugin-picker") -> None:
+        items = self._plugin_picker_suggestions(picker_id, "")
         if not items:
-            self._flush(TranscriptCell("event", text="(no MCP servers declared)"))
+            self._flush(TranscriptCell("event", text=empty_text))
             return
-        self._open_picker("mcp", items)
+        self._open_picker(mode, items)
 
     # ------------------------------------------------------------------
     # Submit & commands
@@ -2600,15 +2604,60 @@ class AnsiUvAgentApp:
             return self._text("image_only_prompt"), image_paths, seen
         return text, image_paths, seen
 
+    def _handle_plugin_command(self, command: str, arg: str, *, thread_id: str | None = None, emit: bool = True) -> bool:
+        plugins = getattr(self.engine, "plugins", None)
+        caller = getattr(plugins, "call_command", None)
+        if not callable(caller):
+            return False
+        try:
+            result = caller(command, {"arg": arg, "thread_id": self.state.thread_id if thread_id is None else thread_id})
+        except LookupError:
+            return False
+        except Exception as exc:
+            if emit:
+                self._flush(TranscriptCell("error", text=f"{command} failed: {exc}"))
+            return True
+        actions = tuple(getattr(result, "actions", ()) or ())
+        for action in actions:
+            self._apply_plugin_command_action(action, emit=emit)
+        return True
+
+    def _apply_plugin_command_action(self, action: object, *, emit: bool = True) -> None:
+        kind = getattr(action, "kind", "")
+        if kind in {"event", "error"}:
+            metadata = getattr(action, "metadata", None)
+            if isinstance(metadata, dict):
+                self._apply_plugin_action_metadata(metadata)
+            if emit:
+                self._flush(TranscriptCell(kind, text=str(getattr(action, "text", "") or "")))
+            return
+        if hasattr(action, "text") and action.__class__.__name__ == "SetComposerAction":
+            if emit:
+                self._set_composer_text(str(getattr(action, "text", "") or ""))
+            return
+        picker_id = getattr(action, "picker_id", None)
+        if picker_id:
+            if emit:
+                self._open_plugin_picker(str(picker_id), mode="skill" if picker_id == "skills" else "mcp" if picker_id == "mcp" else "plugin-picker")
+            return
+
+    def _apply_plugin_action_metadata(self, metadata: dict[str, object]) -> None:
+        if "goal_pending" in metadata:
+            self._pending_goal_enable = bool(metadata.get("goal_pending"))
+        if "goal_enabled" in metadata:
+            self.state.goal_enabled = bool(metadata.get("goal_enabled"))
+        if "goal_objective" in metadata:
+            self.state.goal_objective = str(metadata.get("goal_objective") or "")
+            if self._pending_goal_enable:
+                self._pending_goal_objective = self.state.goal_objective
+            elif metadata.get("goal_pending") is False:
+                self._pending_goal_objective = ""
+
     def _handle_command(self, text: str) -> bool:
         command, _, arg = text.partition(" ")
         arg = arg.strip()
         if command == "/help":
             self._flush(TranscriptCell("event", text=HELP_TEXT))
-        elif command == "/agents":
-            self._open_agent_view()
-        elif command == "/bg":
-            self._background_current_thread()
         elif command in {"/level", "/model"} and arg:
             if not self._is_public_level(arg):
                 self._flush(TranscriptCell("error", text=f"{self._text('unknown_level')}: {arg}"))
@@ -2626,10 +2675,6 @@ class AnsiUvAgentApp:
                 self._show_run_detail(arg.strip())
             else:
                 self._open_run_picker()
-        elif command == "/skills":
-            self._open_skill_picker()
-        elif command == "/mcp":
-            self._open_mcp_picker()
         elif command == "/image":
             self._attach_clipboard_image_to_composer()
         elif command == "/title" and arg:
@@ -2643,8 +2688,8 @@ class AnsiUvAgentApp:
             # /new is kept as an unadvertised compatibility alias; the palette
             # exposes only /clear, matching the Textual TUI reset behavior.
             self._clear_to_new_thread()
-        elif command == "/goal":
-            self._handle_goal(arg)
+        elif self._handle_plugin_command(command, arg):
+            pass
         elif command == "/quit":
             return False
         else:
@@ -2740,6 +2785,9 @@ class AnsiUvAgentApp:
             lines.append(f"title: {self.state.title}")
         if self.state.project_path:
             lines.append(f"project: {self.state.project_path}")
+        plugin_lines = self._plugin_status_lines()
+        if plugin_lines:
+            lines.extend(plugin_lines)
         # Cumulative billing total and wall-clock time for the current thread.
         if self.state.thread_id:
             try:
@@ -2760,6 +2808,33 @@ class AnsiUvAgentApp:
             except Exception:
                 pass
         return "\n".join(lines)
+
+    def _plugin_status_lines(self) -> list[str]:
+        plugins = getattr(self.engine, "plugins", None)
+        records = getattr(plugins, "records", None)
+        lines: list[str] = []
+        try:
+            iterable = list(records or [])
+        except Exception:
+            iterable = []
+        if iterable:
+            summary: dict[str, int] = {}
+            for record in iterable:
+                state = str(getattr(record, "state", "unknown") or "unknown")
+                summary[state] = summary.get(state, 0) + 1
+            rendered = ", ".join(f"{state}={summary[state]}" for state in sorted(summary))
+            lines.append(f"plugins: {rendered}")
+        ui = getattr(plugins, "ui", None)
+        status_items = getattr(ui, "status_items", None)
+        if callable(status_items):
+            try:
+                for item in status_items():
+                    value = str(getattr(item, "value", "") or "")
+                    label = str(getattr(item, "label", "") or getattr(item, "id", "") or "plugin")
+                    lines.append(f"plugin/{label}: {value}" if value else f"plugin/{label}")
+            except Exception:
+                pass
+        return lines
 
     def _show_status(self) -> None:
         self._refresh_context_percent()
@@ -3070,11 +3145,14 @@ class AnsiUvAgentApp:
     def _materialize_pending_goal_enable(self, thread_id: str) -> None:
         if not self._pending_goal_enable:
             return
-        state = self.engine.enable_goal_mode(thread_id, objective=self._pending_goal_objective)
-        self.state.goal_enabled = True
-        self.state.goal_objective = state.objective or self._pending_goal_objective
-        self._pending_goal_enable = False
-        self._pending_goal_objective = ""
+        objective = self._pending_goal_objective
+        if self._handle_plugin_command("/goal", f"enable {objective}".strip(), thread_id=thread_id, emit=False):
+            self.state.goal_enabled = True
+            self.state.goal_objective = objective
+            self._pending_goal_enable = False
+            self._pending_goal_objective = ""
+            return
+        self._flush(TranscriptCell("error", text="/goal unavailable: builtin.goal is not started"))
 
     def _resume_thread(self, thread_id: str) -> None:
         if not thread_id:
@@ -3263,68 +3341,6 @@ class AnsiUvAgentApp:
             message = str(event.get("message") or event.get("error") or "turn error")
             return TranscriptCell("error", text=message)
         return None
-
-    def _handle_goal(self, arg: str) -> None:
-        sub = arg.split(None, 1)
-        op = (sub[0] if sub else "status").lower()
-        rest = sub[1] if len(sub) > 1 else ""
-        if op not in {"enable", "disable", "reset", "status"}:
-            self._flush(
-                TranscriptCell("error", text="usage: /goal enable [objective] | disable | reset | status")
-            )
-            return
-        if not self.state.thread_id:
-            if op == "enable":
-                self._pending_goal_enable = True
-                self._pending_goal_objective = rest.strip()
-                self.state.goal_enabled = True
-                self.state.goal_objective = self._pending_goal_objective
-                obj = self._pending_goal_objective or "—"
-                self._flush(TranscriptCell("event", text=f"goal mode enabled for next message · objective: {obj}"))
-                return
-            if op == "disable":
-                self._pending_goal_enable = False
-                self._pending_goal_objective = ""
-                self.state.goal_enabled = False
-                self.state.goal_objective = ""
-                self._flush(TranscriptCell("event", text="goal mode disabled"))
-                return
-            if op == "status":
-                if self._pending_goal_enable:
-                    obj = self._pending_goal_objective or "—"
-                    self._flush(
-                        TranscriptCell("event", text=f"goal mode: enabled (pending first message)\nobjective: {obj}")
-                    )
-                else:
-                    self._flush(TranscriptCell("event", text="goal mode: disabled (no active thread)"))
-                return
-            self._flush(TranscriptCell("error", text="/goal reset requires an active thread — send a message first"))
-            return
-        try:
-            if op == "enable":
-                state = self.engine.enable_goal_mode(self.state.thread_id, objective=rest)
-                self.state.goal_enabled = True
-                self.state.goal_objective = state.objective or ""
-                obj = state.objective or "—"
-                self._flush(TranscriptCell("event", text=f"goal mode enabled · objective: {obj}"))
-            elif op == "disable":
-                self.engine.disable_goal_mode(self.state.thread_id)
-                self.state.goal_enabled = False
-                self._flush(TranscriptCell("event", text="goal mode disabled"))
-            elif op == "reset":
-                state = self.engine.reset_goal_files(self.state.thread_id, objective=rest)
-                self.state.goal_objective = state.objective or ""
-                self._flush(TranscriptCell("event", text="goal files reset"))
-            else:  # status
-                state = self.engine.goal_state(self.state.thread_id)
-                if state is None:
-                    self._flush(TranscriptCell("event", text="goal mode: disabled (no state yet)"))
-                else:
-                    status = "enabled" if state.status == "enabled" else "disabled"
-                    obj = state.objective or "—"
-                    self._flush(TranscriptCell("event", text=f"goal mode: {status}\nobjective: {obj}"))
-        except Exception as exc:
-            self._flush(TranscriptCell("error", text=f"/goal {op} failed: {exc}"))
 
     # ------------------------------------------------------------------
     # Turn lifecycle

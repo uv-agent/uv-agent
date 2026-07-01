@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from collections.abc import Callable, Mapping
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -18,15 +19,63 @@ SCHEDULE_KINDS = {"once", "interval", "cron"}
 RUNNING_RUN_STATUSES = {"running"}
 
 
+@dataclass(frozen=True)
+class SchedulerConfig:
+    max_concurrent_jobs: int = 8
+    run_history_retention_days: int = 7
+    default_misfire_policy: str = "skip"
+    default_overlap_policy: str = "skip"
+
+
+def scheduler_config_from_plugin_config(config: Mapping[str, Any] | None) -> SchedulerConfig:
+    data = dict(config or {})
+    return SchedulerConfig(
+        max_concurrent_jobs=max(1, int(data.get("max_concurrent_jobs", 8) or 8)),
+        run_history_retention_days=max(1, int(data.get("run_history_retention_days", 7) or 7)),
+        default_misfire_policy=str(data.get("default_misfire_policy", "skip") or "skip"),
+        default_overlap_policy=str(data.get("default_overlap_policy", "skip") or "skip"),
+    )
+
+
+@dataclass(frozen=True)
+class SchedulerActionContext:
+    """Context passed to plugin action handlers for scheduled executions.
+
+    Scheduler owns timing, persistence and overlap policy; plugins own the action
+    semantics.  The small context keeps prompt/workflow behavior out of scheduler
+    while still letting actions create a stable external thread for their runs.
+    """
+
+    data_dir: Path
+    schedule: dict[str, Any]
+    run_id: str
+    due_at: str | None
+    manual: bool = False
+    thread_store: Any | None = None
+
+    def schedule_thread(self) -> str | None:
+        if self.thread_store is None:
+            return None
+        schedule_id = str(self.schedule.get("schedule_id") or "")
+        if not schedule_id:
+            return None
+        return self.thread_store.get_or_create_external_thread(
+            owner_plugin="builtin.scheduler",
+            source="scheduler",
+            external_id=schedule_id,
+            title=str(self.schedule.get("name") or f"Schedule {schedule_id}"),
+            metadata={"schedule_id": schedule_id},
+        )
+
+
 @dataclass
 class SchedulerService:
     data_dir: Path
     config: Any
-    helper_resolver: Any
-    helper_caller: Any
+    action_resolver: Callable[[str], Any]
+    action_caller: Callable[..., Any]
     thread_store: Any | None = None
     poll_interval_s: float = 1.0
-    workflow_starter: Any | None = None
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _stop: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _running_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
@@ -110,11 +159,9 @@ class SchedulerService:
             data = dict(row)
             params = {**self._public_row(data), **changes}
             old_action = _loads(data["action_json"], {})
-            if "helper" in changes or "prompt" in changes or "payload" in changes:
-                if "helper" not in params and old_action.get("type") == "helper.call":
-                    params["helper"] = old_action.get("helper")
-                if "prompt" not in params and old_action.get("type") == "prompt":
-                    params["prompt"] = old_action.get("prompt")
+            if any(key in changes for key in ("action", "action_id", "payload")):
+                if "action" not in changes and "action_id" not in changes and old_action.get("type") == "action.call":
+                    params["action_id"] = old_action.get("action_id")
                 data["action_json"] = _dumps(self._action(params))
             if any(key in changes for key in ("kind", "at", "every", "cron", "timezone")):
                 timing, next_run_at = self._timing(str(params.get("kind") or data["kind"]), params, base=datetime.now(UTC))
@@ -265,17 +312,11 @@ class SchedulerService:
                 (run_id, schedule.get("schedule_id"), _dumps(action), _dumps(snapshot), due_at, started),
             )
         try:
-            if action.get("type") == "helper.call":
-                result = await self.helper_caller(action["helper"], kwargs=dict(action.get("payload") or {}))
-                status = "completed"
-                payload = {"result": result}
-                workflow_id = None
-                error = {}
-            else:
-                workflow_id = self._start_prompt_workflow(schedule, action)
-                status = "completed"
-                payload = {"workflow_id": workflow_id}
-                error = {}
+            result = await self._call_action(schedule, action, run_id=run_id, due_at=due_at, manual=manual)
+            status = "completed"
+            payload = {"result": result}
+            workflow_id = str(result.get("workflow_id")) if isinstance(result, dict) and result.get("workflow_id") else None
+            error = {}
         except Exception as exc:
             status = "failed"
             payload = {}
@@ -287,60 +328,53 @@ class SchedulerService:
                 "UPDATE schedule_runs SET status = ?, result_json = ?, error_json = ?, workflow_id = ?, completed_at = ? WHERE run_id = ?",
                 (status, _dumps(payload), _dumps(error), workflow_id, completed, run_id),
             )
-        return {"run_id": run_id, "schedule_id": schedule.get("schedule_id"), "status": status, **payload, "error": error}
+        response = {"run_id": run_id, "schedule_id": schedule.get("schedule_id"), "status": status, **payload, "error": error}
+        if workflow_id:
+            response["workflow_id"] = workflow_id
+        return response
 
-    def _start_prompt_workflow(self, schedule: dict[str, Any], action: dict[str, Any]) -> str:
-        import uv_agent_runtime.workflow as workflow
-
-        if self.workflow_starter is not None:
-            return str(self.workflow_starter(schedule, action))
-        thread_id = action.get("thread_id") or self._schedule_thread(schedule)
-        wf = workflow.start(
-            str(action.get("objective") or schedule.get("name") or f"Scheduled prompt {schedule['schedule_id']}"),
-            default_model_level=action.get("model_level"),
-            state_dir=self.data_dir,
+    async def _call_action(
+        self,
+        schedule: dict[str, Any],
+        action: dict[str, Any],
+        *,
+        run_id: str,
+        due_at: str | None,
+        manual: bool,
+    ) -> Any:
+        if action.get("type") != "action.call":
+            raise ValueError("Schedule action must be an action.call record")
+        action_id = str(action.get("action_id") or "")
+        if not action_id:
+            raise ValueError("Schedule action is missing action_id")
+        context = SchedulerActionContext(
+            data_dir=self.data_dir,
+            schedule=self._public_row(schedule),
+            run_id=run_id,
+            due_at=due_at,
+            manual=manual,
+            thread_store=self.thread_store,
         )
-        # Parent linkage is persisted on the workflow row; runtime.start cannot
-        # receive it directly, so update the row in the same host transaction.
-        with connect_state_db(self.data_dir) as db:
-            db.execute("UPDATE workflows SET parent_thread_id = ? WHERE workflow_id = ?", (thread_id, wf.workflow_id))
-        wf.agent(str(action.get("prompt") or ""), model_level=action.get("model_level"), timeout_s=action.get("timeout_s"))
-        return wf.workflow_id
-
-    def _schedule_thread(self, schedule: dict[str, Any]) -> str | None:
-        if self.thread_store is None:
-            return None
-        return self.thread_store.get_or_create_external_thread(
-            owner_plugin="scheduler",
-            source="scheduler",
-            external_id=str(schedule["schedule_id"]),
-            title=str(schedule.get("name") or f"Schedule {schedule['schedule_id']}"),
-            metadata={"schedule_id": schedule["schedule_id"]},
-        )
+        result = self.action_caller(action_id, dict(action.get("payload") or {}), context=context)
+        if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+            result = await result
+        _jsonable(result, "action result")
+        return result
 
     def _action(self, params: dict[str, Any]) -> dict[str, Any]:
-        has_helper = bool(params.get("helper"))
-        has_prompt = bool(params.get("prompt"))
-        if has_helper == has_prompt:
-            raise ValueError("Exactly one of helper or prompt is required")
-        if has_helper:
-            if params.get("conflict") is not None:
-                raise ValueError("conflict is only valid for prompt actions")
-            helper = str(params["helper"])
-            if not params.get("allow_missing") and not self.helper_resolver(helper).get("found"):
-                raise LookupError(f"Unknown helper: {helper}")
-            payload = params.get("payload") or {}
-            _jsonable(payload, "payload")
-            return {"type": "helper.call", "helper": helper, "payload": payload}
-        return {
-            "type": "prompt",
-            "prompt": str(params["prompt"]),
-            "thread_id": params.get("thread_id"),
-            "objective": params.get("objective"),
-            "model_level": params.get("model_level"),
-            "timeout_s": params.get("timeout_s"),
-            "conflict": params.get("conflict") or "queue",
-        }
+        if any(params.get(key) is not None for key in ("helper", "prompt")):
+            raise ValueError("Scheduler actions use action_id and payload; helper/prompt fields are not supported")
+        action_id = params.get("action_id", params.get("action"))
+        if not isinstance(action_id, str) or not action_id.strip():
+            raise ValueError("action_id is required")
+        action_id = action_id.strip()
+        if not params.get("allow_missing") and not _action_exists(self.action_resolver(action_id)):
+            raise LookupError(f"Unknown action: {action_id}")
+        payload = params.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise TypeError("payload must be a JSON object")
+        _jsonable(payload, "payload")
+        return {"type": "action.call", "action_id": action_id, "payload": payload}
 
     def _timing(self, kind: str, params: dict[str, Any], *, base: datetime) -> tuple[dict[str, Any], str | None]:
         if kind == "once":
@@ -374,6 +408,12 @@ class SchedulerService:
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
         }
+
+
+def _action_exists(value: Any) -> bool:
+    if isinstance(value, dict):
+        return bool(value.get("found", value))
+    return value is not None and value is not False
 
 
 def _policy(value: Any, default: str, allowed: set[str]) -> str:

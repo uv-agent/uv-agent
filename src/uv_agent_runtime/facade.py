@@ -424,12 +424,6 @@ class File:
         return textops.make_unified_diff(self.text(), other_text, path=str(self.path), context=context)
 
 
-class _GoalsNamespace:
-    @_track("goals.paths")
-    def paths(self):
-        from .goal_mode import goal_paths
-
-        return goal_paths()
 
 
 class _DepsNamespace:
@@ -929,7 +923,6 @@ def _common_roots(paths: Sequence[str]) -> builtins.list[Path]:
 
 
 deps = _DepsNamespace()
-goals = _GoalsNamespace()
 threads = _ThreadsNamespace()
 mcp = _McpNamespace()
 events = _EventsNamespace()

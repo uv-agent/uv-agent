@@ -13,19 +13,24 @@ class FakeEngine:
         self.release: dict[str, asyncio.Event] = {}
         self.calls: list[dict[str, object]] = []
 
-    async def run_turn(self, *, user_text, thread_id=None, level=None, image_paths=None, cancel_event=None, guide_event=None):
+    async def run_turn(self, *, user_text, user_inputs=None, thread_id=None, level=None, image_paths=None, cancel_event=None, guide_event=None):
         thread_id = thread_id or "thr_new"
         turn_id = f"turn_{len(self.calls) + 1}"
-        self.calls.append({"user_text": user_text, "thread_id": thread_id, "image_paths": list(image_paths or [])})
-        self.started.append(user_text)
-        self.release[user_text] = asyncio.Event()
+        texts = [item.text for item in user_inputs] if user_inputs is not None else [user_text]
+        images = [path for item in (user_inputs or []) for path in item.image_paths]
+        if user_inputs is None:
+            images = list(image_paths or [])
+        self.calls.append({"user_text": user_text, "user_texts": texts, "thread_id": thread_id, "image_paths": images})
+        key = "|".join(texts)
+        self.started.append(key)
+        self.release[key] = asyncio.Event()
         yield {"type": "turn.started", "thread_id": thread_id, "turn_id": turn_id}
-        while not self.release[user_text].is_set():
+        while not self.release[key].is_set():
             if cancel_event is not None and cancel_event.is_set():
                 yield {"type": "turn.interrupted", "thread_id": thread_id, "turn_id": turn_id, "reason": "user_interrupt"}
                 return
             await asyncio.sleep(0.01)
-        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": f"done {user_text}"}
+        yield {"type": "turn.completed", "thread_id": thread_id, "turn_id": turn_id, "final_text": f"done {key}"}
 
 
 async def wait_until(predicate, *, timeout=1.0):
@@ -87,14 +92,15 @@ async def test_turn_manager_takeover_absorbs_queued_messages_in_order() -> None:
     assert merged_queue.status == "merged"
     assert interrupt.status == "merged"
     assert queued_a.merged_into == takeover.request_id
-    assert takeover.user_text == "queued a\n---\nqueued b\n---\nguide c\n---\nqueue d\n---\ninterrupt e"
+    assert [item.text for item in takeover.user_inputs] == ["queued a", "queued b", "guide c", "queue d", "interrupt e"]
     assert takeover.image_paths == ["c.png", "e.png"]
 
     await wait_until(lambda: engine.started and engine.started[0] == "running")
     # interrupt upgrades the takeover and cancels the active turn immediately.
     await running.wait()
     await wait_until(lambda: len(engine.started) == 2)
-    assert engine.started[1] == takeover.user_text
-    engine.release[takeover.user_text].set()
+    assert engine.started[1] == "queued a|queued b|guide c|queue d|interrupt e"
+    assert engine.calls[-1]["user_texts"] == ["queued a", "queued b", "guide c", "queue d", "interrupt e"]
+    engine.release[engine.started[1]].set()
     await takeover.wait()
     assert takeover.status == "completed"

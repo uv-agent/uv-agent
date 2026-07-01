@@ -269,7 +269,7 @@ TEXT = {
         "agent_view_status_completed": "COMPLETED",
         "agent_view_status_failed": "FAILED",
         "agent_view_status_interrupted": "INTERRUPTED",
-        "agent_view_open_status": "Agent View · /bg adds current thread · i new task · m model · r reply · ? help",
+        "agent_view_open_status": "Agent View · i new task · m model · r reply · ? help",
         "agent_view_bg_added": "added {thread} to Agent View",
         "agent_view_bg_present": "{thread} is already in Agent View",
         "agent_view_no_sessions": "No agent sessions yet",
@@ -577,7 +577,7 @@ TEXT = {
         "agent_view_status_completed": "已完成",
         "agent_view_status_failed": "失败",
         "agent_view_status_interrupted": "已中断",
-        "agent_view_open_status": "Agent View · /bg 加入当前线程 · i 新任务 · m 模型 · r 回复 · ? 帮助",
+        "agent_view_open_status": "Agent View · i 新任务 · m 模型 · r 回复 · ? 帮助",
         "agent_view_bg_added": "已将 {thread} 加入 Agent View",
         "agent_view_bg_present": "{thread} 已在 Agent View 中",
         "agent_view_no_sessions": "还没有 Agent 会话",
@@ -637,8 +637,6 @@ COMMAND_DESCRIPTIONS = {
         "/cancel": "interrupt the running turn",
         "/quit": "quit immediately",
         "/help": "show all commands",
-        "/agents": "open Agent View dashboard",
-        "/bg": "add the current thread to Agent View",
     },
     "zh": {
         "/threads": "查看最近线程",
@@ -653,8 +651,6 @@ COMMAND_DESCRIPTIONS = {
         "/cancel": "打断正在运行的操作",
         "/quit": "立即退出",
         "/help": "查看所有命令",
-        "/agents": "打开 Agent View 仪表盘",
-        "/bg": "将当前线程加入 Agent View",
     },
 }
 

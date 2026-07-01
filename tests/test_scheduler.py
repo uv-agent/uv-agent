@@ -1,38 +1,54 @@
 from __future__ import annotations
 
-import pytest
-
-from uv_agent.config import SchedulerConfig
-from uv_agent.scheduler import SchedulerService
-from uv_agent.state_db import connect_state_db
 import asyncio
 
+import pytest
 
-class Helpers:
+from uv_agent.plugins.registry import ActionRegistry
+from uv_agent.scheduler import SchedulerConfig, SchedulerService
+from uv_agent.state_db import connect_state_db
+
+
+class Actions:
     def __init__(self) -> None:
         self.calls = []
+        self.registry = ActionRegistry()
+        self.registry.register(
+            plugin="demo-plugin",
+            action_id="demo.run",
+            handler=self._run,
+            schema={"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]},
+        )
 
-    def resolve(self, name: str):
-        return {"found": name == "demo", "name": name}
+    def resolve(self, action_id: str):
+        return self.registry.get(action_id)
 
-    async def call(self, name: str, args=None, kwargs=None):
-        self.calls.append((name, dict(kwargs or {})))
-        return {"called": name, "payload": dict(kwargs or {})}
+    async def call(self, action_id: str, payload=None, *, context=None):
+        self.calls.append((action_id, dict(payload or {}), context))
+        return await self.registry.call(action_id, payload or {}, context=context)
+
+    async def _run(self, payload, context=None):
+        return {
+            "called": "demo.run",
+            "payload": dict(payload),
+            "schedule_id": context.schedule["schedule_id"] if context else None,
+        }
 
 
-def test_scheduler_create_update_list_delete_helper(tmp_path):
-    helpers = Helpers()
-    service = SchedulerService(tmp_path, SchedulerConfig(), helpers.resolve, helpers.call)
+def test_scheduler_create_update_list_delete_action(tmp_path):
+    actions = Actions()
+    service = SchedulerService(tmp_path, SchedulerConfig(), actions.resolve, actions.call)
 
-    schedule = service.create(kind="interval", every={"minutes": 5}, helper="demo", payload={"x": 1}, name="demo job")
+    schedule = service.create(kind="interval", every={"minutes": 5}, action_id="demo.run", payload={"x": 1}, name="demo job")
 
     assert schedule["schedule_id"].startswith("sch_")
-    assert schedule["action"] == {"type": "helper.call", "helper": "demo", "payload": {"x": 1}}
+    assert schedule["action"] == {"type": "action.call", "action_id": "demo.run", "payload": {"x": 1}}
     assert schedule["timing"]["every_seconds"] == 300
     assert service.list()[0]["schedule_id"] == schedule["schedule_id"]
 
-    updated = service.update(schedule["schedule_id"], enabled=False, payload={"x": 2}, helper="demo")
+    updated = service.update(schedule["schedule_id"], enabled=False, payload={"x": 2})
     assert updated["enabled"] is False
+    assert updated["action"]["action_id"] == "demo.run"
     assert updated["action"]["payload"] == {"x": 2}
 
     assert service.delete(schedule["schedule_id"]) == {"deleted": True, "schedule_id": schedule["schedule_id"]}
@@ -40,26 +56,32 @@ def test_scheduler_create_update_list_delete_helper(tmp_path):
 
 
 def test_scheduler_validates_action_shape(tmp_path):
-    service = SchedulerService(tmp_path, SchedulerConfig(), lambda name: {"found": False}, None)
+    actions = Actions()
+    service = SchedulerService(tmp_path, SchedulerConfig(), actions.resolve, actions.call)
 
     with pytest.raises(ValueError):
         service.create(kind="interval", every={"minutes": 5}, helper="x", prompt="y")
     with pytest.raises(LookupError):
-        service.create(kind="interval", every={"minutes": 5}, helper="missing")
+        service.create(kind="interval", every={"minutes": 5}, action_id="missing")
     with pytest.raises(ValueError):
-        service.create(kind="interval", every={"minutes": 5}, helper="missing", allow_missing=True, conflict="guide")
+        service.create(kind="interval", every={"minutes": 5}, payload={})
+    schedule = service.create(kind="interval", every={"minutes": 5}, action_id="missing", allow_missing=True)
+    assert schedule["action"]["action_id"] == "missing"
 
 
 @pytest.mark.asyncio
 async def test_scheduler_run_now_records_history(tmp_path):
-    helpers = Helpers()
-    service = SchedulerService(tmp_path, SchedulerConfig(), helpers.resolve, helpers.call)
-    schedule = service.create(kind="interval", every={"minutes": 5}, helper="demo", payload={"x": 1})
+    actions = Actions()
+    service = SchedulerService(tmp_path, SchedulerConfig(), actions.resolve, actions.call)
+    schedule = service.create(kind="interval", every={"minutes": 5}, action_id="demo.run", payload={"x": 1})
 
     result = await service.run_now(schedule["schedule_id"])
 
     assert result["status"] == "completed"
     assert result["result"]["payload"] == {"x": 1}
+    assert result["result"]["schedule_id"] == schedule["schedule_id"]
+    assert actions.calls[0][0] == "demo.run"
+    assert actions.calls[0][2].run_id == result["run_id"]
     with connect_state_db(tmp_path) as db:
         row = db.execute("SELECT * FROM schedule_runs WHERE run_id = ?", (result["run_id"],)).fetchone()
     assert row is not None
@@ -68,10 +90,10 @@ async def test_scheduler_run_now_records_history(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_scheduler_run_due_once_advances_interval_and_runs_helper(tmp_path):
-    helpers = Helpers()
-    service = SchedulerService(tmp_path, SchedulerConfig(), helpers.resolve, helpers.call)
-    schedule = service.create(kind="interval", every={"seconds": 60}, helper="demo", payload={"x": 3})
+async def test_scheduler_run_due_once_advances_interval_and_runs_action(tmp_path):
+    actions = Actions()
+    service = SchedulerService(tmp_path, SchedulerConfig(), actions.resolve, actions.call)
+    schedule = service.create(kind="interval", every={"seconds": 60}, action_id="demo.run", payload={"x": 3})
     with connect_state_db(tmp_path) as db:
         db.execute("UPDATE schedules SET next_run_at = '2000-01-01T00:00:00+00:00' WHERE schedule_id = ?", (schedule["schedule_id"],))
 
@@ -84,23 +106,59 @@ async def test_scheduler_run_due_once_advances_interval_and_runs_helper(tmp_path
         await asyncio.sleep(0.01)
 
     assert started[0]["schedule_id"] == schedule["schedule_id"]
-    assert helpers.calls == [("demo", {"x": 3})]
+    assert [(call[0], call[1]) for call in actions.calls] == [("demo.run", {"x": 3})]
     with connect_state_db(tmp_path) as db:
         schedule_row = db.execute("SELECT next_run_at FROM schedules WHERE schedule_id = ?", (schedule["schedule_id"],)).fetchone()
     assert schedule_row["next_run_at"] != "2000-01-01T00:00:00+00:00"
 
 
 @pytest.mark.asyncio
-async def test_scheduler_prompt_action_creates_workflow(tmp_path):
-    service = SchedulerService(tmp_path, SchedulerConfig(), lambda name: {"found": False}, None)
-    schedule = service.create(kind="interval", every={"minutes": 5}, prompt="Do scheduled work", objective="Scheduled objective")
+async def test_scheduler_workflow_prompt_action_is_plugin_owned(tmp_path):
+    from uv_agent.builtin.workflow import setup as setup_workflow
+    from uv_agent.plugins import PluginManifest
+    from uv_agent.plugins.context import PluginContext
+    from uv_agent.plugins.events import EventBus
+    from uv_agent.plugins.registry import CommandRegistry, RuntimeNamespaceRegistry, UiRegistry
+    from uv_agent.plugins.storage import PluginStorage
+    from uv_agent.session import ThreadStore
+
+    actions = ActionRegistry()
+    thread_store = ThreadStore(tmp_path)
+    plugin_context = PluginContext(
+        manifest=PluginManifest("builtin.workflow", "0", "Workflow", "test"),
+        project_root=tmp_path,
+        user_state_dir=tmp_path / "user",
+        config={},
+        events=EventBus(),
+        logger=__import__("logging").getLogger("test"),
+        runtime_registry=RuntimeNamespaceRegistry(),
+        action_registry=actions,
+        command_registry=CommandRegistry(),
+        ui_registry=UiRegistry(),
+        context_broker=__import__("uv_agent.plugins.context", fromlist=["PluginContextBroker"]).PluginContextBroker(),
+        storage=PluginStorage("builtin.workflow", tmp_path, tmp_path / "user"),
+        submitter=None,
+        task_factory=lambda plugin, coro, name=None: asyncio.create_task(coro),
+        thread_store=thread_store,
+    )
+    setup_workflow(plugin_context)
+    service = SchedulerService(tmp_path, SchedulerConfig(), actions.get, actions.call, thread_store=thread_store)
+    schedule = service.create(
+        kind="interval",
+        every={"minutes": 5},
+        action_id="workflow.prompt",
+        payload={"prompt": "Do scheduled work", "objective": "Scheduled objective"},
+        name="workflow job",
+    )
 
     result = await service.run_now(schedule["schedule_id"])
 
     assert result["status"] == "completed"
     assert result["workflow_id"].startswith("wf_")
+    assert result["result"]["thread_id"].startswith("thr_")
     with connect_state_db(tmp_path) as db:
         workflow = db.execute("SELECT * FROM workflows WHERE workflow_id = ?", (result["workflow_id"],)).fetchone()
         node = db.execute("SELECT * FROM workflow_nodes WHERE workflow_id = ?", (result["workflow_id"],)).fetchone()
     assert workflow["objective"] == "Scheduled objective"
+    assert workflow["parent_thread_id"] == result["result"]["thread_id"]
     assert node["prompt"] == "Do scheduled work"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import threading
 from collections.abc import Callable
@@ -46,7 +47,22 @@ class MethodRegistry:
             kwargs = dict(params)
         if "context" not in kwargs and _accepts_context(method):
             kwargs["context"] = context
-        return method(*args, **kwargs)
+        result = method(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return _run_awaitable(result)
+        return result
+
+
+def _run_awaitable(value: Any) -> Any:
+    """Resolve async host methods from the RPC worker thread.
+
+    Runtime RPC requests are handled by ``ThreadingHTTPServer`` workers, not the
+    main asyncio turn loop. Plugin helpers commonly expose async setup-time
+    callables, so the dispatcher must turn a coroutine result into a JSON-RPC
+    result instead of handing an unserializable coroutine to the response writer.
+    """
+
+    return asyncio.run(value)
 
 
 def _is_args_kwargs_envelope(params: dict[str, Any]) -> bool:

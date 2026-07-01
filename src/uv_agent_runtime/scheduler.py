@@ -7,7 +7,13 @@ from typing import Any
 from . import transport
 
 
-def create(**kwargs: Any) -> dict[str, Any]:
+def create(*, action_id: str | None = None, action: str | None = None, payload: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+    if action_id is not None:
+        kwargs["action_id"] = action_id
+    if action is not None:
+        kwargs["action"] = action
+    if payload is not None:
+        kwargs["payload"] = payload
     return transport.call_host("scheduler.create", **_normalize(kwargs))
 
 
@@ -35,8 +41,12 @@ def _normalize(value: dict[str, Any]) -> dict[str, Any]:
     at = result.get("at")
     if isinstance(at, datetime):
         result["at"] = at.isoformat()
-    if result.get("prompt") and not result.get("thread_id"):
+    payload = result.get("payload")
+    action_id = result.get("action_id") or result.get("action")
+    if action_id == "workflow.prompt" and isinstance(payload, dict) and not payload.get("thread_id"):
         thread_id = os.environ.get("UV_AGENT_RUNTIME_THREAD_ID")
         if thread_id:
-            result["thread_id"] = thread_id
+            payload = dict(payload)
+            payload["thread_id"] = thread_id
+            result["payload"] = payload
     return result

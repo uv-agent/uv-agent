@@ -93,8 +93,9 @@ async def _workflow_node(
     engine = create_engine(Path.cwd(), data_dir=project_state_dir)
     try:
         if level is None:
-            workflow_default = getattr(engine.config.runtime, "workflow_default_level", None)
-            if workflow_default:
+            workflow_config = engine.config.plugins.plugin_config("builtin.workflow")
+            workflow_default = workflow_config.get("default_level")
+            if isinstance(workflow_default, str) and workflow_default:
                 level = workflow_default
         if thread_id is None:
             title = prompt.splitlines()[0].strip()
