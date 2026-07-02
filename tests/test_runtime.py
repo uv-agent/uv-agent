@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import importlib
 import importlib.util
 import sqlite3
 import sys
@@ -24,7 +25,7 @@ from uv_agent_runtime.errors import CommandError, FileSelectionError, HelperRunt
 from uv_agent_runtime.events import emit_event, emit_progress, emit_result
 from uv_agent_runtime.files import list_files, read_json, read_text, write_json, write_text
 from uv_agent_runtime.helper_stats import helper_stats_db_path
-from uv_agent_runtime.mcp import connect_declared, connect_named, connect_stdio, connect_url, list_declared_servers
+from uv_agent.builtin.mcp.runtime import connect_declared, connect_named, connect_stdio, connect_url, list_declared_servers
 from uv_agent_runtime.patch import apply_patch
 from uv_agent_runtime.textops import (
     CommandTextResult,
@@ -59,11 +60,28 @@ def test_runtime_file_helpers(tmp_path: Path) -> None:
     assert "a.txt" in list_files(tmp_path, pattern="*.txt")
 
 
-def test_runtime_facade_does_not_export_legacy_top_level_helpers() -> None:
+def test_runtime_facade_does_not_export_removed_top_level_helpers() -> None:
     assert "read_file" not in rt.__all__
     assert "search_text" not in rt.__all__
+    assert "RipgrepNotFoundError" not in rt.__all__
     assert not hasattr(rt, "read_file")
     assert not hasattr(rt, "run_process_text")
+    assert not hasattr(rt, "RipgrepNotFoundError")
+
+
+def test_runtime_plugin_namespaces_are_not_static_top_level_exports() -> None:
+    script = """
+import uv_agent_runtime as rt
+names = {"goal", "mcp", "scheduler", "workflow", "worktree"}
+missing = [name for name in names if name in rt.__all__ or hasattr(rt, name)]
+if missing:
+    raise SystemExit(",".join(sorted(missing)))
+"""
+    result = __import__("subprocess").run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("goal", "mcp", "scheduler", "workflow", "worktree"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(f"uv_agent_runtime.{name}")
 
 
 def test_runtime_apply_patch_helper(tmp_path: Path) -> None:
@@ -1008,12 +1026,12 @@ def test_runtime_thread_view_can_select_previous_epochs(tmp_path: Path) -> None:
 
 
 
-def test_runtime_list_thread_digests_filters_subagents(tmp_path: Path) -> None:
+def test_runtime_list_thread_digests_filters_workflow_nodes(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     parent = store.create_thread("Parent")
     child = store.create_thread(
-        "Subagent",
-        kind="subagent",
+        "Workflow node",
+        kind="workflow_node",
         parent_thread_id=parent,
         parent_turn_id="turn_parent",
         parent_run_id="run_parent",
@@ -1025,16 +1043,16 @@ def test_runtime_list_thread_digests_filters_subagents(tmp_path: Path) -> None:
         item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "child work"}]},
     )
 
-    digests = list_thread_digests(state_dir=tmp_path, kind="subagent", parent_thread_id=parent)
+    digests = list_thread_digests(state_dir=tmp_path, kind="workflow_node", parent_thread_id=parent)
 
     assert [digest["thread_id"] for digest in digests] == [child]
     assert digests[0]["items"] == [{"role": "user", "text": "child work"}]
 
 
-def test_runtime_thread_helpers_do_not_create_legacy_thread_directories(tmp_path: Path) -> None:
+def test_runtime_thread_helpers_do_not_create_jsonl_thread_directories(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     parent = store.create_thread("Parent")
-    child = store.create_thread("Subagent", kind="subagent", parent_thread_id=parent)
+    child = store.create_thread("Workflow node", kind="workflow_node", parent_thread_id=parent)
     store.append(
         child,
         "item.user",
@@ -1043,15 +1061,13 @@ def test_runtime_thread_helpers_do_not_create_legacy_thread_directories(tmp_path
     )
 
     assert not (tmp_path / "threads").exists()
-    assert not (tmp_path / "subthreads").exists()
 
     assert thread_digest(parent, state_dir=tmp_path)["thread_id"] == parent
-    assert list_thread_digests(state_dir=tmp_path, kind="subagent", parent_thread_id=parent)[0][
+    assert list_thread_digests(state_dir=tmp_path, kind="workflow_node", parent_thread_id=parent)[0][
         "thread_id"
     ] == child
 
     assert not (tmp_path / "threads").exists()
-    assert not (tmp_path / "subthreads").exists()
 
 
 def test_runtime_look_at_returns_structured_event(tmp_path: Path, capsys) -> None:

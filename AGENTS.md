@@ -1,12 +1,12 @@
 # uv-agent Project Rules
 
-This repository builds `uv-agent`, an experimental coding agent with a Textual TUI. This file records the repository rules an agent should follow while editing the project.
+This repository builds `uv-agent`, an experimental coding agent with a terminal TUI. This file records the repository rules an agent should follow while editing the project.
 
 ## Project Shape
 
-- `src/uv_agent/`: host application, configuration, model clients, session store, Python runner, project rules, skills/MCP discovery, and TUI.
-- `src/uv_agent_runtime/`: helper package installed into the project shared `scriptenv` uv project so scripts can access file helpers, dependency helpers, subprocess helpers, structured events, image attachment, subagent launch helpers, and MCP clients.
-- `tests/`: pytest coverage for runner, runtime, model clients, project rules, sessions, config, and Textual UI behavior.
+- `src/uv_agent/`: host application, configuration, model clients, session store, Python runner, project rules, builtin plugins, and TUI.
+- `src/uv_agent_runtime/`: helper package installed into the project shared `scriptenv` uv project so scripts can access file helpers, dependency helpers, subprocess helpers, structured events, image attachment, thread inspection helpers, and plugin runtime namespaces.
+- `tests/`: pytest coverage for runner, runtime, model clients, project rules, sessions, config, plugins, and TUI behavior.
 
 ## Hard Boundaries
 
@@ -32,13 +32,8 @@ This repository builds `uv-agent`, an experimental coding agent with a Textual T
 
 ## TUI Rules
 
-- New TUI development should target `src/uv_agent/tui2/` by default. The legacy
-  Textual implementation under `src/uv_agent/tui/` is deprecated and retained
-  only for compatibility; avoid extending or changing it unless the user
-  explicitly asks for `tui`/Textual work or a compatibility fix requires it.
-- Legacy Textual TUI tests in `tests/test_tui.py` are skipped by default. Run
-  them only when needed with `uv run pytest --run-legacy-tui tests/test_tui.py`.
-- TUI uses Textual and should remain a Codex-style single transcript with a bottom composer.
+- TUI development targets `src/uv_agent/tui/`.
+- TUI is terminal-rendered and should remain a Codex-style single transcript with a bottom composer.
 - Composer is multi-line: Enter inserts a newline; Ctrl+Enter or Ctrl+J sends.
 - Typing `/` from an empty composer opens the full-screen command picker. Editing or deleting an existing slash command must not reopen it.
 - Full-screen pickers must support keyboard and mouse: type to filter, arrows/PageUp/PageDown to move, Enter to select, Esc to close.
@@ -63,6 +58,6 @@ This repository builds `uv-agent`, an experimental coding agent with a Textual T
 ## Verification
 
 - Run `uv run pytest` before committing meaningful behavior changes.
-- For TUI interaction changes, add or update Textual `run_test` coverage. Manual screenshots can be exported with `App.export_screenshot()` into `.uv-agent/screenshots/`.
+- For TUI interaction changes, add or update focused renderer, state, or app coverage under `tests/test_tui.py` and `tests/test_tui_streaming.py`.
 - Before committing, check `git status --short` and ensure no secrets or ignored local artifacts are staged.
 - Once `uv run pytest` passes for a meaningful change, proactively create a focused git commit with a clear message describing the change; do not wait to be asked. Do not push unless the user explicitly requests it.

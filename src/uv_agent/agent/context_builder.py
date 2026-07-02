@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 from html import escape as xml_escape
 from pathlib import Path
@@ -12,7 +11,6 @@ from uv_agent.prompts import (
     MODEL_LEVELS_LEVEL_TEMPLATE,
     MODEL_LEVELS_RULE,
     MODEL_LEVELS_TEMPLATE,
-    MODEL_LEVELS_WORKFLOW_DEFAULT_TEMPLATE,
     RUNTIME_ENVIRONMENT_DEPENDENCIES_EMPTY,
     RUNTIME_ENVIRONMENT_DEPENDENCY_TEMPLATE,
     RUNTIME_ENVIRONMENT_PERSISTENCE,
@@ -59,7 +57,6 @@ def model_levels_context(config: AppConfig) -> str:
     )
     return MODEL_LEVELS_TEMPLATE.format(
         default=xml_text(config.runtime.default_level),
-        workflow_default="",
         levels=levels,
         rule=MODEL_LEVELS_RULE,
     )
@@ -67,11 +64,6 @@ def model_levels_context(config: AppConfig) -> str:
 
 def runtime_helpers_context() -> str:
     return RUNTIME_HELPERS_CONTEXT
-
-
-def context_fingerprint(text: str) -> str:
-    """Stable fingerprint for dynamic per-turn context."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def xml_text(value: object) -> str:

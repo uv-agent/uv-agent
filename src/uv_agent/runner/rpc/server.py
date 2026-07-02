@@ -23,6 +23,14 @@ if TYPE_CHECKING:
 DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024
 
 
+class _RuntimeRPCHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # Runtime RPC is an internal transport.  Request-level failures are
+        # converted to JSON-RPC errors where possible; worker tracebacks would
+        # leak implementation details into the TUI/terminal.
+        return
+
+
 class RuntimeRPCSessionHandle:
     """Handle returned to the runner for closing a per-run RPC session."""
 
@@ -77,7 +85,7 @@ class RuntimeRPCServer:
                 return self._url
 
             handler = self._handler_class()
-            httpd = ThreadingHTTPServer((self.host, 0), handler)
+            httpd = _RuntimeRPCHTTPServer((self.host, 0), handler)
             httpd.daemon_threads = True
             self._httpd = httpd
             host, port = httpd.server_address[:2]
@@ -180,6 +188,12 @@ class RuntimeRPCServer:
                 self.send_error(HTTPStatus.NOT_FOUND)
 
             def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+                try:
+                    self._do_POST()
+                except Exception as exc:
+                    self._send_internal_error(exc)
+
+            def _do_POST(self) -> None:
                 if self.path != "/rpc":
                     self._discard_request_body()
                     self.send_error(HTTPStatus.NOT_FOUND)
@@ -257,5 +271,24 @@ class RuntimeRPCServer:
                 self.end_headers()
                 if body:
                     self.wfile.write(body)
+
+            def _send_internal_error(self, exc: Exception) -> None:
+                body = json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": -32603,
+                            "message": "Internal error",
+                            "data": {"type": exc.__class__.__name__},
+                        },
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                try:
+                    self._send_bytes(HTTPStatus.INTERNAL_SERVER_ERROR, body, content_type="application/json; charset=utf-8")
+                except Exception:
+                    return
 
         return RuntimeRPCRequestHandler

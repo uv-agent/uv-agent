@@ -1,6 +1,6 @@
 # uv-agent
 
-<img align="right" src="docs/t2.png" alt="uv-agent tui2 screenshot" width="300">
+<img align="right" src="docs/t2.png" alt="uv-agent tui screenshot" width="300">
 
 [简体中文](README.zh-CN.md)
 
@@ -10,8 +10,9 @@ auditable, replayable, and interruptible.**
 `uv-agent` channels all model capabilities through a single, well-defined exit: the
 model can only touch the outside world via `run_python`. Each call is a complete
 Python script executed in a `uv run`-managed isolated environment, using
-`uv_agent_runtime` helpers for file editing, command execution, code search, MCP,
-sub-agents, images, and more. With only one exit, you can replay any run and see
+`uv_agent_runtime` helpers for file editing, command execution, code search,
+images, and plugin-provided capabilities such as MCP clients and workflow graphs.
+With only one exit, you can replay any run and see
 exactly what happened and why.
 
 The project is still experimental. Public APIs, config fields, and runtime behavior
@@ -29,7 +30,7 @@ may change.
   loss. Recent context is retained verbatim (K tokens) to avoid losing key details.
 - **Python managed runtime** — scripts run in a project-shared `uv` environment.
   `uv_agent_runtime` provides helpers for read/write/edit, FFF-backed search,
-  subprocesses, dependency installation, sub-agents, MCP clients, and more.
+  subprocesses, dependency installation, images, and plugin-provided namespaces.
   Scripts serve as documentation — no opaque shell commands.
 - **Plugin system** — plain Python packages discovered via `uv_agent.plugins` entry
   point. Register runtime helpers, subscribe to events, submit turns from external
@@ -42,7 +43,7 @@ may change.
   to prevent stale-context errors.
 - **Goal mode durable memory** — `/goal` creates a per-thread checklist/notes layer
   independent of the chat transcript. After compaction or resume, the model consults
-  Goal files rather than relying solely on summarized history.
+  goal plugin state rather than relying solely on summarized history.
 - **Agent View parallel workspaces** — dispatch bug investigations, implementation
   experiments, and test fixes to isolated Git worktree background sessions. Track
   them all from a single dashboard.
@@ -190,7 +191,6 @@ Supported API formats:
   },
   "runtime": {
     "default_level": "deepseek-flash",
-    "ask_default_level": "deepseek-flash",
     "store_provider_response": false,
     "max_agent_rounds": 1000,
     "compression": {
@@ -257,17 +257,13 @@ settings. See [configuration](docs/configuration.md) for every option and
   cache compaction judge details.
 - `/goal enable [objective]` for durable task checklists across long sessions.
 - Agent View dispatches background tasks to isolated Git worktrees.
-- Use `uv-agent tui` for the legacy Textual panels (`/config`, `/models`, etc.).
-
 See [TUI and slash commands](docs/tui.md) for the full list.
 
 ## TUI Interfaces
 
-- **tui2** (default, `uv-agent` or `uv-agent tui2`) — lightweight ANSI TUI rendered
+- **tui** (default, `uv-agent` or `uv-agent tui`) — lightweight ANSI TUI rendered
   directly in the terminal. Compact status rows, streaming events, Goal/Worktree
   mode, and image attachments.
-- **Textual TUI** (`uv-agent tui`) — deprecated, kept for compatibility. The older
-  Textual widget-based interface. Screenshot: [docs/t1.png](docs/t1.png).
 
 ## Agent View
 
@@ -279,8 +275,9 @@ from one panel.
 ## Plugins
 
 Plugins are Python packages discovered via the `uv_agent.plugins` entry point. They
-run in the uv-agent host process and can register runtime helpers, subscribe to
-events, and submit turns from external systems.
+run in the uv-agent host process and can register runtime helpers, actions,
+commands, UI providers, model context, i18n text, event subscriptions, and
+programmatic turn submission.
 
 ```powershell
 uvx --with your-uv-agent-plugin uv-agent@latest
@@ -296,9 +293,9 @@ Every model turn = stable system prompt + on-demand structured context.
   project-shared uv environment and import `uv_agent_runtime` helpers. The uv
   environment and working directory are separate; the cwd can change via
   `enter_dir` or Worktree mode.
-- Runtime context (helper lists, skills, MCP servers, etc.) uses fingerprinted
-  incremental updates — only changed parts are injected, and removed capabilities
-  are explicitly marked.
+- Runtime context (helper lists, skills, MCP servers, etc.) is plugin-owned epoch
+  context. Plugins publish full epoch context after refresh/compaction and may
+  enqueue explicit XML updates when their own state changes.
 - Workspace rules are disclosed progressively: index first, full AGENTS.md only
   when entering the relevant directory.
 - Goal mode provides a durable checklist/notes layer independent of the chat

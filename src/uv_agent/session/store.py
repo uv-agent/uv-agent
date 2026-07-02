@@ -33,6 +33,7 @@ VISIBLE_HISTORY_EVENT_TYPES = {
     "item.compaction",
     "thread.token_estimation_warning",
     "thread.model_switch_warning",
+    "thread.plugin_epoch_context_warning",
     "turn.stream_retry",
     "turn.interrupted",
     "turn.error",
@@ -131,37 +132,17 @@ class ThreadStore:
         self,
         data_dir: Path,
         *,
-        threads_dir: Path | None = None,
-        subthreads_dir: Path | None = None,
         host_events: "HostEventBus | None" = None,
     ) -> None:
         self.data_dir = data_dir.resolve()
-        # threads_dir/subthreads_dir are accepted for older construction sites,
-        # but SQLite is now the only source of truth for thread state.
-        self.threads_dir = threads_dir or self.data_dir / "threads"
-        self.subthreads_dir = subthreads_dir or self.data_dir / "subthreads"
         self.db_path = state_db_path(self.data_dir)
         self._lock_owner_id = new_id("owner")
         self._held_thread_locks: dict[str, str] = {}
         self._history_segment_cache: OrderedDict[tuple[Any, ...], ThreadHistorySegment] = OrderedDict()
         self._host_events = host_events
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._remove_empty_legacy_thread_dirs()
         with self._connect():
             pass
-
-    def _remove_empty_legacy_thread_dirs(self) -> None:
-        """Remove obsolete empty JSONL directories left by pre-SQLite stores."""
-
-        for path in (self.threads_dir, self.subthreads_dir):
-            try:
-                path.rmdir()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                # Preserve non-empty directories so legacy JSONL history is not
-                # discarded implicitly during startup.
-                pass
 
     def create_thread(
         self,
@@ -483,12 +464,11 @@ class ThreadStore:
             ).fetchone()
         return row is not None
 
-    def list_threads(self) -> list[dict[str, Any]]:
-        return self._list_threads(kind="thread")
+    def list_threads(self, *, kind: str = "thread") -> list[dict[str, Any]]:
+        return self._list_threads(kind=kind)
 
-    def list_subthreads(self, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
-        return self._list_threads(kind="subagent", parent_thread_id=parent_thread_id)
-
+    def list_child_threads(self, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
+        return self._list_threads(exclude_kind="thread", parent_thread_id=parent_thread_id)
 
     def get_external_thread(self, *, owner_plugin: str, source: str, external_id: str) -> str | None:
         source = str(source).strip()
@@ -562,30 +542,13 @@ class ThreadStore:
             "turn_count": int(metadata.get("turn_count") or 0),
             "interrupted_turn_count": int(metadata.get("interrupted_turn_count") or 0),
             "latest_compaction": _compaction_summary(compaction or metadata.get("latest_compaction")),
-            "goal_mode": metadata.get("goal_mode"),
             "items": digest_items(events, include_tools=include_tools),
         }
-        for key in (
-            "latest_cwd",
-            "worktree_status",
-            "worktree_branch",
-            "worktree_path",
-            "worktree_base_ref",
-            "worktree_origin_root",
-            "worktree_head",
-            "worktree_created_at",
-            "worktree_merge_prompted_at",
-            "worktree_deleted_at",
-            "worktree_deleted_head",
-            "worktree_deleted_status",
-            "agent_view_joined",
-            "agent_view_joined_at",
-            "agent_view_source",
-            "agent_view_deleted",
-            "agent_view_deleted_at",
-        ):
-            if metadata.get(key) is not None:
-                digest[key] = metadata.get(key)
+        for key, value in metadata.items():
+            if key not in _METADATA_COLUMNS and key not in digest and value is not None:
+                digest[key] = value
+        if metadata.get("latest_cwd") is not None:
+            digest["latest_cwd"] = metadata.get("latest_cwd")
         return digest
 
     def list_thread_digests(
@@ -717,11 +680,7 @@ class ThreadStore:
         current[self._context_lock_key(thread_id)] = (token, depth)
         return _THREAD_LOCK_CONTEXT.set(current)
 
-    def _read_lock_owner(self, thread_id: str | Path) -> dict[str, Any]:
-        # Accept Path for compatibility with tests or older callers that passed
-        # lock_path objects to the private helper.
-        if isinstance(thread_id, Path):
-            return {}
+    def _read_lock_owner(self, thread_id: str) -> dict[str, Any]:
         with self._connect() as db:
             row = db.execute(
                 "SELECT thread_id, owner_id, token, pid, created_at FROM thread_locks WHERE thread_id = ?",
@@ -841,15 +800,28 @@ class ThreadStore:
             ).fetchone() is not None
         return rows, has_more
 
-    def _list_threads(self, *, kind: str, parent_thread_id: str | None = None) -> list[dict[str, Any]]:
-        clauses = ["kind = ?"]
-        params: list[Any] = [kind]
+    def _list_threads(
+        self,
+        *,
+        kind: str | None = None,
+        exclude_kind: str | None = None,
+        parent_thread_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if exclude_kind is not None:
+            clauses.append("kind != ?")
+            params.append(exclude_kind)
         if parent_thread_id is not None:
             clauses.append("parent_thread_id = ?")
             params.append(parent_thread_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as db:
             rows = db.execute(
-                f"SELECT * FROM threads WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC",
+                f"SELECT * FROM threads {where} ORDER BY updated_at DESC",
                 params,
             ).fetchall()
         return [_metadata_from_row(row) for row in rows]
@@ -1005,40 +977,6 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
             metadata["latest_cwd"] = cwd
         return
 
-    if event_type == "thread.worktree_created":
-        for key in (
-            "worktree_status",
-            "worktree_branch",
-            "worktree_path",
-            "worktree_base_ref",
-            "worktree_origin_root",
-            "worktree_head",
-            "worktree_created_at",
-        ):
-            value = str(event.get(key) or "").strip()
-            if value:
-                metadata[key] = value
-        metadata["worktree_status"] = metadata.get("worktree_status") or "active"
-        return
-
-    if event_type == "thread.worktree_merge_prompted":
-        metadata["worktree_merge_prompted_at"] = event.get("created_at")
-        return
-
-    if event_type == "thread.worktree_deleted":
-        metadata["worktree_status"] = "deleted"
-        for key in (
-            "worktree_deleted_at",
-            "worktree_deleted_head",
-        ):
-            value = str(event.get(key) or "").strip()
-            if value:
-                metadata[key] = value
-        status = str(event.get("worktree_deleted_status") or "")
-        if status:
-            metadata["worktree_deleted_status"] = status
-        return
-
     if event_type == "thread.level_updated":
         level = str(event.get("level") or "").strip()
         model = str(event.get("model") or "").strip()
@@ -1079,36 +1017,6 @@ def _apply_metadata_event(metadata: dict[str, Any], event: dict[str, Any]) -> No
     if event_type == "thread.agent_view_deleted":
         metadata["agent_view_deleted"] = True
         metadata["agent_view_deleted_at"] = event.get("created_at")
-        return
-
-    if event_type == "thread.goal_mode_updated":
-        enabled = bool(event.get("enabled"))
-        previous = metadata.get("goal_mode")
-        if not isinstance(previous, dict):
-            previous = {}
-        metadata["goal_mode"] = {
-            "enabled": enabled,
-            "status": "enabled" if enabled else "disabled",
-            "updated_at": event.get("created_at"),
-            "objective": event.get("objective") or previous.get("objective") or "",
-            "files": event.get("files") or previous.get("files") or {},
-            "_event_id": event.get("_event_id"),
-        }
-        return
-
-    if event_type == "thread.goal_files_reset":
-        current = metadata.get("goal_mode")
-        if not isinstance(current, dict):
-            current = {"enabled": False, "status": "disabled"}
-        current = dict(current)
-        current["enabled"] = False
-        current["status"] = "disabled"
-        current["objective"] = event.get("objective") or ""
-        current["files"] = event.get("files") or current.get("files") or {}
-        current["reset_at"] = event.get("created_at")
-        current["updated_at"] = event.get("created_at")
-        current["_reset_event_id"] = event.get("_event_id")
-        metadata["goal_mode"] = current
         return
 
     if event_type == "item.user":

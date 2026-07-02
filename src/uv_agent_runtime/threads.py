@@ -19,6 +19,14 @@ REQUIRED_RUN_COLUMNS = {
 EpochSelector = Literal["latest", "all"] | int | Sequence[int | str]
 
 
+class ThreadStateConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class ThreadCompactionSummary(TypedDict):
     """Compact summary for one compaction boundary."""
 
@@ -28,14 +36,14 @@ class ThreadCompactionSummary(TypedDict):
 
 
 class ThreadDigestItem(TypedDict):
-    """Legacy compact conversation item used by thread_digest/list_thread_digests."""
+    """Compact conversation item used by thread_digest/list_thread_digests."""
 
     role: str
     text: str
 
 
 class ThreadDigest(TypedDict):
-    """Compact legacy digest for a stored thread."""
+    """Compact digest for a stored thread."""
 
     thread_id: str
     title: str
@@ -366,7 +374,7 @@ def thread_digest(
     since_last_compaction: bool = True,
     include_tools: bool = False,
 ) -> ThreadDigest:
-    """Return a compact legacy human/assistant digest for one stored thread."""
+    """Return a compact human/assistant digest for one stored thread."""
 
     base = _state_dir(state_dir)
     with _connect(base) as db:
@@ -438,7 +446,7 @@ def _connect(base: Path) -> sqlite3.Connection:
         raise FileNotFoundError(f"Missing uv-agent state database: {path}")
     # Runtime scripts only introspect conversation state. Opening in read-only
     # URI mode prevents helper bugs from mutating host-owned project state.
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, factory=ThreadStateConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")

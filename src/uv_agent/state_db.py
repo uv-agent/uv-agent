@@ -11,6 +11,19 @@ SQLITE_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
 
 
+class StateDbConnection(sqlite3.Connection):
+    """SQLite connection that closes when used as a context manager."""
+
+    _close_on_context_exit: bool
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            if getattr(self, "_close_on_context_exit", True):
+                self.close()
+
+
 class StateDbError(RuntimeError):
     """Raised when the project state database cannot be used safely."""
 
@@ -35,14 +48,21 @@ def connect_state_db(data_dir: Path, *, check_same_thread: bool = True) -> sqlit
         db_path,
         timeout=SQLITE_TIMEOUT_SECONDS,
         check_same_thread=check_same_thread,
+        factory=StateDbConnection,
     )
+    connection._close_on_context_exit = False
     connection.row_factory = sqlite3.Row
     # ``timeout`` only affects locks encountered while opening the connection.
     # PRAGMA busy_timeout is per-connection and covers later statements, which
-    # matters when multiple workflow-node subprocesses append to the same project DB.
+    # matters when multiple host and runtime processes append to the same project DB.
     connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     connection.execute("PRAGMA foreign_keys=ON")
-    _ensure_schema(connection)
+    try:
+        _ensure_schema(connection)
+    except Exception:
+        connection.close()
+        raise
+    connection._close_on_context_exit = True
     return connection
 
 
@@ -199,8 +219,6 @@ def _create_schema(connection: sqlite3.Connection) -> None:
               ON run_events(run_id, event_id);
             """
         )
-        _create_workflow_schema(connection)
-        _create_scheduler_schema(connection)
         _create_host_lease_schema(connection)
         _create_plugin_storage_schema(connection)
         connection.execute(
@@ -214,11 +232,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 
 
 def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
-    """Add workflow persistence tables to an existing v1 project database."""
+    """Advance old project databases past the former plugin-table schema version."""
 
     with connection:
-        _create_workflow_schema(connection)
-        _create_scheduler_schema(connection)
         _create_host_lease_schema(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
@@ -240,11 +256,9 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
 
 
 def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
-    """Add persistent scheduler tables."""
+    """Advance old project databases past a former plugin-table schema version."""
 
     with connection:
-        _create_scheduler_schema(connection)
-        _ensure_workflow_executor_columns(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             ("4",),
@@ -252,10 +266,9 @@ def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
 
 
 def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
-    """Add host-side WorkflowExecutor lease columns."""
+    """Advance old project databases past a former plugin-table lease version."""
 
     with connection:
-        _ensure_workflow_executor_columns(connection)
         _create_host_lease_schema(connection)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
@@ -297,18 +310,6 @@ def _create_host_lease_schema(connection: sqlite3.Connection) -> None:
         );
         """
     )
-
-
-def _ensure_workflow_executor_columns(connection: sqlite3.Connection) -> None:
-    table = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'workflow_nodes'").fetchone()
-    if table is None:
-        _create_workflow_schema(connection)
-        return
-    columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflow_nodes)")}
-    if "executor_id" not in columns:
-        connection.execute("ALTER TABLE workflow_nodes ADD COLUMN executor_id TEXT")
-    if "lease_until" not in columns:
-        connection.execute("ALTER TABLE workflow_nodes ADD COLUMN lease_until TEXT")
 
 
 def _create_plugin_storage_schema(connection: sqlite3.Connection) -> None:
@@ -354,135 +355,6 @@ def _create_plugin_storage_schema(connection: sqlite3.Connection) -> None:
         """
     )
 
-
-def _create_scheduler_schema(connection: sqlite3.Connection) -> None:
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS schedules (
-          schedule_id TEXT PRIMARY KEY,
-          name TEXT,
-          description TEXT,
-          kind TEXT NOT NULL,
-          enabled INTEGER NOT NULL DEFAULT 1,
-          action_json TEXT NOT NULL,
-          timing_json TEXT NOT NULL,
-          timezone TEXT,
-          next_run_at TEXT,
-          misfire_policy TEXT NOT NULL DEFAULT 'skip',
-          overlap_policy TEXT NOT NULL DEFAULT 'skip',
-          owner_type TEXT NOT NULL DEFAULT 'agent',
-          owner_name TEXT,
-          metadata_json TEXT NOT NULL DEFAULT '{}',
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_schedules_enabled_next_run
-          ON schedules(enabled, next_run_at);
-
-        CREATE TABLE IF NOT EXISTS schedule_runs (
-          run_id TEXT PRIMARY KEY,
-          schedule_id TEXT,
-          status TEXT NOT NULL,
-          action_json TEXT NOT NULL,
-          schedule_snapshot_json TEXT NOT NULL,
-          result_json TEXT NOT NULL DEFAULT '{}',
-          error_json TEXT NOT NULL DEFAULT '{}',
-          workflow_id TEXT,
-          due_at TEXT,
-          started_at TEXT NOT NULL,
-          completed_at TEXT,
-          FOREIGN KEY(schedule_id) REFERENCES schedules(schedule_id) ON DELETE SET NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_started
-          ON schedule_runs(schedule_id, started_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_schedule_runs_started
-          ON schedule_runs(started_at DESC);
-        """
-    )
-
-
-def _create_workflow_schema(connection: sqlite3.Connection) -> None:
-    """Create workflow task-graph tables and indexes."""
-
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS workflows (
-          workflow_id TEXT PRIMARY KEY,
-          parent_thread_id TEXT,
-          parent_turn_id TEXT,
-          parent_run_id TEXT,
-          objective TEXT NOT NULL,
-          status TEXT NOT NULL,
-          default_model_level TEXT,
-          current_checkpoint_id TEXT,
-          state_json TEXT NOT NULL DEFAULT '{}',
-          metadata_json TEXT NOT NULL DEFAULT '{}',
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS workflow_nodes (
-          node_id TEXT PRIMARY KEY,
-          workflow_id TEXT NOT NULL,
-          key TEXT,
-          kind TEXT NOT NULL,
-          status TEXT NOT NULL,
-          dependencies_json TEXT NOT NULL DEFAULT '[]',
-          prompt TEXT,
-          model_level TEXT,
-          thread_id TEXT,
-          run_id TEXT,
-          result_summary TEXT,
-          result_json TEXT NOT NULL DEFAULT '{}',
-          error_json TEXT NOT NULL DEFAULT '{}',
-          metadata_json TEXT NOT NULL DEFAULT '{}',
-          created_at TEXT NOT NULL,
-          started_at TEXT,
-          completed_at TEXT,
-          executor_id TEXT,
-          lease_until TEXT,
-          FOREIGN KEY(workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS workflow_checkpoints (
-          checkpoint_id TEXT PRIMARY KEY,
-          workflow_id TEXT NOT NULL,
-          node_id TEXT NOT NULL,
-          key TEXT NOT NULL,
-          status TEXT NOT NULL,
-          reason TEXT NOT NULL,
-          options_json TEXT NOT NULL DEFAULT '[]',
-          recommended_action TEXT,
-          snapshot_json TEXT NOT NULL DEFAULT '{}',
-          resolution_json TEXT NOT NULL DEFAULT '{}',
-          created_at TEXT NOT NULL,
-          resolved_at TEXT,
-          FOREIGN KEY(workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE,
-          FOREIGN KEY(node_id) REFERENCES workflow_nodes(node_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS workflow_events (
-          event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          workflow_id TEXT NOT NULL,
-          node_id TEXT,
-          type TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          payload_json TEXT NOT NULL,
-          FOREIGN KEY(workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_workflow_nodes_workflow_status
-          ON workflow_nodes(workflow_id, status);
-        CREATE INDEX IF NOT EXISTS idx_workflow_nodes_workflow_key
-          ON workflow_nodes(workflow_id, key);
-        CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_workflow_status
-          ON workflow_checkpoints(workflow_id, status);
-        CREATE INDEX IF NOT EXISTS idx_workflow_events_workflow_id
-          ON workflow_events(workflow_id, event_id);
-        CREATE INDEX IF NOT EXISTS idx_workflows_parent_thread
-          ON workflows(parent_thread_id, status);
-        """
-    )
 
 def _ensure_wal(connection: sqlite3.Connection) -> None:
     """Switch to WAL only when needed so normal opens stay read-mostly."""

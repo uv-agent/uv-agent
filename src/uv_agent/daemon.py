@@ -96,6 +96,12 @@ class DaemonLease:
 
 
 def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -103,6 +109,35 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _pid_alive_windows(pid: int) -> bool:
+    """Check process liveness on Windows without delivering a console signal."""
+
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    handle = kernel32.OpenProcess(process_query_limited_information, 0, pid)
+    if not handle:
+        # ERROR_ACCESS_DENIED means a process exists but cannot be queried; most
+        # other failures for this use case mean the PID is gone or invalid.
+        return ctypes.get_last_error() == 5
+    try:
+        exit_code = ctypes.c_uint32()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 async def run_daemon(*, project_root: Path, data_dir: Path | None = None, replace: bool = False) -> None:
@@ -117,8 +152,6 @@ async def run_daemon(*, project_root: Path, data_dir: Path | None = None, replac
         lease.acquire(replace=replace)
         lease.start_heartbeat()
         await engine.plugins.start()
-        engine.workflow_executor.start()
-        engine.scheduler.start()
         print(f"uv-agent daemon started pid={os.getpid()} state={engine.thread_store.data_dir}", flush=True)
         await stop.wait()
     finally:

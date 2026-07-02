@@ -47,7 +47,7 @@ def test_load_project_rules_caps_total_context(tmp_path: Path) -> None:
     assert context.truncated
     assert len(context.rules) == 2
     rendered = context.render(context_path=".")
-    assert '<workspace_rules path="." truncated="true">' in rendered
+    assert '<agent_workspace_rules path="." truncated="true">' in rendered
     assert '<rule file="' in rendered
     assert 'truncated="true"' in rendered
     assert "...[truncated]" in rendered
@@ -67,7 +67,7 @@ def test_workspace_rule_index_is_bounded_and_reports_limits(tmp_path: Path) -> N
 
     assert [path.name for path in index.paths] == ["AGENTS.md", "AGENTS.md"]
     assert index.depth_limited is True
-    assert "<workspace_rule_index>" in rendered
+    assert "<agent_workspace_rule_index>" in rendered
     assert "在活动 workspace 下发现" in rendered
     assert "scan_depth: 1" in rendered
     assert "max_entries: 2" in rendered
@@ -96,7 +96,7 @@ def test_load_directory_rules_only_loads_current_directory(tmp_path: Path) -> No
     context = load_directory_rules(project, root=project)
 
     rendered = context.render(root=project)
-    assert "<workspace_rules>" in rendered
+    assert "<agent_workspace_rules>" in rendered
     assert '<rule file="AGENTS.md">' in rendered
     assert "root" in rendered
     assert "child" not in rendered

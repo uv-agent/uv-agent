@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from .i18n import LocalizedText
 
 PluginCapability = Literal[
     "runtime_namespace",
@@ -34,8 +36,8 @@ class PluginManifest:
 
     id: str
     version: str
-    display_name: str
-    description: str
+    display_name: LocalizedText
+    description: LocalizedText
     builtin: bool = False
     default_enabled: bool = True
     priority: int = 100
@@ -61,7 +63,7 @@ class PluginConfig:
 @dataclass
 class PluginStatus:
     id: str
-    display_name: str = ""
+    display_name: LocalizedText = ""
     state: PluginState = "discovered"
     builtin: bool = False
     first_load: bool = False
@@ -71,22 +73,8 @@ class PluginStatus:
 
 @dataclass(frozen=True)
 class SetupPlugin:
-    """Normalized plugin object loaded from builtin modules or entry points."""
+    """Plugin object loaded from builtin modules or entry points."""
 
     manifest: PluginManifest
     setup: Callable[[Any], Any]
     stop: Callable[[Any], Any] | None = None
-
-
-def normalize_manifest(value: PluginManifest | Mapping[str, Any]) -> PluginManifest:
-    """Accept dataclass or plain mapping manifests for third-party ergonomics."""
-
-    if isinstance(value, PluginManifest):
-        return value
-    if not isinstance(value, Mapping):
-        raise TypeError("plugin manifest must be a PluginManifest or mapping")
-    data = dict(value)
-    for key in ("dependencies", "optional_dependencies", "capabilities"):
-        if key in data and isinstance(data[key], Sequence) and not isinstance(data[key], (str, bytes, bytearray)):
-            data[key] = tuple(str(item) for item in data[key])
-    return PluginManifest(**data)

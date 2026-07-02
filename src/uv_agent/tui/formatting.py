@@ -538,13 +538,6 @@ def structured_event_markup(event: dict[str, Any]) -> Text:
     if kind == "workflow.checkpoint.reached":
         checkpoint = _workflow_event_ref(event, key_name="key", id_name="checkpoint_id")
         return line(prefix, markup("[magenta]workflow[/magenta] "), plain(f"checkpoint {checkpoint} reached", style="dim"))
-    if kind == "subagent.started":
-        return line(prefix, markup("[magenta]subagent[/magenta] [dim]started[/dim]"))
-    if kind == "subagent.completed":
-        thread_id = str(event.get("thread_id") or "")
-        summary = _event_first_line(event.get("summary"), max_chars=90)
-        detail = f" {short_thread(thread_id)}" if thread_id else ""
-        return line(prefix, markup("[magenta]subagent[/magenta] "), plain(f"completed{detail}", style="dim"), " ", summary)
     return line(prefix, plain(kind, style="dim"), " ", plain(json.dumps(event, ensure_ascii=False), style="dim"))
 
 

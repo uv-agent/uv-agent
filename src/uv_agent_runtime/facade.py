@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 
-from . import codequery, codesearch, dependencies, events as _events, files as _files, mcp as _mcp, patch as _patch
+from . import codequery, codesearch, dependencies, events as _events, files as _files, patch as _patch
 from .errors import HelperValueError
 from . import textops, threads as _threads, vision as _vision
 from .cwd import enter_dir as _enter_dir
@@ -541,60 +541,6 @@ class _ThreadsNamespace:
         )
 
 
-class _McpNamespace:
-    @_track("mcp.list")
-    def list(
-        self,
-        *,
-        config_paths: builtins.list[str | Path] | None = None,
-        cwd: str | Path | None = None,
-    ) -> builtins.list[dict[str, Any]]:
-        return _mcp.list_declared_servers(config_paths=config_paths, cwd=cwd)
-
-    @_track("mcp.connect")
-    def connect(
-        self,
-        name: str,
-        *,
-        config_paths: builtins.list[str | Path] | None = None,
-        cwd: str | Path | None = None,
-        timeout: float | None = 30,
-    ) -> _mcp.McpClient:
-        return _mcp.connect_named(name, config_paths=config_paths, cwd=cwd, timeout_s=timeout)
-
-    @_track("mcp.connect_url")
-    def connect_url(
-        self,
-        url: str,
-        *,
-        transport: _mcp.McpTransport = "streamable_http",
-        timeout: float | None = 30,
-    ) -> _mcp.McpClient:
-        return _mcp.connect_url(url, transport=transport, timeout_s=timeout)
-
-    @_track("mcp.connect_stdio")
-    def connect_stdio(
-        self,
-        command: Sequence[str],
-        *,
-        cwd: str | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout: float | None = 30,
-    ) -> _mcp.McpClient:
-        return _mcp.connect_stdio(builtins.list(command), cwd=cwd, env=env, timeout_s=timeout)
-
-    @_track("mcp.connect_declared")
-    def connect_declared(
-        self,
-        name: str,
-        *,
-        config_path: str | Path = ".agents/mcp.json",
-        cwd: str | None = None,
-        timeout: float | None = 30,
-    ) -> _mcp.McpClient:
-        return _mcp.connect_declared(name, config_path=config_path, cwd=cwd, timeout_s=timeout)
-
-
 class _EventsNamespace:
     @_track("events.emit")
     def emit(self, kind: str, **payload: Any) -> dict[str, Any]:
@@ -924,5 +870,4 @@ def _common_roots(paths: Sequence[str]) -> builtins.list[Path]:
 
 deps = _DepsNamespace()
 threads = _ThreadsNamespace()
-mcp = _McpNamespace()
 events = _EventsNamespace()

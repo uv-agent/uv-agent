@@ -13,9 +13,9 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["tui2", "tui", "workflow-node", "daemon"],
-        default="tui2",
-        help="Run the default ANSI TUI, Textual TUI, daemon, or execute a workflow node.",
+        choices=["tui", "workflow-node", "daemon"],
+        default="tui",
+        help="Run the terminal TUI, daemon, or execute a workflow node.",
     )
     parser.add_argument("--level", default=None, help="Model level to use for workflow-node mode.")
     parser.add_argument("--thread", default=None, help="Thread id to resume in workflow-node mode.")
@@ -39,10 +39,10 @@ def main() -> None:
     parser.add_argument("--replace", action="store_true", help="Replace an existing daemon for this project state.")
     parser.add_argument("prompt", nargs="*", help="Prompt text for workflow-node mode.")
     args = parser.parse_args()
-    if args.command == "tui2":
-        from uv_agent.tui2.app import AnsiUvAgentApp
+    if args.command == "tui":
+        from uv_agent.tui.app import UvAgentApp
 
-        AnsiUvAgentApp(project_root=Path.cwd()).run()
+        UvAgentApp(project_root=Path.cwd()).run()
         return
     if args.command == "daemon":
         from uv_agent.daemon import run_daemon
@@ -68,9 +68,7 @@ def main() -> None:
             )
         )
         return
-    from uv_agent.tui.app import UvAgentApp
-
-    UvAgentApp(project_root=Path.cwd()).run()
+    raise SystemExit(f"Unknown command: {args.command}")
 
 
 async def _workflow_node(
@@ -94,9 +92,9 @@ async def _workflow_node(
     try:
         if level is None:
             workflow_config = engine.config.plugins.plugin_config("builtin.workflow")
-            workflow_default = workflow_config.get("default_level")
-            if isinstance(workflow_default, str) and workflow_default:
-                level = workflow_default
+            configured_default_level = workflow_config.get("default_level")
+            if isinstance(configured_default_level, str) and configured_default_level:
+                level = configured_default_level
         if thread_id is None:
             title = prompt.splitlines()[0].strip()
             if len(title) > 80:

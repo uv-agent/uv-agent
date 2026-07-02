@@ -1,8 +1,8 @@
 # TUI And Slash Commands
 
-`uv-agent` opens a Textual TUI by default. The interface is a single transcript
-with a bottom composer, compact status footer, and full-screen panels for focused
-views such as threads, config, model levels, and MCP declarations.
+`uv-agent` opens the terminal-native TUI by default. The interface is a single
+transcript with a bottom composer, compact status footer, and full-screen panels
+for focused views such as threads, config, model levels, and MCP declarations.
 
 ```powershell
 uvx uv-agent@latest
@@ -112,10 +112,9 @@ Language choices are:
 See [configuration](configuration.md) for config file locations and schema.
 
 Completion notifications can add a short transcript event for background
-threads and play a completion sound. Windows uses the system notification sound
-in the Textual TUI; the terminal-native `tui2` uses a short buzzer-like terminal
-cue. Other platforms use the terminal bell. The active thread does not add an
-extra terminal event when it finishes.
+threads and play a completion sound. The terminal UI uses a short buzzer-like
+terminal cue when available; other platforms use the terminal bell. The active
+thread does not add an extra terminal event when it finishes.
 
 ## Transcript Events
 
@@ -127,7 +126,8 @@ items:
 - Python run start/result events
 - stdout/stderr summaries and truncation markers
 - structured runtime events such as `progress`, `result`, `look_at`,
-  `subagent.started`, and `subagent.completed`
+  `workflow.node.started`, `workflow.node.completed`, and
+  `workflow.checkpoint.reached`
 - compaction and image attachment notices
 - readable error cards with hints when available
 

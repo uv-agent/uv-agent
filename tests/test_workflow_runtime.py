@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import uv_agent_runtime as rt
+from uv_agent.builtin.workflow import service as workflow
 
 
 def test_workflow_wait_polls_host_executor_state(monkeypatch, tmp_path: Path) -> None:
@@ -15,14 +15,14 @@ def test_workflow_wait_polls_host_executor_state(monkeypatch, tmp_path: Path) ->
     # workflow.wait only observes persisted state; there is no subprocess-based
     # workflow-node execution hook left in the runtime helper.
 
-    wf = rt.workflow.start(objective="demo", default_model_level="deep")
+    wf = workflow.start(objective="demo", default_model_level="deep")
     node = wf.agent("Investigate the demo", key="investigate")
     checkpoint = wf.checkpoint(key="after_investigation", after=node, reason="Review direction", options=["continue", "abort"])
 
     assert wf.wait(timeout_s=0.01).status == "timeout"
 
-    now = rt.workflow._utc_now_iso()
-    with rt.workflow._connect(tmp_path) as db:
+    now = workflow._utc_now_iso()
+    with workflow._connect(tmp_path) as db:
         db.execute(
             """
             UPDATE workflow_nodes
@@ -30,7 +30,7 @@ def test_workflow_wait_polls_host_executor_state(monkeypatch, tmp_path: Path) ->
                 result_json = ?, error_json = '{}'
             WHERE node_id = ?
             """,
-            (now, "final node output\n", rt.workflow._json_dumps({"thread_id": "thr_node", "status": "completed"}), node.node_id),
+            (now, "final node output\n", workflow._json_dumps({"thread_id": "thr_node", "status": "completed"}), node.node_id),
         )
         db.execute(
             "UPDATE workflow_nodes SET status = 'completed', completed_at = ? WHERE node_id = ?",
@@ -61,7 +61,7 @@ def test_workflow_can_modify_pending_graph(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", "thr_parent")
 
-    wf = rt.workflow.start(objective="modify graph")
+    wf = workflow.start(objective="modify graph")
     first = wf.agent("old prompt", key="first")
     second = wf.agent("second", key="second", after=first)
 
@@ -80,7 +80,7 @@ def test_workflow_is_blocked_inside_workflow_node(monkeypatch, tmp_path: Path) -
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_KIND", "workflow_node")
 
     try:
-        rt.workflow.start("nested")
+        workflow.start("nested")
     except RuntimeError as exc:
         assert "main Agent" in str(exc)
     else:  # pragma: no cover - defensive assertion style for clearer failure output

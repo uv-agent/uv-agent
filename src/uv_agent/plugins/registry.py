@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 import re
 import threading
@@ -9,10 +8,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .helpers import validate_json_value, validate_payload
+from .i18n import LocalizedText
 
 _NAME_RE = re.compile(r"^[A-Za-z_]\w*$")
 _DOTTED_NAME_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
-RuntimeTransport = Literal["rpc", "local_module"]
 ActionHandler = Callable[..., Any]
 CommandHandler = Callable[..., Any]
 
@@ -46,10 +45,10 @@ class OpenPickerAction:
 @dataclass(frozen=True)
 class PickerItem:
     value: str
-    description: str = ""
+    description: LocalizedText = ""
     id: str = ""
     kind: str = "mention"
-    meta: str = ""
+    meta: LocalizedText = ""
 
 @dataclass(frozen=True)
 class RuntimeFunctionSpec:
@@ -71,7 +70,6 @@ class RuntimeNamespaceSpec:
     namespace: str
     plugin: str
     doc: str = ""
-    transport: RuntimeTransport = "rpc"
     module: str | None = None
     functions: tuple[RuntimeFunctionSpec, ...] = ()
 
@@ -90,35 +88,15 @@ class CommandSpec:
     name: str
     plugin: str
     handler: CommandHandler
-    description: str = ""
+    description: LocalizedText = ""
     aliases: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class StatusItem:
-    plugin: str
-    id: str
-    label: str
-    value: str = ""
-    priority: int = 100
-    style: str = ""
-
-
-@dataclass(frozen=True)
-class Panel:
-    plugin: str
-    id: str
-    title: str
-    kind: Literal["text", "list", "table", "todo", "progress"]
-    body: Any
-    priority: int = 100
 
 
 @dataclass(frozen=True)
 class PickerSource:
     plugin: str
     id: str
-    title: str
+    title: LocalizedText
     provider: Callable[..., Any]
     trigger: str = ""
 
@@ -152,7 +130,6 @@ class RuntimeNamespaceRegistry:
         functions: Mapping[str, Callable[..., Any] | RuntimeFunctionSpec] | Iterable[RuntimeFunctionSpec] = (),
         schemas: Mapping[str, dict[str, Any]] | None = None,
         docs: Mapping[str, str] | None = None,
-        transport: RuntimeTransport = "rpc",
         module: str | None = None,
     ) -> RuntimeNamespaceSpec:
         namespace = _validate_name(namespace, label="runtime namespace")
@@ -190,13 +167,12 @@ class RuntimeNamespaceRegistry:
         for spec in normalized:
             if spec.schema.get("type") != "object":
                 raise ValueError(f"Runtime helper {spec.full_name!r} requires an object JSON schema")
-            if transport == "rpc" and spec.fn is None:
-                raise ValueError(f"RPC runtime helper {spec.full_name!r} requires a callable")
+            if spec.fn is None:
+                raise ValueError(f"Runtime helper {spec.full_name!r} requires a callable")
         entry = RuntimeNamespaceSpec(
             namespace=namespace,
             plugin=plugin,
             doc=str(doc or "").strip(),
-            transport=transport,
             module=module,
             functions=normalized,
         )
@@ -244,7 +220,6 @@ class RuntimeNamespaceRegistry:
                 "name": namespace.namespace,
                 "plugin": namespace.plugin,
                 "doc": namespace.doc,
-                "transport": namespace.transport,
                 "module": namespace.module,
                 "functions": [
                     {
@@ -269,21 +244,31 @@ class RuntimeNamespaceRegistry:
             "plugin": function.plugin,
             "doc": function.doc,
             "schema": function.schema,
-            "transport": namespace.transport if namespace else "rpc",
             "module": namespace.module if namespace else None,
         }
 
-    async def call(self, full_name: str, payload: dict[str, Any], *, context: Any = None) -> Any:
+    async def call(
+        self,
+        full_name: str,
+        *,
+        args: list[Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        context: Any = None,
+    ) -> Any:
         spec = self.function(full_name)
         if spec is None or spec.fn is None:
             raise LookupError(f"Unknown runtime helper: {full_name}")
-        validate_payload(payload, spec.schema)
-        kwargs: dict[str, Any] = {"payload": payload}
-        if _accepts_context(spec.fn):
+        args = list(args or [])
+        kwargs = dict(kwargs or {})
+        validate_json_value({"args": args, "kwargs": kwargs}, label=f"runtime helper {full_name!r} arguments")
+        validate_payload(kwargs, spec.schema)
+        if "context" not in kwargs and _accepts_context(spec.fn):
             kwargs["context"] = context
-        result = spec.fn(**kwargs)
+        result = spec.fn(*args, **kwargs)
         if inspect.isawaitable(result):
             if spec.timeout_s is not None:
+                import asyncio
+
                 result = await asyncio.wait_for(result, timeout=spec.timeout_s)
             else:
                 result = await result
@@ -337,7 +322,15 @@ class CommandRegistry:
         self._reserved = {name if name.startswith("/") else f"/{name}" for name in reserved}
         self._commands: dict[str, CommandSpec] = {}
 
-    def register(self, *, plugin: str, name: str, handler: CommandHandler, description: str = "", aliases: Iterable[str] = ()) -> CommandSpec:
+    def register(
+        self,
+        *,
+        plugin: str,
+        name: str,
+        handler: CommandHandler,
+        description: LocalizedText = "",
+        aliases: Iterable[str] = (),
+    ) -> CommandSpec:
         command = _normalize_command(name)
         normalized_aliases = tuple(_normalize_command(alias) for alias in aliases)
         if command in self._reserved:
@@ -367,26 +360,8 @@ class CommandRegistry:
 class UiRegistry:
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._status: list[StatusItem] = []
-        self._panels: list[Panel] = []
         self._pickers: dict[str, PickerSource] = {}
         self._transcript: dict[str, TranscriptEventSpec] = {}
-
-    def register_status_item(self, item: StatusItem) -> None:
-        with self._lock:
-            self._status.append(item)
-
-    def status_items(self) -> list[StatusItem]:
-        with self._lock:
-            return sorted(self._status, key=lambda item: (item.priority, item.plugin, item.id))
-
-    def register_panel(self, panel: Panel) -> None:
-        with self._lock:
-            self._panels.append(panel)
-
-    def panels(self) -> list[Panel]:
-        with self._lock:
-            return sorted(self._panels, key=lambda item: (item.priority, item.plugin, item.id))
 
     def register_picker(self, picker: PickerSource) -> None:
         with self._lock:
@@ -440,6 +415,48 @@ def _normalize_command(value: str) -> str:
     if parts[0] != "" or any(part == "" for part in parts[1:]):
         raise ValueError(f"Invalid command name: {value!r}")
     return text
+
+
+def _normalize_picker_items(result: Any) -> list[PickerItem]:
+    if result is None:
+        return []
+    if isinstance(result, PickerItem):
+        return [result]
+    if isinstance(result, Mapping):
+        items = result.get("items", [])
+    else:
+        items = result
+    if not isinstance(items, Iterable) or isinstance(items, (str, bytes, bytearray)):
+        raise TypeError("Picker provider must return an iterable of picker items")
+    normalized: list[PickerItem] = []
+    for item in items:
+        if isinstance(item, PickerItem):
+            normalized.append(item)
+            continue
+        if isinstance(item, Mapping):
+            value = str(item.get("value") or "").strip()
+            if not value:
+                continue
+            normalized.append(
+                PickerItem(
+                    value=value,
+                    description=_localized_field(item.get("description")),
+                    id=str(item.get("id") or ""),
+                    kind=str(item.get("kind") or "mention"),
+                    meta=_localized_field(item.get("meta")),
+                )
+            )
+            continue
+        value = str(item or "").strip()
+        if value:
+            normalized.append(PickerItem(value=value))
+    return normalized
+
+
+def _localized_field(value: Any) -> LocalizedText:
+    if isinstance(value, Mapping):
+        return {str(key): str(text) for key, text in value.items() if text is not None}
+    return str(value or "")
 
 
 def _accepts_context(fn: Callable[..., Any]) -> bool:

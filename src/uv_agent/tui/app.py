@@ -1,226 +1,323 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import json
 import re
-import threading
-from dataclasses import replace
+import sqlite3
+import subprocess
+import sys
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from math import exp
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable, Literal, TypeAlias, cast
-
-from rich.text import Text
-from textual import events
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.css.query import NoMatches
-from textual.geometry import Offset
-from textual.screen import Screen
-from textual.reactive import reactive
-from textual.selection import Selection
-from textual.widget import Widget
-from textual.widgets import Button, Static, TextArea
-from textual.worker import Worker
+from typing import Any
 
 from uv_agent.atomic import atomic_replace
-from uv_agent.billing import billing_total_from_metadata, format_billing_total
-from uv_agent.config import ConfigError
-from uv_agent.environment import application_version, detect_user_language, host_environment_line
-from uv_agent.errors import (
-    error_renderable,
-    format_error,
-    is_retryable_provider_error,
-)
-from uv_agent.i18n import command_description, tr
+from uv_agent.environment import detect_user_language
+
 from uv_agent.ids import new_id
-from uv_agent.notifications import play_completion_sound
-from uv_agent.paths import project_state_dir, project_tui_clipboard_dir, uv_agent_home
+from uv_agent.i18n import tr
+from uv_agent.notifications import play_terminal_buzzer
+from uv_agent.paths import project_tui_clipboard_dir, uv_agent_home
+from uv_agent.plugins.i18n import localize_text
+from uv_agent.session import ThreadLockedError
 from uv_agent.session.store import VISIBLE_HISTORY_EVENT_TYPES
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
-from uv_agent.time import utc_now_iso
-from uv_agent.tui.config_panels import ConfigPanelMixin
-from uv_agent.tui.formatting import (
-    format_elapsed,
-    format_tokens,
-    join_lines,
-    parse_tool_payload,
-    plain,
-    RenderablePart,
-    renderable_plain,
-    short_thread,
-    tool_call_detail_highlight_markup,
-    tool_call_preview_line,
-    tool_call_summary_markup,
-    tool_detail_markup,
-    tool_timeline_markup,
-)
-from uv_agent.tui.image_support import ImageSupportMixin
-from uv_agent.tui.mentions import MentionMixin
-from uv_agent.tui.panels import (
-    FullscreenPanel,
-    ImagePreviewPanel,
-    PendingImagePreviewPanel,
-    PendingSendQueuePanel,
-    ToolDetailsPanel,
-    WorktreeBranchPanel,
-)
-from uv_agent.tui.state import (
-    CommandSpec,
-    MentionScanCache,
-    PendingImage,
-    PickerItem,
-    QueuedTurn,
-    ThreadActivityState,
-    ThreadRunState,
-    TopNotification,
-)
-from uv_agent.tui.timeline import (
-    ThreadTimelineState,
-    ThreadViewState,
-    TimelineItem,
-)
-from uv_agent.tui.styles import MAIN_APP_CSS
-from uv_agent.tui.widgets import (
-    ComposerTextArea,
-    EmptyState,
-    ExpandableTranscriptCell,
-    FoldedProcessCell,
-    ImageAttachmentCell,
-    LoadOlderHistoryCell,
-    RetryTurnButton,
-    TranscriptCell,
-    TranscriptScroll,
-)
+from uv_agent.helper_calls import extract_import_anchor_chains, format_import_anchor_chains
+from uv_agent.tui.formatting import format_elapsed, short_block, short_thread, tool_call_code
+from uv_agent.billing import billing_total_from_metadata, currency_symbol, format_billing_total
+from uv_agent.tui.timeline import ThreadTimelineState, TimelineItem
 from uv_agent.tui.window_title import sanitized_window_title, write_window_title
-from uv_agent.worktree import (
-    CommandResult,
-    WorktreeError,
-    cleanup_worktree,
-    create_worktree,
-    validate_worktree_branch_name,
+from uv_agent.tui.events import (
+    AGENT_VIEW_STATUS_ORDER,
+    AgentViewRow,
+    CommandSuggestion,
+    PendingTurn,
+    TranscriptCell,
+    TuiState,
+    tool_payload_from_event,
 )
+from uv_agent.tui.renderer import Renderer
+from uv_agent.tui.streaming import (
+    BREATH_CHARS_PER_PHASE,
+    DEFAULT_STREAM_CHARS_PER_SECOND,
+    StreamRateEstimator,
+    ThreadTokenRatio,
+    model_response_visible_units,
+    tool_call_name,
+    tool_call_stream_key,
+    tool_delta_visible_text,
+    usage_output_tokens,
+)
+from uv_agent.tui.terminal import PASTE_PREFIX, Terminal, TerminalKeyReader
 
-
-COMPOSER_COLLAPSED_HEIGHT = 5
-COMPOSER_EXPANDED_HEIGHT = 8
-COMPOSER_AUTO_EXPAND_LINES = 3
-QUIT_KEY_DEBOUNCE_SECONDS = 0.08
-MAX_COMPOSER_HISTORY = 50
-COMPOSER_HISTORY_FILENAME = "composer_history.json"
-SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-GOAL_MODE_STYLE = "bold #ff5a36"
-GOAL_FILE_PREVIEW_MAX_CHARS = 100_000
-STREAM_RENDER_INTERVAL_SECONDS = 0.05
-STREAM_STATUS_INTERVAL_SECONDS = 0.25
-MountBefore: TypeAlias = int | str | Widget | None
-NotificationSeverity: TypeAlias = Literal["information", "warning", "error"]
-
-
-__all__ = [
-    "EmptyState",
-    "ExpandableTranscriptCell",
-    "FoldedProcessCell",
-    "FullscreenPanel",
-    "ImageAttachmentCell",
-    "ImagePreviewPanel",
-    "PendingImage",
-    "PendingImagePreviewPanel",
-    "PendingSendQueuePanel",
-    "RetryTurnButton",
-    "ToolDetailsPanel",
-    "TranscriptCell",
-    "TranscriptScroll",
-    "UvAgentApp",
-    "WorktreeBranchPanel",
-]
+CODE_FILE_SUFFIXES = {
+    ".cfg",
+    ".css",
+    ".csv",
+    ".env",
+    ".gd",
+    ".go",
+    ".html",
+    ".ini",
+    ".js",
+    ".json",
+    ".jsonl",
+    ".jsx",
+    ".lock",
+    ".md",
+    ".mjs",
+    ".py",
+    ".rs",
+    ".scss",
+    ".toml",
+    ".tsx",
+    ".ts",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+IGNORED_MENTION_DIRS = {
+    ".code-search",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".uv-agent",
+    ".venv",
+    "__pycache__",
+    "__pypackages__",
+    "build",
+    "coverage",
+    "dist",
+    "env",
+    "htmlcov",
+    "node_modules",
+    "out",
+    "site-packages",
+    "target",
+    "tmp",
+    "vendor",
+    "venv",
+}
+MAX_MENTION_ITEMS = 300
 
 
 def create_engine(project_root: Path | None = None, *, data_dir: Path | None = None):
-    """Create the agent engine without importing it at TUI module import time.
-
-    Importing ``uv_agent.app_factory`` pulls in the full agent/model stack. This
-    wrapper keeps the existing test monkeypatch seam
-    (``uv_agent.tui.app.create_engine``) while allowing the Textual app module
-    itself to load with fewer provider/MCP dependencies before first paint.
-    """
+    """Create the shared uv-agent engine lazily for the raw ANSI TUI."""
 
     from uv_agent.app_factory import create_engine as _create_engine
 
     return _create_engine(project_root, data_dir=data_dir)
 
 
-def _markdown(text: str):
-    """Return a Rich Markdown renderable, importing Markdown on demand.
-
-    Markdown rendering is only needed once assistant/history text exists. The
-    import pulls markdown-it/Pygments through Rich, so deferring it keeps the
-    first empty composer screen lighter without changing transcript rendering.
-    The leading underscore avoids colliding with common ``markdown`` symbols
-    other modules might re-export here in the future.
-    """
-
-    from rich.markdown import Markdown
-
-    return Markdown(text)
-
-
 def save_clipboard_image(target_dir: Path):
-    """Save a clipboard image while preserving the historical patch seam.
-
-    Tests and external embedders monkeypatch ``uv_agent.tui.app.save_clipboard_image``.
-    Keeping this lightweight wrapper avoids importing Pillow at TUI startup while
-    preserving that module-level hook.
-    """
+    """Save a clipboard image while keeping tui startup image-library free."""
 
     from uv_agent.clipboard import save_clipboard_image as _save_clipboard_image
 
     return _save_clipboard_image(target_dir)
 
 
-COMMAND_SPECS = [
-    ("/clear", "/clear"),
-    ("/status", "/status"),
-    ("/level", "/level"),
-    ("/threads", "/threads"),
-    ("/goal", "/goal"),
-    ("/config", "/config"),
-    ("/cancel", "/cancel"),
-    ("/quit", "/quit"),
-    ("/help", "/help"),
-]
+HELP_TEXT = (
+    "Commands:\n"
+    "  /clear             clear view and start a new thread\n"
+    "  /threads           choose a thread to resume\n"
+    "  /status            show model/context/thread status\n"
+    "  /image             attach clipboard image as [Image #N]\n"
+    "  /show [run]        choose or show a run script and output\n"
+    "  /level <name>      switch model level\n"
+    "  /cancel            interrupt the running turn\n"
+    "  /model <name>      alias for /level\n"
+    "  /title <text>      rename the current thread\n"
+    "  /quit              exit the TUI\n"
+    "  /help              show this help\n"
+    "\n"
+    "Keys: Enter send/select · Ctrl/Shift/Alt+Enter, macOS Option+Enter, or Ctrl+J newline · / command palette · @ mentions · ↑/↓ history\n"
+    "      Ctrl+A Agent View · Ctrl+E line end · Ctrl+K cut line · Ctrl+W del word · Ctrl+U clear · Ctrl+C quit/interrupt\n"
+    "Agent View: normal mode uses j/k/Enter/Space/c/d/D; i starts a task, m chooses its model, r replies, ? opens help."
+)
 
 
+# Values ending in a space accept more input; the command palette keeps them in
+# the composer instead of submitting immediately.
 
 
+TOP_LEVEL_COMMANDS: tuple[CommandSuggestion, ...] = (
+    CommandSuggestion("/clear", "clear view and start a new thread"),
+    CommandSuggestion("/threads", "choose a thread to resume"),
+    CommandSuggestion("/status", "show model/context/thread status"),
+    CommandSuggestion("/image", "attach clipboard image as [Image #N]"),
+    CommandSuggestion("/show", "choose a run to inspect"),
+    CommandSuggestion("/level ", "switch model level"),
+    CommandSuggestion("/cancel", "interrupt the running turn"),
+    CommandSuggestion("/model ", "alias for /level"),
+    CommandSuggestion("/title ", "rename current thread"),
+    CommandSuggestion("/quit", "exit the TUI"),
+    CommandSuggestion("/help", "show help"),
+)
 
-def _parse_iso_datetime(value: str | None) -> datetime | None:
-    if not value:
+
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+IMAGE_TOKEN_RE = re.compile(r"\[Image #(\d+)\]")
+IMAGE_ONLY_TOKEN_RE = re.compile(r"(?:\s*\[Image #\d+\]\s*)+")
+MAX_COMPOSER_HISTORY = 50
+COMPOSER_HISTORY_FILENAME = "composer_history.json"
+CTRL_C_CONFIRMATION_S = 3.0
+UNBRACKETED_PASTE_ENTER_S = 0.08
+COMPACTION_SUMMARY_PREVIEW_LINES = 4
+COMPACTION_SUMMARY_PREVIEW_CHARS = 800
+TOKEN_RATE_DISPLAY_UPDATE_INTERVAL_S = 0.5
+TOKEN_RATE_DISPLAY_TAU_S = 3.0
+TOKEN_RATE_DISPLAY_HIDE_BELOW = 0.05
+_AGENT_VIEW_STATUS_RANK = {status: index for index, status in enumerate(AGENT_VIEW_STATUS_ORDER)}
+_RUN_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
+TUI_FLUSHED_CELLS_MAX = 200
+# Once a cell is in terminal scrollback, tui only needs enough text for
+# metadata like row-count estimates and compact status display.  Long cells
+# are truncated to a head/tail preview so large tool outputs do not linger
+# in memory for the rest of the session.
+TUI_RETAINED_FLUSHED_TEXT_CHARS = 8192
+_RETAINED_TOOL_PAYLOAD_KEYS = frozenset(
+    {
+        "run_id",
+        "returncode",
+        "timed_out",
+        "interrupted",
+        "truncated",
+        "partial",
+        "partial_reason",
+        "helper_calls",
+    }
+)
+_RETAINED_TOOL_CALL_KEYS = frozenset({"name", "call_id", "_status_label"})
+
+
+@dataclass
+class ThreadRunState:
+    """In-process execution state for one thread in tui."""
+
+    thread_id: str
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    task: asyncio.Task[None] | None = None
+    pending_turns: list[PendingTurn] = field(default_factory=list)
+    started_at: float | None = None
+    status_message: str = "running"
+    last_error: str | None = None
+    terminal_status: str = "working"
+    user_cell: TranscriptCell | None = None
+    assistant_cell: TranscriptCell | None = None
+    reasoning_cell: TranscriptCell | None = None
+    reasoning_flushed_for_current_response: bool = False
+    tool_cells: dict[str, TranscriptCell] = field(default_factory=dict)
+    rate_estimator: StreamRateEstimator = field(default_factory=StreamRateEstimator)
+    token_ratio: ThreadTokenRatio = field(default_factory=ThreadTokenRatio)
+    observed_tool_call_name_keys: set[str] = field(default_factory=set)
+    assistant_display_queue: str = ""
+    assistant_display_credit: float = 0.0
+    last_animation_tick_at: float | None = None
+    displayed_token_rate: float | None = None
+    last_token_rate_display_update_at: float | None = None
+    token_rate_frozen: bool = False
+    frozen_token_rate: float | None = None
+    token_rate_held: bool = False
+    held_token_rate: float | None = None
+    pending_finish_assistant_text: str | None = None
+    pending_finish_after_drain: bool = False
+    engine_finished: bool = False
+    completion_notification_pending: bool = False
+
+    @property
+    def running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+    @property
+    def display_pending(self) -> bool:
+        return bool(self.assistant_display_queue or self.pending_finish_after_drain)
+
+    def reset_for_turn(self) -> None:
+        self.user_cell = None
+        self.assistant_cell = None
+        self.reasoning_cell = None
+        self.reasoning_flushed_for_current_response = False
+        self.tool_cells = {}
+        self.rate_estimator = StreamRateEstimator()
+        self.observed_tool_call_name_keys.clear()
+        self.assistant_display_queue = ""
+        self.assistant_display_credit = 0.0
+        self.last_animation_tick_at = None
+        self.displayed_token_rate = None
+        self.last_token_rate_display_update_at = None
+        self.token_rate_frozen = False
+        self.frozen_token_rate = None
+        self.token_rate_held = False
+        self.held_token_rate = None
+        self.pending_finish_assistant_text = None
+        self.pending_finish_after_drain = False
+        self.engine_finished = False
+        self.completion_notification_pending = False
+        # Token ratio is thread-level and intentionally survives turns.
+
+
+def _compaction_summary_preview(text: str) -> str:
+    """Keep compaction checkpoints compact in tui scrollback.
+
+    The full summary remains persisted in the thread store for future model
+    context; tui only needs a small visual checkpoint so long automatic
+    compactions do not flood the terminal.
+    """
+
+    return short_block(
+        text.strip(),
+        max_lines=COMPACTION_SUMMARY_PREVIEW_LINES,
+        max_chars=COMPACTION_SUMMARY_PREVIEW_CHARS,
+    )
+
+
+def _compaction_event_text(label: str, summary: object) -> str:
+    preview = _compaction_summary_preview(str(summary or ""))
+    return label + (f"\n{preview}" if preview else "")
+
+
+def _retained_mapping(value: dict[str, Any] | None, keys: frozenset[str]) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
         return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
+    retained: dict[str, Any] = {}
+    for key in keys:
+        if key not in value:
+            continue
+        item = value[key]
+        if key == "helper_calls" and isinstance(item, list):
+            retained[key] = [dict(helper) if isinstance(helper, dict) else helper for helper in item]
+        else:
+            retained[key] = item
+    return retained or None
 
 
-def _elapsed_between(started_at: str | None, ended_at: str | None = None) -> float | None:
-    started = _parse_iso_datetime(started_at)
-    if started is None:
-        return None
-    ended = _parse_iso_datetime(ended_at) or datetime.now(UTC)
-    return max(0.0, (ended - started).total_seconds())
+def _retained_flushed_cell(cell: TranscriptCell) -> TranscriptCell:
+    """Return the lightweight copy kept after a cell is in terminal scrollback."""
 
-
-def _timeline_text(content: object) -> str:
-    """Return timeline text while allowing live items to store text chunks."""
-
-    if isinstance(content, list):
-        return "".join(str(part) for part in content)
-    return str(content or "")
+    text = cell.text
+    if len(text) > TUI_RETAINED_FLUSHED_TEXT_CHARS:
+        half = TUI_RETAINED_FLUSHED_TEXT_CHARS // 2
+        text = text[:half] + "\n...[truncated]\n" + text[-half:]
+    call = _retained_mapping(cell.call, _RETAINED_TOOL_CALL_KEYS) if cell.kind == "tool" else None
+    payload = _retained_mapping(cell.payload, _RETAINED_TOOL_PAYLOAD_KEYS) if cell.kind == "tool" else None
+    return TranscriptCell(
+        cell.kind,
+        text=text,
+        title=cell.title,
+        status=cell.status,
+        call=call,
+        payload=payload,
+        created_at=cell.created_at,
+        finished_at=cell.finished_at,
+        chars_streamed=cell.chars_streamed,
+        animation_phase=cell.animation_phase,
+    )
 
 
 def composer_history_path() -> Path:
@@ -261,1787 +358,2595 @@ def save_composer_history(items: list[str]) -> None:
     atomic_replace(tmp_path, path)
 
 
-def _event_id(event: dict[str, Any] | None) -> int | None:
-    if not event:
-        return None
-    value = event.get("_event_id")
-    return value if isinstance(value, int) else None
+class UvAgentApp:
+    """Terminal-native ANSI interface for :class:`uv_agent.agent.AgentEngine`."""
 
-
-class TranscriptScreen(Screen[None]):
-    """Default screen with tighter transcript selection behavior."""
-
-    def _forward_event(self, event: events.Event) -> None:
-        if isinstance(event, events.MouseDown) and not event.is_forwarded:
-            release_overlay_capture = getattr(
-                self.app,
-                "_release_stale_overlay_mouse_capture",
-                None,
-            )
-            if callable(release_overlay_capture) and release_overlay_capture(event):
-                return
-        super()._forward_event(event)
-
-    def on_paste(self, event: events.Paste) -> None:
-        """Forward unhandled pastes to the app-level composer fallback."""
-        handler = getattr(self.app, "_handle_unfocused_composer_paste", None)
-        if callable(handler):
-            handler(event)
-
-    def _watch__select_state(self, select_state: Any) -> None:
-        super()._watch__select_state(select_state)
-        self._tighten_transcript_selection()
-
-    def _tighten_transcript_selection(self) -> None:
-        select_state = self._select_state
-        if select_state is None or select_state.end is None:
-            return
-        start_widget = select_state.start.content_widget
-        end_widget = select_state.end.content_widget
-        if not isinstance(start_widget, TranscriptCell) or start_widget is not end_widget:
-            return
-        start_offset = select_state.start.content_offset
-        end_offset = select_state.end.content_offset
-        if start_offset is None or end_offset is None:
-            return
-        if self.selections.get(start_widget) is None:
-            return
-        self._set_selection(start_widget, start_offset, end_offset)
-
-    def _set_selection(self, widget: TranscriptCell, start: Offset, end: Offset) -> None:
-        """Replace Textual's selection map for one transcript cell.
-
-        Textual exposes ``selections`` as a reactive descriptor. Assigning via a
-        tiny wrapper keeps the descriptor write in one place and makes the
-        narrowed value shape obvious to static checkers.
-        """
-
-        self.selections = {
-            widget: Selection.from_offsets(start, self._inclusive_selection_end(start, end))
-        }
-
-    def _inclusive_selection_end(self, start: Offset, end: Offset) -> Offset:
-        if end.transpose < start.transpose:
-            return end
-        return end + (1, 0)
-
-
-class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
-    ENABLE_COMMAND_PALETTE = False
-    CLICK_CHAIN_TIME_THRESHOLD = 0.25
-
-    CSS = MAIN_APP_CSS
-
-    BINDINGS = [
-        Binding("ctrl+enter", "submit_composer", "Send", priority=True),
-        Binding("ctrl+j", "submit_composer", "Send", priority=True),
-        Binding("ctrl+g", "toggle_visible_process_folds", "Process", priority=True),
-        Binding("tab", "toggle_composer_height", "Height", priority=True),
-        Binding("ctrl+s", "toggle_status_panel", "Status", priority=True),
-        Binding("ctrl+o", "open_command_palette", "Commands", priority=True),
-        Binding("ctrl+d", "toggle_tool_details", "Details", priority=True),
-        Binding("f2", "attach_clipboard_image", "Attach image", priority=True),
-        Binding("f3", "preview_images", "Images", priority=True),
-        Binding("ctrl+c", "interrupt_turn", "Interrupt", priority=True, show=False),
-        Binding("enter", "focus_composer", "Focus composer", priority=True, show=False),
-        Binding("f1", "help", "Help", priority=True),
-        Binding("escape", "clear_input", "Clear"),
-    ]
-
-    busy = reactive(False)
-
-    def get_default_screen(self) -> Screen:
-        return TranscriptScreen(id="_default")
-
-    def watch_busy(self, old: bool, new: bool) -> None:
-        # Track when work begins so the status footer can render a live elapsed
-        # timer alongside the spinner, codex-style. When the turn ends we must
-        # also re-render the footer immediately; otherwise the busy branch (with
-        # spinner + "Working") keeps showing until the next unrelated refresh.
-        if new and not old:
-            self._busy_started_at = monotonic()
-        elif old and not new:
-            self._busy_started_at = None
-            if self.is_mounted:
-                self._refresh_status()
-
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action == "interrupt_turn":
-            # Let focused text inputs keep the platform-standard Ctrl+C copy
-            # binding only when there is an actual selection to copy. A focused
-            # but unselected composer must still use Ctrl+C for interrupt/quit.
-            focused = self.screen.focused if self.is_mounted else None
-            return not (isinstance(focused, TextArea) and bool(focused.selected_text))
-        if action == "toggle_tool_details":
-            return self.is_mounted and self.screen is self.default_screen
-        if action == "toggle_visible_process_folds":
-            return self.is_mounted and self.screen is self.default_screen
-        if action in {"attach_clipboard_image", "preview_images"}:
-            return self.is_mounted and self.screen is self.default_screen
-        if action == "focus_composer":
-            if not self.is_mounted or self.screen is not self.default_screen:
-                return False
-            try:
-                composer = self.query_one("#composer", TextArea)
-            except NoMatches:
-                return False
-            return self.screen.focused is not composer
-        return True
-
-    def __init__(self, *, project_root: Path) -> None:
-        super().__init__()
-        self.project_root = project_root
-        self.engine = create_engine(project_root)
-        self.language = detect_user_language(self.engine.config.ui.language)
-        self.thread_id: str | None = None
-        self.level: str | None = None
-        self._assistant_buffer = ""
-        self._assistant_cell: TranscriptCell | None = None
-        self._tool_cells: dict[str, TranscriptCell] = {}
-        self._tool_started_calls: dict[str, dict[str, Any]] = {}
-        self._tool_partial_payloads: dict[str, dict[str, Any]] = {}
-        self._tool_delta_cells: dict[int, TranscriptCell] = {}
-        self._last_status = tr(self.language, "idle")
-        self._spinner_index = 0
-        self._busy_started_at: float | None = None
-        self._turn_started_at: str | None = None
-        self._turn_completed_at: str | None = None
-        self._last_tool_payload: dict[str, object] | None = None
-        self._composer_history: list[str] = load_composer_history()
-        self._composer_history_index: int | None = None
-        self._composer_history_draft = ""
-        self._quit_armed = False
-        self._last_quit_request_at = 0.0
-        self._transcript_has_content = False
-        self._reasoning_cell: TranscriptCell | None = None
-        self._reasoning_buffer = ""
-        self._process_cells: list[TranscriptCell] = []
-        self._process_fold_cell: FoldedProcessCell | None = None
-        self._process_collapsed = False
-        self._process_anchor_cell: TranscriptCell | None = None
-        self._last_composer_text = ""
-        self._interrupt_armed = False
-        self._last_interrupt_request_at = 0.0
-        self._current_worker: Worker[None] | None = None
-        self._current_cancel_event: asyncio.Event | None = None
+    def __init__(self, project_root: Path | None = None, *, data_dir: Path | None = None) -> None:
+        self.project_root = (project_root or Path.cwd()).resolve()
+        self.engine = create_engine(self.project_root, data_dir=data_dir)
+        ui_config = getattr(self.engine.config, "ui", None)
+        self.language = detect_user_language(getattr(ui_config, "language", None))
+        self.state = TuiState(
+            level=self.engine.config.runtime.default_level,
+            project_path=str(self.project_root),
+            language=self.language,
+        )
+        self.state.agent_view.dispatch_level = self.state.level
+        self.renderer = Renderer()
         self._thread_runs: dict[str, ThreadRunState] = {}
-        self._thread_timelines: dict[str, ThreadTimelineState] = {}
-        self._thread_view_states: dict[str, ThreadViewState] = {}
-        self._timeline_cells: dict[str, Widget] = {}
-        self._timeline_item_ids: dict[Widget, str] = {}
-        self._history_before_event_id: int | None = None
-        self._history_has_more = False
-        self._history_more_cell: LoadOlderHistoryCell | None = None
-        self._selection_copy_timer: Any | None = None
-        self._pending_selection_copy = ""
-        self._last_auto_copied_selection = ""
-        self._composer_height_override: str | None = None
-        self._composer_expanded = False
-        self._pending_images_by_thread: dict[str | None, list[PendingImage]] = {}
-        self._tool_delta_calls: dict[int, dict[str, Any]] = {}
-        self._mention_file_cache = MentionScanCache()
-        self._mention_thread_cache = MentionScanCache()
-        self._mention_file_cache_dirty = False
-        self._mention_file_watcher_worker: Worker[None] | None = None
-        self._mention_file_watcher_stop = threading.Event()
+        self._thread_token_ratios: OrderedDict[str, ThreadTokenRatio] = OrderedDict()
+        self._thread_token_ratios_max_size: int = 16
+        self._assistant_cell: TranscriptCell | None = None
+        self._reasoning_cell: TranscriptCell | None = None
+        self._user_cell: TranscriptCell | None = None
+        self._reasoning_flushed_for_current_response = False
+        self._tool_cells: dict[str, TranscriptCell] = {}
+        self._history: list[str] = load_composer_history()
+        self._history_cursor: int | None = None
+        self._draft: str = ""
+        self._tab_state: dict[str, Any] | None = None
+        self._quit_armed = False
+        self._quit_armed_until: float | None = None
+        self._quit_confirmation_status: str | None = None
+        self._interrupt_armed = False
+        self._interrupt_armed_until: float | None = None
+        self._interrupt_confirmation_status: str | None = None
+        self._spinner_index = 0
         self._window_title_thread_title = ""
         self._last_window_title = ""
-        self._thread_activity: dict[str, ThreadActivityState] = {}
-        self._top_notifications: list[TopNotification] = []
-        self._top_notification_unread = 0
-        self._interaction_mode = "normal"
-        # Enabling Goal should not create thread records or goal files until the
-        # user actually sends. ``None`` represents the unsaved draft thread.
-        self._pending_goal_enable_threads: set[str | None] = set()
-        self._stream_render_timer: Any | None = None
-        self._stream_status_timer: Any | None = None
-        self._stream_render_due = False
-        self._stream_status_due = False
-        self._last_stream_render_at = 0.0
-        self._last_stream_status_at = 0.0
-        self._status_level_name = self.level or self.engine.config.runtime.default_level
-        self._status_compact_context = "0%"
-        self._status_thread_label = short_thread(self.thread_id)
-        self._status_billing_label = ""
+        self._ticker_task: asyncio.Task[None] | None = None
+        self._last_plain_input_at: float | None = None
+        self._skip_next_lf_after_plain_cr = False
+        self._picker_mode: str = "command"
+        self._mention_start: int | None = None
+        self._mention_query: str = ""
+        # Match the command-driven lazy Goal behavior: enabling Goal for the
+        # unsaved draft thread should update the UI immediately, but must not
+        # create thread records or goal plugin state until the first message is sent.
+        self._pending_goal_enable = False
+        self._pending_goal_objective = ""
+        self._image_sequence_next = 1
+        self._image_paths_by_number: dict[int, Path] = {}
+        self._image_status_token: str | None = None
+        self._image_status_message: str | None = None
+        self._agent_view_local_threads: set[str] = set()
+        self._agent_view_join_pending_persist: set[str] = set()
+        self._pager_code: str = ""
+        self._pager_output: str = ""
 
-    def compose(self) -> ComposeResult:
-        with Vertical(id="main-column"):
-            with Horizontal(id="top-bar"):
-                yield Static("", id="top-bar-elapsed")
-                yield Static("", id="top-bar-mode")
-                yield Static("", id="top-bar-worktree", classes="hidden")
-                yield Static("", id="top-bar-spacer")
-                yield Static("", id="top-bar-active")
-                yield Static("", id="top-bar-completed")
-                yield Static("", id="top-bar-notifications")
-            with TranscriptScroll(id="transcript"):
-                yield EmptyState()
-            yield Static("", id="pending-turns-btn", classes="hidden")
-            yield Static("", id="pending-images-btn", classes="hidden")
-            yield Static(
-                plain(f"↓ {tr(self.language, 'back_to_bottom')}"),
-                id="scroll-to-bottom-btn",
-                classes="hidden",
+    def _run_state(self, thread_id: str | None = None) -> ThreadRunState | None:
+        resolved = thread_id or self.state.thread_id
+        if not resolved:
+            return None
+        return self._thread_runs.get(resolved)
+
+    def _run_state_for_event(self, event: dict[str, Any]) -> ThreadRunState | None:
+        event_thread_id = str(event.get("thread_id") or self.state.thread_id or "")
+        return self._thread_runs.get(event_thread_id) if event_thread_id else None
+
+    def _token_ratio_for_thread(self, thread_id: str | None) -> ThreadTokenRatio:
+        """Return the thread-level visible-character/output-token ratio state."""
+
+        key = thread_id or self.state.thread_id or "__draft__"
+        ratio = self._thread_token_ratios.get(key)
+        if ratio is not None:
+            self._thread_token_ratios.move_to_end(key)
+            return ratio
+        ratio = self._load_thread_token_ratio(thread_id) if thread_id else ThreadTokenRatio()
+        self._thread_token_ratios[key] = ratio
+        self._evict_thread_token_ratios_if_needed()
+        return ratio
+
+    def _evict_thread_token_ratios_if_needed(self) -> None:
+        """Persist and remove the oldest entries when the cache grows too large."""
+
+        while len(self._thread_token_ratios) > self._thread_token_ratios_max_size:
+            oldest_key, oldest_ratio = self._thread_token_ratios.popitem(last=False)
+            if oldest_key != "__draft__":
+                self._persist_thread_token_ratio(oldest_key, oldest_ratio)
+
+    def _persist_thread_token_ratio(self, thread_id: str, ratio: ThreadTokenRatio) -> None:
+        """Best-effort persistence of a token ratio to thread metadata."""
+
+        if ratio.available and thread_id and self.engine is not None:
+            try:
+                self.engine.thread_store.update_thread_metadata(
+                    thread_id,
+                    updates={"token_ratio": ratio.to_metadata()},
+                )
+            except Exception:
+                pass
+
+    def _load_thread_token_ratio(self, thread_id: str | None) -> ThreadTokenRatio:
+        if not thread_id:
+            return ThreadTokenRatio()
+        try:
+            metadata = self.engine.thread_store.thread_metadata(thread_id)
+        except Exception:
+            metadata = {}
+        token_ratio_meta = metadata.get("token_ratio")
+        if isinstance(token_ratio_meta, dict):
+            return ThreadTokenRatio.from_metadata(token_ratio_meta)
+        try:
+            events = self.engine.thread_store.read_events(thread_id, event_types={"item.model_response"})
+        except Exception:
+            return ThreadTokenRatio()
+        ratio = ThreadTokenRatio()
+        for event in events:
+            reasoning_text = str(event.get("reasoning_text") or "")
+            response_units = model_response_visible_units(
+                event.get("output") if isinstance(event.get("output"), list) else [],
+                reasoning_text=reasoning_text,
             )
-            with Vertical(id="bottom-pane"):
-                with Vertical(id="composer-shell"):
-                    yield ComposerTextArea(
-                        "",
-                        placeholder=tr(self.language, "placeholder"),
-                        id="composer",
-                        compact=True,
-                        soft_wrap=True,
-                        show_line_numbers=False,
-                    )
-                    yield Static("", id="composer-footer")
+            ratio.observe_response(
+                visible_units=response_units,
+                output_tokens=usage_output_tokens(
+                    event.get("usage") if isinstance(event.get("usage"), dict) else {},
+                    reasoning_visible=bool(reasoning_text),
+                ),
+            )
+        return ratio
 
-    def on_mount(self) -> None:
-        workflow_executor = getattr(self.engine, "workflow_executor", None)
-        if workflow_executor is not None:
-            workflow_executor.start()
-        self.query_one(EmptyState).tick()
-        self._refresh_status(self._text("idle"))
-        self.set_interval(0.16, self._tick, name="spinner")
-        self.query_one("#composer", TextArea).focus()
-        transcript = self.query_one("#transcript", TranscriptScroll)
-        self.watch(transcript, "near_bottom", self._on_near_bottom_changed)
-        self._refresh_pending_turns()
-        self._refresh_pending_images()
-        self._refresh_composer_overlay()
-        self._refresh_top_bar()
+    def _current_char_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> float | None:
+        run_state = run_state or self._run_state()
+        if run_state is None:
+            return None
+        return run_state.rate_estimator.current_cps(now=monotonic() if now is None else now)
 
-    async def on_unmount(self) -> None:
-        self._mention_file_watcher_stop.set()
-        if self._mention_file_watcher_worker is not None:
-            self._mention_file_watcher_worker.cancel()
-        await self.engine.aclose()
-        if self._stream_render_timer is not None:
-            self._stream_render_timer.stop()
-            self._stream_render_timer = None
-        if self._stream_status_timer is not None:
-            self._stream_status_timer.stop()
-            self._stream_status_timer = None
+    def _current_visible_unit_rate(
+        self,
+        run_state: ThreadRunState | None = None,
+        *,
+        now: float | None = None,
+    ) -> float | None:
+        run_state = run_state or self._run_state()
+        if run_state is None:
+            return None
+        return run_state.rate_estimator.current_ups(now=monotonic() if now is None else now)
 
-    def _on_near_bottom_changed(self, near: bool) -> None:
-        self._refresh_composer_overlay()
+    def _current_token_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> float | None:
+        run_state = run_state or self._run_state()
+        if run_state is None:
+            return None
+        return run_state.token_ratio.token_rate(self._current_visible_unit_rate(run_state, now=now))
 
-    def on_click(self, event: events.Click) -> None:
-        if self._handle_bottom_overlay_pointer_event(event):
+    def _freeze_token_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> None:
+        run_state = run_state or self._run_state()
+        if run_state is None or run_state.token_rate_frozen:
             return
-        widget = getattr(event, "widget", None)
-        if widget is not None and widget.id == "top-bar-active":
-            event.stop()
-            self._open_session_threads_panel("active")
-        elif widget is not None and widget.id == "top-bar-completed":
-            event.stop()
-            self._open_session_threads_panel("completed")
-        elif widget is not None and widget.id == "top-bar-worktree":
-            event.stop()
-            self._open_worktree_panel()
-        elif widget is not None and widget.id == "top-bar-notifications":
-            event.stop()
-            self._open_notifications_panel()
-        elif widget is not None and widget.id == "pending-turns-btn":
-            event.stop()
-            self._open_pending_send_queue()
-        elif widget is not None and widget.id == "pending-images-btn":
-            event.stop()
-            self._open_pending_image_preview()
-        elif widget is not None and widget.id == "scroll-to-bottom-btn":
-            event.stop()
-            self._scroll_transcript_to_bottom_from_overlay()
+        run_state.token_rate_held = False
+        run_state.held_token_rate = None
+        now = monotonic() if now is None else now
+        frozen = run_state.displayed_token_rate
+        if frozen is None:
+            frozen = self._display_token_rate(run_state, now=now)
+        run_state.frozen_token_rate = frozen
+        run_state.token_rate_frozen = frozen is not None
 
-    def on_mouse_down(self, event: events.MouseDown) -> None:
-        self._handle_bottom_overlay_pointer_event(event)
+    def _hold_token_rate(self, run_state: ThreadRunState | None = None) -> None:
+        """Keep the last shown token rate without marking it as frozen."""
 
-    def on_mouse_up(self, event: events.MouseUp) -> None:
-        self._handle_bottom_overlay_pointer_event(event)
+        run_state = run_state or self._run_state()
+        if run_state is None or run_state.token_rate_held:
+            return
+        held = run_state.displayed_token_rate
+        run_state.held_token_rate = held
+        run_state.token_rate_held = True
+        run_state.token_rate_frozen = False
+        run_state.frozen_token_rate = None
 
-    def _handle_bottom_overlay_pointer_event(self, event: events.MouseEvent) -> bool:
-        """Handle overlay controls by screen coordinates before stale capture wins.
+    def _resume_token_rate(self, run_state: ThreadRunState | None = None, *, now: float | None = None) -> None:
+        run_state = run_state or self._run_state()
+        if run_state is None or not (run_state.token_rate_frozen or run_state.token_rate_held):
+            return
+        now = monotonic() if now is None else now
+        resume_rate = (
+            run_state.frozen_token_rate if run_state.token_rate_frozen else run_state.held_token_rate
+        )
+        if resume_rate is not None:
+            run_state.displayed_token_rate = resume_rate
+            run_state.last_token_rate_display_update_at = now
+        run_state.token_rate_frozen = False
+        run_state.frozen_token_rate = None
+        run_state.token_rate_held = False
+        run_state.held_token_rate = None
 
-        Textual routes mouse events to ``app.mouse_captured`` before hit-testing the
-        screen. If the scrollbar capture is left behind after a drag/focus edge
-        case, clicks on the visually top-most composer overlay are delivered to
-        the scrollbar and stopped there. The overlay is screen-positioned, so a
-        small coordinate hit test lets these controls recover from stale capture
-        without changing normal transcript mouse handling.
+    def _display_token_rate(self, run_state: ThreadRunState, *, now: float | None = None) -> float | None:
+        """Return the row-1 token rate with display-only smoothing applied."""
+
+        if run_state.token_rate_held:
+            return run_state.held_token_rate
+        if run_state.token_rate_frozen:
+            return run_state.frozen_token_rate
+        now = monotonic() if now is None else now
+        instant = self._current_token_rate(run_state, now=now)
+        if instant is None or instant < TOKEN_RATE_DISPLAY_HIDE_BELOW:
+            # Clearing on the display cadence avoids a one-frame flicker without
+            # keeping a stale speed visible through long model-output pauses.
+            last_update = run_state.last_token_rate_display_update_at
+            if (
+                run_state.displayed_token_rate is not None
+                and last_update is not None
+                and now - last_update < TOKEN_RATE_DISPLAY_UPDATE_INTERVAL_S
+            ):
+                return run_state.displayed_token_rate
+            run_state.displayed_token_rate = None
+            run_state.last_token_rate_display_update_at = None
+            return None
+
+        previous = run_state.displayed_token_rate
+        last_update = run_state.last_token_rate_display_update_at
+        if previous is None or last_update is None:
+            run_state.displayed_token_rate = instant
+            run_state.last_token_rate_display_update_at = now
+            return instant
+        dt = max(0.0, now - last_update)
+        if dt < TOKEN_RATE_DISPLAY_UPDATE_INTERVAL_S:
+            return previous
+        alpha = 1.0 - exp(-dt / TOKEN_RATE_DISPLAY_TAU_S)
+        displayed = previous + alpha * (instant - previous)
+        run_state.displayed_token_rate = displayed
+        run_state.last_token_rate_display_update_at = now
+        return displayed if displayed >= TOKEN_RATE_DISPLAY_HIDE_BELOW else None
+
+    def _interruptible_run_state(self) -> ThreadRunState | None:
+        """Return the attached run only when Ctrl+C should interrupt it.
+
+        A completed asyncio task remains ``not done()`` while its own
+        ``finally`` block is executing, so stale run states can otherwise keep a
+        cancel event around after the turn has ended.  Likewise, a turn that has
+        already received an interrupt request may keep unwinding for a while.
+        Ctrl+C must ignore both cases and fall through to the normal quit
+        confirmation instead of repeatedly "interrupting" a non-interruptible
+        state.
         """
 
-        if self.screen is not self.default_screen:
-            return False
-        button = self._overlay_button_at_offset(event.screen_offset)
-        if button is None:
-            return False
-        event.stop()
-        if isinstance(event, events.MouseDown):
-            self._release_stale_overlay_mouse_capture(event)
-            return True
-        if isinstance(event, events.MouseUp):
-            self._release_stale_overlay_mouse_capture(event)
-            return True
-        if isinstance(event, events.Click):
-            self._release_stale_overlay_mouse_capture(event)
-            if button.id == "pending-turns-btn":
-                self._open_pending_send_queue()
-            elif button.id == "pending-images-btn":
-                self._open_pending_image_preview()
-            elif button.id == "scroll-to-bottom-btn":
-                self._scroll_transcript_to_bottom_from_overlay()
-            return True
-        return False
-
-    def _release_stale_overlay_mouse_capture(self, event: events.MouseEvent) -> bool:
-        if self.mouse_captured is None:
-            return False
-        if self._overlay_button_at_offset(event.screen_offset) is None:
-            return False
-        self.capture_mouse(None)
-        event.stop()
-        return True
-
-    def _overlay_button_at_offset(self, offset: Offset) -> Static | None:
-        for selector in (
-            "#pending-turns-btn",
-            "#pending-images-btn",
-            "#scroll-to-bottom-btn",
+        run_state = self._run_state()
+        if run_state is None:
+            return None
+        if self._run_state_is_active(run_state):
+            return run_state
+        # Some tests and embedders simulate a busy turn by installing only a
+        # cancel event.  Keep that path working, but do not treat an already
+        # completed task as interruptible.
+        if (
+            run_state.task is None
+            and not run_state.cancel_event.is_set()
+            and run_state.terminal_status not in _RUN_TERMINAL_STATUSES
+            and (self.state.busy or self._interrupt_armed)
         ):
-            try:
-                button = self.query_one(selector, Static)
-            except NoMatches:
-                continue
-            if button.has_class("hidden"):
-                continue
-            if offset in button.region:
-                return button
+            return run_state
         return None
 
-    def _scroll_transcript_to_bottom_from_overlay(self) -> None:
-        try:
-            transcript = self.query_one("#transcript", TranscriptScroll)
-        except NoMatches:
+    @staticmethod
+    def _run_state_is_active(run_state: ThreadRunState) -> bool:
+        return (
+            run_state.running
+            and not run_state.cancel_event.is_set()
+            and run_state.terminal_status not in _RUN_TERMINAL_STATUSES
+        )
+
+    def _inactive_run_status_message(self, run_state: ThreadRunState) -> str:
+        if run_state.terminal_status == "interrupted":
+            return self._text("interrupted")
+        if run_state.terminal_status == "failed" and run_state.last_error:
+            return run_state.last_error
+        return "ready"
+
+    def _run_state_busy_for_ui(self, run_state: ThreadRunState) -> bool:
+        return self._run_state_is_active(run_state) or run_state.display_pending
+
+    def _active_confirmation_status(self) -> str | None:
+        if self._quit_armed and self._quit_confirmation_status:
+            return self._quit_confirmation_status
+        if self._interrupt_armed and self._interrupt_confirmation_status:
+            return self._interrupt_confirmation_status
+        return None
+
+    def _is_attached_thread(self, thread_id: str | None) -> bool:
+        return bool(thread_id and thread_id == self.state.thread_id)
+
+    def _sync_attached_run_state(self, run_state: ThreadRunState | None = None) -> None:
+        run_state = run_state or self._run_state()
+        if run_state is None:
+            self.state.busy = False
+            self.state.pending_turns.clear()
+            self.state.turn_elapsed_s = None
+            self.state.turn_token_rate = None
+            self.state.turn_token_rate_frozen = False
             return
-        transcript.engage_follow_tail(force=True)
-        self._refresh_composer_overlay()
-
-    def on_resize(self) -> None:
-        self._refresh_status()
-        self.call_after_refresh(self._resize_composer)
-        self.call_after_refresh(self._refresh_composer_overlay)
-
-    def _maximum_composer_height(self) -> int:
-        try:
-            transcript = self.query_one("#transcript", TranscriptScroll)
-        except NoMatches:
-            reserved = 1
+        active = self._run_state_is_active(run_state)
+        ui_busy = self._run_state_busy_for_ui(run_state)
+        self.state.busy = ui_busy
+        self.state.pending_turns = run_state.pending_turns
+        confirmation_status = self._active_confirmation_status()
+        self.state.status_message = (
+            confirmation_status
+            if confirmation_status is not None
+            else run_state.status_message
+            if ui_busy
+            else self._inactive_run_status_message(run_state)
+        )
+        self.state.last_error = run_state.last_error
+        self._user_cell = run_state.user_cell
+        self._assistant_cell = run_state.assistant_cell
+        self._reasoning_cell = run_state.reasoning_cell
+        self._reasoning_flushed_for_current_response = run_state.reasoning_flushed_for_current_response
+        self._tool_cells = run_state.tool_cells
+        now = monotonic()
+        self.state.turn_token_rate = self._display_token_rate(run_state, now=now) if ui_busy else None
+        self.state.turn_token_rate_frozen = bool(
+            ui_busy and run_state.token_rate_frozen and self.state.turn_token_rate is not None
+        )
+        if ui_busy and run_state.started_at is not None:
+            self.state.turn_elapsed_s = now - run_state.started_at
         else:
-            min_height = transcript.styles.min_height
-            reserved = min_height.value if min_height is not None and min_height.value is not None else 0
-        return max(COMPOSER_COLLAPSED_HEIGHT, self.size.height - int(reserved) - 1)
+            self.state.turn_elapsed_s = None
 
-    def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        if event.text_area.id != "composer":
-            return
-        previous = self._last_composer_text
-        current = event.text_area.text
-        if self._composer_history_index is not None and current != self._composer_history_text():
-            self._reset_composer_history_navigation()
-        self._last_composer_text = current
-        self._resize_composer()
-        self._refresh_status_from_cache()
-        if current == "/" and previous == "":
-            event.text_area.load_text("")
-            self._last_composer_text = ""
-            self._resize_composer()
-            self._open_command_palette()
-        elif current in {"?", "？"} and previous == "":
-            event.text_area.load_text("")
-            self._last_composer_text = ""
-            self._resize_composer()
-            self._open_help_panel()
-        else:
-            self._maybe_open_mention_picker(event.text_area, previous=previous, current=current)
+    def _sync_attached_run_state_for_repaint(self) -> None:
+        """Refresh busy/status row state immediately before repainting.
 
-    def on_text_area_selection_changed(self, event: TextArea.SelectionChanged) -> None:
-        if event.text_area.id != "composer":
-            return
-        selected_text = event.text_area.selected_text
-        if not selected_text:
-            self._cancel_selection_copy()
-            self._last_auto_copied_selection = ""
-            return
-        self._schedule_selection_copy(selected_text)
-
-    def on_text_selected(self, event: events.TextSelected) -> None:
-        selected_text = self.screen.get_selected_text()
-        if not selected_text:
-            self._cancel_selection_copy()
-            self._last_auto_copied_selection = ""
-            return
-        self._schedule_selection_copy(selected_text, source="screen")
-
-    def _handle_unfocused_composer_paste(self, event: events.Paste) -> None:
-        """Recover bracketed pastes that arrive while terminal focus is cleared.
-
-        Windows Terminal shows a native confirmation dialog for large pastes. That
-        dialog emits FocusOut, so Textual temporarily removes widget focus before
-        the bracketed paste payload is delivered. With no focused widget, Textual
-        forwards the Paste event to the screen and the composer never sees it.
-        If the composer was the widget blurred by AppBlur, treat the paste as
-        intended for the composer and insert it exactly like TextArea's paste
-        handler would.
+        The activity row is rendered from ``TuiState.busy``.  Keeping that flag
+        in sync on ticker frames prevents a running or draining turn from
+        briefly repainting with only the context row when event timing changes.
         """
-        if self.screen is not self.default_screen:
+
+        run_state = self._run_state()
+        if run_state is None:
+            if self.state.busy:
+                self._sync_attached_run_state(None)
             return
-        try:
-            composer = self.query_one("#composer", TextArea)
-        except NoMatches:
+        if self.state.busy or self._run_state_busy_for_ui(run_state):
+            self._sync_attached_run_state(run_state)
+
+    def _detach_live_run_state(self) -> None:
+        run_state = self._run_state()
+        if run_state is not None:
+            self._capture_attached_run_state(run_state)
+        self._assistant_cell = None
+        self._reasoning_cell = None
+        self._user_cell: TranscriptCell | None = None
+        self._reasoning_flushed_for_current_response = False
+        self._tool_cells = {}
+        self.state.live.clear()
+
+    def _capture_attached_run_state(self, run_state: ThreadRunState | None = None) -> None:
+        run_state = run_state or self._run_state()
+        if run_state is None:
             return
+        run_state.user_cell = self._user_cell
+        run_state.assistant_cell = self._assistant_cell
+        run_state.reasoning_cell = self._reasoning_cell
+        run_state.reasoning_flushed_for_current_response = self._reasoning_flushed_for_current_response
+        run_state.tool_cells = self._tool_cells
+        run_state.status_message = self.state.status_message
+        run_state.last_error = self.state.last_error
 
-        # Avoid duplicating normal paste handling. When the composer is still
-        # focused, Textual routes the Paste event there first; it bubbles up to
-        # the app only after TextArea has already inserted the text.
-        if self.screen.focused is composer:
-            return
-        if self.screen.focused is not None:
-            return
-        if self._last_focused_on_app_blur is not composer:
-            return
+    def run(self) -> None:
+        asyncio.run(self.run_async())
 
-        event.stop()
-
-        # A Paste event is terminal input, just like a key press, but Textual's
-        # App.on_event only treats Key/MouseDown as focus-restoring input. Mark
-        # the app focused now so bindings/styles recover even if FocusIn arrives
-        # after the paste payload.
-        if not self.app_focus:
-            self.app_focus = True
-
-        previous = self._last_composer_text
-        result = composer.replace(event.text, *composer.selection, maintain_selection_offset=False)
-        composer.move_cursor(result.end_location)
-
-        # TextArea.Changed is not delivered for this fallback path because the
-        # paste is handled by the screen while no widget has focus. Apply the
-        # same composer bookkeeping that normally happens in
-        # on_text_area_changed(), otherwise large multi-line pastes remain in a
-        # collapsed composer until the next edit.
-        current = composer.text
-        if self._composer_history_index is not None and current != self._composer_history_text():
-            self._reset_composer_history_navigation()
-        self._last_composer_text = current
-        self._resize_composer()
-        self._refresh_status_from_cache()
-        self._maybe_open_mention_picker(composer, previous=previous, current=current)
-        composer.focus()
-
-    def _tick(self) -> None:
-        if not self._transcript_has_content:
+    async def run_async(self) -> None:
+        starter = getattr(self.engine, "start_plugins_background", None)
+        if callable(starter):
             try:
-                self.query_one(EmptyState).tick()
-            except NoMatches:
+                await starter()
+            except Exception:
+                # Plugin startup failures are surfaced through plugin status; the
+                # TUI should still open so users can inspect /status or continue
+                # with core commands.
                 pass
-        if self.busy or self._any_thread_running():
-            self._spinner_index += 1
-        if self.busy:
-            self._refresh_busy_status()
-        else:
-            self._apply_window_title()
+        with Terminal() as terminal:
+            self._ticker_task = asyncio.create_task(self._ticker())
+            self._refresh_window_title()
+            self._safe_repaint()
+            try:
+                with TerminalKeyReader(terminal) as keys:
+                    while True:
+                        try:
+                            key = await keys.read_key()
+                        except KeyboardInterrupt:
+                            # Fallback for platforms/embeddings where SIGINT is
+                            # still raised into the event loop.  The dedicated
+                            # reader means this no longer leaks executor workers.
+                            key = "\x03"
+                        if not await self.handle_key(key):
+                            break
+                running_states = [run_state for run_state in self._thread_runs.values() if run_state.running]
+                for run_state in running_states:
+                    run_state.cancel_event.set()
+                await asyncio.gather(
+                    *(run_state.task for run_state in running_states if run_state.task is not None),
+                    return_exceptions=True,
+                )
+            finally:
+                if self._ticker_task is not None:
+                    self._ticker_task.cancel()
+                    await asyncio.gather(self._ticker_task, return_exceptions=True)
+                    self._ticker_task = None
+                self._apply_window_title()
+                self.renderer.close()
+                for thread_id, ratio in list(self._thread_token_ratios.items()):
+                    if thread_id != "__draft__":
+                        self._persist_thread_token_ratio(thread_id, ratio)
+                await self.engine.aclose()
 
-    def _text(self, key: str) -> str:
-        return tr(self.language, key)
-
-    def _timeline_for_thread(self, thread_id: str | None = None) -> ThreadTimelineState | None:
-        resolved = thread_id or self.thread_id or "__draft__"
-        timeline = self._thread_timelines.get(resolved)
-        if timeline is None:
-            timeline = ThreadTimelineState(resolved)
-            self._thread_timelines[resolved] = timeline
-        return timeline
-
-    def _timeline_for_active(self) -> ThreadTimelineState | None:
-        return self._timeline_for_thread(self.thread_id)
-
-    def _save_active_thread_view_state(self) -> None:
-        if not self.thread_id or not self._default_screen_mounted():
-            return
-        try:
-            transcript = self.query_one("#transcript", TranscriptScroll)
-            composer = self.query_one("#composer", TextArea)
-        except NoMatches:
-            return
-        fold_state: dict[str, bool] = {}
-        for child in transcript.children:
-            if isinstance(child, FoldedProcessCell):
-                group_id = getattr(child, "timeline_group_id", "")
-                if isinstance(group_id, str) and group_id:
-                    fold_state[group_id] = child.collapsed
-        focused_item_id = None
-        focused = self.screen.focused
-        if isinstance(focused, Widget):
-            value = self._timeline_item_ids.get(focused)
-            focused_item_id = value if isinstance(value, str) else None
-        self._thread_view_states[self.thread_id] = ThreadViewState(
-            scroll_y=transcript.scroll_y,
-            follow_tail=transcript.follow_tail,
-            fold_collapsed=fold_state,
-            composer_draft=composer.text,
-            focused_item_id=focused_item_id,
-        )
-
-    def _restore_thread_view_state(self, thread_id: str) -> None:
-        view = self._thread_view_states.get(thread_id)
-        try:
-            transcript = self.query_one("#transcript", TranscriptScroll)
-            composer = self.query_one("#composer", TextArea)
-        except NoMatches:
-            return
-        if view is None:
-            composer.load_text("")
-            self._last_composer_text = ""
-            self._resize_composer()
-            self._scroll_end()
-            return
-        composer.load_text(view.composer_draft)
-        self._last_composer_text = view.composer_draft
-        self._resize_composer()
-        transcript.follow_tail = view.follow_tail
-
-        def _restore() -> None:
-            if view.follow_tail:
-                transcript.programmatic_scroll_end(force=True)
+    async def _ticker(self) -> None:
+        # 12Hz tick: matches the breath animation's target frequency (12
+        # phase changes per second at 100 chars/sec of streamed output).
+        tick_interval = 1.0 / 12.0
+        while True:
+            await asyncio.sleep(tick_interval)
+            confirmation_expired = self._expire_quit_confirmation()
+            confirmation_expired = self._expire_interrupt_confirmation() or confirmation_expired
+            animation_updated = self._advance_streaming_display()
+            if self.state.mode != "agent_view":
+                self._sync_attached_run_state_for_repaint()
+            if self.state.mode == "agent_view":
+                self._spinner_index += 1
+                self.renderer.spinner_frame = self._spinner_index
+                self._refresh_agent_view_rows()
+                self._safe_repaint()
+                continue
+            if self.state.busy or animation_updated:
+                self._spinner_index += 1
+                self.renderer.spinner_frame = self._spinner_index
+                self._apply_window_title()
+                self._safe_repaint()
             else:
-                transcript.scroll_y = transcript.validate_scroll_y(view.scroll_y)
-                transcript._recompute_near_bottom()
-                # Setting scroll_y may synchronously recompute near-bottom and
-                # re-enable follow mode. Restored per-thread view state is more
-                # specific than that generic watcher, so let the saved value win.
-                transcript.follow_tail = False
-            focused = self._timeline_cells.get(view.focused_item_id or "")
-            if isinstance(focused, Widget) and focused.is_mounted:
-                focused.focus()
+                self._apply_window_title()
+                if confirmation_expired:
+                    self._safe_repaint()
 
-        transcript.call_after_refresh(_restore)
+    # ------------------------------------------------------------------
+    # Key handling
+    # ------------------------------------------------------------------
 
-    def _active_fold_state(self) -> dict[str, bool]:
-        if self.thread_id and self.thread_id in self._thread_view_states:
-            return dict(self._thread_view_states[self.thread_id].fold_collapsed)
-        return {}
+    async def handle_key(self, key: str) -> bool:
+        if self.state.pager_open:
+            return self._handle_pager_key(key)
+        if self.state.mode == "agent_view":
+            return await self._handle_agent_view_key(key)
 
-    def _sync_transcript_from_timeline(self, *, restore_view: bool = False) -> None:
-        timeline = self._timeline_for_active()
-        if timeline is None:
-            return
-        try:
-            transcript = self.query_one("#transcript", TranscriptScroll)
-        except NoMatches:
-            return
-
-        # Full rebuilds are still the clearest path for history loads, thread
-        # switches, and structural changes such as inserting/removing old items.
-        # The hot live path below handles append/update-only streams without
-        # tearing down the whole widget tree on every token/tool partial.
-        if not restore_view and self._can_patch_timeline_incrementally(timeline):
-            self._patch_transcript_from_timeline(timeline, transcript)
-            return
-
-        self._rebuild_transcript_from_timeline(
-            timeline,
-            transcript,
-            restore_view=restore_view,
-        )
-
-    def _timeline_widget_is_live(self, widget: Widget | None) -> bool:
-        """Return whether a timeline widget can be patched in place.
-
-        Textual mounts children asynchronously: immediately after ``mount()`` a
-        widget can already have a parent, yet ``is_mounted`` remains false until
-        the next message-pump pass. Live stream events can arrive faster than
-        that, so treating parented widgets as absent makes the hot path rebuild
-        the whole transcript repeatedly.
-        """
-
-        return isinstance(widget, Widget) and (
-            widget.is_mounted
-            or (widget.parent is not None and not bool(getattr(widget, "_closing", False)))
-        )
-
-    def _can_patch_timeline_incrementally(self, timeline: ThreadTimelineState) -> bool:
-        if self._history_more_cell is not None:
-            return False
-        item_ids = self._timeline_cell_item_ids()
-        if len(timeline.items) < len(item_ids):
-            return False
-        # This predicate runs on the live streaming path. Building a full list of
-        # timeline ids for every token made each delta O(history) before the
-        # actual patcher even ran. Compare only the mounted prefix instead.
-        for index, item_id in enumerate(item_ids):
-            if timeline.items[index].id != item_id:
+        if key == "\x03":  # Ctrl+C
+            if self._interruptible_run_state() is not None:
+                self._expire_interrupt_confirmation()
+                if self._interrupt_armed:
+                    self._interrupt_running_turn()
+                    self._safe_repaint()
+                    return True
+                self._clear_quit_confirmation()
+                self._arm_interrupt_confirmation(self._text("interrupt_again"))
+                self._safe_repaint()
+                return True
+            self._expire_quit_confirmation()
+            if self._quit_armed:
                 return False
-        if len(set(item_ids)) != len(item_ids):
-            return False
-        for item_id in item_ids:
-            cell = self._timeline_cells.get(item_id)
-            if not self._timeline_widget_is_live(cell):
-                return False
+            self._clear_interrupt_confirmation()
+            self._arm_quit_confirmation(self._text("quit_again"))
+            self._safe_repaint()
+            return True
+
+        if key.startswith(PASTE_PREFIX):
+            self._insert_pasted_text(key[len(PASTE_PREFIX) :])
+            return True
+
+        if key:
+            self._clear_quit_confirmation()
+            self._clear_interrupt_confirmation()
+        if key != "\t":
+            self._tab_state = None
+        if key == "\x0c":  # Ctrl+L: force a full redraw of the live region.
+            self.renderer._has_frame = False  # type: ignore[attr-defined]
+            self._safe_repaint()
+            return True
+        if key == "\r":
+            if self._enter_looks_like_unbracketed_paste():
+                self._insert_composer_text("\n")
+                self._reset_history()
+                self._mark_plain_input()
+                self._skip_next_lf_after_plain_cr = True
+                self._after_composer_changed()
+                self._safe_repaint()
+                return True
+            self._skip_next_lf_after_plain_cr = False
+            if self.state.command_palette_open:
+                completed = self._accept_command_palette_selection()
+                if self._picker_mode != "command":
+                    self._safe_repaint()
+                    return True
+                if completed and self.state.composer.endswith(" "):
+                    self._safe_repaint()
+                    return True
+            return await self.submit()
+        if key in {"\n", "<C-ENTER>", "<S-ENTER>", "<A-ENTER>", "<O-ENTER>"}:  # Ctrl+J, Ctrl/Shift/Alt+Enter, and macOS Option+Enter insert a newline.
+            if key != "<C-ENTER>" and self._skip_next_lf_after_plain_cr:
+                self._mark_plain_input()
+                self._safe_repaint()
+                return True
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._insert_composer_text("\n")
+            self._after_composer_changed()
+        elif key == "\x1b":
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._close_command_palette()
+        if key == "\t":
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._handle_tab()
+        elif key == "\x01":  # Ctrl+A: line start in a draft, Agent View when the composer is empty.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            if self.state.composer:
+                self._move_composer_to_line_start()
+            else:
+                self._open_agent_view()
+        elif key == "\x05":  # Ctrl+E: move to the end of the current logical line.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._move_composer_to_line_end()
+        elif key == "\x0b":  # Ctrl+K: delete from the cursor to the current line end.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._delete_composer_to_line_end()
+            self._after_composer_changed()
+        elif key == "\x02":  # Ctrl+B: readline-style cursor-left shortcut.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._move_composer_cursor(-1)
+        elif key == "\x06":  # Ctrl+F: readline-style cursor-right shortcut.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._move_composer_cursor(1)
+        elif key == "\x04":  # Ctrl+D: delete the character under the cursor.
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._delete_composer_after_cursor()
+            self._after_composer_changed()
+        elif key in {"\x7f", "\b"}:
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._delete_composer_before_cursor()
+            self._after_composer_changed()
+        elif key == "\x17":  # Ctrl+W
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._delete_composer_word_before_cursor()
+            self._after_composer_changed()
+        elif key == "\x15":  # Ctrl+U
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._set_composer_text("", cursor=0)
+            self._reset_history()
+            self._after_composer_changed()
+        elif key in {"<H>", "<UP>"}:  # Windows/POSIX up arrow
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            if self.state.command_palette_open:
+                self._move_command_palette(-1)
+            else:
+                if self._history_cursor is not None:
+                    self._history_prev()
+                elif not self._move_composer_vertical(-1):
+                    self._history_prev()
+        elif key in {"<P>", "<DOWN>"}:  # Windows/POSIX down arrow
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            if self.state.command_palette_open:
+                self._move_command_palette(1)
+            else:
+                if self._history_cursor is not None:
+                    self._history_next()
+                elif not self._move_composer_vertical(1):
+                    self._history_next()
+        elif key in {"<K>", "<LEFT>"}:  # Windows/POSIX left arrow
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._move_composer_cursor(-1)
+        elif key in {"<M>", "<RIGHT>"}:  # Windows/POSIX right arrow
+            self._skip_next_lf_after_plain_cr = False
+            self._last_plain_input_at = None
+            self._move_composer_cursor(1)
+        elif self._is_text_input_key(key):
+            self._skip_next_lf_after_plain_cr = False
+            self._insert_composer_text(key)
+            self._reset_history()
+            self._mark_plain_input()
+            self._after_composer_changed()
+        self._safe_repaint()
         return True
 
-    def _patch_transcript_from_timeline(
-        self,
-        timeline: ThreadTimelineState,
-        transcript: TranscriptScroll,
-    ) -> None:
-        follow_tail = transcript.follow_tail
-        previous_scroll_y = transcript.scroll_y
-        changed_item_ids, changed_groups = timeline.consume_changes()
-        force_item_update = bool(changed_item_ids)
-        if not changed_item_ids and not changed_groups:
-            changed_item_ids = {item.id for item in timeline.items}
+    @staticmethod
+    def _is_text_input_key(key: str) -> bool:
+        """Return True for user text keys, excluding wrapped control tokens."""
+        return bool(key) and key >= " " and (key == "<" or not key.startswith("<"))
 
-        items_by_id = {item.id: item for item in timeline.items}
-        stale_ids = [item_id for item_id in self._timeline_cell_item_ids() if item_id not in items_by_id]
-        if stale_ids:
-            self._rebuild_transcript_from_timeline(timeline, transcript)
+    @staticmethod
+    def _delete_word(text: str) -> str:
+        stripped = text.rstrip()
+        if not stripped:
+            return ""
+        idx = max(stripped.rfind(" "), stripped.rfind("\n"))
+        return stripped[: idx + 1] if idx >= 0 else ""
+
+    async def _handle_agent_view_key(self, key: str) -> bool:
+        view = self.state.agent_view
+        confirmation = view.pending_confirmation
+        if confirmation:
+            if key in {"y", "Y"}:
+                action, _, thread_id = confirmation.partition(":")
+                view.pending_confirmation = None
+                if action == "delete_worktree":
+                    asyncio.create_task(self._delete_agent_view_worktree(thread_id))
+                elif action in {"hide_thread", "delete_thread"}:
+                    self._hide_agent_view_thread(thread_id)
+                self._safe_repaint()
+                return True
+            if key in {"n", "N", "\x1b", "\x03"}:
+                view.pending_confirmation = None
+                view.status_message = self._text("agent_view_delete_cancelled")
+                self._safe_repaint()
+                return True
+
+        if view.interaction_mode == "help":
+            if key in {"?", "h", "H", "\x1b"}:
+                view.interaction_mode = "normal"
+                view.status_message = self._text("agent_view_normal_hint")
+            elif key == "\x03":
+                self._close_agent_view()
+            self._safe_repaint()
+            return True
+
+        if view.interaction_mode == "model":
+            return await self._handle_agent_view_model_key(key)
+
+        if view.interaction_mode == "input":
+            return await self._handle_agent_view_input_key(key)
+        return await self._handle_agent_view_normal_key(key)
+
+    async def _handle_agent_view_normal_key(self, key: str) -> bool:
+        view = self.state.agent_view
+        if key == "\x03":
+            selected = view.selected_row()
+            if selected is not None and self._cancel_agent_view_thread(selected.thread_id):
+                view.status_message = self._fmt("agent_view_cancelled", thread=short_thread(selected.thread_id))
+            else:
+                self._close_agent_view()
+            self._safe_repaint()
+            return True
+        if key in {"\x1b", "\x01"}:  # Esc or Ctrl+A toggles back to transcript mode.
+            self._close_agent_view()
+            self._safe_repaint()
+            return True
+        if key in {"?", "h", "H"}:
+            view.interaction_mode = "help"
+            view.status_message = self._text("agent_view_help_status")
+        elif key in {"i", "a", "A"}:
+            self._enter_agent_view_input_mode(target="dispatch")
+        elif key in {"m", "M"}:
+            self._open_agent_view_model_picker()
+        elif key == "r":
+            selected = view.selected_row()
+            if selected is None:
+                view.status_message = self._text("agent_view_select_reply")
+            else:
+                self._enter_agent_view_input_mode(target="reply", thread_id=selected.thread_id)
+        elif key == "\r":
+            selected = view.selected_row()
+            if selected is not None:
+                self._resume_thread(selected.thread_id)
+                self.state.mode = "transcript"
+        elif key in {"<H>", "<UP>", "k"}:
+            self._move_agent_view_selection(-1)
+        elif key in {"<P>", "<DOWN>", "j"}:
+            self._move_agent_view_selection(1)
+        elif key in {"<I>", "<PAGEUP>"}:
+            self._move_agent_view_selection(-5)
+        elif key in {"<Q>", "<PAGEDOWN>"}:
+            self._move_agent_view_selection(5)
+        elif key == " ":
+            view.peek_expanded = not view.peek_expanded
+        elif key == "c":
+            selected = view.selected_row()
+            if selected is not None and self._cancel_agent_view_thread(selected.thread_id):
+                view.status_message = self._fmt("agent_view_cancelled", thread=short_thread(selected.thread_id))
+            else:
+                view.status_message = self._text("no_running_turn")
+        elif key == "d":
+            self._confirm_agent_view_delete(include_worktree=False)
+        elif key == "D":
+            self._confirm_agent_view_delete(include_worktree=True)
+        self._safe_repaint()
+        return True
+
+    async def _handle_agent_view_model_key(self, key: str) -> bool:
+        view = self.state.agent_view
+        if key in {"\x03", "\x1b", "m", "M"}:
+            view.interaction_mode = "normal"
+            view.status_message = self._text("agent_view_normal_hint")
+        elif key in {"<H>", "<UP>", "k"}:
+            self._move_agent_view_model_selection(-1)
+        elif key in {"<P>", "<DOWN>", "j"}:
+            self._move_agent_view_model_selection(1)
+        elif key in {"<I>", "<PAGEUP>"}:
+            self._move_agent_view_model_selection(-5)
+        elif key in {"<Q>", "<PAGEDOWN>"}:
+            self._move_agent_view_model_selection(5)
+        elif key == "\r":
+            self._accept_agent_view_model_selection()
+        self._safe_repaint()
+        return True
+
+    async def _handle_agent_view_input_key(self, key: str) -> bool:
+        if key == "\x03":  # Ctrl+C cancels editing in Agent View input mode.
+            self._leave_agent_view_input_mode(clear=True)
+            self._safe_repaint()
+            return True
+        if key == "\x1b":
+            self._leave_agent_view_input_mode(clear=False)
+            self._safe_repaint()
+            return True
+        if key.startswith(PASTE_PREFIX):
+            self._insert_agent_view_text(key[len(PASTE_PREFIX) :])
+            self._safe_repaint()
+            return True
+        if key == "\r":
+            await self._submit_agent_view_input()
+            self._safe_repaint()
+            return True
+        if key in {"\n", "<C-ENTER>", "<S-ENTER>", "<A-ENTER>", "<O-ENTER>"}:  # Ctrl+J, Ctrl/Shift/Alt+Enter, and macOS Option+Enter insert a newline.
+            self._insert_agent_view_text("\n")
+        elif key == "\x01":
+            self._move_agent_view_to_line_start()
+        elif key == "\x05":
+            self._move_agent_view_to_line_end()
+        elif key == "\x0b":
+            self._delete_agent_view_to_line_end()
+        elif key in {"\x7f", "\b"}:
+            self._delete_agent_view_before_cursor()
+        elif key == "\x04":
+            self._delete_agent_view_after_cursor()
+        elif key == "\x17":
+            self._delete_agent_view_word_before_cursor()
+        elif key == "\x15":
+            self._set_agent_view_text("", cursor=0)
+        elif key == "\x02" or key in {"<K>", "<LEFT>"}:
+            self._move_agent_view_cursor(-1)
+        elif key == "\x06" or key in {"<M>", "<RIGHT>"}:
+            self._move_agent_view_cursor(1)
+        elif self._is_text_input_key(key):
+            self._insert_agent_view_text(key)
+        self._safe_repaint()
+        return True
+
+    async def _submit_agent_view_input(self) -> None:
+        view = self.state.agent_view
+        text = view.composer.strip()
+        if not text:
+            view.status_message = self._text("agent_view_input_status")
             return
-
-        for item_id in changed_item_ids:
-            item = items_by_id.get(item_id)
-            if item is None:
-                continue
-            old_group = self._sync_timeline_item_widget(item, force_update=force_item_update)
-            if item.process_group:
-                changed_groups.add(item.process_group)
-            if old_group and old_group != item.process_group:
-                changed_groups.add(old_group)
-
-        for group_id in changed_groups:
-            self._refresh_timeline_process_fold(timeline, group_id)
-
-        if timeline.items:
-            self._mark_transcript_content()
-        else:
-            self._reset_transcript(show_empty=True)
+        target = view.input_target
+        target_thread_id = view.input_target_thread_id
+        self._set_agent_view_text("", cursor=0)
+        self._leave_agent_view_input_mode(clear=False)
+        if target == "reply":
+            self._reply_to_agent_view_thread(target_thread_id, text)
             return
-        self._history_before_event_id = timeline.loaded_start_event_id
-        self._history_has_more = timeline.has_older
-        self._history_more_cell = None
-        transcript.follow_tail = follow_tail
-        if follow_tail:
-            self._scroll_end()
-        else:
-            transcript.scroll_y = transcript.validate_scroll_y(previous_scroll_y)
-            transcript._recompute_near_bottom()
+        asyncio.create_task(self._dispatch_agent_view_prompt(text))
+        view.status_message = self._text("agent_view_dispatching")
 
-    def _rebuild_transcript_from_timeline(
-        self,
-        timeline: ThreadTimelineState,
-        transcript: TranscriptScroll,
-        *,
-        restore_view: bool = False,
-    ) -> None:
-        follow_tail = transcript.follow_tail
-        previous_scroll_y = transcript.scroll_y
-        transcript.query("*").remove()
-        self._timeline_cells.clear()
-        self._timeline_item_ids.clear()
-        self._assistant_cell = None
-        self._assistant_buffer = ""
-        self._reasoning_cell = None
-        self._reasoning_buffer = ""
-        self._process_cells = []
-        self._process_fold_cell = None
-        self._process_collapsed = False
-        self._process_anchor_cell = None
-        self._transcript_has_content = False
-        self._history_before_event_id = timeline.loaded_start_event_id
-        self._history_has_more = timeline.has_older
-        self._history_more_cell = None
-        if timeline.has_older:
-            marker = LoadOlderHistoryCell(has_more=True, classes="event")
-            transcript.mount(marker)
-            self._history_more_cell = marker
-        group_order: list[str] = []
-        for item in timeline.items:
-            if item.process_group and item.process_group not in group_order:
-                group_order.append(item.process_group)
-            self._mount_timeline_item(item)
-        # Saved view state is a one-shot restore concern.  During normal live
-        # updates the timeline group is the source of truth; reapplying an older
-        # ThreadViewState on every sync makes a user-toggled fold snap back on
-        # the next stream event or queued-turn refresh.
-        fold_state = self._active_fold_state() if restore_view else {}
-        for group_id in group_order:
-            group = timeline.process_groups.get(group_id)
-            if group is None or not group.item_ids:
-                continue
-            if restore_view:
-                group.collapsed = fold_state.get(group.id, group.collapsed)
-            self._mount_timeline_process_fold(timeline, group_id)
-        timeline.consume_changes()
-        if timeline.items:
-            self._mark_transcript_content()
-        else:
-            self._reset_transcript(show_empty=True)
-            return
-        if restore_view and self.thread_id:
-            self._restore_thread_view_state(self.thread_id)
-            return
-        transcript.follow_tail = follow_tail
-        if follow_tail:
-            self._scroll_end()
-        else:
-            transcript.scroll_y = transcript.validate_scroll_y(previous_scroll_y)
-            transcript._recompute_near_bottom()
+    def _enter_agent_view_input_mode(self, *, target: str, thread_id: str | None = None) -> None:
+        view = self.state.agent_view
+        view.interaction_mode = "input"
+        view.input_target = "reply" if target == "reply" else "dispatch"
+        view.input_target_thread_id = thread_id
+        view.status_message = self._text("agent_view_reply_status" if view.input_target == "reply" else "agent_view_input_status")
+        view.composer_cursor = self._agent_view_cursor()
 
-    def _timeline_cell_item_ids(self) -> list[str]:
-        return [
-            item_id
-            for item_id in self._timeline_cells
-            if not item_id.startswith("process_fold:")
-        ]
+    def _leave_agent_view_input_mode(self, *, clear: bool) -> None:
+        view = self.state.agent_view
+        if clear:
+            self._set_agent_view_text("", cursor=0)
+        view.interaction_mode = "normal"
+        view.input_target = "dispatch"
+        view.input_target_thread_id = None
+        view.status_message = self._text("agent_view_normal_hint")
 
-    def _timeline_item_signature(self, item: TimelineItem) -> tuple[Any, ...]:
-        """Return a cheap widget freshness key for timeline updates.
+    def _open_agent_view_model_picker(self) -> None:
+        view = self.state.agent_view
+        view.model_options = list(self._agent_view_model_options())
+        current = self._agent_view_dispatch_level()
+        view.model_selected = 0
+        for index, option in enumerate(view.model_options):
+            if option.id == current:
+                view.model_selected = index
+                break
+        view.interaction_mode = "model"
+        view.status_message = self._text("agent_view_model_status")
 
-        The live streaming path calls this often. Avoid serializing ever-growing
-        assistant text, tool arguments, or partial stdout on every flush; length
-        plus a tail slice is enough to detect the append-only updates we render.
-        Stable events still fall back to full JSON so history/final content keeps
-        exact change detection.
-        """
-
-        if item.kind in {"assistant", "reasoning"} and isinstance(item.content, dict):
-            text = item.content.get("text")
-            if isinstance(text, list):
-                return (
-                    item.kind,
-                    item.process_group,
-                    bool(item.content.get("partial")),
-                    len(text),
-                    text[-1] if text else "",
-                )
-        if item.kind == "tool_call" and isinstance(item.content, dict):
-            call = item.content.get("call") if isinstance(item.content.get("call"), dict) else {}
-            status = str(item.content.get("status") or "")
-            if status != "called" and isinstance(call, dict):
-                arguments = str(call.get("arguments") or "")
-                return (
-                    item.kind,
-                    item.process_group,
-                    status,
-                    str(call.get("call_id") or ""),
-                    str(call.get("name") or ""),
-                    len(arguments),
-                    arguments[-120:],
-                )
-        if item.kind == "tool_result" and isinstance(item.content, dict):
-            payload = item.content.get("payload") if isinstance(item.content.get("payload"), dict) else {}
-            if isinstance(payload, dict) and payload.get("partial"):
-                stdout = str(payload.get("stdout") or "")
-                stderr = str(payload.get("stderr") or "")
-                events = payload.get("events")
-                if not isinstance(events, list):
-                    events = []
-                return (
-                    item.kind,
-                    item.process_group,
-                    "partial",
-                    str(payload.get("run_id") or ""),
-                    str(payload.get("call_id") or ""),
-                    payload.get("returncode"),
-                    len(stdout),
-                    stdout[-120:],
-                    len(stderr),
-                    stderr[-120:],
-                    len(events),
-                    repr(events[-1])[:240] if events else "",
-                )
-        return (
-            item.kind,
-            item.process_group,
-            json.dumps(item.content, sort_keys=True, default=str),
+    def _agent_view_model_options(self) -> tuple[CommandSuggestion, ...]:
+        levels = sorted(self._public_config_levels())
+        return tuple(
+            CommandSuggestion(name, self._level_model_name(name), id=name, kind="model")
+            for name in levels
         )
 
-    def _set_timeline_widget_metadata(self, widget: Widget, item: TimelineItem) -> None:
-        self._timeline_cells[item.id] = widget
-        self._timeline_item_ids[widget] = item.id
-        setattr(widget, "timeline_process_group", item.process_group)
-        setattr(widget, "timeline_signature", self._timeline_item_signature(item))
+    def _agent_view_dispatch_level(self) -> str:
+        view = self.state.agent_view
+        source_level = view.dispatch_level if view.dispatch_level_explicit else self.state.level
+        level = source_level or self.engine.config.runtime.default_level
+        public_levels = self._public_config_levels()
+        if level in public_levels:
+            return level
+        default = self.engine.config.runtime.default_level
+        if default in public_levels:
+            return default
+        return next(iter(public_levels), default)
 
-    def _rebind_timeline_widget_id(self, old_item_id: str, item: TimelineItem) -> None:
-        """Move mounted widget metadata after a timeline item id changes."""
-
-        if old_item_id == item.id or old_item_id not in self._timeline_cells:
+    def _move_agent_view_model_selection(self, delta: int) -> None:
+        view = self.state.agent_view
+        if not view.model_options:
+            view.model_selected = 0
             return
-        widget = self._timeline_cells[old_item_id]
-        replaced = self._timeline_cells.get(item.id)
-        if isinstance(replaced, Widget) and replaced is not widget:
-            self._timeline_item_ids.pop(replaced, None)
-        rebound: dict[str, Widget] = {}
-        for key, value in self._timeline_cells.items():
-            if key == old_item_id:
-                rebound[item.id] = value
-            elif key != item.id:
-                rebound[key] = value
-        self._timeline_cells.clear()
-        self._timeline_cells.update(rebound)
-        self._timeline_item_ids[widget] = item.id
-        setattr(widget, "timeline_process_group", item.process_group)
-        setattr(widget, "timeline_signature", self._timeline_item_signature(item))
+        view.model_selected = max(0, min(len(view.model_options) - 1, view.model_selected + delta))
 
-    def _sync_timeline_item_widget(self, item: TimelineItem, *, force_update: bool = False) -> str | None:
-        existing = self._timeline_cells.get(item.id)
-        old_group = getattr(existing, "timeline_process_group", None) if isinstance(existing, Widget) else None
-        signature = None if force_update else self._timeline_item_signature(item)
-        if self._timeline_widget_is_live(existing):
-            if not force_update and getattr(existing, "timeline_signature", None) == signature:
-                setattr(existing, "timeline_process_group", item.process_group)
-                return old_group if isinstance(old_group, str) else None
-            if self._update_timeline_item_widget(existing, item):
-                self._set_timeline_widget_metadata(existing, item)
-                return old_group if isinstance(old_group, str) else None
-            replacement = self._mount_timeline_item(item, before=existing)
-            self._timeline_item_ids.pop(existing, None)
-            existing.remove()
-            if replacement is None:
-                self._timeline_cells.pop(item.id, None)
-            return old_group if isinstance(old_group, str) else None
-        if isinstance(existing, Widget):
-            self._timeline_item_ids.pop(existing, None)
-        self._timeline_cells.pop(item.id, None)
-        self._mount_timeline_item(item)
-        return old_group if isinstance(old_group, str) else None
+    def _accept_agent_view_model_selection(self) -> None:
+        view = self.state.agent_view
+        if not view.model_options:
+            view.status_message = self._text("agent_view_no_models")
+            return
+        option = view.model_options[max(0, min(view.model_selected, len(view.model_options) - 1))]
+        level = option.id or option.value
+        view.dispatch_level = level
+        view.dispatch_level_explicit = True
+        view.interaction_mode = "normal"
+        view.status_message = self._fmt("agent_view_model_set", level=level)
 
-    def _update_timeline_item_widget(self, widget: Widget, item: TimelineItem) -> bool:
-        if item.kind == "user":
-            if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
-                return False
-            label = "你" if self.language.is_chinese else "you"
-            text = _timeline_text(item.content.get("text"))
-            widget.update(join_lines([Text(f"› {label}", style="bold #7dd3fc"), plain(text)]))
-            return True
-        if item.kind == "assistant":
-            if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
-                return False
-            text = _timeline_text(item.content.get("text"))
-            if item.content.get("partial"):
-                widget.update(plain(text, style="#d7e0ea"), copy_text=text)
-                return True
-            widget.update(_markdown(text), copy_text=text)
-            return True
-        if item.kind == "reasoning":
-            text = _timeline_text(item.content.get("text"))
-            if item.content.get("partial"):
-                if not isinstance(widget, TranscriptCell) or isinstance(widget, (ExpandableTranscriptCell, FoldedProcessCell)):
-                    return False
-                first = text.strip().splitlines()[0] if text.strip() else ""
-                if len(first) > 120:
-                    first = first[:117].rstrip() + "..."
-                widget.update(Text.assemble(
-                    (self._text("thinking"), "dim italic"),
-                    "  ",
-                    (first, "italic #a3b1c2"),
-                ))
-                return True
-            if not isinstance(widget, ExpandableTranscriptCell):
-                return False
-            stripped = text.strip()
-            if not stripped:
-                return False
-            summary, details = self._reasoning_markup(stripped)
-            widget.set_details(summary, details)
-            return True
-        if item.kind == "tool_call":
-            if not isinstance(widget, ExpandableTranscriptCell):
-                return False
-            call = dict(item.content.get("call") or {})
-            status = str(item.content.get("status") or "called")
-            status_label = str(
-                call.get("_status_label")
-                or (self._text("python_called") if status == "called" else self._text("python_running"))
-            )
-            if status != "called":
-                # The streamed tool-call arguments may update every few bytes.
-                # Re-highlighting the growing details pane on each delta makes
-                # live JSON/function-call output increasingly expensive. Keep
-                # the compact row fresh and defer the full highlighted body to
-                # tool.started/tool.output, where the call is stable.
-                widget.update(tool_call_summary_markup({**call, "_status_label": status_label}))
-                widget.update_copy_text(renderable_plain(tool_call_detail_highlight_markup(call)))
-                if widget.has_class("event"):
-                    widget.remove_class("event")
-                if not widget.has_class("tool_pending"):
-                    widget.add_class("tool_pending")
-                return True
-            widget.set_details(
-                tool_call_summary_markup({**call, "_status_label": status_label}),
-                tool_call_detail_highlight_markup(call),
-            )
-            if status == "called":
-                if widget.has_class("tool_pending"):
-                    widget.remove_class("tool_pending")
-                if not widget.has_class("event"):
-                    widget.add_class("event")
-            else:
-                if widget.has_class("event"):
-                    widget.remove_class("event")
-                if not widget.has_class("tool_pending"):
-                    widget.add_class("tool_pending")
-            return True
-        if item.kind == "tool_result":
-            if not isinstance(widget, ExpandableTranscriptCell):
-                return False
-            payload = dict(item.content.get("payload") or {})
-            widget.set_details(tool_timeline_markup(payload), tool_detail_markup(payload))
-            widget.tool_payload = payload
-            self._last_tool_payload = payload
-            return True
-        if item.kind == "image":
-            if not isinstance(widget, ImageAttachmentCell):
-                return False
-            widget.attachment = dict(item.content.get("attachment") or {})
-            widget._refresh_content()
-            return True
-        if item.kind == "compaction":
-            if not isinstance(widget, ExpandableTranscriptCell):
-                return False
-            summary_text = _timeline_text(item.content.get("text")).strip()
-            if not summary_text:
-                return False
-            summary = Text.assemble(
-                (self._text("compacted"), "dim"),
-                " · ",
-                (self._text("compacted_summary_hint"), "cyan dim"),
-            )
-            widget.detail_title = "compaction_summary"
-            widget.detail_hint = "compaction_summary_hint"
-            widget.set_details(summary, plain(summary_text))
-            self._process_anchor_cell = widget
-            return True
-        if item.kind == "warning":
-            if not isinstance(widget, TranscriptCell) or isinstance(widget, FoldedProcessCell):
-                return False
-            event = dict(item.content.get("event") or {})
-            if item.content.get("warning_kind") == "model_switch":
-                message = str(event.get("message") or self._text("model_switch_warning"))
-                from_level = str(event.get("from_level") or "")
-                to_level = str(event.get("to_level") or "")
-                content = Text(message, style="yellow")
-                if from_level or to_level:
-                    content.append("\n")
-                    content.append(f"{from_level or '?'} -> {to_level or '?'}", style="dim")
-                widget.update(content, copy_text=message)
-            else:
-                message = str(event.get("message") or self._text("token_estimation_warning"))
-                widget.update(Text.assemble(("⚠ ", "yellow"), (message, "yellow")), copy_text=message)
-            return True
-        if item.kind == "error":
-            if not isinstance(widget, TranscriptCell) or isinstance(widget, FoldedProcessCell):
-                return False
-            event = dict(item.content.get("event") or {})
-            error_type = str(event.get("error_type") or "Turn error")
-            message = str(event.get("message") or "The turn stopped before producing a final response.")
-            retryable = self._is_retryable_error_event(event)
-            hint = self._text("retry_network_error_hint") if retryable else self._text("thread_stopped_after_error")
-            widget.update(
-                join_lines([Text.assemble((error_type, "bold red"), " ", message), plain(hint, style="dim")]),
-                copy_text=f"{error_type}: {message}\n{hint}",
-            )
-            return True
-        if item.kind == "stream_retry":
-            if not isinstance(widget, TranscriptCell) or isinstance(widget, FoldedProcessCell):
-                return False
-            event = dict(item.content.get("event") or {})
-            attempt = event.get("attempt")
-            max_attempts = event.get("max_attempts")
-            delay_s = event.get("delay_s")
-            error_type = str(event.get("error_type") or "stream")
-            try:
-                if delay_s is None:
-                    raise TypeError("delay_s is missing")
-                delay_text = f"{float(delay_s):.1f}s"
-            except (TypeError, ValueError):
-                delay_text = "?s"
-            widget.update(plain(
-                f"⟳ stream empty, retrying {attempt or '?'}/{max_attempts or '?'} "
-                f"in {delay_text} ({error_type})",
-                style="dim",
-            ))
-            return True
-        if item.kind == "queued":
-            if not isinstance(widget, TranscriptCell) or isinstance(widget, FoldedProcessCell):
-                return False
-            widget.update(self._queued_turn_markup(
-                str(item.content.get("prompt") or ""),
-                list(item.content.get("image_paths") or []),
-            ))
-            return True
-        return False
+    def _open_agent_view(self) -> None:
+        self._close_command_palette()
+        self._refresh_agent_view_rows()
+        self.state.mode = "agent_view"
+        self.state.agent_view.interaction_mode = "normal"
+        self.state.agent_view.input_target = "dispatch"
+        self.state.agent_view.input_target_thread_id = None
+        self.state.agent_view.dispatch_level = self._agent_view_dispatch_level()
+        if self.state.agent_view.selected >= len(self.state.agent_view.rows):
+            self.state.agent_view.selected = max(0, len(self.state.agent_view.rows) - 1)
+        self.state.agent_view.status_message = self._text("agent_view_open_status")
 
-    def _timeline_process_cells(self, timeline: ThreadTimelineState, group_id: str) -> list[TranscriptCell]:
-        group = timeline.process_groups.get(group_id)
-        if group is None or not group.item_ids:
-            return []
-        process_cells: list[TranscriptCell] = []
-        seen: set[Widget] = set()
-        for item_id in group.item_ids:
-            cell = self._timeline_cells.get(item_id)
-            if not isinstance(cell, TranscriptCell) or isinstance(cell, FoldedProcessCell):
-                continue
-            if cell in seen:
-                continue
-            seen.add(cell)
-            process_cells.append(cell)
-        return process_cells
+    def _background_current_thread(self) -> None:
+        self._close_command_palette()
+        joined = self._join_current_thread_to_agent_view()
+        self._refresh_agent_view_rows()
+        if self.state.thread_id:
+            for index, row in enumerate(self.state.agent_view.rows):
+                if row.thread_id == self.state.thread_id:
+                    self.state.agent_view.selected = index
+                    break
+        self.state.mode = "agent_view"
+        self.state.agent_view.interaction_mode = "normal"
+        self.state.agent_view.input_target = "dispatch"
+        self.state.agent_view.input_target_thread_id = None
+        self.state.agent_view.dispatch_level = self._agent_view_dispatch_level()
+        if joined is True:
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_bg_added",
+                thread=short_thread(self.state.thread_id),
+            )
+        elif joined is False:
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_bg_present",
+                thread=short_thread(self.state.thread_id),
+            )
+        else:
+            self.state.agent_view.status_message = self._text("agent_view_open_status")
 
-    def _mount_timeline_process_fold(self, timeline: ThreadTimelineState, group_id: str) -> FoldedProcessCell | None:
-        group = timeline.process_groups.get(group_id)
-        process_cells = self._timeline_process_cells(timeline, group_id)
-        if group is None or not process_cells:
+    def _join_current_thread_to_agent_view(self) -> bool | None:
+        thread_id = self.state.thread_id
+        if not thread_id:
             return None
-        elapsed_label = self._process_elapsed_label(started_at=group.started_at, completed_at=group.completed_at)
-        fold = self._append_process_fold_cell(
-            process_cells,
-            collapsed=group.collapsed,
-            elapsed_label=elapsed_label,
-            timeline_group_id=group_id,
-        )
-        self._timeline_cells[f"process_fold:{group_id}"] = fold
-        self._timeline_item_ids[fold] = f"process_fold:{group_id}"
-        return fold
+        metadata = self._thread_metadata(thread_id)
+        if not metadata.get("agent_view_deleted") and (
+            metadata.get("agent_view_joined") or thread_id in self._agent_view_local_threads
+        ):
+            return False
+        self._agent_view_local_threads.add(thread_id)
+        try:
+            self.engine.thread_store.append(thread_id, "thread.agent_view_joined", source="bg_command")
+        except ThreadLockedError:
+            self._agent_view_join_pending_persist.add(thread_id)
+        return True
 
-    def _refresh_timeline_process_fold(self, timeline: ThreadTimelineState, group_id: str) -> None:
-        group = timeline.process_groups.get(group_id)
-        key = f"process_fold:{group_id}"
-        existing = self._timeline_cells.get(key)
-        process_cells = self._timeline_process_cells(timeline, group_id)
-        if group is None or not process_cells:
-            if isinstance(existing, Widget):
-                existing.remove()
-                self._timeline_item_ids.pop(existing, None)
-            self._timeline_cells.pop(key, None)
+    def _persist_pending_agent_view_join(self, thread_id: str) -> None:
+        if thread_id not in self._agent_view_join_pending_persist:
             return
-        elapsed_label = self._process_elapsed_label(started_at=group.started_at, completed_at=group.completed_at)
-        if isinstance(existing, FoldedProcessCell) and self._timeline_widget_is_live(existing):
-            existing.set_cells(process_cells)
-            existing.set_elapsed_label(elapsed_label)
-            first_cell = process_cells[0]
-            if self._timeline_widget_is_live(first_cell):
-                children = list(first_cell.parent.children) if first_cell.parent is not None else []
-                fold_is_after_first_cell = (
-                    existing in children
-                    and first_cell in children
-                    and children.index(existing) > children.index(first_cell)
-                )
-                if fold_is_after_first_cell:
-                    first_cell.parent.move_child(existing, before=first_cell)
-            if existing.collapsed != group.collapsed:
-                existing.set_collapsed(group.collapsed, notify=False)
+        metadata = self._thread_metadata(thread_id)
+        if metadata.get("agent_view_joined"):
+            self._agent_view_join_pending_persist.discard(thread_id)
             return
-        self._mount_timeline_process_fold(timeline, group_id)
+        try:
+            self.engine.thread_store.append(thread_id, "thread.agent_view_joined", source="bg_command")
+        except ThreadLockedError:
+            return
+        self._agent_view_join_pending_persist.discard(thread_id)
 
-    def _mount_timeline_item(self, item: TimelineItem, *, before: MountBefore = None) -> Widget | None:
-        cell: Widget | None = None
-        if item.kind == "user":
-            cell = self._append_user(str(item.content.get("text") or ""), before=before)
-        elif item.kind == "assistant":
-            text = _timeline_text(item.content.get("text"))
-            content = plain(text, style="#d7e0ea") if item.content.get("partial") else _markdown(text)
-            cell = self._append_cell(content, "assistant", before=before, copy_text=text)
-        elif item.kind == "reasoning":
-            text = _timeline_text(item.content.get("text"))
-            if item.content.get("partial"):
-                first = text.strip().splitlines()[0] if text.strip() else ""
-                if len(first) > 120:
-                    first = first[:117].rstrip() + "..."
-                cell = self._append_cell(
-                    Text.assemble(
-                        (self._text("thinking"), "dim italic"),
-                        "  ",
-                        (first, "italic #a3b1c2"),
-                    ),
-                    "reasoning",
-                    before=before,
-                )
-            else:
-                cell = self._append_reasoning_history(text, before=before)
-        elif item.kind == "tool_call":
-            call = dict(item.content.get("call") or {})
-            status = str(item.content.get("status") or "called")
-            status_label = self._text("python_called") if status == "called" else self._text("python_running")
-            cell = self._append_tool_call_history({**call, "_status_label": status_label}, before=before)
-            if status != "called" and isinstance(cell, TranscriptCell):
-                cell.remove_class("event")
-                cell.add_class("tool_pending")
-        elif item.kind == "tool_result":
-            payload = dict(item.content.get("payload") or {})
-            cell = self._append_expandable_cell(tool_timeline_markup(payload), tool_detail_markup(payload), "event", before=before)
-            cell.tool_payload = payload
-        elif item.kind == "image":
-            cell = self._append_image_attachment_cell(dict(item.content.get("attachment") or {}), before=before)
-        elif item.kind == "compaction":
-            cell = self._append_compaction_cell(dict(item.content.get("event") or {}), before=before)
-            if isinstance(cell, TranscriptCell):
-                self._process_anchor_cell = cell
-        elif item.kind == "warning":
-            event = dict(item.content.get("event") or {})
-            if item.content.get("warning_kind") == "model_switch":
-                cell = self._append_model_switch_warning_cell(event, before=before)
-            else:
-                cell = self._append_token_estimation_warning(event, before=before, flash=False)
-        elif item.kind == "error":
-            cell = self._append_turn_error(dict(item.content.get("event") or {}), before=before)
-        elif item.kind == "stream_retry":
-            cell = self._append_stream_retry(dict(item.content.get("event") or {}), before=before)
-        elif item.kind == "queued":
-            cell = self._append_cell(
-                self._queued_turn_markup(
-                    str(item.content.get("prompt") or ""),
-                    list(item.content.get("image_paths") or []),
-                ),
-                "event",
-                before=before,
+    def _close_agent_view(self) -> None:
+        self.state.mode = "transcript"
+        self.state.agent_view.pending_confirmation = None
+        self.state.agent_view.interaction_mode = "normal"
+
+    def _move_agent_view_selection(self, delta: int) -> None:
+        rows = self.state.agent_view.rows
+        if not rows:
+            self.state.agent_view.selected = 0
+            return
+        self.state.agent_view.selected = max(0, min(len(rows) - 1, self.state.agent_view.selected + delta))
+
+    def _ordered_agent_view_rows(self) -> list[AgentViewRow]:
+        indexed_threads = {row.thread_id: index for index, row in enumerate(self.state.agent_view.rows)}
+        rows: list[AgentViewRow] = []
+        seen: set[str] = set()
+        for thread in self.engine.thread_store.list_threads()[:100]:
+            thread_id = str(thread.get("thread_id") or "")
+            if not thread_id or thread.get("agent_view_deleted"):
+                continue
+            if not self._is_agent_view_thread(thread):
+                continue
+            rows.append(self._agent_view_row_for_thread(thread_id, thread))
+            seen.add(thread_id)
+
+        for thread_id in sorted(self._agent_view_local_threads.difference(seen)):
+            try:
+                thread = self._thread_metadata(thread_id)
+            except Exception:
+                thread = {"thread_id": thread_id, "title": "New thread"}
+            if thread.get("agent_view_deleted") and thread_id not in self._agent_view_join_pending_persist:
+                continue
+            rows.append(self._agent_view_row_for_thread(thread_id, thread))
+
+        def sort_key(row: AgentViewRow) -> tuple[int, int]:
+            return (
+                _AGENT_VIEW_STATUS_RANK.get(row.status, len(_AGENT_VIEW_STATUS_RANK)),
+                indexed_threads.get(row.thread_id, len(indexed_threads)),
             )
-        if cell is not None:
-            self._set_timeline_widget_metadata(cell, item)
-        return cell
 
-    def _commands(self) -> list[CommandSpec]:
-        return [
-            CommandSpec(name, usage, command_description(self.language, name))
-            for name, usage in COMMAND_SPECS
-        ]
+        return sorted(rows, key=sort_key)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if not isinstance(event.button, RetryTurnButton):
-            return
-        event.stop()
-        self._retry_thread(event.button.retry_thread_id or self.thread_id)
+    @staticmethod
+    def _is_agent_view_thread(thread: dict[str, Any]) -> bool:
+        if thread.get("agent_view_joined"):
+            return True
+        return bool(thread.get("worktree_branch") or thread.get("worktree_path"))
 
-    def action_submit_composer(self) -> None:
-        composer = self.query_one("#composer", TextArea)
-        prompt = composer.text.strip()
-        pending_images_thread_id = self.thread_id
-        pending_images = list(self._pending_images)
-        if not prompt and not pending_images:
-            self._flash(self._text("write_first"))
-            return
-        if self._thread_has_blocking_error(self.thread_id):
-            self._flash(self._text("thread_blocked_after_error"), severity="error")
-            return
-        try:
-            transcript = self.query_one("#transcript", TranscriptScroll)
-        except NoMatches:
-            transcript = None
-        if transcript is not None and transcript.near_bottom:
-            transcript.follow_tail = True
-        if prompt:
-            self._remember_composer_input(prompt)
-        self._reset_composer_history_navigation()
-        composer.load_text("")
-        self._last_composer_text = ""
-        self._composer_height_override = None
-        self._resize_composer()
-        if not prompt:
-            prompt = self._text("image_only_prompt")
-        if "\n" not in prompt and self._handle_command(prompt):
-            return
-        thread_id = self._ensure_active_thread()
-        image_paths = [image.path for image in pending_images]
-        self._clear_pending_images_for_thread(pending_images_thread_id)
-        self._refresh_pending_images()
-        level = self._current_level_for_thread(thread_id)
-        self._persist_thread_level(thread_id, level)
-        active_run = self._active_run_state()
-        if active_run is not None:
-            run_state = active_run
-            run_state.queue.append(QueuedTurn(prompt=prompt, level=level, image_paths=image_paths))
-            timeline = self._timeline_for_thread(run_state.thread_id)
-            if timeline is not None:
-                timeline.add_queued_turn(run_state.queue[-1].queue_id, prompt, image_paths)
-            if self._is_active_thread(run_state.thread_id):
-                self._sync_transcript_from_timeline()
-            self._refresh_pending_turns()
-            self._refresh_status()
-            return
-        self._start_turn(prompt, level=level, image_paths=image_paths)
+    def _agent_view_cursor(self) -> int:
+        cursor = self.state.agent_view.composer_cursor
+        text = self.state.agent_view.composer
+        if cursor is None:
+            return len(text)
+        return max(0, min(cursor, len(text)))
 
-    def _start_turn(
-        self,
-        prompt: str,
-        *,
-        level: str | None = None,
-        image_paths: list[Path] | None = None,
-    ) -> None:
-        thread_id = self._ensure_active_thread()
-        level = level or self._current_level_for_thread(thread_id)
-        self._persist_thread_level(thread_id, level)
-        self._start_background_turn(thread_id, prompt, level=level, image_paths=image_paths)
+    def _set_agent_view_text(self, text: str, *, cursor: int | None = None) -> None:
+        self.state.agent_view.composer = text
+        self.state.agent_view.composer_cursor = len(text) if cursor is None else max(0, min(cursor, len(text)))
 
-    def _start_background_turn(
-        self,
-        thread_id: str,
-        prompt: str,
-        *,
-        level: str | None,
-        image_paths: list[Path] | None = None,
-        queue: list[QueuedTurn] | None = None,
-    ) -> None:
-        cancel_event = asyncio.Event()
-        started_at = utc_now_iso()
-        run_state = ThreadRunState(
-            thread_id=thread_id,
-            worker=None,
-            cancel_event=cancel_event,
-            queue=list(queue or []),
-            status=self._text("sending"),
-            started_at=started_at,
+    def _insert_agent_view_text(self, text: str) -> None:
+        cursor = self._agent_view_cursor()
+        value = self.state.agent_view.composer
+        self._set_agent_view_text(value[:cursor] + text + value[cursor:], cursor=cursor + len(text))
+
+    def _delete_agent_view_before_cursor(self) -> None:
+        cursor = self._agent_view_cursor()
+        if cursor <= 0:
+            return
+        value = self.state.agent_view.composer
+        self._set_agent_view_text(value[: cursor - 1] + value[cursor:], cursor=cursor - 1)
+
+    def _delete_agent_view_after_cursor(self) -> None:
+        cursor = self._agent_view_cursor()
+        value = self.state.agent_view.composer
+        if cursor >= len(value):
+            return
+        self._set_agent_view_text(value[:cursor] + value[cursor + 1 :], cursor=cursor)
+
+    def _delete_agent_view_word_before_cursor(self) -> None:
+        cursor = self._agent_view_cursor()
+        value = self.state.agent_view.composer
+        before = self._delete_word(value[:cursor])
+        self._set_agent_view_text(before + value[cursor:], cursor=len(before))
+
+    def _delete_agent_view_to_line_end(self) -> None:
+        cursor = self._agent_view_cursor()
+        value = self.state.agent_view.composer
+        end = value.find("\n", cursor)
+        end = len(value) if end < 0 else end
+        self._set_agent_view_text(value[:cursor] + value[end:], cursor=cursor)
+
+    def _move_agent_view_cursor(self, delta: int) -> None:
+        self.state.agent_view.composer_cursor = max(
+            0,
+            min(self._agent_view_cursor() + delta, len(self.state.agent_view.composer)),
         )
-        self._thread_runs[thread_id] = run_state
-        self._mark_thread_active(thread_id)
-        timeline = self._timeline_for_thread(thread_id)
-        pending_turn_id = f"pending:{started_at or thread_id}"
-        if timeline is not None:
-            timeline.ensure_user_item(pending_turn_id, prompt, created_at=started_at)
-            run_state.pending_user_turn_id = pending_turn_id
-        if self._is_active_thread(thread_id):
-            self.query_one("#composer-shell", Vertical).add_class("busy")
-            self._reset_live_view_state()
-            self._interrupt_armed = False
-            self._turn_started_at = started_at
-            self._turn_completed_at = None
-            self._sync_transcript_from_timeline()
-            for image_path in image_paths or []:
-                self._append_cell(
-                    Text.assemble(
-                        (self._text("image_pending_sent"), "dim"),
-                        " ",
-                        (Path(image_path).name, "cyan"),
-                    ),
-                    "event",
-                )
-            self._refresh_status(self._text("sending"))
-        worker = self.run_worker(
-            self._run_turn(prompt, thread_id, level=level, image_paths=list(image_paths or [])),
-            exclusive=False,
-            thread=False,
-        )
-        run_state.worker = worker
-        if self._is_active_thread(thread_id):
-            self._current_worker = worker
-            self._current_cancel_event = cancel_event
-        self._refresh_active_run_state()
 
-    def _start_retry_turn(self, thread_id: str) -> None:
-        cancel_event = asyncio.Event()
-        started_at = utc_now_iso()
-        run_state = ThreadRunState(
-            thread_id=thread_id,
-            worker=None,
-            cancel_event=cancel_event,
-            queue=[],
-            status=self._text("sending"),
-            started_at=started_at,
-        )
-        self._thread_runs[thread_id] = run_state
-        self._mark_thread_active(thread_id)
-        if self._is_active_thread(thread_id):
-            self.query_one("#composer-shell", Vertical).add_class("busy")
-            self._reset_live_view_state()
-            self._interrupt_armed = False
-            self._turn_started_at = started_at
-            self._turn_completed_at = None
-            self._sync_transcript_from_timeline()
-            self._refresh_status(self._text("sending"))
-        worker = self.run_worker(
-            self._run_turn(
-                "",
-                thread_id,
-                level=self._current_level_for_thread(thread_id),
-                image_paths=[],
-                retry=True,
-            ),
-            exclusive=False,
-            thread=False,
-        )
-        run_state.worker = worker
-        if self._is_active_thread(thread_id):
-            self._current_worker = worker
-            self._current_cancel_event = cancel_event
-        self._refresh_active_run_state()
+    def _move_agent_view_to_line_start(self) -> None:
+        cursor = self._agent_view_cursor()
+        self.state.agent_view.composer_cursor = self.state.agent_view.composer.rfind("\n", 0, cursor) + 1
 
-    async def _run_turn(
-        self,
-        prompt: str,
-        thread_id: str,
-        *,
-        level: str | None,
-        image_paths: list[Path],
-        retry: bool = False,
-    ) -> None:
-        run_state = self._thread_runs[thread_id]
-        try:
-            if not retry:
-                self._materialize_pending_goal_enable(thread_id)
-            turn_kwargs: dict[str, Any] = {
-                "thread_id": thread_id,
-                "level": level,
-                "cancel_event": run_state.cancel_event,
-            }
-            if not retry:
-                turn_kwargs["user_text"] = prompt
-            if image_paths and not retry:
-                turn_kwargs["image_paths"] = image_paths
-            turn_stream = self.engine.retry_turn(**turn_kwargs) if retry else self.engine.run_turn(**turn_kwargs)
-            async for item in turn_stream:
-                await self._handle_engine_stream_item(item, thread_id, run_state)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            error = format_error(exc)
-            retryable = is_retryable_provider_error(exc)
-            item = {
-                "type": "turn.error",
-                "thread_id": thread_id,
-                "turn_id": run_state.turn_id,
-                "created_at": utc_now_iso(),
-                "completed_at": utc_now_iso(),
-                "error_type": exc.__class__.__name__,
-                "message": str(exc) or repr(exc),
-                "retryable": retryable,
-            }
-            self._mark_run_error_state(run_state, item)
-            self._record_live_thread_event(run_state, "turn.error", item)
-            run_state.status = self._text("error")
-            if self._is_active_thread(thread_id):
-                self._flush_pending_stream_retries(run_state)
-                self._append_turn_error(item, display_content=error_renderable(error))
-                self._refresh_status(self._text("error"))
-        finally:
-            if self._is_active_thread(thread_id):
-                self._flush_stream_updates()
-            next_turn = run_state.queue.pop(0) if run_state.queue else None
-            if next_turn is not None:
-                remaining_queue = list(run_state.queue)
-                if self._is_active_thread(thread_id):
-                    self.thread_id = thread_id
-                self._start_background_turn(
-                    thread_id,
-                    next_turn.prompt,
-                    level=next_turn.level,
-                    image_paths=next_turn.image_paths,
-                    queue=remaining_queue,
-                )
-                if self._default_screen_mounted():
-                    self._refresh_pending_turns()
+    def _move_agent_view_to_line_end(self) -> None:
+        cursor = self._agent_view_cursor()
+        end = self.state.agent_view.composer.find("\n", cursor)
+        self.state.agent_view.composer_cursor = len(self.state.agent_view.composer) if end < 0 else end
+
+    def _refresh_agent_view_rows(self) -> None:
+        previous = self.state.agent_view.selected_row()
+        previous_id = previous.thread_id if previous is not None else None
+        rows = self._ordered_agent_view_rows()
+        self.state.agent_view.rows = rows
+        if previous_id:
+            for index, row in enumerate(rows):
+                if row.thread_id == previous_id:
+                    self.state.agent_view.selected = index
+                    break
             else:
-                keep_state = run_state.retryable_error or run_state.terminal_error
-                self._mark_thread_inactive(thread_id, completed=not keep_state)
-                if keep_state:
-                    run_state.worker = None
-                    run_state.cancel_event = asyncio.Event()
-                    if self._is_active_thread(thread_id):
-                        self._sync_transcript_from_timeline()
-                else:
-                    self._thread_runs.pop(thread_id, None)
-                if self._is_active_thread(thread_id) and self._default_screen_mounted():
-                    self._current_worker = None
-                    self._current_cancel_event = None
-                    self._interrupt_armed = False
-                    if not keep_state and self._last_status != self._text("error"):
-                        self._refresh_status(self._text("idle"))
-                    self.query_one("#composer", TextArea).focus()
-                if self._default_screen_mounted():
-                    self._refresh_active_run_state()
-                    self._refresh_pending_turns()
+                self.state.agent_view.selected = min(self.state.agent_view.selected, max(0, len(rows) - 1))
+        else:
+            self.state.agent_view.selected = min(self.state.agent_view.selected, max(0, len(rows) - 1))
 
-    async def _handle_engine_stream_item(
-        self,
-        item: dict[str, Any],
-        default_thread_id: str,
-        run_state: ThreadRunState,
-    ) -> None:
-        item_thread_id = str(item.get("thread_id") or default_thread_id)
-        event_type = item["type"]
-        if event_type in {
-            "image.attachment",
-            "assistant.delta",
-            "assistant.reasoning_delta",
-            "tool.delta",
-            "tool.started",
-            "tool.output",
-            "tool.partial",
-            "model.stream_retry",
-            "thread.token_estimation_warning",
-            "compaction.started",
-            "compaction.completed",
-        }:
-            await self._handle_thread_event(item_thread_id, event_type, item, run_state)
-            return
-        if event_type == "model.response":
-            await self._handle_model_response_item(item_thread_id, item, run_state)
-            billing_charge = item.get("billing_charge")
-            if isinstance(billing_charge, dict):
-                self._handle_billing_updated_item(item_thread_id, billing_charge, run_state)
-            return
-        if event_type == "thread.title":
-            if self._is_active_thread(item_thread_id):
-                self._refresh_status(self._text("idle"))
-            return
-        if event_type == "turn.completed":
-            self._handle_turn_completed_item(item_thread_id, item, run_state)
-            return
-        if event_type == "turn.interrupted":
-            self._handle_turn_interrupted_item(item_thread_id, item, run_state)
-            return
+    def _agent_view_row_for_thread(self, thread_id: str, thread: dict[str, Any]) -> AgentViewRow:
+        status = self._agent_view_thread_status(thread_id, thread)
+        run_state = self._thread_runs.get(thread_id)
+        return AgentViewRow(
+            thread_id=thread_id,
+            title=str(thread.get("title") or "New thread"),
+            status=status,
+            summary=str(thread.get("last_text") or ""),
+            updated_at=str(thread.get("updated_at") or ""),
+            worktree_branch=str(thread.get("worktree_branch") or ""),
+            worktree_path=str(thread.get("worktree_path") or ""),
+            elapsed_seconds=monotonic() - run_state.started_at if run_state and run_state.started_at else 0.0,
+            queued_turns=len(run_state.pending_turns) if run_state is not None else 0,
+        )
+
+    def _agent_view_thread_status(self, thread_id: str, thread: dict[str, Any]) -> str:
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is not None and run_state.terminal_status == "dispatching":
+            return "dispatching"
+        if run_state is not None and run_state.display_pending:
+            return "working"
+        if run_state is not None and run_state.terminal_status in _RUN_TERMINAL_STATUSES:
+            return run_state.terminal_status
+        if run_state is not None and self._run_state_busy_for_ui(run_state):
+            return "working"
+        if run_state is not None and run_state.pending_turns:
+            return "queued"
+        event_type = self._latest_thread_terminal_event_type(thread_id)
         if event_type == "turn.error":
-            self._handle_turn_error_item(item_thread_id, item, run_state)
+            return "failed"
+        if event_type == "turn.interrupted":
+            return "interrupted"
+        return "completed"
 
-    async def _handle_model_response_item(
-        self,
-        item_thread_id: str,
-        item: dict[str, Any],
-        run_state: ThreadRunState,
-    ) -> None:
-        response = item.get("response")
-        reasoning_text = str(
-            item.get("reasoning_text")
-            or getattr(response, "reasoning_text", "")
-            or ""
-        )
-        output = list(getattr(response, "output", []) or [])
-        has_tool_call = any(isinstance(entry, dict) and entry.get("type") == "function_call" for entry in output)
-        timeline = self._timeline_for_thread(item_thread_id)
-        if timeline is not None:
-            if reasoning_text:
-                timeline.apply_live_event(
-                    "assistant.reasoning_completed",
-                    {
-                        "type": "assistant.reasoning_completed",
-                        "thread_id": item_thread_id,
-                        "turn_id": item.get("turn_id"),
-                        "turn_started_at": item.get("turn_started_at"),
-                        "text": reasoning_text,
-                    },
-                )
-            else:
-                timeline.apply_live_event(
-                    "assistant.reasoning_absent",
-                    {
-                        "type": "assistant.reasoning_absent",
-                        "thread_id": item_thread_id,
-                        "turn_id": item.get("turn_id"),
-                        "turn_started_at": item.get("turn_started_at"),
-                    },
-                )
-            turn_id = str(item.get("turn_id") or "").strip()
-            acc = timeline._turn(turn_id) if turn_id else None
-            assistant_text = acc.assistant_buffer if acc is not None else ""
-            if has_tool_call:
-                timeline.apply_live_event(
-                    "assistant.response_with_tools",
-                    {
-                        "type": "assistant.response_with_tools",
-                        "thread_id": item_thread_id,
-                        "turn_id": item.get("turn_id"),
-                        "turn_started_at": item.get("turn_started_at"),
-                        "assistant_text": assistant_text,
-                    },
-                )
-            else:
-                if "assistant_text" not in item:
-                    item["assistant_text"] = assistant_text
-                timeline.apply_live_event(
-                    "assistant.final_response_started",
-                    {
-                        "type": "assistant.final_response_started",
-                        "thread_id": item_thread_id,
-                        "turn_id": item.get("turn_id"),
-                        "turn_started_at": item.get("turn_started_at"),
-                        "assistant_text": item.get("assistant_text"),
-                    },
-                )
-            if self._is_active_thread(item_thread_id):
-                self._flush_stream_updates()
-                self._sync_transcript_from_timeline()
-        run_state.status = self._text("reading")
-        if self._is_active_thread(item_thread_id):
-            self._refresh_status(self._text("reading"))
+    def _latest_thread_terminal_event_type(self, thread_id: str) -> str:
+        read_recent = getattr(self.engine.thread_store, "read_recent_events", None)
+        if not callable(read_recent):
+            return ""
+        try:
+            events, _has_more = read_recent(
+                thread_id,
+                limit=1,
+                event_types={"turn.completed", "turn.error", "turn.interrupted"},
+            )
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+            return ""
+        return str(events[0].get("type") or "") if events else ""
 
-    def _handle_turn_completed_item(
-        self,
-        item_thread_id: str,
-        item: dict[str, Any],
-        run_state: ThreadRunState,
-    ) -> None:
-        self._update_turn_timestamps(item, run_state)
-        timeline = self._timeline_for_thread(item_thread_id)
-        if timeline is not None:
-            timeline.apply_live_event("turn.completed", item)
-        text = item["final_text"] or ""
-        was_active_thread = self._is_active_thread(item_thread_id)
-        run_state.status = self._text("idle")
-        self._notify_turn_completed(item_thread_id, text, active_thread=was_active_thread)
-        if was_active_thread:
-            self._flush_stream_updates()
-            self._sync_transcript_from_timeline()
-            self._refresh_status(self._text("idle"))
-
-    def _handle_billing_updated_item(
-        self,
-        item_thread_id: str,
-        item: dict[str, Any],
-        run_state: ThreadRunState,
-    ) -> None:
-        if self._is_active_thread(item_thread_id):
-            self._refresh_status()
-
-
-    def _handle_turn_interrupted_item(
-        self,
-        item_thread_id: str,
-        item: dict[str, Any],
-        run_state: ThreadRunState,
-    ) -> None:
-        self._update_turn_timestamps(item, run_state)
-        timeline = self._timeline_for_thread(item_thread_id)
-        if timeline is not None:
-            timeline.apply_live_event("turn.interrupted", item)
-        run_state.status = self._text("interrupted")
-        if self._is_active_thread(item_thread_id):
-            self._flush_stream_updates()
-            self._sync_transcript_from_timeline()
-            self._refresh_status(self._text("interrupted"))
-
-    def _handle_turn_error_item(
-        self,
-        item_thread_id: str,
-        item: dict[str, Any],
-        run_state: ThreadRunState,
-    ) -> None:
-        self._update_turn_timestamps(item, run_state)
-        self._mark_run_error_state(run_state, item)
-        timeline = self._timeline_for_thread(item_thread_id)
-        if timeline is not None:
-            timeline.flush_pending_stream_retries(str(item.get("turn_id") or run_state.turn_id or ""))
-            timeline.apply_live_event("turn.error", item)
-        if self._is_active_thread(item_thread_id):
-            self._flush_stream_updates()
-            self._sync_transcript_from_timeline()
-            self._refresh_status(self._text("error"))
-
-    def action_clear_input(self) -> None:
-        composer = self.query_one("#composer", TextArea)
-        if composer.text:
-            self._reset_composer_history_navigation()
-            composer.load_text("")
-            self._last_composer_text = ""
-            self._composer_height_override = None
-            self._resize_composer()
+    def _reply_to_agent_view_thread(self, thread_id: str | None, text: str) -> None:
+        view = self.state.agent_view
+        if not thread_id:
+            view.status_message = self._text("agent_view_select_reply")
             return
+        if not text:
+            view.status_message = self._text("agent_view_type_reply")
+            return
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is not None and self._run_state_busy_for_ui(run_state):
+            run_state.pending_turns.append(PendingTurn(text, []))
+            view.status_message = self._fmt("agent_view_reply_queued", thread=short_thread(thread_id))
+            self._refresh_agent_view_rows()
+            return
+        asyncio.create_task(self._start_turn_for_thread(thread_id, text, image_paths=[]))
+        view.status_message = self._fmt("agent_view_reply_sent", thread=short_thread(thread_id))
+
+    def _reply_to_agent_view_selection(self) -> None:
+        selected = self.state.agent_view.selected_row()
+        text = self.state.agent_view.composer.strip()
+        self._set_agent_view_text("", cursor=0)
+        self._reply_to_agent_view_thread(selected.thread_id if selected else None, text)
+
+    def _cancel_agent_view_thread(self, thread_id: str) -> bool:
+        run_state = self._thread_runs.get(thread_id)
+        if run_state is None or not run_state.running:
+            return False
+        run_state.cancel_event.set()
+        run_state.terminal_status = "interrupted"
+        run_state.status_message = self._text("interrupted")
+        self._refresh_agent_view_rows()
+        return True
+
+    def _confirm_agent_view_delete(self, *, include_worktree: bool) -> None:
+        selected = self.state.agent_view.selected_row()
+        if selected is None:
+            self.state.agent_view.status_message = self._text("agent_view_delete_select")
+            return
+        if include_worktree and not (selected.worktree_branch and selected.worktree_path):
+            self.state.agent_view.status_message = self._text("agent_view_no_worktree")
+            return
+        action = "delete_worktree" if include_worktree else "hide_thread"
+        target = selected.worktree_branch if include_worktree else short_thread(selected.thread_id)
+        self.state.agent_view.pending_confirmation = f"{action}:{selected.thread_id}"
+        if include_worktree:
+            self.state.agent_view.status_message = self._fmt("agent_view_delete_worktree_status", target=target)
+        else:
+            self.state.agent_view.status_message = self._fmt("agent_view_hide_thread_status", target=target)
+
+    def _hide_agent_view_thread(self, thread_id: str) -> None:
+        self._cancel_agent_view_thread(thread_id)
+        try:
+            self.engine.thread_store.append(thread_id, "thread.agent_view_deleted")
+        except ThreadLockedError:
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_delete_locked",
+                thread=short_thread(thread_id),
+            )
+            return
+        self._thread_runs.pop(thread_id, None)
+        self._agent_view_local_threads.discard(thread_id)
+        self._agent_view_join_pending_persist.discard(thread_id)
+        if thread_id == self.state.thread_id:
+            self._clear_to_new_thread()
+        self.state.agent_view.status_message = self._fmt("agent_view_hidden", thread=short_thread(thread_id))
+        self._refresh_agent_view_rows()
+
+    async def _delete_agent_view_worktree(self, thread_id: str) -> None:
+        self._cancel_agent_view_thread(thread_id)
+        metadata = self._thread_metadata(thread_id)
+        branch = str(metadata.get("worktree_branch") or "")
+        path_text = str(metadata.get("worktree_path") or "")
+        if not branch or not path_text:
+            self.state.agent_view.status_message = self._text("agent_view_no_worktree")
+            self._safe_repaint()
+            return
+        try:
+            result = await self.engine.plugins.call_action(
+                "worktree.cleanup",
+                {
+                    "project_root": str(self.project_root),
+                    "thread_id": thread_id,
+                    "branch": branch,
+                    "path": path_text,
+                },
+            )
+        except Exception as exc:
+            self.state.agent_view.status_message = self._fmt("agent_view_worktree_delete_failed", error=exc)
+            self._safe_repaint()
+            return
+        rule_states = getattr(self.engine, "_rule_states", None)
+        if rule_states is not None:
+            rule_states.pop(thread_id, None)
+        self._agent_view_local_threads.discard(thread_id)
+        self._agent_view_join_pending_persist.discard(thread_id)
+        self.state.agent_view.status_message = self._fmt(
+            "agent_view_worktree_deleted",
+            branch=str(result.get("branch") or branch),
+        )
+        self._refresh_agent_view_rows()
+        self._safe_repaint()
+
+    async def _dispatch_agent_view_prompt(self, prompt: str) -> None:
+        prompt = prompt.strip()
+        if not prompt:
+            return
+        thread_id = self.engine.thread_store.create_thread(self._agent_view_thread_title(prompt))
+        run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
+        self.engine.thread_store.append(thread_id, "thread.agent_view_joined", source="agent_view_dispatch")
+        run_state.terminal_status = "dispatching"
+        run_state.status_message = "dispatching worktree"
+        self._refresh_agent_view_rows()
+        self._safe_repaint()
+        try:
+            level = self._agent_view_dispatch_level()
+            branch = await self._agent_view_branch_name(thread_id, prompt, level=level)
+            info = await self.engine.plugins.call_action(
+                "worktree.create",
+                {
+                    "project_root": str(self.project_root),
+                    "thread_id": thread_id,
+                    "branch": branch,
+                },
+            )
+            self._persist_thread_level(thread_id, level)
+            run_state.terminal_status = "working"
+            run_state.status_message = "running"
+            await self._start_turn_for_thread(thread_id, prompt, image_paths=[])
+            self.state.agent_view.status_message = self._fmt(
+                "agent_view_dispatched",
+                thread=short_thread(thread_id),
+                branch=str(info.get("branch") or branch),
+            )
+        except Exception as exc:
+            run_state.terminal_status = "failed"
+            run_state.last_error = str(exc) or repr(exc)
+            self.state.agent_view.status_message = self._fmt("agent_view_dispatch_failed", error=run_state.last_error)
+        finally:
+            self._refresh_agent_view_rows()
+            self._safe_repaint()
+
+    def _agent_view_thread_title(self, prompt: str) -> str:
+        first = " ".join(prompt.strip().split())
+        if not first:
+            return "Agent task"
+        return first[:77].rstrip() + "..." if len(first) > 80 else first
+
+    async def _agent_view_branch_name(self, thread_id: str, prompt: str, *, level: str | None = None) -> str:
+        short_id = thread_id.replace("thr_", "")[:8] or new_id("agent").replace("agent_", "")[:8]
+        slug: str | None = None
+        generate = getattr(self.engine, "generate_branch_slug", None)
+        if callable(generate):
+            try:
+                slug = await generate(thread_id, prompt, level=level or self._agent_view_dispatch_level())
+            except Exception:
+                slug = None
+        branch = f"agent-{slug}-{short_id}" if slug else f"agent-{short_id}"
+        result = await self.engine.plugins.call_action("worktree.validate_branch", {"branch": branch})
+        return str(result.get("branch") or branch)
+
+    def _composer_cursor(self) -> int:
+        cursor = self.state.composer_cursor
+        if cursor is None:
+            return len(self.state.composer)
+        return max(0, min(cursor, len(self.state.composer)))
+
+    def _set_composer_text(self, text: str, *, cursor: int | None = None) -> None:
+        self.state.composer = text
+        self.state.composer_cursor = len(text) if cursor is None else max(0, min(cursor, len(text)))
+
+    def _insert_composer_text(self, text: str) -> None:
+        cursor = self._composer_cursor()
+        value = self.state.composer
+        self._set_composer_text(value[:cursor] + text + value[cursor:], cursor=cursor + len(text))
+
+    def _insert_pasted_text(self, text: str) -> None:
+        if not text:
+            return
+        self._clear_quit_confirmation()
+        self._last_plain_input_at = None
+        self._skip_next_lf_after_plain_cr = False
+        self._insert_composer_text(text)
+        self._reset_history()
+        self._after_composer_changed()
+        self._safe_repaint()
+
+    def _attach_clipboard_image_to_composer(self) -> None:
+        try:
+            model = self.engine.config.model_for_level(self.state.level)
+        except Exception as exc:
+            self._flush(TranscriptCell("error", text=str(exc)))
+            self._safe_repaint()
+            return
+        if getattr(model, "supports_images", None) is False:
+            self._flush(TranscriptCell("error", text=self._text("image_model_disabled")))
+            self._safe_repaint()
+            return
+        from uv_agent.clipboard import ClipboardImageError
+
+        try:
+            image = save_clipboard_image(project_tui_clipboard_dir(self.project_root))
+        except ClipboardImageError as exc:
+            self._flush(TranscriptCell("error", text=str(exc)))
+            self._safe_repaint()
+            return
+
+        number = self._image_sequence_next
+        self._image_sequence_next += 1
+        self._image_paths_by_number[number] = Path(image.path)
+        self.state.image_token_numbers.add(number)
+        token = f"[Image #{number}]"
+        if self.state.composer:
+            cursor = self._composer_cursor()
+            before = self.state.composer[:cursor]
+            after = self.state.composer[cursor:]
+            insert = token
+            if before and not before.endswith((" ", "\n")):
+                insert = " " + insert
+            if after and not after.startswith((" ", "\n")):
+                insert += " "
+        else:
+            insert = token
+        self._insert_composer_text(insert)
+        self._reset_history()
+        self._after_composer_changed()
+        message = f"{self._text('image_queued')} {token} · {image.width}x{image.height}"
+        self._image_status_token = token
+        self._image_status_message = message
+        self.state.status_message = message
+        self._safe_repaint()
+
+    def _mark_plain_input(self) -> None:
+        self._last_plain_input_at = monotonic()
+
+    def _enter_looks_like_unbracketed_paste(self) -> bool:
+        """Protect against terminals that paste newlines as plain Enter keys."""
+
+        if self._last_plain_input_at is None:
+            return False
+        return monotonic() - self._last_plain_input_at <= UNBRACKETED_PASTE_ENTER_S
+
+    def _arm_quit_confirmation(self, message: str) -> None:
+        self._quit_armed = True
+        self._quit_armed_until = monotonic() + CTRL_C_CONFIRMATION_S
+        self._quit_confirmation_status = message
+        self.state.status_message = message
+
+    def _arm_interrupt_confirmation(self, message: str) -> None:
+        self._interrupt_armed = True
+        self._interrupt_armed_until = monotonic() + CTRL_C_CONFIRMATION_S
+        self._interrupt_confirmation_status = message
+        self.state.status_message = message
+
+    def _clear_quit_confirmation(self) -> bool:
+        was_armed = self._quit_armed
+        message = self._quit_confirmation_status
+        self._quit_armed = False
+        self._quit_armed_until = None
+        self._quit_confirmation_status = None
+        if message and self.state.status_message == message:
+            self.state.status_message = "running" if self.state.busy else "ready"
+        return was_armed
+
+    def _expire_quit_confirmation(self) -> bool:
+        if not self._quit_armed:
+            return False
+        if self._quit_armed_until is None or monotonic() < self._quit_armed_until:
+            return False
+        return self._clear_quit_confirmation()
+
+    def _clear_interrupt_confirmation(self) -> bool:
+        was_armed = self._interrupt_armed
+        message = self._interrupt_confirmation_status
+        self._interrupt_armed = False
+        self._interrupt_armed_until = None
+        self._interrupt_confirmation_status = None
+        if message and self.state.status_message == message:
+            self.state.status_message = "running" if self.state.busy else "ready"
+        return was_armed
+
+    def _expire_interrupt_confirmation(self) -> bool:
+        if not self._interrupt_armed:
+            return False
+        if self._interrupt_armed_until is None or monotonic() < self._interrupt_armed_until:
+            return False
+        return self._clear_interrupt_confirmation()
+
+    def _interrupt_running_turn(self) -> bool:
+        run_state = self._interruptible_run_state()
+        if run_state is None:
+            return False
+        run_state.cancel_event.set()
+        self._clear_interrupt_confirmation()
+        self._clear_quit_confirmation()
+        run_state.status_message = self._text("interrupted")
+        run_state.terminal_status = "interrupted"
+        self.state.status_message = self._text("interrupted")
+        return True
+
+    def _delete_composer_before_cursor(self) -> None:
+        cursor = self._composer_cursor()
+        if cursor <= 0:
+            return
+        value = self.state.composer
+        token_span = self._image_token_delete_span_before_cursor(value, cursor)
+        if token_span is not None:
+            start, end = token_span
+            self._set_composer_text(value[:start] + value[end:], cursor=start)
+            return
+        self._set_composer_text(value[: cursor - 1] + value[cursor:], cursor=cursor - 1)
+
+    def _delete_composer_after_cursor(self) -> None:
+        cursor = self._composer_cursor()
+        value = self.state.composer
+        if cursor >= len(value):
+            return
+        token_span = self._image_token_delete_span_after_cursor(value, cursor)
+        if token_span is not None:
+            start, end = token_span
+            self._set_composer_text(value[:start] + value[end:], cursor=start)
+            return
+        self._set_composer_text(value[:cursor] + value[cursor + 1 :], cursor=cursor)
+
+    @staticmethod
+    def _image_token_delete_span_before_cursor(text: str, cursor: int) -> tuple[int, int] | None:
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            if match.start() < cursor <= match.end():
+                return UvAgentApp._expand_image_token_delete_span(text, *match.span())
+        space_start = cursor
+        while space_start > 0 and text[space_start - 1] in {" ", "\t"}:
+            space_start -= 1
+        if space_start == cursor:
+            return None
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            if match.end() == space_start:
+                return match.start(), cursor
+        return None
+
+    @staticmethod
+    def _image_token_delete_span_after_cursor(text: str, cursor: int) -> tuple[int, int] | None:
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            if match.start() <= cursor < match.end():
+                return UvAgentApp._expand_image_token_delete_span(text, *match.span())
+        space_end = cursor
+        while space_end < len(text) and text[space_end] in {" ", "\t"}:
+            space_end += 1
+        if space_end == cursor:
+            return None
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            if match.start() == space_end:
+                return cursor, match.end()
+        return None
+
+    @staticmethod
+    def _expand_image_token_delete_span(text: str, start: int, end: int) -> tuple[int, int]:
+        """Remove one separator space with an image token when it is obvious."""
+
+        before_is_space = start > 0 and text[start - 1] in {" ", "\t"}
+        after_is_space = end < len(text) and text[end] in {" ", "\t"}
+        if before_is_space and after_is_space:
+            # Keep the word separator before the token and remove the token's
+            # trailing separator, producing "a b" from "a [Image #1] b".
+            return start, end + 1
+        if before_is_space and end == len(text):
+            return start - 1, end
+        if after_is_space and start == 0:
+            return start, end + 1
+        return start, end
+
+    def _delete_composer_word_before_cursor(self) -> None:
+        cursor = self._composer_cursor()
+        before = self.state.composer[:cursor]
+        after = self.state.composer[cursor:]
+        replacement = self._delete_word(before)
+        self._set_composer_text(replacement + after, cursor=len(replacement))
+
+    def _move_composer_cursor(self, delta: int) -> None:
+        self.state.composer_cursor = max(0, min(self._composer_cursor() + delta, len(self.state.composer)))
+
+    def _move_composer_to_line_start(self) -> None:
+        start, _end = self._composer_line_bounds()
+        self.state.composer_cursor = start
+
+    def _move_composer_to_line_end(self) -> None:
+        _start, end = self._composer_line_bounds()
+        self.state.composer_cursor = end
+
+    def _delete_composer_to_line_end(self) -> None:
+        cursor = self._composer_cursor()
+        value = self.state.composer
+        if cursor >= len(value):
+            return
+        _start, end = self._composer_line_bounds()
+        # Match common terminal editor behaviour: Ctrl+K removes text up to the
+        # line break first, and removes the line break itself when already at EOL.
+        delete_end = end + 1 if cursor == end and end < len(value) else end
+        if delete_end == cursor:
+            return
+        self._set_composer_text(value[:cursor] + value[delete_end:], cursor=cursor)
+
+    def _composer_line_bounds(self) -> tuple[int, int]:
+        cursor = self._composer_cursor()
+        value = self.state.composer
+        start = value.rfind("\n", 0, cursor) + 1
+        end = value.find("\n", cursor)
+        if end < 0:
+            end = len(value)
+        return start, end
+
+    def _move_composer_vertical(self, delta: int) -> bool:
+        value = self.state.composer
+        if not value:
+            return False
+        cursor = self._composer_cursor()
+        line_start, line_end = self._composer_line_bounds()
+        column = cursor - line_start
+        if delta < 0:
+            if line_start == 0:
+                self.state.composer_cursor = line_start
+                return True
+            prev_end = line_start - 1
+            prev_start = value.rfind("\n", 0, prev_end) + 1
+            self.state.composer_cursor = prev_start + min(column, prev_end - prev_start)
+            return True
+        if line_end >= len(value):
+            self.state.composer_cursor = line_end
+            return True
+        next_start = line_end + 1
+        next_end = value.find("\n", next_start)
+        if next_end < 0:
+            next_end = len(value)
+        self.state.composer_cursor = next_start + min(column, next_end - next_start)
+        return True
+
+    def _reset_history(self) -> None:
+        self._history_cursor = None
+        self._draft = ""
 
     def _remember_composer_input(self, text: str) -> None:
         text = text.strip()
         if not text:
             return
-        if self._composer_history and self._composer_history[-1] == text:
+        if self._history and self._history[-1] == text:
             return
-        self._composer_history.append(text)
-        overflow = len(self._composer_history) - MAX_COMPOSER_HISTORY
+        self._history.append(text)
+        overflow = len(self._history) - MAX_COMPOSER_HISTORY
         if overflow > 0:
-            del self._composer_history[:overflow]
+            del self._history[:overflow]
         try:
-            save_composer_history(self._composer_history)
+            save_composer_history(self._history)
         except OSError as exc:
-            self._flash(str(exc), severity="error")
+            self._flush(TranscriptCell("error", text=str(exc)))
 
-    def _handle_composer_history_key(self, composer: TextArea, key: str) -> bool:
-        if key == "up":
-            if not self._composer_history:
-                return False
-            if self._composer_history_index is None:
-                if composer.text:
-                    return False
-                self._composer_history_draft = composer.text
-                self._composer_history_index = len(self._composer_history) - 1
-            else:
-                self._composer_history_index = max(0, self._composer_history_index - 1)
-            self._load_composer_history_text(composer, self._composer_history_text())
+    def _after_composer_changed(self) -> None:
+        self._sync_image_status_with_composer()
+        if self.state.composer.startswith("/") and "\n" not in self.state.composer:
+            self._refresh_command_palette()
+            return
+        mention = self._mention_query_at_cursor()
+        if mention is not None:
+            start, query = mention
+            self._open_mention_palette(query, start)
+            return
+        self._close_command_palette()
+
+    def _sync_image_status_with_composer(self) -> None:
+        self._release_images_missing_from_composer()
+        if not self._image_status_token or not self._image_status_message:
+            return
+        if self.state.status_message != self._image_status_message:
+            return
+        if self._image_status_token in self.state.composer:
+            return
+        self._clear_image_status_tracking()
+        self.state.status_message = "ready"
+
+    def _release_images_missing_from_composer(self) -> None:
+        if not self._image_paths_by_number:
+            return
+        present_numbers = self._image_numbers_in_text(self.state.composer)
+        stale_numbers = set(self._image_paths_by_number).difference(present_numbers)
+        if stale_numbers:
+            self._release_image_numbers(stale_numbers)
+
+    @staticmethod
+    def _image_numbers_in_text(text: str) -> set[int]:
+        numbers: set[int] = set()
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            numbers.add(int(match.group(1)))
+        return numbers
+
+    def _release_image_numbers(self, numbers: set[int]) -> None:
+        for number in numbers:
+            self._image_paths_by_number.pop(number, None)
+            self.state.image_token_numbers.discard(number)
+
+    def _clear_image_status_tracking(self) -> None:
+        self._image_status_token = None
+        self._image_status_message = None
+
+    def _history_prev(self) -> None:
+        if not self._history:
+            return
+        if self._history_cursor is None:
+            # Once the composer has user text, Up/Down
+            # belong to editing/navigation rather than replacing that draft with
+            # persisted history.  If the user edits a recalled entry we reset the
+            # cursor before calling this method, so navigation also stops there.
+            if self.state.composer:
+                return
+            self._draft = ""
+            self._history_cursor = len(self._history) - 1
+        else:
+            self._history_cursor = max(0, self._history_cursor - 1)
+        self._set_composer_text(self._history[self._history_cursor])
+
+    def _history_next(self) -> None:
+        if self._history_cursor is None:
+            return
+        if self._history_cursor >= len(self._history) - 1:
+            self._history_cursor = None
+            self._set_composer_text(self._draft)
+            return
+        self._history_cursor += 1
+        self._set_composer_text(self._history[self._history_cursor])
+
+    # ------------------------------------------------------------------
+    # Tab completion
+    # ------------------------------------------------------------------
+
+    def _handle_tab(self) -> None:
+        text = self.state.composer
+        if text.startswith("@") or self._mention_query_at_cursor() is not None:
+            mention = self._mention_query_at_cursor()
+            if mention is None:
+                mention = (0, text)
+            start, query = mention
+            matches = self._mention_suggestions(query)
+            if not matches:
+                return
+            cycling = (
+                self._tab_state is not None
+                and self._tab_state.get("kind") == "mention"
+                and query == self._tab_state.get("query")
+            )
+            if not cycling:
+                self._tab_state = {"kind": "mention", "matches": matches, "index": -1, "query": query, "start": start}
+            assert self._tab_state is not None
+            self._tab_state["index"] = (self._tab_state["index"] + 1) % len(self._tab_state["matches"])
+            item = self._tab_state["matches"][self._tab_state["index"]]
+            self._replace_composer_range(start, self._composer_cursor(), item.value)
+            self._close_command_palette()
+            return
+        if not text.startswith("/"):
+            return
+        cycling = self._tab_state is not None and text == self._tab_state.get("last")
+        if not cycling:
+            matches = self._command_suggestions(text)
+            if not matches:
+                return
+            self._tab_state = {"matches": matches, "index": -1, "last": ""}
+        assert self._tab_state is not None
+        self._tab_state["index"] = (self._tab_state["index"] + 1) % len(self._tab_state["matches"])
+        item = self._tab_state["matches"][self._tab_state["index"]]
+        self._tab_state["last"] = item.value
+        self._set_composer_text(item.value)
+        if item.value.endswith(" "):
+            self._refresh_command_palette()
+        else:
+            self._close_command_palette()
+
+    def _command_suggestions(self, text: str) -> list[CommandSuggestion]:
+        query = text.lower()
+        if query.startswith("/show "):
+            return self._run_picker_items(query[len("/show ") :], command_values=True)
+        if query.startswith("/goal "):
+            pool = tuple(self._plugin_picker_suggestions("goal.commands", query[len("/goal ") :]))
+        elif query == "/goal":
+            pool = (*TOP_LEVEL_COMMANDS, *self._plugin_command_suggestions())
+        elif query.startswith("/level ") or query == "/level":
+            pool = self._level_command_suggestions("/level") if query != "/level" else TOP_LEVEL_COMMANDS
+        elif query.startswith("/model ") or query == "/model":
+            pool = self._level_command_suggestions("/model") if query != "/model" else TOP_LEVEL_COMMANDS
+        else:
+            pool = (*TOP_LEVEL_COMMANDS, *self._plugin_command_suggestions())
+        return [item for item in pool if item.value.lower().startswith(query)]
+
+    def _plugin_command_suggestions(self) -> tuple[CommandSuggestion, ...]:
+        items: list[CommandSuggestion] = []
+        for command in self.engine.plugins.command_suggestions():
+            value = str(getattr(command, "name", "") or "")
+            if not value:
+                continue
+            description = localize_text(getattr(command, "description", "") or "plugin command", self.language)
+            items.append(CommandSuggestion(value, description, kind="plugin-command", meta=str(getattr(command, "plugin", "") or "")))
+        return tuple(items)
+
+    def _plugin_picker_suggestions(self, picker_id: str, query: str = "") -> list[CommandSuggestion]:
+        return [
+            CommandSuggestion(
+                str(getattr(item, "value", "") or ""),
+                localize_text(getattr(item, "description", "") or "", self.language),
+                id=str(getattr(item, "id", "") or ""),
+                kind=str(getattr(item, "kind", "mention") or "mention"),
+                meta=localize_text(getattr(item, "meta", "") or "", self.language),
+            )
+            for item in self.engine.plugins.picker_items(picker_id, query)
+            if getattr(item, "value", "")
+        ]
+
+    def _level_command_suggestions(self, command: str) -> tuple[CommandSuggestion, ...]:
+        levels = sorted(self._public_config_levels())
+        return tuple(CommandSuggestion(f"{command} {name}", "model level") for name in levels)
+
+    def _refresh_command_palette(self) -> None:
+        self._picker_mode = "command"
+        self._mention_start = None
+        self._mention_query = ""
+        self.state.command_palette_open = True
+        self.state.command_palette_items = self._command_suggestions(self.state.composer)
+        if self.state.command_palette_items:
+            self.state.command_palette_index = min(
+                self.state.command_palette_index,
+                len(self.state.command_palette_items) - 1,
+            )
+        else:
+            self.state.command_palette_index = 0
+
+    def _open_picker(self, mode: str, items: list[CommandSuggestion]) -> None:
+        self._picker_mode = mode
+        self.state.command_palette_open = True
+        self.state.command_palette_items = items
+        self.state.command_palette_index = 0
+
+    def _close_command_palette(self) -> None:
+        self.state.command_palette_open = False
+        self.state.command_palette_items = []
+        self.state.command_palette_index = 0
+        self._picker_mode = "command"
+        self._mention_start = None
+        self._mention_query = ""
+
+    def _move_command_palette(self, delta: int) -> None:
+        if not self.state.command_palette_items:
+            return
+        count = len(self.state.command_palette_items)
+        self.state.command_palette_index = (self.state.command_palette_index + delta) % count
+
+    def _accept_command_palette_selection(self) -> bool:
+        if not self.state.command_palette_items:
+            return False
+        item = self.state.command_palette_items[self.state.command_palette_index]
+        mode = self._picker_mode
+        if mode == "thread":
+            self._close_command_palette()
+            self._resume_thread(item.id or item.value)
             return True
-
-        if key == "down" and self._composer_history_index is not None:
-            if self._composer_history_index >= len(self._composer_history) - 1:
-                draft = self._composer_history_draft
-                self._reset_composer_history_navigation()
-                self._load_composer_history_text(composer, draft)
-            else:
-                self._composer_history_index += 1
-                self._load_composer_history_text(composer, self._composer_history_text())
+        if mode == "run":
+            self._close_command_palette()
+            run_id = item.id or item.value
+            # Extract the short ID from the display value if needed
+            if " " in run_id:
+                run_id = run_id.split()[-1]
+            self._show_run_detail(run_id)
             return True
+        if mode in {"skill", "mcp", "plugin-picker", "mention"}:
+            self._accept_mention_item(item)
+            self._close_command_palette()
+            return True
+        self._set_composer_text(item.value)
+        if item.value.endswith(" "):
+            self._refresh_command_palette()
+        else:
+            self._close_command_palette()
+        return True
 
-        return False
+    def _replace_composer_range(self, start: int, end: int, replacement: str) -> None:
+        value = self.state.composer
+        start = max(0, min(start, len(value)))
+        end = max(start, min(end, len(value)))
+        self._set_composer_text(value[:start] + replacement + value[end:], cursor=start + len(replacement))
 
-    def _composer_history_text(self) -> str:
-        if self._composer_history_index is None:
-            return self._composer_history_draft
-        return self._composer_history[self._composer_history_index]
+    def _accept_mention_item(self, item: CommandSuggestion) -> None:
+        if item.kind == "thread-mention" and item.id:
+            token = f"@thread:{item.id} "
+        else:
+            token = item.value
+            if not token.endswith(" "):
+                token += " "
+        if self._mention_start is not None:
+            self._replace_composer_range(self._mention_start, self._composer_cursor(), token)
+            return
+        if self.state.composer and not self.state.composer.endswith((" ", "\n")):
+            token = " " + token
+        self._insert_composer_text(token)
 
-    def _load_composer_history_text(self, composer: TextArea, text: str) -> None:
-        composer.load_text(text)
-        composer.cursor_location = composer.document.end
-        self._last_composer_text = text
-        self._resize_composer()
-        self._refresh_status()
-
-    def _reset_composer_history_navigation(self) -> None:
-        self._composer_history_index = None
-        self._composer_history_draft = ""
-
-    def _active_run_state(self) -> ThreadRunState | None:
-        if self.thread_id is None:
-            return None
-        run_state = self._thread_runs.get(self.thread_id)
-        if run_state is not None and run_state.worker is None:
-            return None
-        return run_state
-
-    @property
-    def _pending_images(self) -> list[PendingImage]:
-        """Composer images for the currently visible thread.
-
-        The composer itself is shared UI, but pasted images should belong to the
-        thread draft the user is looking at. Keeping the storage keyed by
-        thread id prevents an image pasted in one thread from following the user
-        into another thread's next send.
-        """
-
-        return self._pending_images_for_thread(self.thread_id)
-
-    def _pending_images_for_thread(self, thread_id: str | None) -> list[PendingImage]:
-        return self._pending_images_by_thread.setdefault(thread_id, [])
-
-    def _clear_pending_images_for_thread(self, thread_id: str | None) -> None:
-        self._pending_images_by_thread.pop(thread_id, None)
-
-    def _active_queue_length(self) -> int:
-        return len(self._queued_turns_for_thread(self.thread_id))
-
-    def _queued_turns_for_thread(self, thread_id: str | None) -> list[QueuedTurn]:
-        run_state = self._thread_state(thread_id)
-        if run_state is None or run_state.worker is None:
-            return []
-        return list(run_state.queue)
-
-    def _queued_turn_location(self, thread_id: str | None, queue_id: str) -> tuple[ThreadRunState, int] | None:
-        run_state = self._thread_state(thread_id)
-        if run_state is None or run_state.worker is None:
-            return None
-        for index, queued_turn in enumerate(run_state.queue):
-            if queued_turn.queue_id == queue_id:
-                return run_state, index
+    def _mention_query_at_cursor(self) -> tuple[int, str] | None:
+        cursor = self._composer_cursor()
+        prefix = self.state.composer[:cursor]
+        line_start = max(prefix.rfind("\n") + 1, 0)
+        token_start = max(prefix.rfind(" ") + 1, line_start)
+        token = prefix[token_start:]
+        if token == "@" or (token.startswith("@") and not token.startswith("@@") and ":" not in token):
+            return token_start, token
+        if token == "@@" or token.startswith("@@"):
+            return token_start, token
         return None
 
-    def _update_queued_turn_prompt(self, thread_id: str | None, queue_id: str, prompt: str) -> str:
-        location = self._queued_turn_location(thread_id, queue_id)
-        if location is None:
-            self._flash(self._text("pending_turn_started"), severity="warning")
-            return "missing"
-        run_state, index = location
-        queued_turn = run_state.queue[index]
-        normalized = prompt.strip()
-        if not normalized:
-            if queued_turn.image_paths:
-                normalized = self._text("image_only_prompt")
-            else:
-                self._flash(self._text("write_first"), severity="warning")
-                return "empty"
-        run_state.queue[index] = replace(queued_turn, prompt=normalized)
-        timeline = self._timeline_for_thread(run_state.thread_id)
-        if timeline is not None:
-            timeline.add_queued_turn(queued_turn.queue_id, normalized, queued_turn.image_paths)
-        if self._is_active_thread(run_state.thread_id):
-            self._sync_transcript_from_timeline()
-        self._refresh_pending_turns()
-        self._refresh_status()
-        return "updated"
+    def _open_mention_palette(self, query: str, start: int) -> None:
+        items = self._mention_suggestions(query)
+        self._mention_start = start
+        self._mention_query = query
+        self._open_picker("mention", items)
 
-    def _delete_queued_turn(self, thread_id: str | None, queue_id: str) -> str:
-        location = self._queued_turn_location(thread_id, queue_id)
-        if location is None:
-            self._flash(self._text("pending_turn_started"), severity="warning")
-            return "missing"
-        run_state, index = location
-        queued_turn = run_state.queue[index]
-        del run_state.queue[index]
-        timeline = self._timeline_for_thread(run_state.thread_id)
-        if timeline is not None:
-            timeline.remove_queued_turn(queued_turn.queue_id)
-        if self._is_active_thread(run_state.thread_id):
-            self._sync_transcript_from_timeline()
-        self._refresh_pending_turns()
-        self._refresh_status()
-        return "deleted"
+    def _mention_suggestions(self, query: str) -> list[CommandSuggestion]:
+        query = query or "@"
+        if query.startswith("@@"):
+            return self._thread_mention_suggestions(query[2:].lower())
+        if query.startswith("@"):
+            return self._file_mention_suggestions(query[1:].lower())
+        return []
 
-    def _move_queued_turn(self, thread_id: str | None, queue_id: str, step: int) -> str:
-        location = self._queued_turn_location(thread_id, queue_id)
-        if location is None:
-            self._flash(self._text("pending_turn_started"), severity="warning")
-            return "missing"
-        run_state, index = location
-        target = max(0, min(len(run_state.queue) - 1, index + step))
-        if target == index:
-            return "unchanged"
-        queued_turn = run_state.queue.pop(index)
-        run_state.queue.insert(target, queued_turn)
-        self._refresh_pending_turns()
-        self._refresh_status()
-        return "moved"
+    def _file_mention_suggestions(self, needle: str = "") -> list[CommandSuggestion]:
+        items: list[CommandSuggestion] = []
+        root = self.project_root.resolve()
+        stack = [root]
+        directories_seen = 0
+        while stack and len(items) < MAX_MENTION_ITEMS:
+            directory = stack.pop(0)
+            directories_seen += 1
+            if directories_seen > 20_000:
+                break
+            try:
+                entries = sorted(
+                    directory.iterdir(),
+                    key=lambda path: (not path.is_dir(), path.name.casefold()),
+                )
+            except OSError:
+                continue
+            for path in entries:
+                if len(items) >= MAX_MENTION_ITEMS:
+                    break
+                try:
+                    relative = path.relative_to(root)
+                except ValueError:
+                    continue
+                parts = relative.parts
+                if any(part in IGNORED_MENTION_DIRS for part in parts[:-1]):
+                    continue
+                title = relative.as_posix()
+                if path.is_dir():
+                    if path.name.startswith(".") or path.name in IGNORED_MENTION_DIRS:
+                        continue
+                    stack.append(path)
+                    value = f"@{title}/"
+                    if needle and needle not in title.lower():
+                        continue
+                    items.append(CommandSuggestion(value, "directory", id=title + "/", kind="file-mention"))
+                    continue
+                if not path.is_file() or path.suffix.lower() not in CODE_FILE_SUFFIXES:
+                    continue
+                if needle and needle not in title.lower():
+                    continue
+                items.append(CommandSuggestion(f"@{title}", "file", id=title, kind="file-mention"))
+        return items[:50]
 
-    def _ensure_active_thread(self) -> str:
-        if self.thread_id is None:
-            self.thread_id = self.engine.thread_store.create_thread()
-            self._move_draft_goal_enable_to_thread(self.thread_id)
-        return self.thread_id
+    def _thread_mention_suggestions(self, needle: str = "") -> list[CommandSuggestion]:
+        items: list[CommandSuggestion] = []
+        for thread in self.engine.thread_store.list_threads()[:50]:
+            thread_id = str(thread.get("thread_id") or "")
+            if not thread_id:
+                continue
+            title = str(thread.get("title") or "New thread")
+            last_text = str(thread.get("last_text") or "").replace("\n", " ")
+            haystack = f"{thread_id} {title} {last_text}".lower()
+            if needle and needle not in haystack:
+                continue
+            description = last_text[:100] if last_text else "no messages"
+            items.append(
+                CommandSuggestion(
+                    title,
+                    description,
+                    id=thread_id,
+                    kind="thread-mention",
+                    meta=f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} turns",
+                )
+            )
+        return items[:20]
 
-    def _move_draft_goal_enable_to_thread(self, thread_id: str) -> None:
-        if None not in self._pending_goal_enable_threads:
+    def _open_thread_picker(self) -> None:
+        threads = self.engine.thread_store.list_threads()
+        if not threads:
+            self._flush(TranscriptCell("event", text="(no previous threads)"))
             return
-        self._pending_goal_enable_threads.discard(None)
-        self._pending_goal_enable_threads.add(thread_id)
+        items: list[CommandSuggestion] = []
+        for thread in threads[:50]:
+            thread_id = str(thread.get("thread_id") or "")
+            title = str(thread.get("title") or "New thread")
+            updated = str(thread.get("updated_at") or "")
+            last_text = str(thread.get("last_text") or "").replace("\n", " ")
+            description = last_text[:120] if last_text else "no messages"
+            marker = "current · " if thread_id == self.state.thread_id else ""
+            items.append(
+                CommandSuggestion(
+                    f"{marker}{title}",
+                    description,
+                    id=thread_id,
+                    kind="thread",
+                    meta=f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} turns · {updated}",
+                )
+            )
+        self._open_picker("thread", items)
 
-    def _set_pending_goal_enable(self, thread_id: str | None, enabled: bool) -> None:
-        if enabled:
-            self._pending_goal_enable_threads.add(thread_id)
+    def _open_plugin_picker(self, picker_id: str, *, empty_text: str = "(no items)") -> None:
+        items = self._plugin_picker_suggestions(picker_id, "")
+        if not items:
+            self._flush(TranscriptCell("event", text=empty_text))
+            return
+        self._open_picker("plugin-picker", items)
+
+    # ------------------------------------------------------------------
+    # Submit & commands
+
+    def _run_events_for_current_thread(self) -> list[dict[str, Any]]:
+        thread_id = self.state.thread_id
+        if not thread_id:
+            return []
+        try:
+            events = self.engine.thread_store.read_events(
+                thread_id,
+                event_types={"item.model_response", "item.runner_result"},
+            )
+        except Exception:
+            return []
+        merged = self._merge_history_tool_events([event for event in events if isinstance(event, dict)])
+        return [event for event in merged if event.get("type") == "item.runner_result"]
+
+    def _run_picker_items(self, needle: str = "", *, command_values: bool = False) -> list[CommandSuggestion]:
+        return self._run_picker_items_from_events(
+            self._run_events_for_current_thread(),
+            needle,
+            command_values=command_values,
+        )
+
+    def _run_picker_items_from_events(
+        self,
+        events: list[dict[str, Any]],
+        needle: str = "",
+        *,
+        command_values: bool = False,
+    ) -> list[CommandSuggestion]:
+        """Build run picker rows, newest first, optionally as /show completions."""
+
+        query = needle.strip().lower()
+        items: list[CommandSuggestion] = []
+        for event in reversed(events):
+            result = event.get("result") if isinstance(event.get("result"), dict) else {}
+            call = event.get("call") if isinstance(event.get("call"), dict) else {}
+            if not call and isinstance(result.get("call"), dict):
+                call = result["call"]
+
+            run_id = str(result.get("run_id") or "")
+            call_id = str(call.get("call_id") or result.get("call_id") or "")
+            display_id = run_id or call_id
+            if not display_id:
+                continue
+
+            tool_name = str(call.get("tool_name") or call.get("name") or "run_python")
+            returncode = result.get("returncode")
+            status = "✓" if returncode == 0 else ("…" if returncode is None else "✗")
+            description = self._run_picker_description(result, call, tool_name=tool_name)
+            meta = self._run_picker_meta(result, tool_name=tool_name)
+            short_id = display_id[-6:] if len(display_id) >= 6 else display_id
+            haystack = f"{display_id} {short_id} {tool_name} {description} {meta} {returncode}".lower()
+            if query and query not in haystack:
+                continue
+
+            items.append(
+                CommandSuggestion(
+                    f"/show {short_id}" if command_values else f"{status} {short_id}",
+                    description,
+                    id=display_id,
+                    kind="run",
+                    meta=meta,
+                )
+            )
+            if len(items) >= 50:
+                break
+        return items
+
+    def _run_picker_description(
+        self,
+        result: dict[str, Any],
+        call: dict[str, Any],
+        *,
+        tool_name: str,
+    ) -> str:
+        helper_calls = result.get("helper_calls")
+        if isinstance(helper_calls, list):
+            helper_summary = self._run_helper_summary(helper_calls)
+            if helper_summary:
+                return helper_summary
+
+        code = tool_call_code(call)
+        if code:
+            chains = format_import_anchor_chains(extract_import_anchor_chains(code))
+            if chains:
+                return self._join_run_picker_labels(chains)
+            preview = self._run_script_preview(code)
+            if preview:
+                return preview
+
+        summary = str(result.get("summary") or "").replace("\n", " ").strip()
+        if summary and not summary.lower().startswith("run_python rc="):
+            return self._truncate_run_picker_text(summary)
+        return tool_name or "run"
+
+    def _run_picker_meta(self, result: dict[str, Any], *, tool_name: str) -> str:
+        returncode = result.get("returncode")
+        if returncode == 0:
+            status = "ok"
+        elif returncode is None:
+            status = "pending"
         else:
-            self._pending_goal_enable_threads.discard(thread_id)
+            status = f"exit {returncode}"
+        if tool_name and tool_name != "run_python":
+            return f"{tool_name} · {status}"
+        return status
 
-    def _goal_enable_pending(self, thread_id: str | None) -> bool:
-        return thread_id in self._pending_goal_enable_threads
+    @staticmethod
+    def _run_helper_summary(helper_calls: list[Any]) -> str:
+        labels: list[str] = []
+        for helper in helper_calls:
+            if not isinstance(helper, dict):
+                continue
+            name = str(helper.get("name") or helper.get("helper") or "").strip()
+            if not name:
+                continue
+            count = UvAgentApp._positive_run_helper_count(helper.get("count"))
+            labels.append(f"{name} x{count}" if count > 1 else name)
+        return UvAgentApp._join_run_picker_labels(labels)
 
-    def _materialize_pending_goal_enable(self, thread_id: str) -> None:
-        if thread_id not in self._pending_goal_enable_threads:
+    @staticmethod
+    def _positive_run_helper_count(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 1
+        return parsed if parsed > 0 else 1
+
+    @staticmethod
+    def _run_script_preview(code: str) -> str:
+        for line in code.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith(("import ", "from ")):
+                continue
+            return UvAgentApp._truncate_run_picker_text(stripped)
+        return ""
+
+    @staticmethod
+    def _join_run_picker_labels(labels: list[str], *, max_items: int = 4) -> str:
+        visible = [label for label in labels if label]
+        if not visible:
+            return ""
+        text = " · ".join(visible[:max_items])
+        if len(visible) > max_items:
+            text += f" · +{len(visible) - max_items}"
+        return UvAgentApp._truncate_run_picker_text(text)
+
+    @staticmethod
+    def _truncate_run_picker_text(text: str, *, max_chars: int = 96) -> str:
+        text = " ".join(text.split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + "..."
+
+    def _open_run_picker(self) -> None:
+        """Open a picker for run events in reverse chronological order."""
+        if not self.state.thread_id:
+            self._flush(TranscriptCell("event", text="(no active thread)"))
             return
-        state = self.engine.goal_state(thread_id)
-        if state is None or not state.enabled:
-            self.engine.enable_goal_mode(thread_id)
-        self._pending_goal_enable_threads.discard(thread_id)
-        if self.is_mounted:
-            self._refresh_status()
 
-    def _current_level_for_thread(self, thread_id: str | None = None) -> str | None:
-        if self.level:
-            return self.level
+        events = self._run_events_for_current_thread()
+        if not events:
+            self._flush(TranscriptCell("event", text="(no runs in current thread)"))
+            return
+
+        items = self._run_picker_items_from_events(events)
+        if not items:
+            self._flush(TranscriptCell("event", text="(no runs found)"))
+            return
+
+        self._open_picker("run", items)
+
+    # ------------------------------------------------------------------
+
+    async def submit(self) -> bool:
+        text = self.state.composer.strip()
+        if not text:
+            self._safe_repaint()
+            return True
+        self._remember_composer_input(text)
+        self._reset_history()
+        self._close_command_palette()
+        if text.startswith("/"):
+            if text.partition(" ")[0] == "/image":
+                self._set_composer_text("", cursor=0)
+                self._handle_command(text)
+                self._safe_repaint()
+                return True
+            should_continue = self._handle_command(text)
+            self._set_composer_text("", cursor=0)
+            self._safe_repaint()
+            return should_continue
+        prompt, image_paths, image_numbers = self._message_payload_from_composer(text)
+        run_state = self._run_state()
+        if run_state is not None and self._run_state_busy_for_ui(run_state):
+            run_state.pending_turns.append(PendingTurn(prompt, image_paths))
+            self._sync_attached_run_state(run_state)
+            self._release_image_numbers(image_numbers)
+            self._clear_image_status_tracking()
+            self._set_composer_text("", cursor=0)
+            self.state.status_message = self._text("queued")
+            self._safe_repaint()
+            return True
+        self._set_composer_text("", cursor=0)
+        await self._start_turn(prompt, image_paths=image_paths)
+        self._release_image_numbers(image_numbers)
+        self._clear_image_status_tracking()
+        return True
+
+    def _message_payload_from_composer(self, text: str) -> tuple[str, list[Path], set[int]]:
+        image_paths: list[Path] = []
+        seen: set[int] = set()
+        for match in IMAGE_TOKEN_RE.finditer(text):
+            number = int(match.group(1))
+            path = self._image_paths_by_number.get(number)
+            if path is None or number in seen:
+                continue
+            seen.add(number)
+            image_paths.append(path)
+        if image_paths and IMAGE_ONLY_TOKEN_RE.fullmatch(text):
+            return self._text("image_only_prompt"), image_paths, seen
+        return text, image_paths, seen
+
+    def _handle_plugin_command(self, command: str, arg: str, *, thread_id: str | None = None, emit: bool = True) -> bool:
+        try:
+            result = self.engine.plugins.call_command(
+                command,
+                {"arg": arg, "thread_id": self.state.thread_id if thread_id is None else thread_id},
+            )
+        except LookupError:
+            return False
+        except Exception as exc:
+            if emit:
+                self._flush(TranscriptCell("error", text=f"{command} failed: {exc}"))
+            return True
+        actions = tuple(getattr(result, "actions", ()) or ())
+        for action in actions:
+            self._apply_plugin_command_action(action, emit=emit)
+        return True
+
+    def _apply_plugin_command_action(self, action: object, *, emit: bool = True) -> None:
+        kind = getattr(action, "kind", "")
+        if kind in {"event", "error"}:
+            metadata = getattr(action, "metadata", None)
+            if isinstance(metadata, dict):
+                self._apply_plugin_action_metadata(metadata)
+            if emit:
+                self._flush(TranscriptCell(kind, text=str(getattr(action, "text", "") or "")))
+            return
+        if hasattr(action, "text") and action.__class__.__name__ == "SetComposerAction":
+            if emit:
+                self._set_composer_text(str(getattr(action, "text", "") or ""))
+            return
+        picker_id = getattr(action, "picker_id", None)
+        if picker_id:
+            if emit:
+                self._open_plugin_picker(str(picker_id))
+            return
+
+    def _apply_plugin_action_metadata(self, metadata: dict[str, object]) -> None:
+        if "goal_pending" in metadata:
+            self._pending_goal_enable = bool(metadata.get("goal_pending"))
+        if "goal_enabled" in metadata:
+            self.state.goal_enabled = bool(metadata.get("goal_enabled"))
+        if "goal_objective" in metadata:
+            self.state.goal_objective = str(metadata.get("goal_objective") or "")
+            if self._pending_goal_enable:
+                self._pending_goal_objective = self.state.goal_objective
+            elif metadata.get("goal_pending") is False:
+                self._pending_goal_objective = ""
+
+    def _handle_command(self, text: str) -> bool:
+        command, _, arg = text.partition(" ")
+        arg = arg.strip()
+        if command == "/help":
+            self._flush(TranscriptCell("event", text=HELP_TEXT))
+        elif command in {"/level", "/model"} and arg:
+            if not self._is_public_level(arg):
+                self._flush(TranscriptCell("error", text=f"{self._text('unknown_level')}: {arg}"))
+                return True
+            self.state.level = arg
+            if self.state.thread_id and not self.state.busy:
+                self._persist_thread_level(self.state.thread_id, self.state.level)
+            self._flush(TranscriptCell("event", text=f"model level set to {self.state.level}"))
+        elif command == "/threads":
+            self._open_thread_picker()
+        elif command == "/status":
+            self._show_status()
+        elif command == "/show":
+            if arg:
+                self._show_run_detail(arg.strip())
+            else:
+                self._open_run_picker()
+        elif command == "/image":
+            self._attach_clipboard_image_to_composer()
+        elif command == "/title" and arg:
+            self.state.title = arg
+            self._refresh_window_title()
+            self._flush(TranscriptCell("event", text=f"title set to {arg}"))
+        elif command == "/cancel":
+            if not self._interrupt_running_turn():
+                self._flush(TranscriptCell("event", text=self._text("no_running_turn")))
+        elif command == "/clear":
+            self._clear_to_new_thread()
+        elif self._handle_plugin_command(command, arg):
+            pass
+        elif command == "/quit":
+            return False
+        else:
+            self._flush(TranscriptCell("error", text=f"unknown command: {command}  (try /help)"))
+        return True
+
+    def _clear_to_new_thread(self) -> None:
+        old_thread_id = self.state.thread_id
+        self._finish_live_cells(force=True)
+        old_run_state = self._run_state(old_thread_id)
+        if old_run_state is not None:
+            old_run_state.pending_turns.clear()
+        self.state.thread_id = None
+        self.state.title = "New thread"
+        self.state.goal_enabled = False
+        self.state.goal_objective = ""
+        self._pending_goal_enable = False
+        self._pending_goal_objective = ""
+        self._image_paths_by_number.clear()
+        self.state.image_token_numbers.clear()
+        self._clear_image_status_tracking()
+        self.state.level = self.engine.config.runtime.default_level
+        self.state.flushed.clear()
+        self.state.live.clear()
+        self.state.pending_turns = []
+        self.state.last_error = None
+        self._tool_cells.clear()
+        self._assistant_cell = None
+        self._reasoning_cell = None
+        self._user_cell: TranscriptCell | None = None
+        self._reasoning_flushed_for_current_response = False
+        self._refresh_window_title()
+        if hasattr(self.renderer, "clear_screen"):
+            self.renderer.clear_screen()
+        else:
+            self.renderer.output.write("\x1b[2J\x1b[3J\x1b[H")
+            self.renderer.output.flush()
+        self.state.status_message = self._text("new_thread")
+        if old_thread_id:
+            self._flush(TranscriptCell("event", text=f"cleared view · new thread (was {short_thread(old_thread_id)})"))
+        else:
+            self._flush(TranscriptCell("event", text="cleared view · new thread"))
+
+    def _format_judge_line(self, judge: dict[str, Any]) -> str:
+        """Format the most recent cache-aware judge result for /status display."""
+        if judge.get("skipped"):
+            reason = judge.get("reason", "?")
+            detail = ""
+            if "total_tokens" in judge:
+                detail = f" ({judge["total_tokens"]} tokens)"
+            elif "dependency" in judge:
+                detail = f" (dep={judge["dependency"]})"
+            return f"judge: skipped · {reason}{detail}"
+        dep = judge.get("dependency", "?")
+        N = judge.get("N", "?")
+        D = judge.get("D", "?")
+        K = judge.get("best_K", "?")
+        S = judge.get("best_S", "?")
+        gain = judge.get("net_gain", 0.0)
+        thr = judge.get("threshold", 0.0)
+        triggered = "compacted" if judge.get("compacted") else ("triggered" if judge.get("triggered") else "skipped")
+        sym = currency_symbol(self.engine.config.pricing.currency)
+        return (
+            f"judge: dep={dep} N={N} D={D} K={K} S={S} "
+            f"gain={sym}{gain:.5f} thr={sym}{thr:.5f} → {triggered}"
+        )
+
+    def _status_text(self) -> str:
+        level_name = self.state.level or self.engine.config.runtime.default_level
+        lines = [f"level: {level_name}"]
+        try:
+            model = self.engine.config.model_for_level(self.state.level)
+            lines.append(f"model: {model.name} -> {model.model}")
+        except Exception as exc:
+            lines.append(f"model: not configured ({exc})")
+        try:
+            stats = self.engine.context_stats(self.state.thread_id, self.state.level)
+            lines.append(
+                "context: "
+                f"{stats.percent}% ({stats.used_tokens} / {stats.context_window_tokens}, {stats.source})"
+            )
+            lines.append(f"compression: trigger {stats.threshold_tokens} · headroom {stats.headroom_tokens}")
+        except Exception as exc:
+            lines.append(f"context: unavailable ({exc})")
+        try:
+            judge = self.engine.last_judge_summary()
+            if judge:
+                lines.append(self._format_judge_line(judge))
+        except Exception:
+            pass
+        lines.append(f"thread: {short_thread(self.state.thread_id)}")
+        if self.state.title:
+            lines.append(f"title: {self.state.title}")
+        if self.state.project_path:
+            lines.append(f"project: {self.state.project_path}")
+        plugin_lines = self._plugin_status_lines()
+        if plugin_lines:
+            lines.extend(plugin_lines)
+        # Cumulative billing total and wall-clock time for the current thread.
+        if self.state.thread_id:
+            try:
+                metadata = self._thread_metadata(self.state.thread_id)
+                if self.engine.config.pricing.models:
+                    total = billing_total_from_metadata(
+                        metadata,
+                        preferred_currency=self.engine.config.pricing.currency,
+                    )
+                    if total is not None:
+                        amount, currency = total
+                        lines.append(f"cost: {format_billing_total(amount, currency, decimals=4)}")
+                created_at = metadata.get("created_at")
+                if created_at:
+                    created_dt = datetime.fromisoformat(str(created_at))
+                    elapsed_s = (datetime.now(UTC) - created_dt).total_seconds()
+                    lines.append(f"elapsed: {format_elapsed(elapsed_s)}")
+            except Exception:
+                pass
+        return "\n".join(lines)
+
+    def _plugin_status_lines(self) -> list[str]:
+        lines: list[str] = []
+        iterable = list(self.engine.plugins.records)
+        if iterable:
+            summary: dict[str, int] = {}
+            for record in iterable:
+                state = str(getattr(record, "state", "unknown") or "unknown")
+                summary[state] = summary.get(state, 0) + 1
+            rendered = ", ".join(f"{state}={summary[state]}" for state in sorted(summary))
+            lines.append(f"plugins: {rendered}")
+        return lines
+
+    def _show_status(self) -> None:
+        self._refresh_context_percent()
+        self._flush(TranscriptCell("event", text=self._status_text()))
+
+    # ------------------------------------------------------------------
+    # Run detail pager
+    # ------------------------------------------------------------------
+
+    def _show_run_detail(self, query: str) -> None:
+        """Open the pager with full source and output for a run."""
+
+        thread_id = self.state.thread_id
+        event = self._find_run_event(thread_id, query)
+        if event is None:
+            # Fall back to searching all visible threads if the user gave a
+            # run id without a current thread.
+            for thread in self.engine.thread_store.list_threads()[:50]:
+                candidate = str(thread.get("thread_id") or "")
+                if not candidate:
+                    continue
+                event = self._find_run_event(candidate, query)
+                if event is not None:
+                    thread_id = candidate
+                    break
+        if event is None:
+            self._flush(TranscriptCell("error", text=f"run not found: {query}"))
+            return
+
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        call = event.get("call") if isinstance(event.get("call"), dict) else {}
+        if not call and isinstance(result.get("call"), dict):
+            call = dict(result["call"])
+
+        try:
+            args = json.loads(str(call.get("arguments") or "{}"))
+        except Exception:
+            args = {}
+        code = str(args.get("code") or "").rstrip()
+
+        run_id = str(result.get("run_id") or query)
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "")
+        events = result.get("events") if isinstance(result.get("events"), list) else []
+
+        lines = self._build_run_pager_lines(code, stdout, stderr, events)
+        title = f"run {short_thread(run_id)}"
         if thread_id:
-            metadata_level = self._thread_metadata_level(thread_id)
-            if metadata_level:
-                return metadata_level
-        return self.engine.config.runtime.default_level
+            title += f" in thread {short_thread(thread_id)}"
+        self._open_run_pager(title, lines, code=code, output=self._run_output_text(stdout, stderr, events))
+
+    def _find_run_event(self, thread_id: str | None, query: str) -> dict[str, Any] | None:
+        """Find the ``item.runner_result`` event matching ``query`` (run_id or call_id)."""
+
+        if not thread_id:
+            return None
+        query = query.strip()
+        try:
+            events = self.engine.thread_store.read_events(
+                thread_id,
+                event_types={"item.model_response", "item.runner_result"},
+            )
+        except Exception:
+            return None
+        merged_events = self._merge_history_tool_events(
+            [event for event in events if isinstance(event, dict)]
+        )
+        for event in merged_events:
+            if event.get("type") != "item.runner_result":
+                continue
+            result = event.get("result") if isinstance(event.get("result"), dict) else {}
+            call = event.get("call") if isinstance(event.get("call"), dict) else {}
+            if not call and isinstance(result.get("call"), dict):
+                call = result["call"]
+            run_id = str(result.get("run_id") or "")
+            call_id = str(call.get("call_id") or result.get("call_id") or "")
+            if query in (run_id, call_id, run_id[-12:], call_id[-12:], run_id[-6:], call_id[-6:]):
+                return event
+        return None
+
+    def _run_output_text(self, stdout: str, stderr: str, events: list[Any]) -> str:
+        parts: list[str] = []
+        if stdout.strip():
+            parts.append(stdout)
+        if stderr.strip():
+            parts.append(stderr)
+        if events:
+            try:
+                parts.append(json.dumps(events, ensure_ascii=False, indent=2))
+            except Exception:
+                parts.append(str(events))
+        return "\n".join(parts)
+
+    def _build_run_pager_lines(
+        self,
+        code: str,
+        stdout: str,
+        stderr: str,
+        events: list[Any],
+    ) -> list[str]:
+        """Assemble pager lines with highlighted code and output sections."""
+
+        lines: list[str] = []
+        if code:
+            lines.append("script")
+            highlighted = self._highlight_python(code)
+            lines.extend(highlighted.splitlines())
+            lines.append("")
+        if stdout.strip():
+            lines.append("stdout")
+            lines.extend(stdout.rstrip().splitlines())
+            lines.append("")
+        if stderr.strip():
+            lines.append("stderr")
+            lines.extend(stderr.rstrip().splitlines())
+            lines.append("")
+        if events:
+            lines.append("events")
+            for event in events:
+                try:
+                    lines.append(json.dumps(event, ensure_ascii=False))
+                except Exception:
+                    lines.append(str(event))
+            lines.append("")
+        if not lines:
+            lines.append("(no content)")
+        return lines
+
+    @staticmethod
+    def _highlight_python(code: str) -> str:
+        """Best-effort Python syntax highlighting into ANSI escape sequences."""
+
+        if not code:
+            return ""
+        try:
+            from pygments import highlight
+            from pygments.lexers.python import PythonLexer
+            from pygments.formatters.terminal256 import Terminal256Formatter
+
+            return highlight(code, PythonLexer(), Terminal256Formatter(style="default"))
+        except Exception:
+            return code
+
+    def _open_run_pager(self, title: str, lines: list[str], *, code: str, output: str) -> None:
+        self._close_command_palette()
+        self.state.pager_open = True
+        self.state.pager_run_id = title
+        self.state.pager_title = title
+        self.state.pager_lines = lines
+        self.state.pager_scroll = 0
+        self.state.pager_total_lines = len(lines)
+        self._pager_code = code
+        self._pager_output = output
+        self._safe_repaint()
+
+    def _close_pager(self) -> None:
+        self.state.pager_open = False
+        self.state.pager_run_id = None
+        self.state.pager_title = ""
+        self.state.pager_lines = []
+        self.state.pager_scroll = 0
+        self.state.pager_total_lines = 0
+        self._pager_code = ""
+        self._pager_output = ""
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        """Copy text to the platform clipboard, falling back to a temp file."""
+
+        import shutil
+        import subprocess
+        import tempfile
+
+        copied = False
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["clip"], input=text, text=True, check=True, timeout=5)
+                copied = True
+            elif sys.platform == "darwin":
+                subprocess.run(["pbcopy"], input=text, text=True, check=True, timeout=5)
+                copied = True
+            else:
+                for cmd in (
+                    ["xclip", "-selection", "clipboard"],
+                    ["wl-copy"],
+                ):
+                    if shutil.which(cmd[0]):
+                        subprocess.run(cmd, input=text, text=True, check=True, timeout=5)
+                        copied = True
+                        break
+        except Exception:
+            copied = False
+
+        if copied:
+            self.state.status_message = "copied to clipboard"
+        else:
+            try:
+                tmp = Path(tempfile.gettempdir()) / f"uv-agent-run-{short_thread(self.state.pager_run_id or 'copy')}.txt"
+                tmp.write_text(text, encoding="utf-8")
+                self.state.status_message = f"copied to {tmp}"
+            except Exception as exc:
+                self.state.status_message = f"copy failed: {exc}"
+        self._safe_repaint()
+
+    def _scroll_pager(self, delta: int) -> None:
+        if not self.state.pager_open:
+            return
+        self.state.pager_scroll = max(0, self.state.pager_scroll + delta)
+
+    def _handle_pager_key(self, key: str) -> bool:
+        """Handle keys while the run-detail pager is open."""
+
+        if key in {"q", "Q", "\x1b"}:
+            self._close_pager()
+            return True
+        if key in {"\x03"}:  # Ctrl+C in pager copies code, does not quit.
+            self._copy_to_clipboard(self._pager_code)
+            return True
+        if key in {"\x0f", "o", "O"}:  # Ctrl+O or o copies output.
+            self._copy_to_clipboard(self._pager_output)
+            return True
+        if key in {"<H>", "<UP>", "k"}:
+            self._scroll_pager(-1)
+        elif key in {"<P>", "<DOWN>", "j"}:
+            self._scroll_pager(1)
+        elif key in {"<I>", "<PAGEUP>"}:
+            self._scroll_pager(-10)
+        elif key in {"<Q>", "<PAGEDOWN>"}:
+            self._scroll_pager(10)
+        self._safe_repaint()
+        return True
+
 
     def _thread_metadata(self, thread_id: str) -> dict[str, Any]:
+        listed: dict[str, Any] = {}
+        for item in self.engine.thread_store.list_threads():
+            if str(item.get("thread_id") or "") == thread_id:
+                listed = dict(item)
+                break
         try:
-            return self.engine.thread_store.thread_digest(thread_id)
-        except (OSError, ValueError, FileNotFoundError):
-            return {}
+            read_metadata = getattr(self.engine.thread_store, "thread_metadata")
+            metadata = dict(read_metadata(thread_id))
+        except Exception:
+            try:
+                metadata = dict(self.engine.thread_store.snapshot(thread_id).metadata)
+            except Exception:
+                metadata = {}
+        return {**listed, **metadata}
 
     def _thread_metadata_level(self, thread_id: str) -> str | None:
         level = str(self._thread_metadata(thread_id).get("active_level") or "").strip()
@@ -2049,2840 +2954,951 @@ class UvAgentApp(MentionMixin, ConfigPanelMixin, ImageSupportMixin, App[None]):
 
     def _level_model_name(self, level: str | None) -> str:
         try:
-            return self.engine.config.level(level).model
-        except ConfigError:
+            config_level = getattr(self.engine.config, "level", None)
+            if callable(config_level):
+                model_name = getattr(config_level(level), "model", "")
+                if model_name:
+                    return str(model_name)
+            return str(getattr(self.engine.config.model_for_level(level), "name", "") or "")
+        except Exception:
             return ""
 
-    def _level_model_signature(self, level: str | None) -> tuple[str, str, str] | None:
-        try:
-            model = self.engine.config.model_for_level(level)
-        except ConfigError:
-            return None
-        return (model.provider, model.api, model.model)
+    def _public_config_levels(self) -> dict[str, Any]:
+        public_levels = getattr(self.engine.config, "public_levels", None)
+        if callable(public_levels):
+            return dict(public_levels())
+        levels = getattr(self.engine.config, "levels", {})
+        if not isinstance(levels, dict):
+            return {}
+        return {name: level for name, level in levels.items() if not getattr(level, "hidden", False)}
 
-    def _levels_use_same_model(self, left: str | None, right: str | None) -> bool:
-        left_signature = self._level_model_signature(left)
-        right_signature = self._level_model_signature(right)
-        return bool(left_signature and right_signature and left_signature == right_signature)
+    def _is_public_level(self, level: str | None) -> bool:
+        return bool(level and level in self._public_config_levels())
 
     def _persist_thread_level(self, thread_id: str, level: str | None) -> None:
         if not thread_id or not level:
             return
-        metadata = self._thread_metadata(thread_id)
-        if metadata.get("active_level") == level and metadata.get("active_model") == self._level_model_name(level):
+        append = getattr(self.engine.thread_store, "append", None)
+        if not callable(append):
             return
-        self.engine.thread_store.append(
+        metadata = self._thread_metadata(thread_id)
+        model = self._level_model_name(level)
+        if metadata.get("active_level") == level and metadata.get("active_model") == model:
+            return
+        append(
             thread_id,
             "thread.level_updated",
             level=level,
-            model=self._level_model_name(level),
+            model=model,
             previous_level=metadata.get("active_level"),
             previous_model=metadata.get("active_model"),
         )
 
-    def _append_model_switch_warning(
-        self,
-        thread_id: str,
-        *,
-        from_level: str,
-        to_level: str,
-    ) -> None:
-        message = self._text("model_switch_warning")
-        event = self.engine.thread_store.append(
-            thread_id,
-            "thread.model_switch_warning",
-            from_level=from_level,
-            to_level=to_level,
-            from_model=self._level_model_name(from_level),
-            to_model=self._level_model_name(to_level),
-            message=message,
-        )
-        if self._is_active_thread(thread_id):
-            self._append_model_switch_warning_cell(event)
-
-    def _append_model_switch_warning_cell(
-        self,
-        event: dict[str, Any],
-        *,
-        before: MountBefore = None,
-    ) -> TranscriptCell:
-        message = str(event.get("message") or self._text("model_switch_warning"))
-        from_level = str(event.get("from_level") or "")
-        to_level = str(event.get("to_level") or "")
-        content = Text(message, style="yellow")
-        if from_level or to_level:
-            content.append("\n")
-            content.append(f"{from_level or '?'} -> {to_level or '?'}", style="dim")
-        return self._append_cell(
-            content,
-            "event",
-            before=before,
-            copy_text=message,
-        )
-
-    def _append_token_estimation_warning(
-        self,
-        event: dict[str, Any],
-        *,
-        before: MountBefore = None,
-        flash: bool = True,
-    ) -> TranscriptCell:
-        """Show the user when compaction had to rely on token estimation."""
-
-        message = str(event.get("message") or self._text("token_estimation_warning"))
-        content = Text.assemble(("⚠ ", "yellow"), (message, "yellow"))
-        if flash:
-            self._flash(message, severity="warning")
-        return self._append_cell(content, "event", before=before, copy_text=message)
-
-    def _default_screen_mounted(self) -> bool:
-        try:
-            self.query_one("#composer", TextArea)
-        except NoMatches:
-            return False
-        return True
-
-    def _reset_live_render_state(self) -> None:
-        self._assistant_buffer = ""
-        self._assistant_cell = None
-        self._reasoning_cell = None
-        self._reasoning_buffer = ""
-        self._tool_cells.clear()
-        self._tool_started_calls.clear()
-        self._tool_partial_payloads.clear()
-        self._tool_delta_cells.clear()
-        self._tool_delta_calls.clear()
-        self._process_cells = []
-        self._process_fold_cell = None
-        self._process_collapsed = False
-        self._process_anchor_cell = None
-        self._timeline_cells.clear()
-        self._timeline_item_ids.clear()
-
-    def _reset_live_view_state(self) -> None:
-        self._reset_live_render_state()
-        self._turn_started_at = None
-        self._turn_completed_at = None
-
-    def _background_run_states(self) -> list[ThreadRunState]:
-        return [
-            run_state
-            for thread_id, run_state in self._thread_runs.items()
-            if not self._is_active_thread(thread_id)
-        ]
-
-    def _activity_state_for_thread(self, thread_id: str) -> ThreadActivityState:
-        state = self._thread_activity.get(thread_id)
-        if state is None:
-            state = ThreadActivityState(thread_id=thread_id)
-            self._thread_activity[thread_id] = state
-        return state
-
-    def _mark_thread_active(self, thread_id: str, *, now: float | None = None) -> None:
-        activity = self._activity_state_for_thread(thread_id)
-        if activity.active_started_monotonic is None:
-            activity.active_started_monotonic = monotonic() if now is None else now
-        # A rerun/resume moves the thread out of the completed bucket until this
-        # latest piece of work finishes.
-        activity.completed = False
-        if self.is_mounted:
-            self._refresh_top_bar()
-
-    def _mark_thread_inactive(
-        self,
-        thread_id: str,
-        *,
-        completed: bool,
-        now: float | None = None,
-    ) -> None:
-        activity = self._activity_state_for_thread(thread_id)
-        ended_at = monotonic() if now is None else now
-        if activity.active_started_monotonic is not None:
-            activity.total_elapsed_s += max(0.0, ended_at - activity.active_started_monotonic)
-            activity.active_started_monotonic = None
-        activity.completed = completed
-        if self.is_mounted:
-            self._refresh_top_bar()
-
-    def _thread_elapsed_seconds(self, thread_id: str | None) -> float:
-        if thread_id is None:
-            return 0.0
-        activity = self._thread_activity.get(thread_id)
-        if activity is None:
-            return 0.0
-        total = activity.total_elapsed_s
-        if activity.active_started_monotonic is not None:
-            total += max(0.0, monotonic() - activity.active_started_monotonic)
-        return total
-
-    def _active_activity_thread_ids(self) -> list[str]:
-        return sorted(
-            thread_id
-            for thread_id, activity in self._thread_activity.items()
-            if activity.active
-        )
-
-    def _completed_activity_thread_ids(self) -> list[str]:
-        return sorted(
-            thread_id
-            for thread_id, activity in self._thread_activity.items()
-            if activity.completed and not activity.active
-        )
-
-    def _run_state_for_thread(self, thread_id: str | None) -> ThreadRunState:
-        if thread_id is None:
-            thread_id = self.engine.thread_store.create_thread()
-            self.thread_id = thread_id
-            self._move_draft_goal_enable_to_thread(thread_id)
-        run_state = self._thread_runs.get(thread_id)
-        if run_state is None:
-            run_state = ThreadRunState(
-                thread_id=thread_id,
-                worker=None,
-                cancel_event=asyncio.Event(),
-                queue=[],
-                status=self._text("idle"),
-            )
-            self._thread_runs[thread_id] = run_state
-        return run_state
-
-    def _thread_state(self, thread_id: str | None) -> ThreadRunState | None:
-        if thread_id is None:
-            return None
-        return self._thread_runs.get(thread_id)
-
-    def _thread_has_blocking_error(self, thread_id: str | None) -> bool:
-        run_state = self._thread_state(thread_id)
-        if run_state is not None and run_state.terminal_error:
-            return True
-        if run_state is not None and run_state.retryable_error:
-            return False
-        event = self._latest_thread_event(thread_id, "turn.error")
-        return bool(event and not self._is_retryable_error_event(event))
-
-    def _is_active_thread(self, thread_id: str | None) -> bool:
-        return bool(thread_id and self.thread_id == thread_id)
-
-    def _refresh_active_run_state(self) -> None:
-        run_state = self._thread_state(self.thread_id)
-        self.busy = run_state is not None and run_state.worker is not None
-        shell = self.query_one("#composer-shell", Vertical)
-        if run_state is None or run_state.worker is None:
-            shell.remove_class("busy")
-            self._current_worker = None
-            self._current_cancel_event = None
-            self._turn_started_at = None
-            self._turn_completed_at = None
-            return
-        shell.add_class("busy")
-        self._current_worker = run_state.worker
-        self._current_cancel_event = run_state.cancel_event
-        self._turn_started_at = run_state.started_at
-        self._turn_completed_at = run_state.completed_at
-
-    def _sync_run_state_from_active(self, run_state: ThreadRunState) -> None:
-        return
-
-    def _sync_active_from_run_state(self, run_state: ThreadRunState) -> None:
-        return
-
-    def _update_turn_timestamps(self, item: dict[str, Any], run_state: ThreadRunState) -> None:
-        turn_id = str(item.get("turn_id") or "").strip()
-        if turn_id:
-            run_state.turn_id = turn_id
-            timeline = self._timeline_for_thread(run_state.thread_id)
-            if timeline is not None:
-                old_pending_turn_id = run_state.pending_user_turn_id
-                timeline.promote_user_turn(old_pending_turn_id, turn_id)
-                if old_pending_turn_id and self._is_active_thread(run_state.thread_id):
-                    promoted = timeline.items_by_id.get(f"user:{turn_id}")
-                    if promoted is not None:
-                        self._rebind_timeline_widget_id(f"user:{old_pending_turn_id}", promoted)
-            run_state.pending_user_turn_id = None
-        started_at = str(item.get("turn_started_at") or item.get("started_at") or "").strip()
-        if started_at:
-            run_state.started_at = started_at
-            if self._is_active_thread(run_state.thread_id):
-                self._turn_started_at = started_at
-        if item.get("type") in {"turn.completed", "turn.interrupted", "turn.error"}:
-            completed_at = str(item.get("completed_at") or item.get("created_at") or utc_now_iso()).strip()
-            run_state.completed_at = completed_at
-            if self._is_active_thread(run_state.thread_id):
-                self._turn_completed_at = completed_at
-                self._refresh_process_fold_elapsed()
-
-    def _record_live_thread_event(
-        self,
-        run_state: ThreadRunState,
-        event_type: str,
-        item: dict[str, Any],
-    ) -> None:
-        timeline = self._timeline_for_thread(run_state.thread_id)
-        if timeline is None:
-            return
-        timeline.apply_live_event(event_type, item)
-
-    def _defer_stream_retry_event(self, run_state: ThreadRunState, item: dict[str, Any]) -> None:
-        timeline = self._timeline_for_thread(run_state.thread_id)
-        if timeline is None:
-            return
-        turn_id = str(item.get("turn_id") or run_state.turn_id or "").strip()
-        if not turn_id:
-            return
-        timeline._turn(turn_id).pending_stream_retries.append(dict(item))
-
-    def _flush_pending_stream_retries(self, run_state: ThreadRunState) -> None:
-        timeline = self._timeline_for_thread(run_state.thread_id)
-        if timeline is None or not run_state.turn_id:
-            return
-        timeline.flush_pending_stream_retries(run_state.turn_id)
-        if self._is_active_thread(run_state.thread_id):
-            self._sync_transcript_from_timeline()
-
-    def _live_event_item(self, item: dict[str, Any]) -> dict[str, Any]:
-        return dict(item)
-
-    def _apply_thread_event_to_active(self, event_type: str, item: dict[str, Any]) -> None:
-        timeline = self._timeline_for_active()
-        if timeline is None:
-            return
-        timeline.apply_live_event(event_type, item)
-        self._sync_transcript_from_timeline()
-
-    def _stream_event_needs_throttle(self, event_type: str) -> bool:
-        return event_type in {"assistant.delta", "assistant.reasoning_delta", "tool.delta", "tool.partial"}
-
-    def _schedule_stream_render(self) -> None:
-        if not self.is_mounted:
-            return
-        self._stream_render_due = True
-        if self._stream_render_timer is not None:
-            return
-        delay = max(0.001, STREAM_RENDER_INTERVAL_SECONDS - (monotonic() - self._last_stream_render_at))
-        self._stream_render_timer = self.set_timer(delay, self._flush_stream_render, name="stream-render")
-
-    def _flush_stream_render(self) -> None:
-        self._stream_render_timer = None
-        if not self._stream_render_due:
-            return
-        if not self._default_screen_mounted():
-            self._stream_render_due = False
-            return
-        self._stream_render_due = False
-        self._last_stream_render_at = monotonic()
-        self._sync_transcript_from_timeline()
-
-    def _schedule_stream_status_refresh(self) -> None:
-        if not self.is_mounted:
-            return
-        self._stream_status_due = True
-        if self._stream_status_timer is not None:
-            return
-        delay = max(0.001, STREAM_STATUS_INTERVAL_SECONDS - (monotonic() - self._last_stream_status_at))
-        self._stream_status_timer = self.set_timer(delay, self._flush_stream_status_refresh, name="stream-status")
-
-    def _flush_stream_status_refresh(self) -> None:
-        self._stream_status_timer = None
-        if not self._stream_status_due:
-            return
-        if not self._default_screen_mounted():
-            self._stream_status_due = False
-            return
-        self._stream_status_due = False
-        self._last_stream_status_at = monotonic()
-        if self.busy:
-            self._refresh_busy_status()
-        else:
-            self._refresh_status()
-
-    def _flush_stream_updates(self) -> None:
-        if self._stream_render_timer is not None:
-            self._stream_render_timer.stop()
-            self._stream_render_timer = None
-        if self._stream_status_timer is not None:
-            self._stream_status_timer.stop()
-            self._stream_status_timer = None
-        if not self._default_screen_mounted():
-            self._stream_render_due = False
-            self._stream_status_due = False
-            return
-        if self._stream_render_due:
-            self._stream_render_due = False
-            self._last_stream_render_at = monotonic()
-            self._sync_transcript_from_timeline()
-        if self._stream_status_due:
-            self._stream_status_due = False
-            self._last_stream_status_at = monotonic()
-            if self.busy:
-                self._refresh_busy_status()
-            else:
-                self._refresh_status()
-
-    def _mark_run_error_state(self, run_state: ThreadRunState, event: dict[str, Any]) -> None:
-        retryable = self._is_retryable_error_event(event)
-        run_state.retryable_error = retryable
-        run_state.terminal_error = not retryable
-        run_state.status = self._text("error")
-
-    def _is_retryable_error_event(self, event: dict[str, Any]) -> bool:
-        if "retryable" in event:
-            return bool(event.get("retryable"))
-        error_type = str(event.get("error_type") or "")
-        message = str(event.get("message") or "").lower()
-        if error_type in {"TimeoutException", "RequestError", "ConnectError", "ReadError", "NetworkError"}:
-            return True
-        status = self._http_status_from_error(event)
-        return status == 429 or (status is not None and 500 <= status < 600) or "timeout" in message
-
-    def _http_status_from_error(self, event: dict[str, Any]) -> int | None:
-        value = event.get("status_code")
-        if isinstance(value, int):
-            return value
-        text = " ".join(str(event.get(key) or "") for key in ("error_type", "message", "title"))
-        match = re.search(r"\b(?:HTTP|status)\s*(\d{3})\b", text, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-        return None
-
-    def _latest_thread_event(self, thread_id: str | None, event_type: str) -> dict[str, Any] | None:
-        if thread_id is None:
-            return None
-        try:
-            return self.engine.thread_store.latest_event(thread_id, event_type)
-        except (OSError, ValueError, FileNotFoundError):
-            return None
-
-    def _retry_thread(self, thread_id: str | None) -> None:
-        if not thread_id:
-            return
-        run_state = self._thread_state(thread_id)
-        if run_state is not None and run_state.worker is not None:
-            self._flash(self._text("working"), severity="warning")
-            return
-        if self.thread_id != thread_id:
-            self._resume_thread(thread_id)
-        if run_state is not None:
-            self._thread_runs.pop(thread_id, None)
-        self._remove_retry_buttons(thread_id)
-        timeline = self._timeline_for_thread(thread_id)
-        if timeline is not None:
-            for item in list(timeline.items):
-                if item.kind == "error":
-                    timeline._remove_item(item.id)
-        self._start_retry_turn(thread_id)
-
-    def _remove_retry_buttons(self, thread_id: str) -> None:
-        try:
-            transcript = self.query_one("#transcript", VerticalScroll)
-        except NoMatches:
-            return
-        for child in list(transcript.children):
-            if isinstance(child, RetryTurnButton) and child.retry_thread_id == thread_id:
-                child.remove()
-
-    async def _handle_thread_event(
-        self,
-        thread_id: str,
-        event_type: str,
-        item: dict[str, Any],
-        run_state: ThreadRunState,
-    ) -> None:
-        self._update_turn_timestamps(item, run_state)
-        if event_type == "assistant.reasoning_absent":
-            self._reasoning_cell = None
-            self._reasoning_buffer = ""
-        if event_type == "model.stream_retry":
-            self._defer_stream_retry_event(run_state, item)
-            run_state.status = self._text("working")
-            if self._is_active_thread(thread_id):
-                self._refresh_status(self._text("working"))
-            return
-        timeline = self._timeline_for_thread(thread_id)
-        if timeline is not None:
-            timeline.apply_live_event(event_type, item)
-        if event_type == "assistant.delta":
-            run_state.status = self._text("writing_answer")
-        elif event_type == "assistant.reasoning_delta":
-            run_state.status = self._text("thinking_status")
-        elif event_type in {"tool.delta"}:
-            run_state.status = self._text("writing_script")
-        elif event_type in {"tool.started", "tool.partial"}:
-            run_state.status = self._text("running_python")
-        elif event_type in {"tool.output", "compaction.completed", "thread.token_estimation_warning"}:
-            run_state.status = self._text("working")
-        elif event_type == "compaction.started":
-            run_state.status = self._text("compacting")
-        elif event_type == "turn.interrupted":
-            run_state.status = self._text("interrupted")
-        elif event_type == "turn.error":
-            self._mark_run_error_state(run_state, item)
-        if self._is_active_thread(thread_id):
-            if self._stream_event_needs_throttle(event_type):
-                self._last_status = run_state.status
-                self._schedule_stream_render()
-                self._schedule_stream_status_refresh()
-                return
-            self._flush_stream_updates()
-            self._sync_transcript_from_timeline()
-            if event_type == "assistant.delta":
-                self._refresh_status(self._text("writing_answer"))
-            elif event_type == "assistant.reasoning_delta":
-                self._refresh_status(self._text("thinking_status"))
-            elif event_type == "tool.delta":
-                self._refresh_status(self._text("writing_script"))
-            elif event_type in {"tool.started", "tool.partial"}:
-                self._refresh_status(self._text("running_python"))
-            elif event_type == "tool.output":
-                self._refresh_status(self._text("working"))
-            elif event_type == "compaction.started":
-                self._refresh_status(self._text("compacting"))
-            elif event_type == "compaction.completed":
-                self._refresh_status(self._text("working"))
-
-    def action_request_quit(self) -> None:
-        now = monotonic()
-        if now - self._last_quit_request_at < QUIT_KEY_DEBOUNCE_SECONDS:
-            return
-        self._last_quit_request_at = now
-        if self._quit_armed:
-            self.exit()
-            return
-        draft = self.query_one("#composer", TextArea).text.strip()
-        suffix = self._text("draft_lost") if draft else ""
-        self._quit_armed = True
-        self._flash(f"{self._text('quit_again')}{suffix}", severity="warning")
-        self.set_timer(2.0, self._clear_quit_arm)
-
-    def _quit_from_command(self) -> None:
-        self.exit()
-
-    def action_interrupt_turn(self) -> None:
-        if not self.busy:
-            self.action_request_quit()
-            return
-        now = monotonic()
-        if self._interrupt_armed and now - self._last_interrupt_request_at <= 2.0:
-            self._interrupt_armed = False
-            if self._current_cancel_event is not None:
-                self._current_cancel_event.set()
-            self._flash(self._text("interrupted"), severity="warning")
-            return
-        self._interrupt_armed = True
-        self._last_interrupt_request_at = now
-        self._flash(self._text("interrupt_again"), severity="warning")
-        self.set_timer(2.0, self._clear_interrupt_arm)
-
-    def _interrupt_from_command(self) -> None:
-        if self._current_cancel_event is None:
-            self._flash(self._text("no_running_turn"))
-            return
-        self._interrupt_armed = False
-        self._current_cancel_event.set()
-        self._flash(self._text("interrupted"), severity="warning")
-
-    def action_toggle_status_panel(self) -> None:
-        self._open_status_panel()
-
-    def action_open_command_palette(self) -> None:
-        panel = self._active_fullscreen_panel()
-        if panel is not None:
-            panel.close_navigation()
-            return
-        self._open_command_palette()
-
-    def action_toggle_composer_height(self) -> None:
-        self._composer_height_override = "collapsed" if self._composer_expanded else "expanded"
-        self._resize_composer()
-
-    def action_focus_composer(self) -> None:
-        composer = self.query_one("#composer", TextArea)
-        if self.screen.focused is composer:
-            return
-        composer.focus()
-
-    def action_toggle_tool_details(self) -> None:
-        focused = self.screen.focused
-        if isinstance(focused, ExpandableTranscriptCell):
-            self._open_tool_details_panel(focused)
-            return
-        cell = self._latest_expandable_cell()
-        if cell is None:
-            self._flash(self._text("no_details"))
-            return
-        self._open_tool_details_panel(cell)
-
-    def action_toggle_visible_process_folds(self) -> None:
-        folds = self._visible_process_fold_cells()
-        if not folds:
-            return
-        fold = folds[-1]
-        fold.set_collapsed(not fold.collapsed)
-
-    def action_attach_clipboard_image(self) -> None:
-        try:
-            model = self.engine.config.model_for_level(self.level)
-        except ConfigError as exc:
-            self._flash(str(exc), severity="error")
-            return
-        if model.supports_images is False:
-            self._flash(self._text("image_model_disabled"), severity="error")
-            return
-        from uv_agent.clipboard import ClipboardImageError
-
-        try:
-            image = save_clipboard_image(project_tui_clipboard_dir(self.project_root))
-        except ClipboardImageError as exc:
-            self._flash(str(exc), severity="warning")
-            return
-        pending = PendingImage(path=image.path, width=image.width, height=image.height)
-        self._pending_images.append(pending)
-        self._refresh_pending_images()
-        self._flash(
-            f"{self._text('image_queued')} {image.width}x{image.height}",
-        )
-
-    def action_preview_images(self) -> None:
-        attachments = self._thread_image_attachments()
-        if not attachments:
-            self._flash(self._text("no_images"))
-            return
-        self.push_screen(ImagePreviewPanel(attachments, len(attachments) - 1))
-
-    def _expandable_cells(self) -> list[ExpandableTranscriptCell]:
-        try:
-            transcript = self.query_one("#transcript", VerticalScroll)
-        except NoMatches:
-            return []
-        return [
-            child
-            for child in transcript.children
-            if isinstance(child, ExpandableTranscriptCell)
-            and not child.has_class("process_fold_hidden")
-        ]
-
-    def _visible_process_fold_cells(self) -> list[FoldedProcessCell]:
-        try:
-            transcript = self.query_one("#transcript", TranscriptScroll)
-        except NoMatches:
-            return []
-        viewport_top = transcript.scroll_y
-        viewport_bottom = viewport_top + transcript.scrollable_content_region.height
-        folds: list[FoldedProcessCell] = []
-        for child in transcript.children:
-            if not isinstance(child, FoldedProcessCell):
-                continue
-            region = child.virtual_region
-            # Fold bar itself is in the viewport.
-            if region.y < viewport_bottom and region.y + region.height > viewport_top:
-                folds.append(child)
-            # Fold bar is scrolled off but the expanded cells it wraps may
-            # still be visible; treat the fold as reachable when any of its
-            # cells overlaps the viewport.
-            elif not child.collapsed:
-                for cell in child.cells:
-                    cr = cell.virtual_region
-                    if cr.y < viewport_bottom and cr.y + cr.height > viewport_top:
-                        folds.append(child)
-                        break
-        return folds
-
-    def _latest_expandable_cell(self) -> ExpandableTranscriptCell | None:
-        cells = self._expandable_cells()
-        return cells[-1] if cells else None
-
-    def _focus_relative_expandable_cell(self, current: ExpandableTranscriptCell, step: int) -> None:
-        next_cell = self._relative_expandable_cell(current, step)
-        next_cell.focus()
-        next_cell.scroll_visible(animate=False)
-
-    def _relative_expandable_cell(self, current: ExpandableTranscriptCell, step: int) -> ExpandableTranscriptCell:
-        cells = self._expandable_cells()
-        if not cells:
-            return current
-        try:
-            index = cells.index(current)
-        except ValueError:
-            index = len(cells) - 1
-        return cells[(index + step) % len(cells)]
-
-    def _image_cells(self) -> list[ImageAttachmentCell]:
-        try:
-            transcript = self.query_one("#transcript", VerticalScroll)
-        except NoMatches:
-            return []
-        return [
-            child
-            for child in transcript.children
-            if isinstance(child, ImageAttachmentCell)
-        ]
-
-    def _focus_relative_image_cell(self, current: ImageAttachmentCell, step: int) -> None:
-        next_cell = self._relative_image_cell(current, step)
-        next_cell.focus()
-        next_cell.scroll_visible(animate=False)
-
-    def _relative_image_cell(self, current: ImageAttachmentCell, step: int) -> ImageAttachmentCell:
-        cells = self._image_cells()
-        if not cells:
-            return current
-        try:
-            index = cells.index(current)
-        except ValueError:
-            index = len(cells) - 1
-        return cells[(index + step) % len(cells)]
-
-    def _open_image_preview_for_cell(self, cell: ImageAttachmentCell) -> None:
-        attachments = self._thread_image_attachments()
-        if not attachments:
-            attachments = [cell.attachment]
-        index = next(
-            (
-                idx
-                for idx, attachment in enumerate(attachments)
-                if attachment.get("attachment_id") == cell.attachment.get("attachment_id")
-            ),
-            len(attachments) - 1,
-        )
-        self.push_screen(ImagePreviewPanel(attachments, index))
-
-    def _open_tool_details_panel(self, cell: ExpandableTranscriptCell) -> None:
-        self.push_screen(ToolDetailsPanel(cell))
-
-    def _open_pending_send_queue(self) -> None:
-        if not self._queued_turns_for_thread(self.thread_id):
-            self._flash(self._text("no_pending_turns"))
-            return
-        self.push_screen(PendingSendQueuePanel(self.thread_id))
-
-    def _thread_image_attachments(self) -> list[dict[str, Any]]:
-        if not self.thread_id:
-            return []
-        attachments: list[dict[str, Any]] = []
-        events = self.engine.thread_store.read_events(
-            self.thread_id,
-            event_types={"item.image_attachment"},
-        )
-        for event in events:
-            attachment = event.get("attachment")
-            if isinstance(attachment, dict):
-                attachments.append(attachment)
-        return attachments
-
-    def action_help(self) -> None:
-        self._open_help_panel()
-
-    def _clear_quit_arm(self) -> None:
-        self._quit_armed = False
-        self._refresh_status()
-
-    def _clear_interrupt_arm(self) -> None:
-        self._interrupt_armed = False
-        self._refresh_status()
-
-    def _schedule_selection_copy(self, text: str, *, source: str = "composer") -> None:
-        if text == self._last_auto_copied_selection:
-            return
-        self._cancel_selection_copy()
-        self._pending_selection_copy = text
-        self._selection_copy_timer = self.set_timer(
-            1.0,
-            lambda: self._copy_pending_selection(source),
-            name="selection-copy",
-        )
-
-    def _cancel_selection_copy(self) -> None:
-        if self._selection_copy_timer is not None:
-            self._selection_copy_timer.stop()
-            self._selection_copy_timer = None
-        self._pending_selection_copy = ""
-
-    def _copy_pending_selection(self, source: str) -> None:
-        self._selection_copy_timer = None
-        text = self._pending_selection_copy
-        self._pending_selection_copy = ""
-        if not text:
-            return
-        if source == "composer":
-            try:
-                composer = self.query_one("#composer", TextArea)
-            except NoMatches:
-                return
-            if composer.selected_text != text:
-                return
-        else:
-            selected_text = self.screen.get_selected_text()
-            if not selected_text:
-                return
-            text = selected_text
-        self.copy_to_clipboard(text)
-        self._last_auto_copied_selection = text
-        self.notify(self._text("copied"), timeout=1.5)
-
-    def _queued_turn_markup(self, prompt: str, image_paths: list[Path]) -> Text:
-        content = Text(self._text("queued"), style="dim")
-        content.append("\n")
-        content.append(prompt)
-        if image_paths:
-            content.append("\n")
-            content.append(f"+{len(image_paths)} {self._text('images')}", style="dim")
-        return content
-
-    def _handle_command(self, prompt: str) -> bool:
-        command, _, rest = prompt.partition(" ")
-        if command == "/clear":
-            old_thread_id = self.thread_id
-            self._save_active_thread_view_state()
-            self._close_active_panel()
-            self._set_pending_goal_enable(old_thread_id, False)
-            self._set_pending_goal_enable(None, False)
-            self.thread_id = None
-            self.level = None
-            self._reset_live_view_state()
-            self._clear_pending_images_for_thread(old_thread_id)
-            self._reset_transcript()
-            self._refresh_pending_images()
-            self._refresh_active_run_state()
-            self._refresh_status(self._text("idle"))
-            return True
-        if command == "/quit":
-            self._quit_from_command()
-            return True
-        if command == "/cancel":
-            self._interrupt_from_command()
-            return True
-        if command == "/threads":
-            self._open_threads_panel()
-            return True
-        if command == "/status":
-            self._open_status_panel()
-            return True
-        if command == "/goal":
-            self._open_goal_panel()
-            return True
-        if command == "/config":
-            self._open_config_panel()
-            return True
-        if command == "/models":
-            self._open_models_panel()
-            return True
-        if command == "/mcp":
-            self._open_mcp_panel()
-            return True
-        if command == "/skills":
-            self._open_skills_panel()
-            return True
-        if command == "/level":
-            self._open_current_level_panel()
-            return True
-        if command in {"/help", "?"}:
-            self._open_help_panel()
-            return True
-        if command.startswith("/"):
-            self._flash(f"{self._text('unknown_command')}: {command}", severity="error")
-            self._open_help_panel()
-            return True
-        return False
-
-    async def action_quit(self) -> None:
-        # Textual ships Ctrl+Q -> quit by default; this app reserves key-based quit for Ctrl+C.
-        return
-
-    def _open_help_panel(self) -> None:
-        lines = [
-            Text(self._text("keyboard_shortcuts"), style="bold"),
-            Text.assemble("- ", ("Ctrl+Enter / Ctrl+J", "cyan"), " ", (self._text("help_send"), "dim")),
-            Text.assemble("- ", ("Enter", "cyan"), " ", (self._text("help_newline"), "dim")),
-            Text.assemble("- ", ("Ctrl+O / /", "cyan"), " ", (self._text("help_commands"), "dim")),
-            Text.assemble("- ", ("F1 / ?", "cyan"), " ", (self._text("help_help"), "dim")),
-            Text.assemble("- ", ("Ctrl+S", "cyan"), " ", (self._text("help_status"), "dim")),
-            Text.assemble("- ", ("Ctrl+D", "cyan"), " ", (self._text("help_details"), "dim")),
-            Text.assemble("- ", ("F2", "cyan"), " ", (self._text("help_attach_image"), "dim")),
-            Text.assemble("- ", ("F3", "cyan"), " ", (self._text("help_preview_images"), "dim")),
-            Text.assemble("- ", ("Tab", "cyan"), " ", (self._text("help_height"), "dim")),
-            Text.assemble("- ", ("Ctrl+C", "cyan"), " ", (self._text("help_interrupt_quit"), "dim")),
-            Text(),
-            Text(self._text("mentions"), style="bold"),
-            Text.assemble("- ", ("@", "cyan"), " ", (self._text("help_mention_files"), "dim")),
-            Text.assemble("- ", ("@@", "cyan"), " ", (self._text("help_mention_threads"), "dim")),
-            Text(),
-            Text.assemble((self._text("commands"), "bold"), " ", ("(Tab/Enter, Esc)", "dim")),
-        ]
-        for spec in self._commands():
-            lines.append(
-                Text.assemble((f"{spec.usage:<18}", "cyan"), " ", (spec.description, "dim"))
-            )
-        self._open_panel(join_lines(lines), "help", self._text("help"))
-
-    def _append_help(self) -> None:
-        lines = [Text.assemble((self._text("commands"), "bold"), " ", ("(Ctrl+O, F1, Esc)", "dim"))]
-        for spec in self._commands():
-            lines.append(
-                Text.assemble((f"{spec.usage:<18}", "cyan"), " ", (spec.description, "dim"))
-            )
-        self._append_cell(join_lines(lines), "event")
-
-    def _append_user(self, text: str, *, before: MountBefore = None) -> TranscriptCell:
-        label = "你" if self.language.is_chinese else "you"
-        # Codex-style "› " prefix keeps user turns easy to spot.
-        return self._append_cell(
-            join_lines([Text(f"› {label}", style="bold #7dd3fc"), plain(text)]),
-            "user",
-            before=before,
-        )
-
-    def _append_assistant_text(self, text: str) -> None:
-        timeline = self._timeline_for_active()
-        if timeline is not None:
-            timeline.seed_assistant_delta(text)
-            self._sync_transcript_from_timeline()
-            acc = timeline.active_turns.get("manual")
-            cell = self._timeline_cells.get(acc.assistant_item_id or "") if acc is not None else None
-            self._assistant_cell = cell if isinstance(cell, TranscriptCell) else None
-            self._assistant_buffer = acc.assistant_buffer if acc is not None else self._assistant_buffer + text
-            return
-        self._assistant_buffer += text
-        if self._assistant_cell is None:
-            self._mark_transcript_content()
-            self._assistant_cell = TranscriptCell(classes="assistant")
-            self.query_one("#transcript", VerticalScroll).mount(self._assistant_cell)
-        self._assistant_cell.update(_markdown(self._assistant_buffer), copy_text=self._assistant_buffer)
-        self._scroll_end()
-
-    async def _append_assistant_delta(self, text: str) -> None:
-        self._append_assistant_text(text)
-
-    def _seal_assistant_round(self) -> None:
-        self._assistant_buffer = ""
-        self._assistant_cell = None
-
-    def _append_reasoning_delta(self, text: str) -> None:
-        if not text:
-            return
-        timeline = self._timeline_for_active()
-        if timeline is not None:
-            timeline.seed_reasoning_delta(text)
-            self._sync_transcript_from_timeline()
-            acc = timeline.active_turns.get("manual")
-            cell = self._timeline_cells.get(acc.reasoning_item_id or "") if acc is not None else None
-            self._reasoning_cell = cell if isinstance(cell, TranscriptCell) else None
-            self._reasoning_buffer = acc.reasoning_buffer if acc is not None else self._append_reasoning_text(self._reasoning_buffer, text)
-            return
-        self._reasoning_buffer = self._append_reasoning_text(self._reasoning_buffer, text)
-        display_text = self._reasoning_buffer.strip()
-        if not display_text:
-            return
-        first = display_text.splitlines()[0]
-        if len(first) > 120:
-            first = first[:117].rstrip() + "..."
-        content = Text.assemble(
-            (self._text("thinking"), "dim italic"),
-            "  ",
-            (first, "italic #a3b1c2"),
-        )
-        if self._reasoning_cell is None:
-            self._reasoning_cell = self._append_cell(content, "reasoning")
-        else:
-            self._reasoning_cell.update(content)
-            self._scroll_end()
-
-    def _append_reasoning_text(self, existing: str, delta: str) -> str:
-        if not existing:
-            return delta.lstrip()
-        return existing + delta
-
-    def _reasoning_markup(self, text: str) -> tuple[Text, Text]:
-        stripped = text.strip()
-        first = stripped.splitlines()[0]
-        if len(first) > 120:
-            first = first[:117].rstrip() + "..."
-        summary = Text.assemble(
-            (self._text("thinking"), "dim italic"),
-            "  ",
-            (first, "italic #a3b1c2"),
-        )
-        return summary, plain(stripped)
-
-    def _finalize_reasoning(self, text: str) -> None:
-        stripped = text.strip()
-        if not stripped and self._reasoning_buffer.strip():
-            stripped = self._reasoning_buffer.strip()
-        if not stripped:
-            self._clear_pending_reasoning()
-            return
-        summary, details = self._reasoning_markup(stripped)
-        if isinstance(self._reasoning_cell, ExpandableTranscriptCell):
-            self._reasoning_cell.set_details(summary, details)
-            cell = self._reasoning_cell
-        elif self._reasoning_cell is not None:
-            cell = self._replace_with_reasoning_cell(self._reasoning_cell, summary, details)
-        else:
-            cell = self._append_reasoning_cell(summary, details)
-        self._track_process_cell(cell)
-        self._reasoning_cell = None
-        self._reasoning_buffer = ""
-
-    def _clear_pending_reasoning(self) -> None:
-        if self._reasoning_cell is not None and not isinstance(self._reasoning_cell, ExpandableTranscriptCell):
-            self._reasoning_cell.remove()
-        self._reasoning_cell = None
-        self._reasoning_buffer = ""
-
-    def _append_reasoning_history(
-        self,
-        text: str,
-        *,
-        before: MountBefore = None,
-    ) -> ExpandableTranscriptCell | None:
-        stripped = text.strip()
-        if not stripped:
-            return None
-        summary, details = self._reasoning_markup(stripped)
-        return self._append_reasoning_cell(summary, details, before=before)
-
-    def _track_process_cell(self, cell: TranscriptCell | None) -> None:
-        if cell is None or isinstance(cell, FoldedProcessCell):
-            return
-        if cell not in self._process_cells:
-            self._process_cells.append(cell)
-        if self._process_fold_cell is not None:
-            self._process_fold_cell.set_cells(self._process_cells)
-
-    def _process_fold_toggled(self, cell: FoldedProcessCell, collapsed: bool) -> None:
-        if cell is self._process_fold_cell:
-            self._process_collapsed = collapsed
-        group_id = getattr(cell, "timeline_group_id", "")
-        timeline = self._timeline_for_active()
-        if isinstance(group_id, str) and group_id and timeline is not None:
-            group = timeline.process_groups.get(group_id)
-            if group is not None:
-                group.collapsed = collapsed
-            if self.thread_id and self.thread_id in self._thread_view_states:
-                # Keep saved per-thread UI state in step with manual toggles so
-                # a later restore or full transcript sync cannot resurrect an
-                # older fold value.
-                self._thread_view_states[self.thread_id].fold_collapsed[group_id] = collapsed
-
-    def _replace_process_cell(self, old_cell: TranscriptCell, new_cell: TranscriptCell) -> None:
-        self._process_cells = [
-            new_cell if cell is old_cell else cell
-            for cell in self._process_cells
-        ]
-        if self._process_fold_cell is not None:
-            self._process_fold_cell.set_cells(self._process_cells)
-
-    def _collapse_process_cells(self) -> None:
-        if self._process_collapsed or not self._process_cells:
-            return
-        self._append_process_fold_cell(
-            self._process_cells,
-            collapsed=True,
-            after=self._process_anchor_cell,
-        )
-        self._process_collapsed = True
-        self._refresh_process_fold_elapsed()
-
-    def _append_compaction_completed(self, item: dict[str, Any]) -> None:
-        """Render a completed compaction as a hard visual boundary.
-
-        A compaction checkpoint replaces the previous model context. Mirroring
-        that in the transcript keeps old tool/reasoning cells folded before the
-        checkpoint while allowing subsequent tool output to start a fresh process
-        group below the summary cell.
-        """
-
-        self._finalize_turn_render()
-        cell = self._append_compaction_cell(item)
-        self._process_cells = []
-        self._process_fold_cell = None
-        self._process_collapsed = False
-        self._process_anchor_cell = cell
-
-    def _append_compaction_cell(
-        self,
-        event: dict[str, Any],
-        *,
-        before: MountBefore = None,
-    ) -> ExpandableTranscriptCell | None:
-        """Append an expandable checkpoint cell containing the compaction text.
-
-        Older checkpoints may have been written with an empty summary when a
-        provider unexpectedly answered a compaction request with a tool call.
-        Hiding those avoids showing a misleading "conversation compacted" block
-        whose details contain no actual summary.
-        """
-
-        summary_text = str(event.get("text") or "").strip()
-        if not summary_text:
-            return None
-        summary = Text.assemble(
-            (self._text("compacted"), "dim"),
-            " · ",
-            (self._text("compacted_summary_hint"), "cyan dim"),
-        )
-        details = plain(summary_text)
-        return self._append_expandable_cell(
-            summary,
-            details,
-            "event",
-            before=before,
-            detail_title="compaction_summary",
-            detail_hint="compaction_summary_hint",
-        )
-
-    def _finalize_turn_render(self) -> None:
-        """Bring the live transcript to the same end-of-turn state as re-entry.
-
-        Mirrors `_mount_history_turn_events`: any pending reasoning is cleared,
-        the streaming assistant cell is sealed, and every process cell of the
-        turn is folded under a single FoldedProcessCell with the turn's elapsed
-        label. Safe to call multiple times in a single turn (e.g. once via
-        `assistant.final_response_started` and again on `turn.completed`).
-        """
-        self._clear_pending_reasoning()
-        self._seal_assistant_round()
-        self._collapse_process_cells()
-        self._refresh_process_fold_elapsed()
-
-    def _track_current_assistant_cell_as_process(self) -> None:
-        if self._assistant_cell is not None:
-            self._track_process_cell(self._assistant_cell)
-
-    def _append_process_fold_cell(
-        self,
-        cells: list[TranscriptCell],
-        *,
-        collapsed: bool = True,
-        before: MountBefore = None,
-        after: TranscriptCell | None = None,
-        elapsed_label: str | None = None,
-        timeline_group_id: str | None = None,
-    ) -> FoldedProcessCell:
-        self._mark_transcript_content()
-        insert_before = before
-        if insert_before is None and after is not None:
-            insert_before = self._cell_after(after)
-        if insert_before is None:
-            insert_before = cells[0] if cells else None
-        cell = FoldedProcessCell(
-            cells,
-            collapsed=collapsed,
-            elapsed_label=elapsed_label if elapsed_label is not None else self._process_elapsed_label(),
-            classes="process_fold",
-        )
-        if timeline_group_id:
-            setattr(cell, "timeline_group_id", timeline_group_id)
-        self.query_one("#transcript", VerticalScroll).mount(cell, before=insert_before)
-        self._process_fold_cell = cell
-        self._scroll_end()
-        return cell
-
-    def _process_elapsed_label(self, *, started_at: str | None = None, completed_at: str | None = None) -> str:
-        seconds = _elapsed_between(started_at or self._turn_started_at, completed_at or self._turn_completed_at)
-        return format_elapsed(seconds) if seconds is not None else ""
-
-    def _refresh_process_fold_elapsed(self) -> None:
-        if self._process_fold_cell is not None:
-            self._process_fold_cell.set_elapsed_label(self._process_elapsed_label())
-
-    def _cell_after(self, cell: TranscriptCell) -> MountBefore:
-        try:
-            children = list(self.query_one("#transcript", VerticalScroll).children)
-            index = children.index(cell)
-        except (NoMatches, ValueError):
-            return None
-        next_child = children[index + 1] if index + 1 < len(children) else None
-        return next_child if isinstance(next_child, Widget) else None
-
-    def _append_tool_partial(self, item: dict[str, Any]) -> None:
-        timeline = self._timeline_for_active()
-        if timeline is not None:
-            timeline.seed_tool_partial(item)
-            self._sync_transcript_from_timeline()
-            return
-        """Refresh the latest run_python result cell while the process is running."""
-
-        payload = parse_tool_payload(item.get("output", {}))
-        if payload is None:
-            return
-        payload = dict(payload)
-        call = item.get("call") if isinstance(item.get("call"), dict) else None
-        call_id = str((call or {}).get("call_id") or payload.get("call_id") or "")
-        if call_id:
-            self._tool_partial_payloads[call_id] = payload
-        self._last_tool_payload = payload
-        markup = tool_timeline_markup(payload)
-        details = tool_detail_markup(payload)
-        pending_cell = self._tool_cells.get(call_id) if call_id else None
-        if pending_cell is not None:
-            self._track_process_cell(pending_cell)
-        cell = self._partial_tool_result_cell(item)
-        if cell is None:
-            cell = self._append_expandable_cell(markup, details, "event")
-            self._track_process_cell(cell)
-        else:
-            cell.set_details(markup, details)
-        cell.tool_payload = payload
-        self._refresh_status(self._text("running_python"))
-
-    def _partial_tool_result_cell(self, item: dict[str, Any]) -> ExpandableTranscriptCell | None:
-        """Return an existing partial-result cell for this tool call, if any."""
-
-        call_raw = item.get("call")
-        call = cast(dict[str, Any], call_raw) if isinstance(call_raw, dict) else {}
-        call_id = str(call.get("call_id") or "")
-        if call_id:
-            for cell in reversed(self._process_cells):
-                if isinstance(cell, ExpandableTranscriptCell):
-                    payload = cell.tool_payload if isinstance(cell.tool_payload, dict) else {}
-                    if payload.get("partial") and payload.get("call_id") == call_id:
-                        return cell
-        payload = parse_tool_payload(item.get("output", {})) or {}
-        run_id = str(payload.get("run_id") or "")
-        if run_id:
-            for cell in reversed(self._process_cells):
-                if isinstance(cell, ExpandableTranscriptCell):
-                    existing = cell.tool_payload if isinstance(cell.tool_payload, dict) else {}
-                    if existing.get("partial") and existing.get("run_id") == run_id:
-                        return cell
-        return None
-
-    def _append_tool_output(self, item: dict[str, Any]) -> None:
-        timeline = self._timeline_for_active()
-        if timeline is not None:
-            timeline.seed_tool_output(item)
-            self._sync_transcript_from_timeline()
-            return
-        payload = parse_tool_payload(item.get("output", {}))
-        call = item.get("call") if isinstance(item.get("call"), dict) else None
-        delta_index = item.get("tool_call_index")
-        if (call is None or not tool_call_preview_line(call)) and isinstance(delta_index, int):
-            call = self._tool_delta_calls.pop(delta_index, None) or call
-        call_id = str((call or {}).get("call_id") or item.get("call", {}).get("call_id") or "")
-        if call_id:
-            self._tool_started_calls.pop(call_id, None)
-            self._tool_partial_payloads.pop(call_id, None)
-        pending_cell = self._tool_cells.pop(call_id, None) if call_id else None
-        if pending_cell is None and isinstance(delta_index, int):
-            pending_cell = self._tool_delta_cells.pop(delta_index, None)
-            self._tool_delta_calls.pop(delta_index, None)
-        elif isinstance(delta_index, int):
-            self._tool_delta_cells.pop(delta_index, None)
-            self._tool_delta_calls.pop(delta_index, None)
-        if pending_cell is not None and call is not None:
-            markup = self._tool_pending_markup(
-                str(call.get("name") or "python"),
-                "",
-                call={**call, "_status_label": self._text("python_called")},
-            )
-            details = tool_call_detail_highlight_markup(call)
-            if isinstance(pending_cell, ExpandableTranscriptCell):
-                pending_cell.set_details(markup, details)
-                self._mark_tool_cell_completed(pending_cell)
-            elif tool_call_preview_line(call):
-                new_cell = self._replace_with_expandable_cell(pending_cell, markup, details, "event")
-                self._replace_process_cell(pending_cell, new_cell)
-            else:
-                pending_cell.update(markup)
-                self._mark_tool_cell_completed(pending_cell)
-        partial_lookup_item = {**item, "call": call} if call is not None else item
-        partial_cell = self._partial_tool_result_cell(partial_lookup_item) if payload is not None else None
-        if payload is None:
-            markup = plain(f"{self._text('python')} {self._text('python_completed')}", style="dim")
-            cell = self._append_cell(markup, "event")
-            self._track_process_cell(cell)
-            return
-
-        payload = dict(payload)
-        payload.pop("partial", None)
-        payload.pop("partial_reason", None)
-        payload.pop("call_id", None)
-        self._last_tool_payload = payload
-        markup = tool_timeline_markup(payload)
-        details = tool_detail_markup(payload)
-        if partial_cell is not None:
-            # A partial result is only a live preview. Reuse that transcript cell
-            # for the completed payload so the timeline never shows a stale
-            # "still running" entry next to the final result.
-            partial_cell.set_details(markup, details)
-            partial_cell.tool_payload = payload
-            self._refresh_status(self._text("working"))
-            return
-        cell = self._append_expandable_cell(markup, details, "event")
-        cell.tool_payload = payload
-        self._track_process_cell(cell)
-        self._refresh_status(self._text("working"))
-
-    def _mark_tool_cell_completed(self, cell: TranscriptCell) -> None:
-        """Match re-entry rendering: completed tool calls use the 'event' class.
-
-        While streaming the call is marked 'tool_pending'; once `tool.output`
-        arrives the cell must look exactly like its history-rendered twin
-        (see `_append_tool_call_history`).
-        """
-        if cell.has_class("tool_pending"):
-            cell.remove_class("tool_pending")
-        if not cell.has_class("event"):
-            cell.add_class("event")
-
-    def _append_tool_started(self, item: dict[str, Any]) -> None:
-        timeline = self._timeline_for_active()
-        if timeline is not None:
-            timeline.seed_tool_started(item)
-            self._sync_transcript_from_timeline()
-            return
-        call = item.get("call") or {}
-        delta_index = item.get("tool_call_index")
-        if isinstance(delta_index, int):
-            self._tool_delta_calls[delta_index] = dict(call)
-        call_id = str(call.get("call_id") or "")
-        if call_id:
-            self._tool_started_calls[call_id] = dict(call)
-        name = str(call.get("name") or "python")
-        detail = self._tool_call_preview(call)
-        markup = self._tool_pending_markup(name, detail, call=call)
-        cell = (
-            self._tool_delta_cells.pop(delta_index, None)
-            if isinstance(delta_index, int)
-            else None
-        )
-        if cell is None and len(self._tool_delta_cells) == 1:
-            _, cell = self._tool_delta_cells.popitem()
-        details = tool_call_detail_highlight_markup(call)
-        if cell is None:
-            if tool_call_preview_line(call):
-                cell = self._append_expandable_cell(markup, details, "tool_pending")
-            else:
-                cell = self._append_cell(markup, "tool_pending")
-        elif isinstance(cell, ExpandableTranscriptCell):
-            cell.set_details(markup, details)
-        else:
-            old_cell = cell
-            cell = self._replace_with_expandable_cell(cell, markup, details, "tool_pending")
-            self._replace_process_cell(old_cell, cell)
-        if call_id:
-            self._tool_cells[call_id] = cell
-        self._track_process_cell(cell)
-        self._refresh_status(self._text("running_python"))
-
-    def _append_tool_pending_call(self, index: int, call: dict[str, Any]) -> None:
-        name = str(call.get("name") or "python")
-        detail = self._tool_call_preview(call)
-        markup = self._tool_pending_markup(name, detail, call=call)
-        if tool_call_preview_line(call):
-            cell = self._append_expandable_cell(
-                markup,
-                tool_call_detail_highlight_markup(call),
-                "tool_pending",
-            )
-        else:
-            cell = self._append_cell(markup, "tool_pending")
-        self._tool_delta_cells[index] = cell
-        call_id = str(call.get("call_id") or "")
-        if call_id:
-            self._tool_cells[call_id] = cell
-        self._track_process_cell(cell)
-
-    def _append_tool_delta(self, item: dict[str, Any]) -> None:
-        delta = item.get("tool_call")
-        index = int(self._tool_call_field(delta, "index", 0) or 0)
-        name = str(self._tool_call_field(delta, "name", None) or "python")
-        call = {
-            "call_id": self._tool_call_field(delta, "call_id", "") or "",
-            "name": name,
-            "arguments": self._tool_call_field(delta, "arguments", "")
-            or self._tool_call_field(delta, "arguments_delta", ""),
-        }
-        self._tool_delta_calls[index] = call
-        detail = self._tool_call_preview(call)
-        markup = self._tool_pending_markup(name, detail, call=call)
-        cell = self._tool_delta_cells.get(index)
-        if cell is None:
-            if tool_call_preview_line(call):
-                cell = self._append_expandable_cell(
-                    markup,
-                    tool_call_detail_highlight_markup(call),
-                    "tool_pending",
-                )
-            else:
-                cell = self._append_cell(markup, "tool_pending")
-            self._tool_delta_cells[index] = cell
-        elif isinstance(cell, ExpandableTranscriptCell):
-            cell.set_details(markup, tool_call_detail_highlight_markup(call))
-        elif tool_call_preview_line(call):
-            old_cell = cell
-            cell = self._replace_with_expandable_cell(
-                cell,
-                markup,
-                tool_call_detail_highlight_markup(call),
-                "tool_pending",
-            )
-            self._replace_process_cell(old_cell, cell)
-            self._tool_delta_cells[index] = cell
-        else:
-            cell.update(markup)
-        self._track_process_cell(cell)
-        self._refresh_status(self._text("writing_script"))
-
-    def _tool_call_field(self, tool_call: Any, name: str, default: Any = None) -> Any:
-        if isinstance(tool_call, dict):
-            return tool_call.get(name, default)
-        return getattr(tool_call, name, default)
-
-    def _tool_pending_markup(
-        self,
-        name: str,
-        detail: str,
-        *,
-        call: dict[str, Any] | None = None,
-    ) -> Text:
-        if call is not None and tool_call_preview_line(call):
-            return tool_call_summary_markup(
-                {**call, "_status_label": call.get("_status_label") or self._text("python_running")}
-            )
-        status = str((call or {}).get("_status_label") or self._text("python_running"))
-        content = Text.assemble(
-            ("⠿", "#7dd3fc"),
-            " ",
-            (name, "bold"),
-            " ",
-            (status, "dim"),
-        )
-        if detail:
-            content.append(detail, style="dim")
-        return content
-
-    def _append_image_attachment_cell(
-        self,
-        attachment: dict[str, Any],
-        *,
-        before: MountBefore = None,
-    ) -> ImageAttachmentCell:
-        self._mark_transcript_content()
-        cell = ImageAttachmentCell(attachment, classes="event")
-        self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
-        self._scroll_end()
-        return cell
-
-    def _append_turn_error(
-        self,
-        event: dict[str, Any],
-        *,
-        before: MountBefore = None,
-        display_content: object | None = None,
-    ) -> TranscriptCell:
-        error_type = str(event.get("error_type") or "Turn error")
-        message = str(event.get("message") or "The turn stopped before producing a final response.")
-        retryable = self._is_retryable_error_event(event)
-        hint = self._text("retry_network_error_hint") if retryable else self._text("thread_stopped_after_error")
-        content = cast(RenderablePart, display_content) if display_content is not None else Text.assemble((error_type, "bold red"), " ", message)
-        cell = self._append_cell(
-            join_lines([content, plain(hint, style="dim")]),
-            "error",
-            before=before,
-            copy_text=f"{error_type}: {message}\n{hint}",
-        )
-        if retryable:
-            self._append_retry_button(event, before=before)
-        return cell
-
-    def _append_stream_retry(
-        self,
-        event: dict[str, Any],
-        *,
-        before: MountBefore = None,
-    ) -> TranscriptCell:
-        attempt = event.get("attempt")
-        max_attempts = event.get("max_attempts")
-        delay_s = event.get("delay_s")
-        error_type = str(event.get("error_type") or "stream")
-        try:
-            if delay_s is None:
-                raise TypeError("delay_s is missing")
-            delay_text = f"{float(delay_s):.1f}s"
-        except (TypeError, ValueError):
-            delay_text = "?s"
-        return self._append_cell(
-            plain(
-                f"⟳ stream empty, retrying {attempt or '?'}/{max_attempts or '?'} "
-                f"in {delay_text} ({error_type})",
-                style="dim",
-            ),
-            "event",
-            before=before,
-        )
-
-    def _append_retry_button(self, event: dict[str, Any], *, before: MountBefore = None) -> RetryTurnButton:
-        self._mark_transcript_content()
-        button = RetryTurnButton(self._text("retry"), thread_id=str(event.get("thread_id") or self.thread_id or ""))
-        self.query_one("#transcript", VerticalScroll).mount(button, before=before)
-        self._scroll_end()
-        return button
-
-    def _append_tool_call_history(self, item: dict[str, Any], *, before: MountBefore = None) -> ExpandableTranscriptCell:
-        return self._append_expandable_cell(
-            tool_call_summary_markup({**item, "_status_label": self._text("python_called")}),
-            tool_call_detail_highlight_markup(item),
-            "event",
-            before=before,
-        )
-
-    def _tool_call_preview(self, call: dict[str, Any]) -> str:
-        first = tool_call_preview_line(call, max_chars=72)
-        if not first:
-            return ""
-        return f"\n{first}"
-
-    def _append_cell(
-        self,
-        content: object,
-        classes: str,
-        *,
-        before: MountBefore = None,
-        copy_text: str | None = None,
-    ) -> TranscriptCell:
-        self._mark_transcript_content()
-        cell = TranscriptCell(content, classes=classes, copy_text=copy_text)
-        self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
-        self._scroll_end()
-        return cell
-
-    def _append_expandable_cell(
-        self,
-        summary: object,
-        details: object,
-        classes: str,
-        *,
-        before: MountBefore = None,
-        detail_title: str = "tool_details",
-        detail_hint: str = "tool_details_hint",
-    ) -> ExpandableTranscriptCell:
-        self._mark_transcript_content()
-        cell = ExpandableTranscriptCell(
-            summary,
-            details,
-            detail_title=detail_title,
-            detail_hint=detail_hint,
-            classes=classes,
-        )
-        self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
-        self._scroll_end()
-        return cell
-
-    def _append_reasoning_cell(
-        self,
-        summary: object,
-        details: object,
-        *,
-        before: MountBefore = None,
-    ) -> ExpandableTranscriptCell:
-        self._mark_transcript_content()
-        cell = ExpandableTranscriptCell(
-            summary,
-            details,
-            detail_title="reasoning_details",
-            detail_hint="reasoning_details_hint",
-            classes="reasoning",
-        )
-        self.query_one("#transcript", VerticalScroll).mount(cell, before=before)
-        self._scroll_end()
-        return cell
-
-    def _replace_with_expandable_cell(
-        self,
-        old_cell: TranscriptCell,
-        summary: object,
-        details: object,
-        classes: str,
-    ) -> ExpandableTranscriptCell:
-        cell = ExpandableTranscriptCell(summary, details, classes=classes)
-        self.query_one("#transcript", VerticalScroll).mount(cell, before=old_cell)
-        old_cell.remove()
-        return cell
-
-    def _replace_with_reasoning_cell(
-        self,
-        old_cell: TranscriptCell,
-        summary: object,
-        details: object,
-    ) -> ExpandableTranscriptCell:
-        cell = ExpandableTranscriptCell(
-            summary,
-            details,
-            detail_title="reasoning_details",
-            detail_hint="reasoning_details_hint",
-            classes="reasoning",
-        )
-        self.query_one("#transcript", VerticalScroll).mount(cell, before=old_cell)
-        old_cell.remove()
-        return cell
-
-    def _mark_transcript_content(self) -> None:
-        self._transcript_has_content = True
-        try:
-            self.query_one(EmptyState).add_class("hidden")
-        except NoMatches:
-            pass
-
-    def _reset_transcript(self, *, show_empty: bool = True) -> None:
-        transcript = self.query_one("#transcript", TranscriptScroll)
-        transcript.query("*").remove()
-        self._transcript_has_content = False
-        self._history_before_event_id = None
-        self._history_has_more = False
-        self._history_more_cell = None
-        # Brand new transcript: re-engage auto-follow so the first incoming
-        # delta isn't stranded above the fold.
-        transcript.follow_tail = True
-        if show_empty:
-            empty_state = EmptyState()
-            transcript.mount(empty_state)
-            self.call_after_refresh(empty_state.tick)
-
-    def _open_threads_panel(self) -> None:
-        threads = self.engine.thread_store.list_threads()
-        if not threads:
-            self._open_fullscreen_panel(
-                self._text("threads"),
-                plain(self._text("no_threads"), style="dim"),
-            )
-            return
-        items = []
-        for thread in threads:
-            thread_id = str(thread.get("thread_id") or "")
-            title = str(thread.get("title") or self._text("new_thread"))
-            updated = str(thread.get("updated_at") or "")
-            last_text = str(thread.get("last_text") or "").replace("\n", " ")
-            if len(last_text) > 120:
-                last_text = last_text[:117].rstrip() + "..."
-            marker = f"{self._text('current')} " if thread_id == self.thread_id else ""
-            state = self._thread_runs.get(thread_id)
-            running = f" · {self._text('working')}" if state is not None and state.worker is not None else ""
-            items.append(
-                PickerItem(
-                    id=thread_id,
-                    title=f"{marker}{title}",
-                    description=last_text or self._text("no_messages"),
-                    meta=(
-                        f"{short_thread(thread_id)} · {thread.get('turn_count', 0)} "
-                        f"{self._text('turns')} · {updated}{running}"
-                    ),
-                )
-            )
-        self._open_picker(
-            self._text("threads"),
-            items,
-            self._resume_thread,
-            subtitle=self._text("thread_search_hint"),
-        )
-
-    def _open_status_panel(self) -> None:
-        self._open_panel(self._status_panel_markup(), "status", self._text("status"))
-
-    def _open_goal_panel(self, *, replace_current: bool = False) -> None:
-        thread_id = self.thread_id
-        if thread_id is not None:
-            self.level = self._thread_metadata_level(thread_id) or self.level
-        state = self.engine.goal_state(thread_id) if thread_id is not None else None
-        persisted_enabled = bool(state and state.enabled)
-        pending_enabled = not persisted_enabled and self._goal_enable_pending(thread_id)
-        enabled = pending_enabled or persisted_enabled
-        status = self._text("goal_enabled") if enabled else self._text("goal_disabled")
-        files_hint = self._text("goal_files_pending") if thread_id is None else self._text("goal_files_hint")
-        items = [
-            PickerItem(
-                id="enable",
-                title=self._text("goal_enable"),
-                description=self._text("current") if enabled else "",
-                meta=self._text("goal_enable_hint"),
-            ),
-            PickerItem(
-                id="disable",
-                title=self._text("goal_disable"),
-                description=self._text("current") if not enabled else "",
-                meta=self._goal_disable_meta(thread_id, enabled),
-            ),
-            PickerItem(
-                id="files",
-                title=self._text("goal_files"),
-                description=status,
-                meta=files_hint,
-            ),
-            PickerItem(
-                id="reset",
-                title=self._text("goal_reset"),
-                description="" if not enabled else self._text("goal_reset_disabled_active"),
-                meta=self._text("goal_reset_hint"),
-            ),
-        ]
-        self._open_picker(
-            self._text("goal"),
-            items,
-            self._choose_goal_item,
-            subtitle=self._text("goal_panel_hint"),
-            navigate=True,
-            replace_current=replace_current,
-        )
-
-    def _goal_disable_meta(self, thread_id: str | None, enabled: bool) -> str:
-        if not enabled:
-            return self._text("goal_disable_hint")
-        if thread_id is None or self._goal_enable_pending(thread_id):
-            return self._text("goal_disable_hint")
-        if not self._goal_can_disable(thread_id):
-            return self._text("goal_disable_requires_completed")
-        return self._text("goal_disable_hint")
-
-    def _choose_goal_item(self, item_id: str) -> None:
-        thread_id = self.thread_id
-        if thread_id is not None:
-            self.level = self._thread_metadata_level(thread_id) or self.level
-        state = self.engine.goal_state(thread_id) if thread_id is not None else None
-        persisted_enabled = bool(state and state.enabled)
-        pending_enabled = not persisted_enabled and self._goal_enable_pending(thread_id)
-        enabled = pending_enabled or persisted_enabled
-        if item_id == "enable":
-            if persisted_enabled:
-                self._flash(self._text("goal_enabled_flash"))
-                self._refresh_status()
-                self._open_goal_panel(replace_current=True)
-                return
-            self._set_pending_goal_enable(thread_id, True)
-            self._flash(self._text("goal_enabled_flash"))
-            self._refresh_status()
-            self._open_goal_panel(replace_current=True)
-            return
-        if item_id == "disable":
-            if pending_enabled:
-                self._set_pending_goal_enable(thread_id, False)
-                self._flash(self._text("goal_disabled_flash"))
-                self._refresh_status()
-                self._open_goal_panel(replace_current=True)
-                return
-            if not persisted_enabled:
-                self._flash(self._text("goal_already_disabled"))
-                self._open_goal_panel(replace_current=True)
-                return
-            if thread_id is None:
-                self._flash(self._text("goal_already_disabled"))
-                self._open_goal_panel(replace_current=True)
-                return
-            if not self._goal_can_disable(thread_id):
-                self._flash(self._text("goal_disable_requires_completed"), severity="warning")
-                self._open_goal_panel(replace_current=True)
-                return
-            self.engine.disable_goal_mode(thread_id)
-            self.level = self._thread_metadata_level(thread_id) or self.level
-            self._flash(self._text("goal_disabled_flash"))
-            self._refresh_status()
-            self._open_goal_panel(replace_current=True)
-            return
-        if item_id == "files":
-            if thread_id is None:
-                self._flash(self._text("goal_files_pending"), severity="warning")
-                self._open_goal_panel(replace_current=True)
-                return
-            self._open_goal_files_panel(thread_id)
-            return
-        if item_id == "reset":
-            if enabled:
-                self._flash(self._text("goal_reset_disabled_active"), severity="warning")
-                self._open_goal_panel(replace_current=True)
-                return
-            if thread_id is None:
-                self._flash(self._text("goal_files_pending"), severity="warning")
-                self._open_goal_panel(replace_current=True)
-                return
-            self.engine.reset_goal_files(thread_id)
-            self.level = self._thread_metadata_level(thread_id) or self.level
-            self._flash(self._text("goal_reset_flash"))
-            self._open_goal_panel(replace_current=True)
-
-    def _goal_can_disable(self, thread_id: str) -> bool:
-        run_state = self._thread_state(thread_id)
-        if run_state is not None and (run_state.worker is not None or run_state.queue):
-            return False
-        return self._thread_has_final_reply(thread_id)
-
-    def _thread_has_final_reply(self, thread_id: str) -> bool:
-        events, _ = self.engine.thread_store.read_recent_events(
-            thread_id,
-            limit=1,
-            event_types={"turn.completed", "turn.interrupted", "turn.error"},
-        )
-        return bool(events and events[-1].get("type") == "turn.completed")
-
-    def _open_goal_files_panel(self, thread_id: str) -> None:
-        state = self.engine.goal_state(thread_id)
-        if state is None:
-            self._open_panel(plain(self._text("goal_files_pending"), style="dim"), "goal", self._text("goal_files"))
-            return
-        status = self._text("goal_enabled") if state.enabled or self._goal_enable_pending(thread_id) else self._text("goal_disabled")
-        sections: list[object] = [
-            Text.assemble((self._text("goal"), "bold"), " ", (status, "cyan")),
-            Text(),
-            Text.assemble("- state: ", str(state.paths.state)),
-            Text.assemble("- checklist: ", str(state.paths.checklist)),
-            Text.assemble("- document: ", str(state.paths.notes)),
-        ]
-        if state.objective:
-            sections.extend([Text(), Text.assemble("- objective: ", state.objective)])
-        sections.extend(
-            [
-                Text(),
-                *self._goal_file_preview("goal.json", state.paths.state, kind="json"),
-                Text(),
-                *self._goal_file_preview("checklist.md", state.paths.checklist, kind="markdown"),
-                Text(),
-                *self._goal_file_preview("notes.md", state.paths.notes, kind="markdown"),
-            ]
-        )
-        self._open_panel(join_lines(sections), "goal", self._text("goal_files"))
-
-    def _goal_file_preview(self, label: str, path: Path, *, kind: Literal["json", "markdown"]) -> list[object]:
-        """Render one durable goal file if it already exists.
-
-        The goal files panel is a read-only inspection surface. Missing files are
-        reported inline instead of being created as a side effect of opening the
-        panel; creation/reset remains owned by the explicit goal-mode actions.
-        """
-
-        heading = Text.assemble((label, "bold cyan"), " ", (str(path), "dim"))
-        if not path.is_file():
-            return [heading, plain(self._text("goal_file_missing"), style="dim")]
-        try:
-            content, truncated = self._read_goal_file_preview(path)
-        except OSError as exc:
-            return [heading, plain(f"{self._text('goal_file_read_error')}: {exc}", style="red")]
-        if not content:
-            body: object = plain(self._text("goal_file_empty"), style="dim")
-        elif kind == "json":
-            body = plain(self._format_goal_json_preview(content))
-        else:
-            body = _markdown(content)
-        parts: list[object] = [heading, body]
-        if truncated:
-            parts.append(
-                plain(
-                    self._text("goal_file_truncated").format(limit=GOAL_FILE_PREVIEW_MAX_CHARS),
-                    style="dim",
-                )
-            )
-        return parts
-
-    def _read_goal_file_preview(self, path: Path) -> tuple[str, bool]:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            content = handle.read(GOAL_FILE_PREVIEW_MAX_CHARS + 1)
-        if len(content) <= GOAL_FILE_PREVIEW_MAX_CHARS:
-            return content, False
-        return content[:GOAL_FILE_PREVIEW_MAX_CHARS].rstrip() + "\n", True
-
-    @staticmethod
-    def _format_goal_json_preview(content: str) -> str:
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError:
-            return content
-        return json.dumps(parsed, ensure_ascii=False, indent=2)
-
-    def _session_thread_ids_for_panel(self, kind: str) -> list[str]:
-        active_ids = self._active_activity_thread_ids()
-        completed_ids = self._completed_activity_thread_ids()
-        if kind == "active":
-            return active_ids
-        if kind == "completed":
-            return completed_ids
-        return active_ids + completed_ids
-
-    def _open_session_threads_panel(self, kind: str) -> None:
-        thread_ids = self._session_thread_ids_for_panel(kind)
-        if not thread_ids:
-            key = {
-                "active": "no_active_threads",
-                "completed": "no_completed_threads",
-            }.get(kind, "no_session_threads")
-            self._open_panel(plain(self._text(key), style="dim"), "threads", self._text("threads"))
-            return
-        title_key = {
-            "active": "active_threads_title",
-            "completed": "completed_threads_title",
-        }.get(kind, "session_threads_title")
-        items = [self._session_thread_picker_item(thread_id) for thread_id in thread_ids]
-        self._open_picker(
-            self._text(title_key),
-            items,
-            self._resume_thread,
-            subtitle=self._text("thread_search_hint"),
-        )
-
-    def _session_thread_picker_item(self, thread_id: str) -> PickerItem:
-        metadata = self._thread_metadata(thread_id)
-        title = str(metadata.get("title") or self._text("new_thread")).strip()
-        state = self._thread_runs.get(thread_id)
-        status = state.status if state is not None and state.worker is not None else self._text("python_completed")
-        activity = self._thread_activity.get(thread_id)
-        elapsed = format_elapsed(self._thread_elapsed_seconds(thread_id)) or "0s"
-        marker = f"{self._text('current')} " if thread_id == self.thread_id else ""
-        turn_count = int(metadata.get("turn_count") or 0)
-        return PickerItem(
-            id=thread_id,
-            title=f"{marker}{title}",
-            description=str(metadata.get("last_text") or self._text("no_messages")).replace("\n", " ")[:120],
-            meta=(
-                f"{short_thread(thread_id)} · {status} · {self._text('elapsed')} {elapsed} · "
-                f"{turn_count} {self._text('turns')}"
-                if activity is not None
-                else short_thread(thread_id)
-            ),
-        )
-
-    def _open_notifications_panel(self) -> None:
-        self._top_notification_unread = 0
-        self._top_notifications = [
-            replace(notification, read=True) for notification in self._top_notifications
-        ]
-        if not self._top_notifications:
-            items = [
-                PickerItem(
-                    id="",
-                    title=self._text("no_notifications"),
-                    meta=self._text("notifications_hint"),
-                )
-            ]
-        else:
-            items = [self._notification_picker_item(notification) for notification in reversed(self._top_notifications[-100:])]
-        self._open_picker(
-            self._text("notifications"),
-            items,
-            self._choose_notification,
-            subtitle=self._text("notifications_hint"),
-        )
-        self._refresh_top_bar()
-
-    def _notification_picker_item(self, notification: TopNotification) -> PickerItem:
-        title = notification.title if notification.read else f"● {notification.title}"
-        meta_parts = [notification.created_at]
-        if notification.thread_id:
-            meta_parts.append(short_thread(notification.thread_id))
-        if notification.severity != "information":
-            meta_parts.append(notification.severity)
-        return PickerItem(
-            id=notification.id,
-            title=title,
-            description=notification.message,
-            meta=" · ".join(meta_parts),
-        )
-
-    def _choose_notification(self, notification_id: str) -> None:
-        notification = next(
-            (item for item in self._top_notifications if item.id == notification_id),
-            None,
-        )
-        if notification is None or not notification.thread_id:
-            return
-        self._resume_thread(notification.thread_id)
-
-    def _add_notification(
-        self,
-        title: str,
-        message: str = "",
-        *,
-        thread_id: str | None = None,
-        severity: str = "information",
-    ) -> None:
-        self._top_notifications.append(
-            TopNotification(
-                id=new_id("ntf"),
-                title=title,
-                message=message,
-                created_at=utc_now_iso(),
-                thread_id=thread_id,
-                severity=severity,
-            )
-        )
-        self._top_notification_unread += 1
-        if self.is_mounted:
-            self._refresh_top_bar()
-
-    def _status_panel_markup(self) -> Text:
-        self.engine.refresh_config()
-        level_name = self.level or self.engine.config.runtime.default_level
-        rules = self.engine.project_rule_context()
-        billing_line = self._thread_billing_status_line()
-        try:
-            model = self.engine.config.model_for_level(self.level)
-            provider = self.engine.config.provider_for_model(model)
-            stats = self.engine.context_stats(self.thread_id, self.level)
-            model_line = f"{model.name} -> {model.model}"
-            provider_line = f"{provider.name} / {model.api}"
-            context_line = (
-                f"{stats.percent}% "
-                f"({format_tokens(stats.used_tokens)} / {format_tokens(stats.context_window_tokens)}, "
-                f"{stats.source})"
-            )
-            compress_line = (
-                f"{'on' if self.engine.config.runtime.compression.enabled else 'off'} · "
-                f"trigger {format_tokens(stats.threshold_tokens)} · "
-                f"headroom {format_tokens(stats.headroom_tokens)}"
-            )
-        except ConfigError as exc:
-            model_line = Text("not configured", style="red")
-            provider_line = str(exc)
-            context_line = "-"
-            compress_line = "-"
-        rules_line = f"{len(rules.rules)} {self._text('status_rules_loaded')}"
-        if rules.truncated:
-            rules_line += f" · {self._text('truncated')}"
-        if rules.omitted_files:
-            rules_line += f" · {rules.omitted_files} {self._text('status_rules_omitted')}"
-        lines: list[Text] = [
-            Text.assemble("- state: ", (self._last_status, "cyan")),
-            Text.assemble("- version: ", (application_version(), "cyan")),
-            Text.assemble("- goal: ", self._goal_status_line()),
-            Text.assemble("- level: ", (level_name, "cyan")),
-            Text.assemble("- model: ", model_line),
-            Text.assemble("- provider/api: ", provider_line),
-            Text.assemble("- context: ", context_line),
-        ]
-        if billing_line:
-            lines.append(Text.assemble("- billing: ", billing_line))
-        lines.extend(
-            [
-                Text.assemble("- compaction: ", compress_line),
-                Text.assemble("- rules: ", rules_line),
-                Text.assemble("- thread: ", short_thread(self.thread_id)),
-                Text.assemble("- queued: ", str(self._active_queue_length())),
-                Text.assemble("- user state: ", str(uv_agent_home())),
-                Text.assemble("- project state: ", str(project_state_dir(self.project_root))),
-                Text.assemble("- host: ", host_environment_line()),
-                Text.assemble("- language: ", self.language.name),
-            ]
-        )
-        background_runs = self._background_run_states()
-        if background_runs:
-            lines.append(
-                Text.assemble("- background: ", (f"{len(background_runs)} {self._text('active_threads')}", "cyan"))
-            )
-            for run_state in background_runs[:6]:
-                lines.append(
-                    Text.assemble("  - ", short_thread(run_state.thread_id), ": ", run_state.status)
-                )
-            if len(background_runs) > 6:
-                lines.append(Text(f"  - ... {len(background_runs) - 6} more"))
-        if rules.rules:
-            lines.append(Text())
-            lines.append(Text(self._text("rules"), style="bold"))
-            for rule in rules.rules[:6]:
-                suffix = f" [{self._text('truncated')}]" if rule.truncated else ""
-                lines.append(Text(f"- {rule.scope}: {rule.path}{suffix}"))
-            if len(rules.rules) > 6:
-                lines.append(Text(f"- ... {len(rules.rules) - 6} more"))
-        return join_lines(lines)  # type: ignore[return-value]
-
-    def _goal_status_line(self) -> Text:
-        if self._goal_mode_enabled():
-            return Text(self._text("goal_enabled"), style="cyan")
-        return Text(self._text("goal_disabled"), style="dim")
-
-    def _thread_billing_status_line(self) -> str:
-        if not self.engine.config.pricing.models:
-            return ""
-        label = self._thread_billing_label(decimals=6)
-        return label if label else "-"
-
-    def _active_worktree_metadata(self) -> dict[str, Any] | None:
-        """Return active worktree metadata for the current thread, if any."""
-
-        if not self.thread_id:
-            return None
-        metadata = self._thread_metadata(self.thread_id)
-        if str(metadata.get("worktree_status") or "").strip() != "active":
-            return None
-        if not metadata.get("worktree_branch") or not metadata.get("worktree_path"):
-            return None
-        return metadata
-
-    def _open_worktree_panel(self, *, replace_current: bool = False) -> None:
-        metadata = self._active_worktree_metadata()
-        if metadata is None:
-            items = [
-                PickerItem(
-                    id="create",
-                    title=self._text("worktree_create"),
-                    description=self._text("worktree_create_hint"),
-                )
-            ]
-        else:
-            branch = str(metadata.get("worktree_branch") or "")
-            path = str(metadata.get("worktree_path") or "")
-            items = [
-                PickerItem(
-                    id="info",
-                    title=self._text("worktree_current"),
-                    description=branch,
-                    meta=path,
-                ),
-                PickerItem(
-                    id="merge",
-                    title=self._text("worktree_merge"),
-                    description=self._text("worktree_merge_hint"),
-                    meta=branch,
-                ),
-                PickerItem(
-                    id="delete",
-                    title=self._text("worktree_delete"),
-                    description=self._text("worktree_delete_hint"),
-                    meta=branch,
-                ),
-            ]
-        self._open_picker(
-            self._text("worktree_title"),
-            items,
-            self._choose_worktree_item,
-            subtitle=self._text("worktree_panel_hint"),
-            navigate=True,
-            replace_current=replace_current,
-        )
-
-    def _choose_worktree_item(self, item_id: str) -> None:
-        if item_id == "create":
-            self._open_worktree_create_panel()
-            return
-        if item_id == "info":
-            self._open_worktree_info_panel()
-            return
-        if item_id == "merge":
-            self._append_worktree_merge_prompt()
-            self._close_active_panel()
-            return
-        if item_id == "delete":
-            self._open_worktree_delete_panel()
-
-    def _open_worktree_create_panel(self) -> None:
-        self._close_active_panel()
-        panel = WorktreeBranchPanel(
-            title=self._text("worktree_create_title"),
-            subtitle=self._text("worktree_branch_hint"),
-            placeholder=self._text("worktree_branch_placeholder"),
-        )
-
-        def handle(branch: str | None) -> None:
-            if branch:
-                self._create_worktree_from_input(branch)
-            self.query_one("#composer", TextArea).focus()
-
-        self.push_screen(panel, handle)
-
-    def _create_worktree_from_input(self, value: str) -> None:
-        branch = value.strip()
-        try:
-            validate_worktree_branch_name(branch)
-            info = create_worktree(self.project_root, branch, run=self._run_worktree_command)
-        except WorktreeError as exc:
-            self._flash(f"{self._text('worktree_error')}: {exc}", severity="error")
-            self._open_worktree_create_panel()
-            return
-        thread_id = self.engine.thread_store.create_thread(f"Worktree {info.branch}")
-        self.engine.thread_store.append(thread_id, "thread.worktree_created", **info.metadata())
-        self.engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(info.path))
-        self._thread_timelines.pop(thread_id, None)
-        self._resume_thread(thread_id)
-        self._append_cell(
-            Text.assemble(
-                (self._text("worktree_created"), "dim"),
-                " ",
-                (info.branch, "cyan"),
-                " · ",
-                str(info.path),
-            ),
-            "event",
-        )
-        self._refresh_status(self._text("worktree_created"))
-
-    def _open_worktree_info_panel(self) -> None:
-        metadata = self._active_worktree_metadata()
-        if metadata is None:
-            self._open_panel(plain(self._text("worktree_none"), style="dim"), "worktree", self._text("worktree_title"))
-            return
-        lines = [
-            Text(self._text("worktree_current"), style="bold cyan"),
-            Text.assemble("- branch: ", str(metadata.get("worktree_branch") or "")),
-            Text.assemble("- path: ", str(metadata.get("worktree_path") or "")),
-            Text.assemble("- base: ", str(metadata.get("worktree_base_ref") or "")),
-            Text.assemble("- origin: ", str(metadata.get("worktree_origin_root") or "")),
-            Text(),
-            Text.assemble("- ", (self._text("worktree_merge"), "cyan"), ": ", self._text("worktree_merge_hint")),
-            Text.assemble("- ", (self._text("worktree_delete"), "red"), ": ", self._text("worktree_delete_hint")),
-        ]
-        self._open_panel(join_lines(lines), "worktree", self._text("worktree_title"))
-
-    def _append_worktree_merge_prompt(self) -> None:
-        metadata = self._active_worktree_metadata()
-        if metadata is None:
-            self._flash(self._text("worktree_none"), severity="warning")
-            return
-        branch = str(metadata.get("worktree_branch") or "")
-        path = str(metadata.get("worktree_path") or "")
-        origin = str(metadata.get("worktree_origin_root") or self.project_root)
-        prompt = (
-            f"请将当前 worktree 分支 `{branch}` 的工作合并回主工作区 `{origin}`。\n"
-            f"当前 worktree 路径是 `{path}`。请先检查 worktree 和主工作区的 `git status`、"
-            "当前分支、`git worktree list` 和差异。若主工作区有未提交改动、合并会覆盖用户改动、"
-            "或者需要处理冲突，请先说明情况并谨慎处理。合并后运行合适的验证。"
-            "不要自动删除 worktree 或分支；完成后告诉我可以在 Worktree 面板中点击“删除 worktree 和分支”。"
-        )
-        composer = self.query_one("#composer", TextArea)
-        existing = composer.text.rstrip()
-        composer.load_text(f"{existing}\n\n{prompt}" if existing else prompt)
-        composer.focus()
-        if self.thread_id:
-            self.engine.thread_store.append(self.thread_id, "thread.worktree_merge_prompted")
-        self._flash(self._text("worktree_prompt_appended"))
-
-    def _open_worktree_delete_panel(self) -> None:
-        metadata = self._active_worktree_metadata()
-        if metadata is None:
-            self._flash(self._text("worktree_none"), severity="warning")
-            return
-        branch = str(metadata.get("worktree_branch") or "")
-        path = str(metadata.get("worktree_path") or "")
-        items = [
-            PickerItem(
-                id="confirm_delete",
-                title=self._text("worktree_delete_confirm"),
-                description=self._text("worktree_delete_confirm_hint"),
-                meta=f"{branch} · {path}",
-            )
-        ]
-        self._open_picker(
-            self._text("worktree_delete"),
-            items,
-            self._delete_worktree_from_panel,
-            subtitle=self._text("worktree_delete_confirm_hint"),
-            navigate=True,
-        )
-
-    def _delete_worktree_from_panel(self, item_id: str) -> None:
-        if item_id != "confirm_delete" or not self.thread_id:
-            return
-        metadata = self._active_worktree_metadata()
-        if metadata is None:
-            self._flash(self._text("worktree_none"), severity="warning")
-            return
-        branch = str(metadata.get("worktree_branch") or "")
-        path = Path(str(metadata.get("worktree_path") or ""))
-        try:
-            result = cleanup_worktree(self.project_root, branch, path, run=self._run_worktree_command)
-        except WorktreeError as exc:
-            self._flash(f"{self._text('worktree_error')}: {exc}", severity="error")
-            return
-        self.engine.thread_store.append(
-            self.thread_id,
-            "thread.worktree_deleted",
-            worktree_branch=result.branch,
-            worktree_path=str(result.path),
-            worktree_origin_root=str(result.origin_root),
-            worktree_deleted_at=utc_now_iso(),
-            worktree_deleted_head=result.head,
-            worktree_deleted_status=result.status,
-            worktree_removed=result.worktree_removed,
-            branch_deleted=result.branch_deleted,
-        )
-        self.engine.thread_store.append(self.thread_id, "thread.cwd_updated", cwd=str(self.project_root.resolve()))
-        rule_states = getattr(self.engine, "_rule_states", None)
-        if isinstance(rule_states, dict):
-            rule_states.pop(self.thread_id, None)
-        self._append_cell(
-            Text.assemble((self._text("worktree_deleted"), "dim"), " ", (result.branch, "cyan")),
-            "event",
-        )
-        self._close_active_panel()
-        self._refresh_status(self._text("worktree_deleted"))
-
-    def _run_worktree_command(self, args: list[str], *, cwd: Path, timeout_s: float | None = None) -> CommandResult:
-        import subprocess
-
-        completed = subprocess.run(
-            args,
-            cwd=str(cwd),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout_s,
-            check=False,
-        )
-        return CommandResult(
-            args=list(args),
-            returncode=completed.returncode,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
-        )
-
-    def _open_command_palette(self, *, query: str = "") -> None:
-        self._open_picker(
-            self._text("command_palette"),
-            self._command_palette_items(),
-            self._choose_command,
-            subtitle=self._text("command_filter_hint"),
-            initial_filter=query,
-            navigate=True,
-        )
-
-    def _command_palette_items(self) -> list[PickerItem]:
-        items = [
-            PickerItem(
-                id=spec.name,
-                title=spec.palette_title,
-                description=spec.description,
-            )
-            for spec in self._commands()
-        ]
-        items.append(
-            PickerItem(
-                id="worktree",
-                title=self._text("worktree_title"),
-                description=self._text("worktree_panel_hint"),
-            )
-        )
-        mention_items: list[PickerItem] = []
-        for item in self._mcp_mention_items():
-            mention_items.append(
-                PickerItem(
-                    id=f"mcp:{item.id}",
-                    title=f"mcp:{item.title}",
-                    description=item.description,
-                    meta=item.meta,
-                )
-            )
-        for item in self._skill_mention_items():
-            mention_items.append(
-                PickerItem(
-                    id=f"skill:{item.id}",
-                    title=f"skill:{item.title}",
-                    description=item.description,
-                    meta=item.meta,
-                )
-            )
-        if mention_items:
-            items.append(PickerItem(id="", title=""))
-            items.extend(mention_items)
-        return items
-
-    def _choose_command(self, command: str) -> None:
-        if command == "worktree":
-            self._open_worktree_panel()
-            return
-        if command.startswith("mcp:"):
-            self._choose_mcp_mention(command.removeprefix("mcp:"))
-            self._close_active_panel()
-            return
-        if command.startswith("skill:"):
-            self._choose_skill_mention(command.removeprefix("skill:"))
-            self._close_active_panel()
-            return
-        spec = next((item for item in self._commands() if item.name == command), None)
-        if spec is None:
-            return
-        self._handle_command(command)
-
-    def _cell_text(self, cell: TranscriptCell) -> str:
-        parts = [str(cell.copy_text or "")]
-        if isinstance(cell, ExpandableTranscriptCell):
-            parts.append(renderable_plain(cell.details) or "")
-        try:
-            parts.append(str(cell.render()))
-        except Exception:
-            pass
-        return "\n".join(parts)
+    def _current_level_for_thread(self, thread_id: str | None = None) -> str | None:
+        if thread_id and thread_id != self.state.thread_id:
+            metadata_level = self._thread_metadata_level(thread_id)
+            if metadata_level:
+                return metadata_level
+        return self.state.level or self.engine.config.runtime.default_level
+
+    def _ensure_active_thread(self) -> str:
+        if self.state.thread_id is None:
+            self.state.thread_id = self.engine.thread_store.create_thread("New thread")
+            self._refresh_window_title()
+        return self.state.thread_id
+
+    def _materialize_pending_goal_enable(self, thread_id: str) -> None:
+        if not self._pending_goal_enable:
+            return
+        objective = self._pending_goal_objective
+        if self._handle_plugin_command("/goal", f"enable {objective}".strip(), thread_id=thread_id, emit=False):
+            self.state.goal_enabled = True
+            self.state.goal_objective = objective
+            self._pending_goal_enable = False
+            self._pending_goal_objective = ""
+            return
+        self._flush(TranscriptCell("error", text="/goal unavailable: builtin.goal is not started"))
 
     def _resume_thread(self, thread_id: str) -> None:
         if not thread_id:
             return
-        self._save_active_thread_view_state()
-        run_state = self._thread_runs.get(thread_id)
-        self.thread_id = thread_id
-        self.level = self._thread_metadata_level(thread_id)
-        self._reset_live_view_state()
-        self._render_thread_history(thread_id, sync=False)
-        self._refresh_active_run_state()
-        self._refresh_pending_images()
-        self._refresh_pending_turns()
-        self._refresh_status(run_state.status if run_state is not None and run_state.worker is None else self._text("resumed"))
-        self._sync_transcript_from_timeline(restore_view=True)
-        self._close_active_panel()
+        if thread_id != self.state.thread_id:
+            self._detach_live_run_state()
+        else:
+            self._finish_live_cells(force=True)
+        metadata = self._thread_metadata(thread_id)
+        self.state.thread_id = thread_id
+        self.state.title = str(metadata.get("title") or "New thread")
+        self.state.level = self._thread_metadata_level(thread_id) or self.engine.config.runtime.default_level
+        self._token_ratio_for_thread(thread_id)
+        goal = metadata.get("goal_mode") if isinstance(metadata.get("goal_mode"), dict) else {}
+        self.state.goal_enabled = bool(goal.get("enabled")) if isinstance(goal, dict) else False
+        self.state.goal_objective = str(goal.get("objective") or "") if isinstance(goal, dict) else ""
+        self._pending_goal_enable = False
+        self._pending_goal_objective = ""
+        self.state.flushed.clear()
+        self.state.live.clear()
+        run_state = self._run_state(thread_id)
+        if run_state is not None and self._run_state_busy_for_ui(run_state):
+            self._user_cell = run_state.user_cell
+            self._assistant_cell = run_state.assistant_cell
+            self._reasoning_cell = run_state.reasoning_cell
+            self._reasoning_flushed_for_current_response = run_state.reasoning_flushed_for_current_response
+            self._tool_cells = run_state.tool_cells
+            live_candidates = [
+                self._user_cell,
+                self._reasoning_cell,
+                self._assistant_cell,
+                *self._tool_cells.values(),
+            ]
+            self.state.live = [
+                cell
+                for cell in live_candidates
+                if cell is not None and (cell is self._user_cell or not cell.done)
+            ]
+        else:
+            self._tool_cells.clear()
+            self._user_cell = None
+            self._assistant_cell = None
+            self._reasoning_cell = None
+            self._reasoning_flushed_for_current_response = False
+        self.state.last_error = None
+        self._refresh_window_title()
+        cells = self._history_cells_for_thread(thread_id)
+        resume_cell = TranscriptCell(
+            "event",
+            text=f"{self._text('resumed')} {short_thread(thread_id)} · {self.state.title}",
+        )
+        display_cells = [resume_cell, *cells]
+        self.state.flushed.extend(_retained_flushed_cell(cell) for cell in display_cells)
+        self._trim_flushed_cells()
+        self.state.status_message = f"{self._text('resumed')} {short_thread(thread_id)}"
+        self._sync_attached_run_state(run_state)
+        if run_state is None or not run_state.running:
+            self.state.status_message = f"{self._text('resumed')} {short_thread(thread_id)}"
+        self.renderer.flush_cells(display_cells, live_state=self.state)
+        self._safe_repaint()
 
-    def _render_thread_history(self, thread_id: str, *, sync: bool = True) -> None:
-        timeline = self._timeline_for_thread(thread_id)
-        if timeline is None:
-            return
-        if not timeline.history_loaded:
-            segment = self.engine.thread_store.read_history_segment(
-                thread_id,
-                event_types=VISIBLE_HISTORY_EVENT_TYPES | {"turn.started", "turn.completed"},
-            )
-            if timeline.items or timeline.process_groups or timeline.active_turns:
-                timeline.merge_history_segment(
-                    segment.events,
-                    start_event_id=segment.start_event_id,
-                    end_event_id=segment.end_event_id,
-                    has_older=segment.has_more,
-                )
-            else:
-                timeline.load_history_segment(
-                    segment.events,
-                    start_event_id=segment.start_event_id,
-                    end_event_id=segment.end_event_id,
-                    has_older=segment.has_more,
-                )
-        if sync and self._is_active_thread(thread_id):
-            self._sync_transcript_from_timeline()
-
-    def _load_older_thread_history(self) -> None:
-        if not self.thread_id or self._history_before_event_id is None:
-            return
-        timeline = self._timeline_for_active()
-        if timeline is None:
-            return
+    def _history_cells_for_thread(self, thread_id: str) -> list[TranscriptCell]:
         segment = self.engine.thread_store.read_history_segment(
-            self.thread_id,
-            before_event_id=self._history_before_event_id,
+            thread_id,
             event_types=VISIBLE_HISTORY_EVENT_TYPES | {"turn.started", "turn.completed"},
         )
-        timeline.prepend_history_segment(
-            segment.events,
+        merged_events = self._merge_history_tool_events(segment.events)
+        timeline = ThreadTimelineState(thread_id)
+        timeline.load_history_segment(
+            merged_events,
             start_event_id=segment.start_event_id,
+            end_event_id=segment.end_event_id,
             has_older=segment.has_more,
         )
-        self._sync_transcript_from_timeline()
-
-    def _history_turn_elapsed_label(self, events: list[dict[str, Any]]) -> str:
-        started_at = ""
-        completed_at = ""
-        for event in events:
-            event_type = event.get("type")
-            if not started_at and event_type in {"turn.started", "item.user"}:
-                started_at = str(event.get("created_at") or "")
-            if event_type in {"turn.completed", "turn.interrupted", "turn.error"}:
-                completed_at = str(event.get("created_at") or "")
-        seconds = _elapsed_between(started_at, completed_at)
-        return format_elapsed(seconds) if seconds is not None else ""
-
-    def _append_user_from_history(self, item: dict[str, Any], *, before: MountBefore = None) -> TranscriptCell | None:
-        self._reasoning_cell = None
-        self._reasoning_buffer = ""
-        parts = []
-        for content in item.get("content") or []:
-            if content.get("type") in {"input_text", "text"}:
-                parts.append(str(content.get("text") or ""))
-        if parts:
-            return self._append_user("\n".join(parts), before=before)
-        return None
-
-    def _model_response_text(self, output: list[dict[str, Any]]) -> str:
-        parts: list[str] = []
-        for item in output:
-            if item.get("type") != "message":
-                continue
-            text = self._message_item_text(item)
-            if text:
-                parts.append(text)
-        return "".join(parts)
-
-    def _message_item_text(self, item: dict[str, Any]) -> str:
-        parts: list[str] = []
-        for content in item.get("content") or []:
-            if content.get("type") in {"output_text", "text", "refusal"}:
-                parts.append(str(content.get("text") or ""))
-        return "".join(parts)
-
-    def _open_fullscreen_panel(self, title: str, content: object, *, subtitle: str = "") -> None:
-        self.push_screen(FullscreenPanel(title=title, body=content, subtitle=subtitle))
-
-    def _active_fullscreen_panel(self) -> FullscreenPanel | None:
-        if self.screen_stack and isinstance(self.screen_stack[-1], FullscreenPanel):
-            return self.screen_stack[-1]
-        return None
-
-    def _open_picker(
-        self,
-        title: str,
-        items: list[PickerItem],
-        callback: Callable[[str], None],
-        *,
-        subtitle: str = "",
-        initial_filter: str = "",
-        mention_kind: str | None = None,
-        mention_items: Callable[[str], tuple[str, list[PickerItem], str]] | None = None,
-        navigate: bool = False,
-        close_on_select: bool = False,
-        replace_current: bool = False,
-    ) -> None:
-        panel = self._active_fullscreen_panel()
-        if panel is not None and replace_current:
-            panel.replace_picker(
-                title=title,
-                items=items,
-                callback=callback,
-                subtitle=subtitle,
-                initial_filter=initial_filter,
-                close_on_select=close_on_select,
+        cells = [cell for item in timeline.items if (cell := self._timeline_item_cell(item)) is not None]
+        latest = self._thread_metadata(thread_id).get("latest_compaction")
+        if segment.has_more and isinstance(latest, dict):
+            cells.insert(
+                0,
+                TranscriptCell(
+                    "event",
+                    text=_compaction_event_text("history since last compaction", latest.get("text")),
+                ),
             )
-            return
-        if panel is not None and panel.can_navigate:
-            panel.navigate_picker(
-                title=title,
-                items=items,
-                callback=callback,
-                subtitle=subtitle,
-                initial_filter=initial_filter,
-                close_on_select=close_on_select,
-            )
-            return
-        panel = FullscreenPanel(
-            title=title,
-            items=items,
-            subtitle=subtitle,
-            initial_filter=initial_filter,
-            mention_kind=mention_kind,
-            mention_items=mention_items,
-            select_callback=callback if navigate else None,
-            close_on_select=close_on_select,
-            navigation_enabled=navigate,
-        )
+        return cells
 
-        def handle(result: str | None) -> None:
-            if result:
-                if mention_kind is not None:
-                    kind = panel._selected_mention_kind
-                    if kind == "thread":
-                        self._choose_thread_mention(result)
-                    elif kind == "file":
-                        self._choose_file_mention(result)
-                    else:
-                        callback(result)
-                else:
-                    callback(result)
-            self.query_one("#composer", TextArea).focus()
+    def _merge_history_tool_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Merge paired ``item.model_response`` function_call + ``item.runner_result`` events.
 
-        self.push_screen(panel, handle)
-
-    def _open_panel(self, content: object, name: str | None = None, title: str | None = None) -> None:
-        panel_title = title or (name.title() if name else self._text("panel"))
-        panel = self._active_fullscreen_panel()
-        if panel is not None and panel.can_navigate:
-            panel.navigate_panel(title=panel_title, body=content, subtitle=self._text("panel_closes"))
-            self._refresh_status()
-            return
-        self._open_fullscreen_panel(panel_title, content, subtitle=self._text("panel_closes"))
-        self._refresh_status()
-
-    def _resize_composer(self) -> None:
-        try:
-            composer = self.query_one("#composer", TextArea)
-        except NoMatches:
-            return
-        line_count = self._composer_visual_line_count(composer)
-        if line_count < COMPOSER_AUTO_EXPAND_LINES and self._composer_height_override == "collapsed":
-            self._composer_height_override = None
-        if self._composer_height_override == "expanded":
-            expanded = True
-        elif self._composer_height_override == "collapsed":
-            expanded = False
-        else:
-            expanded = line_count >= COMPOSER_AUTO_EXPAND_LINES
-        self._composer_expanded = expanded
-        height = self._expanded_composer_height() if expanded else min(
-            COMPOSER_COLLAPSED_HEIGHT,
-            self._maximum_composer_height(),
-        )
-        composer.styles.height = height
-        if self.is_mounted:
-            # Textual's TextArea.edit() triggers scroll_cursor_visible() before
-            # virtual_size is refreshed, so when the composer is at its max
-            # height a freshly inserted newline leaves the cursor off-screen
-            # (max_scroll_y is clamped against the stale virtual_size). Defer a
-            # second scroll_cursor_visible() until after the layout pass so the
-            # textarea can scroll using the up-to-date geometry.
-            self.call_after_refresh(self._refresh_composer_overlay)
-            self.call_after_refresh(composer.scroll_cursor_visible)
-
-    def _composer_visual_line_count(self, composer: TextArea) -> int:
-        if composer.soft_wrap:
-            composer.wrapped_document.wrap(composer.wrap_width, tab_width=composer.indent_width)
-            return max(1, composer.wrapped_document.height)
-        return max(1, composer.document.line_count)
-
-    def _expanded_composer_height(self) -> int:
-        return min(COMPOSER_EXPANDED_HEIGHT, self._maximum_composer_height())
-
-    def _flash(self, message: str, *, severity: NotificationSeverity = "information") -> None:
-        self.notify(message, severity=severity, timeout=2.0)
-        self._last_status = message
-        self._refresh_status()
-
-    def _notify_turn_completed(self, thread_id: str, final_text: str, *, active_thread: bool) -> None:
-        config = self.engine.config.ui.completion_notification
-        if not config.enabled:
-            return
-        if config.terminal and not active_thread:
-            self._notify_background_thread_completed(thread_id)
-        if config.bell:
-            self.bell()
-            play_completion_sound()
-
-    def _notify_background_thread_completed(self, thread_id: str) -> None:
-        digest = self.engine.thread_store.thread_digest(thread_id)
-        title = str(digest.get("title") or self._text("new_thread")).strip()
-        if len(title) > 48:
-            title = title[:45].rstrip() + "..."
-        self._add_notification(
-            self._text("background_thread_completed"),
-            f"{title or self._text('new_thread')} · {short_thread(thread_id)}",
-            thread_id=thread_id,
-        )
-
-    def _refresh_top_bar(self) -> None:
-        if not self.is_mounted:
-            return
-        active_ids = self._active_activity_thread_ids()
-        completed_ids = self._completed_activity_thread_ids()
-        elapsed = format_elapsed(self._thread_elapsed_seconds(self.thread_id)) or "0s"
-        mode = self._current_mode_label()
-        mode_style = GOAL_MODE_STYLE if self._goal_mode_enabled() else "cyan"
-        unread = self._top_notification_unread
-        notification_count = len(self._top_notifications)
-        try:
-            elapsed_widget = self.query_one("#top-bar-elapsed", Static)
-            mode_widget = self.query_one("#top-bar-mode", Static)
-            worktree_widget = self.query_one("#top-bar-worktree", Static)
-            active_widget = self.query_one("#top-bar-active", Static)
-            completed_widget = self.query_one("#top-bar-completed", Static)
-            notification_widget = self.query_one("#top-bar-notifications", Static)
-        except NoMatches:
-            return
-        elapsed_widget.update(
-            Text.assemble((self._text("current_thread_elapsed"), "dim"), " ", (elapsed, "cyan"))
-        )
-        mode_widget.update(Text.assemble((self._text("mode"), "dim"), " ", (mode, mode_style)))
-        if self._active_worktree_metadata():
-            worktree_widget.remove_class("hidden")
-            worktree_widget.update(Text(self._text("worktree"), style="bold cyan"))
-        else:
-            worktree_widget.add_class("hidden")
-            worktree_widget.update("")
-        active_widget.update(
-            Text.assemble(
-                (self._text("thread_activity_active"), "dim"),
-                " ",
-                (str(len(active_ids)), "cyan" if active_ids else "dim"),
-            )
-        )
-        completed_widget.update(
-            Text.assemble(
-                (self._text("thread_activity_completed"), "dim"),
-                " ",
-                (str(len(completed_ids)), "cyan" if completed_ids else "dim"),
-            )
-        )
-        if unread:
-            notification_widget.update(
-                Text.assemble(
-                    (self._text("notifications_short"), "cyan"),
-                    " ",
-                    (str(unread), "bold cyan"),
-                    (f"/{notification_count}", "dim"),
-                )
-            )
-        else:
-            notification_widget.update(
-                Text.assemble((self._text("notifications_short"), "dim"), " ", (str(notification_count), "dim"))
-            )
-
-    def _refresh_top_bar_elapsed(self) -> None:
-        """Refresh only the top-bar fields that visibly change during ticks."""
-
-        if not self.is_mounted:
-            return
-        elapsed = format_elapsed(self._thread_elapsed_seconds(self.thread_id)) or "0s"
-        try:
-            elapsed_widget = self.query_one("#top-bar-elapsed", Static)
-        except NoMatches:
-            return
-        elapsed_widget.update(
-            Text.assemble((self._text("current_thread_elapsed"), "dim"), " ", (elapsed, "cyan"))
-        )
-
-    def _refresh_status(self, state: str | None = None) -> None:
-        if state is not None:
-            self._last_status = state
-        self.engine.refresh_config()
-        self.language = detect_user_language(self.engine.config.ui.language)
-        billing_label = self._thread_billing_label(decimals=4)
-        try:
-            self.query_one("#composer", TextArea).placeholder = self._text("placeholder")
-        except NoMatches:
-            pass
-        level_name = self.level or self.engine.config.runtime.default_level
-        try:
-            stats = self.engine.context_stats(self.thread_id, self.level)
-            compact_context = f"{stats.percent}%"
-        except ConfigError:
-            compact_context = "?"
-        self._status_level_name = level_name
-        self._status_compact_context = compact_context
-        self._status_thread_label = short_thread(self.thread_id)
-        self._status_billing_label = billing_label
-        state_text = self._last_status
-        if self.busy and state_text == self._text("idle"):
-            state_text = self._text("working")
-        footer = self._status_footer(state_text=state_text)
-        self._refresh_window_title()
-        self._refresh_top_bar()
-        try:
-            self.query_one("#composer-footer", Static).update(footer)
-        except NoMatches:
-            return
-        self._refresh_pending_images()
-        self._refresh_pending_turns()
-
-    def _status_footer(self, *, state_text: str) -> Text:
-        """Render the footer from cached status metadata.
-
-        Busy spinner ticks happen several times per second; keeping this pure and
-        cache-backed avoids re-reading config, context stats, and thread metadata
-        just to advance the elapsed timer by one frame.
+        Persisted history stores a model function_call and its runner result as
+        two separate events.  Rendering them as two cells produces a duplicated
+        ``python`` block when a thread is resumed, so we attach the ``call``
+        metadata to the runner result and drop the bare function_call event.
         """
 
-        level_name = self._status_level_name
-        compact_context = self._status_compact_context
-        thread_label = self._status_thread_label
-        billing_label = self._status_billing_label
-        if self.busy:
-            spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)] + " "
-            elapsed_suffix = ""
-            elapsed_seconds = _elapsed_between(self._turn_started_at)
-            if elapsed_seconds is None and self._busy_started_at is not None:
-                elapsed_seconds = monotonic() - self._busy_started_at
-            if elapsed_seconds is not None:
-                elapsed_suffix = f" ({format_elapsed(elapsed_seconds)})"
-            footer = Text.assemble(
-                (f"{spinner}{state_text}", "cyan"),
-                (elapsed_suffix, "dim"),
-                " ",
-                (f"{level_name} · {compact_context} · {thread_label}", "dim"),
-            )
-        else:
-            footer = Text(f"{level_name} · {compact_context} · {thread_label}", style="dim")
-        if billing_label:
-            footer.append(" · ", style="dim")
-            footer.append(billing_label, style="dim")
-        return footer
+        calls_by_id: dict[str, dict[str, Any]] = {}
+        result_indices: dict[str, int] = {}
+        for index, event in enumerate(events):
+            event_type = event.get("type")
+            if event_type == "item.model_response":
+                for output_item in event.get("output") or []:
+                    if isinstance(output_item, dict) and output_item.get("type") == "function_call":
+                        call_id = str(output_item.get("call_id") or "").strip()
+                        if call_id:
+                            calls_by_id[call_id] = dict(output_item)
+            elif event_type == "item.runner_result":
+                call_id = str(event.get("call_id") or "").strip()
+                if call_id:
+                    result_indices[call_id] = index
 
-    def _refresh_busy_status(self) -> None:
-        """Advance spinner/elapsed UI without the heavyweight status refresh."""
+        if not calls_by_id or not result_indices:
+            return list(events)
 
-        state_text = self._last_status
-        if state_text == self._text("idle"):
-            state_text = self._text("working")
+        merged: list[dict[str, Any]] = []
+        consumed_model_response: set[int] = set()
+        for index, event in enumerate(events):
+            event_type = event.get("type")
+            if event_type == "item.model_response":
+                output = event.get("output") or []
+                merged_call_ids = {
+                    str(item.get("call_id") or "").strip()
+                    for item in output
+                    if isinstance(item, dict)
+                    and item.get("type") == "function_call"
+                    and str(item.get("call_id") or "").strip() in result_indices
+                }
+                if merged_call_ids:
+                    # If the model response also contained reasoning text, keep
+                    # it as a separate event so resumed threads still show the
+                    # reasoning that preceded each tool call.
+                    reasoning_text = str(event.get("reasoning_text") or "").strip()
+                    if reasoning_text:
+                        merged.append({
+                            **event,
+                            "output": [],
+                            "reasoning_text": reasoning_text,
+                        })
+                    consumed_model_response.add(index)
+                    continue
+                merged.append(event)
+            elif event_type == "item.runner_result":
+                call_id = str(event.get("call_id") or "").strip()
+                call = calls_by_id.get(call_id)
+                if call is not None and not event.get("call"):
+                    merged.append({**event, "call": call})
+                else:
+                    merged.append(event)
+            else:
+                merged.append(event)
+        return merged
+
+    def _timeline_item_cell(self, item: TimelineItem) -> TranscriptCell | None:
+        content = item.content or {}
+        if item.kind in {"user", "assistant", "reasoning"}:
+            text_value = content.get("text")
+            if isinstance(text_value, list):
+                text = "".join(str(part) for part in text_value)
+            else:
+                text = str(text_value or "")
+            return TranscriptCell(item.kind, text=text) if text else None
+        if item.kind == "tool_result":
+            payload = content.get("payload") if isinstance(content.get("payload"), dict) else {}
+            call = content.get("call") if isinstance(content.get("call"), dict) else {}
+            return TranscriptCell("tool", payload=dict(payload), call=dict(call) if call else None)
+        if item.kind == "tool_call":
+            call = content.get("call") if isinstance(content.get("call"), dict) else {}
+            status = str(content.get("status") or "done")
+            return TranscriptCell("tool", status="running" if status == "running" else "done", call=dict(call))
+        if item.kind == "image":
+            attachment = content.get("attachment") if isinstance(content.get("attachment"), dict) else {}
+            path = attachment.get("path") or attachment.get("original_path") or attachment.get("source_path") or "image"
+            return TranscriptCell("image", text=f"image attached: {path}")
+        if item.kind == "compaction":
+            return TranscriptCell("event", text=_compaction_event_text("conversation compacted", content.get("text")))
+        if item.kind == "warning":
+            event = content.get("event") if isinstance(content.get("event"), dict) else {}
+            message = str(event.get("message") or event.get("text") or "warning")
+            return TranscriptCell("event", text=message)
+        if item.kind == "stream_retry":
+            event = content.get("event") if isinstance(content.get("event"), dict) else {}
+            attempt = event.get("attempt") or "?"
+            message = str(event.get("message") or "model stream retry")
+            return TranscriptCell("event", text=f"retry {attempt}: {message}")
+        if item.kind == "error":
+            event = content.get("event") if isinstance(content.get("event"), dict) else {}
+            message = str(event.get("message") or event.get("error") or "turn error")
+            return TranscriptCell("error", text=message)
+        return None
+
+    # ------------------------------------------------------------------
+    # Turn lifecycle
+    # ------------------------------------------------------------------
+
+    async def _start_turn(self, text: str, *, image_paths: list[Path] | None = None) -> None:
+        thread_id = self._ensure_active_thread()
+        level = self._current_level_for_thread(thread_id)
+        self.state.level = level
+        self._persist_thread_level(thread_id, level)
+        # Keep the user message in the live region so spacing between the user
+        # message, reasoning/tools, and the assistant response stays visible and
+        # matches the final scrollback layout.
+        self._user_cell = TranscriptCell("user", text=text)
+        self.state.live.append(self._user_cell)
+        run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
+        run_state.reset_for_turn()
+        run_state.user_cell = self._user_cell
+        run_state.token_ratio = self._token_ratio_for_thread(thread_id)
+        run_state.cancel_event = asyncio.Event()
+        run_state.started_at = monotonic()
+        run_state.status_message = "running"
+        run_state.last_error = None
+        run_state.terminal_status = "working"
+        run_state.assistant_cell = None
+        run_state.reasoning_cell = None
+        run_state.reasoning_flushed_for_current_response = False
+        run_state.tool_cells = {}
+        self._clear_quit_confirmation()
+        self._clear_interrupt_confirmation()
+        self.state.busy = True
+        self.state.status_message = "running"
+        self.state.last_error = None
+        self.state.turn_token_rate = None
+        self.state.turn_token_rate_frozen = False
+        self._reasoning_flushed_for_current_response = False
+        self._assistant_cell = None
+        self._reasoning_cell = None
+        self._tool_cells = run_state.tool_cells
         self._apply_window_title()
-        self._refresh_top_bar_elapsed()
-        try:
-            self.query_one("#composer-footer", Static).update(self._status_footer(state_text=state_text))
-        except NoMatches:
-            return
-
-    def _refresh_status_from_cache(self) -> None:
-        """Refresh footer/top-bar chrome without re-reading config or history."""
-
-        state_text = self._last_status
-        if self.busy and state_text == self._text("idle"):
-            state_text = self._text("working")
-        self._apply_window_title()
-        self._refresh_top_bar_elapsed() if self.busy else self._refresh_top_bar()
-        try:
-            self.query_one("#composer-footer", Static).update(self._status_footer(state_text=state_text))
-        except NoMatches:
-            return
-        self._refresh_pending_images()
-        self._refresh_pending_turns()
-
-    def _current_mode_label(self) -> str:
-        if self._goal_mode_enabled():
-            return self._text("goal")
-        return self._text("mode_normal") if self._interaction_mode == "normal" else self._interaction_mode
-
-    def _goal_mode_enabled(self) -> bool:
-        if self._goal_enable_pending(self.thread_id):
-            return True
-        if not self.thread_id:
-            return False
-        goal_state = self.engine.goal_state(self.thread_id)
-        return goal_state is not None and goal_state.enabled
-
-    def _thread_billing_label(self, *, decimals: int) -> str:
-        """Return the current thread's formatted cost, or empty when disabled."""
-
-        if self.thread_id is None or not self.engine.config.pricing.models:
-            return ""
-        metadata = self._thread_metadata(self.thread_id)
-        total = billing_total_from_metadata(
-            metadata,
-            preferred_currency=self.engine.config.pricing.currency,
+        run_state.task = asyncio.create_task(
+            self._run_turn(thread_id, text, image_paths=list(image_paths or []))
         )
-        if total is None:
-            return ""
-        amount, currency = total
-        return format_billing_total(amount, currency, decimals=decimals)
+        self._safe_repaint()
 
-    def _any_thread_running(self) -> bool:
-        return any(
-            run_state.worker is not None
-            for run_state in self._thread_runs.values()
-        )
+    async def _run_turn(self, thread_id: str, text: str, *, image_paths: list[Path]) -> None:
+        run_state = self._thread_runs[thread_id]
+        try:
+            if self._is_attached_thread(thread_id):
+                self._sync_attached_run_state(run_state)
+            self._materialize_pending_goal_enable(thread_id)
+            async for event in self.engine.run_turn(
+                user_text=text,
+                thread_id=thread_id,
+                level=self._current_level_for_thread(thread_id),
+                image_paths=image_paths,
+                cancel_event=run_state.cancel_event,
+            ):
+                if self._is_attached_thread(thread_id):
+                    self._handle_event(event)
+                    self._capture_attached_run_state(run_state)
+                    self._safe_repaint()
+                else:
+                    self._handle_background_event(run_state, event)
+        except Exception as exc:
+            run_state.last_error = str(exc) or repr(exc)
+            run_state.terminal_status = "failed"
+            run_state.engine_finished = False
+            run_state.assistant_display_queue = ""
+            run_state.pending_finish_after_drain = False
+            run_state.completion_notification_pending = False
+            if self._is_attached_thread(thread_id):
+                self.state.last_error = run_state.last_error
+                self._flush(TranscriptCell("error", text=run_state.last_error))
+        finally:
+            if self._is_attached_thread(thread_id):
+                self._sync_attached_run_state(run_state)
+                self._finish_live_cells()
+                self._capture_attached_run_state(run_state)
+            self._persist_pending_agent_view_join(thread_id)
+            if run_state.display_pending:
+                run_state.engine_finished = True
+                run_state.status_message = self._text("writing_answer")
+                if self._is_attached_thread(thread_id):
+                    self._sync_attached_run_state(run_state)
+                    self._apply_window_title()
+                    self._safe_repaint()
+            else:
+                self._complete_finished_run_display(run_state)
+                if self._is_attached_thread(thread_id):
+                    self._safe_repaint()
+
+    async def _start_turn_for_thread(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        image_paths: list[Path] | None = None,
+    ) -> None:
+        if self._is_attached_thread(thread_id):
+            await self._start_turn(text, image_paths=image_paths)
+            return
+        run_state = self._thread_runs.setdefault(thread_id, ThreadRunState(thread_id=thread_id))
+        run_state.reset_for_turn()
+        run_state.token_ratio = self._token_ratio_for_thread(thread_id)
+        run_state.cancel_event = asyncio.Event()
+        run_state.started_at = monotonic()
+        run_state.status_message = "running"
+        run_state.last_error = None
+        run_state.terminal_status = "working"
+        run_state.assistant_cell = None
+        run_state.reasoning_cell = None
+        run_state.reasoning_flushed_for_current_response = False
+        run_state.tool_cells = {}
+        run_state.task = asyncio.create_task(self._run_turn(thread_id, text, image_paths=list(image_paths or [])))
+
+    def _run_state_for_cell(self, cell: TranscriptCell | None = None) -> ThreadRunState | None:
+        attached = self._run_state()
+        if cell is None:
+            return attached
+        for run_state in self._thread_runs.values():
+            if (
+                cell is run_state.assistant_cell
+                or cell is run_state.reasoning_cell
+                or cell in run_state.tool_cells.values()
+            ):
+                return run_state
+        return attached
+
+    def _handle_event(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        previous_thread_id = self.state.thread_id
+        event_thread_id = event.get("thread_id")
+        if event_thread_id:
+            self.state.thread_id = str(event_thread_id)
+            if self.state.thread_id != previous_thread_id:
+                self._refresh_window_title()
+        run_state = self._run_state_for_event(event)
+        if run_state is not None:
+            if event_type == "turn.started":
+                run_state.terminal_status = "working"
+                run_state.status_message = "running"
+            elif event_type == "judge.started":
+                run_state.status_message = self._text("judging")
+            elif event_type == "judge.completed":
+                run_state.status_message = self._text("working")
+            elif event_type == "turn.error":
+                run_state.terminal_status = "failed"
+                run_state.last_error = str(event.get("message") or "turn error")
+                run_state.assistant_display_queue = ""
+                run_state.pending_finish_after_drain = False
+                run_state.engine_finished = False
+                run_state.completion_notification_pending = False
+            elif event_type == "turn.interrupted":
+                run_state.terminal_status = "interrupted"
+                run_state.status_message = self._text("interrupted")
+                run_state.assistant_display_queue = ""
+                run_state.pending_finish_after_drain = False
+                run_state.engine_finished = False
+                run_state.completion_notification_pending = False
+            elif event_type == "turn.completed":
+                run_state.terminal_status = "completed"
+                run_state.status_message = "ready"
+        if event_type == "thread.title":
+            self.state.title = str(event.get("title") or self.state.title)
+            self._refresh_window_title()
+        elif event_type == "assistant.delta":
+            self.state.status_message = self._text("writing_answer")
+            # As soon as the assistant starts writing, flush any in-flight
+            # reasoning cell into scrollback so its breath animation stops
+            # immediately instead of waiting for a later reasoning_completed
+            # or model.response event (which may arrive much later).
+            if self._reasoning_cell is not None:
+                self._finish_reasoning_cell("")
+            self._append_assistant(str(event.get("text") or ""))
+        elif event_type == "assistant.reasoning_delta":
+            self.state.status_message = self._text("thinking_status")
+            self._append_reasoning(str(event.get("text") or ""))
+        elif event_type == "assistant.reasoning_completed":
+            self.state.status_message = self._text("reading")
+            self._finish_reasoning_cell(str(event.get("text") or ""))
+        elif event_type == "assistant.reasoning_absent":
+            self.state.status_message = self._text("reading")
+            self._drop_reasoning_cell()
+        elif event_type in {"assistant.final_response_started", "assistant.response_with_tools"}:
+            self.state.status_message = self._text("writing_answer")
+            self._finish_reasoning_cell("")
+            assistant_text = str(event.get("assistant_text") or "")
+            if assistant_text:
+                self._finish_assistant_cell(assistant_text)
+        elif event_type == "model.response":
+            self.state.status_message = self._text("reading")
+            self._handle_model_response_event(event)
+        elif event_type == "tool.delta":
+            self.state.status_message = self._text("writing_script")
+            self._observe_tool_delta(event, run_state=run_state)
+        elif event_type == "tool.started":
+            self.state.status_message = self._text("running_python")
+            self._freeze_token_rate(run_state)
+            self._finish_text_cells(force=True)
+            call = event.get("call") if isinstance(event.get("call"), dict) else {}
+            key = str(call.get("call_id") or event.get("tool_call_index") or len(self._tool_cells))
+            cell = TranscriptCell("tool", status="running", call=call)
+            self._tool_cells[key] = cell
+            self.state.live.append(cell)
+        elif event_type == "tool.partial":
+            self.state.status_message = self._text("running_python")
+            self._update_tool(event, running=True)
+        elif event_type == "tool.output":
+            self.state.status_message = self._text("working")
+            self._update_tool(event, running=False)
+            # A completed tool output is followed by a fresh model response, so
+            # provider-only reasoning in that next response must still render.
+            self._reasoning_flushed_for_current_response = False
+        elif event_type == "image.attachment":
+            attachment = event.get("attachment") or {}
+            path = attachment.get("path") or attachment.get("original_path") or "image"
+            self._flush(TranscriptCell("image", text=f"image attached: {path}"))
+        elif event_type == "judge.started":
+            self.state.status_message = self._text("judging")
+        elif event_type == "judge.completed":
+            self.state.status_message = self._text("working")
+        elif event_type == "compaction.started":
+            self.state.status_message = self._text("compacting")
+            self._flush(TranscriptCell("event", text="compaction started"))
+        elif event_type == "compaction.completed":
+            self.state.status_message = self._text("working")
+            self._flush(TranscriptCell("event", text=_compaction_event_text("conversation compacted", event.get("text"))))
+        elif event_type == "turn.error":
+            self.state.last_error = str(event.get("message") or "turn error")
+            self._flush(TranscriptCell("error", text=self.state.last_error))
+        elif event_type == "turn.interrupted":
+            self._flush(TranscriptCell("event", text="turn interrupted"))
+        elif event_type == "turn.completed":
+            self._finish_live_cells()
+            if run_state is not None and run_state.display_pending:
+                run_state.completion_notification_pending = True
+            else:
+                self._notify_turn_completed()
+            self._refresh_window_title()
+
+    def _handle_background_event(self, run_state: ThreadRunState, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type == "thread.title":
+            self._refresh_agent_view_rows()
+        elif event_type == "turn.error":
+            run_state.last_error = str(event.get("message") or "turn error")
+            run_state.terminal_status = "failed"
+            run_state.assistant_display_queue = ""
+            run_state.pending_finish_after_drain = False
+            run_state.engine_finished = False
+            run_state.completion_notification_pending = False
+        elif event_type == "turn.interrupted":
+            run_state.terminal_status = "interrupted"
+            run_state.assistant_display_queue = ""
+            run_state.pending_finish_after_drain = False
+            run_state.engine_finished = False
+            run_state.completion_notification_pending = False
+        elif event_type == "turn.completed":
+            run_state.terminal_status = "completed"
+            self._notify_turn_completed()
+
+    def _notify_turn_completed(self) -> None:
+        notification_config = getattr(getattr(self.engine.config, "ui", None), "completion_notification", None)
+        if notification_config is not None:
+            if not getattr(notification_config, "enabled", True):
+                return
+            if not getattr(notification_config, "bell", True):
+                return
+        play_terminal_buzzer()
 
     def _current_thread_title(self) -> str:
-        fallback = self._text("new_thread")
-        if self.thread_id is None:
+        fallback = self.state.title if self.state.title not in DEFAULT_THREAD_TITLES else self._text("new_thread")
+        if not self.state.thread_id:
+            return fallback
+        metadata_available = False
+        try:
+            read_metadata = getattr(self.engine.thread_store, "thread_metadata")
+            metadata = dict(read_metadata(self.state.thread_id))
+            metadata_available = True
+        except Exception:
+            metadata = {}
+        title = str(metadata.get("title") or "").strip()
+        if title and title not in DEFAULT_THREAD_TITLES:
+            return title
+        if metadata_available:
             return fallback
         try:
-            digest = self.engine.thread_store.thread_digest(self.thread_id)
+            digest = self.engine.thread_store.thread_digest(self.state.thread_id)
         except Exception:
             return fallback
         title = str(digest.get("title") or "").strip()
-        # Until the auto-titler renames the thread, the store returns its own
-        # localized default ("New thread" / "新会话"). Treat those placeholders
-        # as "no real title yet" so the window title keeps showing the user's
-        # currently-selected language instead of flipping between locales.
         if not title or title in DEFAULT_THREAD_TITLES:
             return fallback
         return title
+
+    def _window_title_waiting_for_generated_title(self) -> bool:
+        if not self.state.thread_id:
+            return False
+        title = self._window_title_thread_title.strip()
+        return not title or title == self._text("new_thread") or title in DEFAULT_THREAD_TITLES
 
     def _refresh_window_title(self) -> None:
         self._window_title_thread_title = self._current_thread_title()
         self._apply_window_title()
 
     def _apply_window_title(self) -> None:
-        title = self._window_title_thread_title or self._text("new_thread")
-        if self.busy or self._any_thread_running():
+        if self.state.busy and self._window_title_waiting_for_generated_title():
+            # Title generation writes thread metadata from a side task before the
+            # engine emits its final thread.title event. While the visible title
+            # is still a placeholder, re-read it on spinner ticks so the
+            # terminal title can switch as soon as metadata is available.
+            self._window_title_thread_title = self._current_thread_title()
+        title = self._window_title_thread_title or self._current_thread_title()
+        if self.state.busy:
             spinner = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
             title = f"{spinner} {title}"
         title = sanitized_window_title(title)
         if title == self._last_window_title:
             return
         self._last_window_title = title
-        # Rich's Console.set_window_title goes through Textual's render pipeline
-        # and never reaches the real terminal while the App is running. Write
-        # the OSC sequence directly to the original stdout (which Textual leaves
-        # untouched at the Python level) so Windows Terminal / xterm-style hosts
-        # actually update their title bar.
         write_window_title(title)
 
-    def _scroll_end(self) -> None:
-        transcript = self.query_one("#transcript", TranscriptScroll)
-        if not transcript.follow_tail:
-            # User dragged the scrollbar / pressed PgUp; don't yank them back to
-            # the bottom on every streaming SSE delta. They re-engage follow by
-            # pressing the "↓ bottom" button above the composer.
+    def _text(self, key: str) -> str:
+        text = str(self.engine.plugins.text(key, self.language) or "")
+        if text:
+            return text
+        return tr(self.language, key)
+
+    def _fmt(self, key: str, **values: object) -> str:
+        return self._text(key).format(**values)
+
+    # ------------------------------------------------------------------
+    # Cell bookkeeping
+    # ------------------------------------------------------------------
+
+    def _observe_stream_text(self, text: str, *, run_state: ThreadRunState | None = None) -> None:
+        if not text:
             return
-        transcript.programmatic_scroll_end()
+        run_state = run_state or self._run_state()
+        if run_state is not None:
+            now = monotonic()
+            self._resume_token_rate(run_state, now=now)
+            run_state.rate_estimator.observe(text, now=now)
+            if run_state.last_animation_tick_at is None:
+                run_state.last_animation_tick_at = now
+
+    def _observe_tool_delta(self, event: dict[str, Any], *, run_state: ThreadRunState | None = None) -> None:
+        run_state = run_state or self._run_state()
+        tool_call = event.get("tool_call")
+        text = tool_delta_visible_text(tool_call)
+        if run_state is not None:
+            key = tool_call_stream_key(tool_call, fallback=event.get("tool_call_index") or "0")
+            name = tool_call_name(tool_call)
+            if name and key not in run_state.observed_tool_call_name_keys:
+                run_state.observed_tool_call_name_keys.add(key)
+                text = name + text
+        self._observe_stream_text(text, run_state=run_state)
+
+    def _advance_streaming_display(self) -> bool:
+        """Advance throughput-driven animation and queued assistant text.
+
+        Provider chunks can be uneven even when the model's average throughput is
+        steady.  This tick converts the current sliding-window estimate into a
+        fractional animation phase and a character display budget so the live UI
+        is paced by average speed instead of chunk boundaries.
+        """
+
+        run_state = self._run_state()
+        if run_state is None:
+            return False
+        now = monotonic()
+        previous = run_state.last_animation_tick_at
+        run_state.last_animation_tick_at = now
+        if previous is None:
+            return bool(run_state.assistant_display_queue)
+        dt = max(0.0, min(now - previous, 0.5))
+        if dt <= 0.0:
+            return False
+
+        changed = False
+        cps = run_state.rate_estimator.current_cps(now=now)
+        if cps is None and run_state.rate_estimator.first_output_at is not None:
+            cps = DEFAULT_STREAM_CHARS_PER_SECOND
+        if cps and cps > 0:
+            phase_delta = cps * dt / BREATH_CHARS_PER_PHASE
+            for cell in (run_state.reasoning_cell, run_state.assistant_cell):
+                if cell is not None and cell.status == "streaming":
+                    cell.animation_phase = (cell.animation_phase or 0.0) + phase_delta
+                    changed = True
+
+        queue = run_state.assistant_display_queue
+        if queue:
+            display_cps = run_state.rate_estimator.display_cps(now=now, backlog_chars=len(queue))
+            run_state.assistant_display_credit += max(0.0, display_cps * dt)
+            count = min(len(queue), int(run_state.assistant_display_credit))
+            if count > 0:
+                chunk = queue[:count]
+                run_state.assistant_display_queue = queue[count:]
+                run_state.assistant_display_credit -= count
+                self._append_assistant_now(chunk)
+                changed = True
+
+        if not run_state.assistant_display_queue and run_state.pending_finish_after_drain:
+            run_state.pending_finish_after_drain = False
+            self._finish_assistant_cell_now(run_state.pending_finish_assistant_text or "")
+            run_state.pending_finish_assistant_text = None
+            changed = True
+
+        if run_state.engine_finished and not run_state.display_pending:
+            self._complete_finished_run_display(run_state)
+            changed = True
+        return changed
+
+    def _complete_finished_run_display(self, run_state: ThreadRunState) -> None:
+        """Finish a turn whose engine task ended while text was still draining."""
+
+        should_notify = run_state.completion_notification_pending
+        run_state.completion_notification_pending = False
+        run_state.engine_finished = False
+        run_state.started_at = None
+        run_state.status_message = "ready"
+        if self._is_attached_thread(run_state.thread_id):
+            self.state.busy = False
+            self.state.status_message = "ready"
+            self.state.turn_elapsed_s = None
+            self.state.turn_token_rate = None
+            self.state.turn_token_rate_frozen = False
+            self._apply_window_title()
+        if should_notify:
+            self._notify_turn_completed()
+        if run_state.pending_turns:
+            next_turn = run_state.pending_turns.pop(0)
+            asyncio.create_task(
+                self._start_turn_for_thread(
+                    run_state.thread_id,
+                    next_turn.text,
+                    image_paths=next_turn.image_paths,
+                )
+            )
+        elif not run_state.running:
+            self._thread_runs.pop(run_state.thread_id, None)
+
+    def _ensure_assistant_cell(self) -> TranscriptCell:
+        if self._assistant_cell is None or self._assistant_cell.done:
+            self._assistant_cell = TranscriptCell("assistant", status="streaming", animation_phase=0.0)
+            self.state.live.append(self._assistant_cell)
+        run_state = self._run_state()
+        if run_state is not None:
+            run_state.assistant_cell = self._assistant_cell
+        return self._assistant_cell
+
+    def _append_assistant(self, text: str) -> None:
+        if not text:
+            return
+        run_state = self._run_state()
+        if run_state is None:
+            self._append_assistant_now(text)
+            return
+        self._observe_stream_text(text)
+        self._ensure_assistant_cell()
+        run_state.assistant_display_queue += text
+
+    def _append_assistant_now(self, text: str) -> None:
+        if not text:
+            return
+        cell = self._ensure_assistant_cell()
+        cell.text += text
+        cell.chars_streamed += len(text)
+        run_state = self._run_state()
+        if run_state is not None:
+            run_state.assistant_cell = cell
+
+    def _append_reasoning(self, text: str) -> None:
+        if not text:
+            return
+        self._observe_stream_text(text)
+        if self._reasoning_cell is None or self._reasoning_cell.done:
+            self._reasoning_cell = TranscriptCell("reasoning", status="streaming", animation_phase=0.0)
+            self.state.live.append(self._reasoning_cell)
+            self._reasoning_flushed_for_current_response = False
+        self._reasoning_cell.text += text
+        self._reasoning_cell.chars_streamed += len(text)
+        run_state = self._run_state()
+        if run_state is not None:
+            run_state.reasoning_cell = self._reasoning_cell
+            run_state.reasoning_flushed_for_current_response = self._reasoning_flushed_for_current_response
+
+    def _update_tool(self, event: dict[str, Any], *, running: bool) -> None:
+        call = event.get("call") if isinstance(event.get("call"), dict) else {}
+        key = str(call.get("call_id") or event.get("tool_call_index") or "0")
+        cell = self._tool_cells.get(key)
+        if cell is None:
+            cell = TranscriptCell("tool", status="running", call=call)
+            self._tool_cells[key] = cell
+            self.state.live.append(cell)
+            run_state = self._run_state()
+            if run_state is not None:
+                run_state.tool_cells = self._tool_cells
+        elif call and not cell.call:
+            cell.call = call
+        payload = tool_payload_from_event(event)
+        if payload is not None:
+            cell.payload = payload
+        if not running:
+            cell.status = "done"
+            cell.finished_at = monotonic()
+            self._flush(cell)
+            self._tool_cells.pop(key, None)
+
+    @staticmethod
+    def _tool_call_code(call: dict[str, Any] | None) -> str:
+        if not isinstance(call, dict):
+            return ""
+        try:
+            import json
+
+            args = json.loads(str(call.get("arguments") or "{}"))
+        except Exception:
+            return ""
+        return str(args.get("code") or "")
+
+    def _finish_reasoning_cell(self, text: str = "") -> None:
+        cell = self._reasoning_cell
+        if cell is None:
+            if text.strip() and not self._reasoning_flushed_for_current_response:
+                self._flush(TranscriptCell("reasoning", text=text.strip()))
+                self._reasoning_flushed_for_current_response = True
+            return
+        if text.strip():
+            cell.text = text.strip()
+        if not cell.text.strip():
+            self._drop_reasoning_cell()
+            return
+        if not cell.done:
+            cell.status = "done"
+            cell.finished_at = monotonic()
+        self._flush(cell)
+        self._reasoning_flushed_for_current_response = True
+        self._reasoning_cell = None
+
+    def _drop_reasoning_cell(self) -> None:
+        cell = self._reasoning_cell
+        if cell is not None and cell in self.state.live:
+            self.state.live.remove(cell)
+        self._reasoning_cell = None
+
+    def _finish_assistant_cell(self, text: str = "", *, force: bool = False) -> None:
+        run_state = self._run_state()
+        if run_state is not None and run_state.assistant_display_queue and force:
+            queued = run_state.assistant_display_queue
+            run_state.assistant_display_queue = ""
+            run_state.assistant_display_credit = 0.0
+            if not text:
+                self._append_assistant_now(queued)
+        if run_state is not None and run_state.assistant_display_queue:
+            if text:
+                displayed = self._assistant_cell.text if self._assistant_cell is not None else ""
+                queued = run_state.assistant_display_queue
+                # ``text`` is the canonical final answer from the response.  Keep
+                # draining whatever has not yet reached the terminal instead of
+                # replacing the live cell with a large completed chunk.
+                if text.startswith(displayed):
+                    remainder = text[len(displayed):]
+                    if remainder != queued:
+                        run_state.assistant_display_queue = remainder
+                    run_state.pending_finish_assistant_text = text
+                else:
+                    run_state.pending_finish_assistant_text = text
+            run_state.pending_finish_after_drain = True
+            return
+        self._finish_assistant_cell_now(text)
+
+    def _finish_assistant_cell_now(self, text: str = "") -> None:
+        run_state = self._run_state()
+        if run_state is not None:
+            run_state.pending_finish_after_drain = False
+            run_state.pending_finish_assistant_text = None
+        cell = self._assistant_cell
+        if cell is None:
+            if text:
+                self._flush(TranscriptCell("assistant", text=text))
+            if run_state is not None:
+                run_state.assistant_cell = None
+            return
+        if text:
+            cell.text = text
+        if not cell.done:
+            cell.status = "done"
+            cell.finished_at = monotonic()
+        self._flush(cell)
+        self._assistant_cell = None
+        if run_state is not None:
+            run_state.assistant_cell = None
+
+    def _handle_model_response_event(self, event: dict[str, Any]) -> None:
+        run_state = self._run_state_for_event(event)
+        reasoning_text = str(event.get("reasoning_text") or "")
+        if reasoning_text:
+            self._finish_reasoning_cell(reasoning_text)
+        else:
+            self._drop_reasoning_cell()
+        response = event.get("response")
+        output = list(getattr(response, "output", []) or [])
+        output_tokens = usage_output_tokens(
+            getattr(response, "usage", {}) if response is not None else {},
+            reasoning_visible=bool(reasoning_text),
+        )
+        if output_tokens:
+            ratio = self._token_ratio_for_thread(str(event.get("thread_id") or self.state.thread_id or ""))
+            ratio.observe_response(
+                visible_units=model_response_visible_units(output, reasoning_text=reasoning_text),
+                output_tokens=output_tokens,
+            )
+            if run_state is not None:
+                run_state.token_ratio = ratio
+        has_tool_call = any(isinstance(item, dict) and item.get("type") == "function_call" for item in output)
+        if has_tool_call:
+            self._freeze_token_rate(run_state)
+        else:
+            if run_state is not None and run_state.display_pending:
+                self._hold_token_rate(run_state)
+            else:
+                self._freeze_token_rate(run_state)
+            self._finish_assistant_cell()
+
+    def _finish_text_cells(self, *, force: bool = False) -> None:
+        self._finish_reasoning_cell("")
+        self._finish_assistant_cell("", force=force)
+
+    def _finish_live_cells(self, *, force: bool = False) -> None:
+        self._finish_text_cells(force=force)
+        for key, cell in list(self._tool_cells.items()):
+            if not cell.done:
+                cell.status = "done"
+                cell.finished_at = monotonic()
+                self._flush(cell)
+            self._tool_cells.pop(key, None)
+        # If the user message was never followed by a response cell, flush it
+        # now so it does not stay stuck in the live region.
+        if self._user_cell is not None:
+            user_cell = self._user_cell
+            self._user_cell = None
+            self._flush(user_cell)
+
+    def _remember_flushed_cell(self, cell: TranscriptCell) -> None:
+        self.state.flushed.append(_retained_flushed_cell(cell))
+        self._trim_flushed_cells()
+
+    def _trim_flushed_cells(self) -> None:
+        overflow = len(self.state.flushed) - TUI_FLUSHED_CELLS_MAX
+        if overflow > 0:
+            del self.state.flushed[:overflow]
+
+    def _flush(self, cell: TranscriptCell) -> None:
+        # Flush the current turn's user message before any other cell so the
+        # scrollback order and spacing match the live region.
+        if self._user_cell is not None and self._user_cell is not cell:
+            user_cell = self._user_cell
+            self._user_cell = None
+            self._flush(user_cell)
+        if cell in self.state.live:
+            self.state.live.remove(cell)
+        run_state = self._run_state()
+        if run_state is not None and run_state.user_cell is cell:
+            run_state.user_cell = None
+        cell.status = "done" if cell.status in {"running", "streaming"} else cell.status
+        cell.finished_at = cell.finished_at or monotonic()
+        # ``state.live`` no longer holds ``cell`` (removed above), so ``self.state``
+        # is the post-flush live region the renderer should redraw beneath the
+        # freshly flushed cell.
+        self.renderer.flush_cell(cell, self.state)
+        self._remember_flushed_cell(cell)
+
+    # ------------------------------------------------------------------
+    # Render guard
+    # ------------------------------------------------------------------
+
+    def _refresh_context_percent(self) -> None:
+        try:
+            stats = self.engine.context_stats(self.state.thread_id, self.state.level)
+        except Exception:
+            self.state.context_percent = None
+            return
+        self.state.context_percent = stats.percent
+
+    def _safe_repaint(self) -> None:
+        """Repaint without letting UI bugs unwind the engine async generator."""
+
+        self._sync_attached_run_state()
+        self._refresh_context_percent()
+        try:
+            self.renderer.repaint(self.state)
+        except Exception as exc:
+            self.state.last_error = f"tui render error: {exc}"
+            self.state.status_message = "render error"

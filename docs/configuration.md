@@ -236,7 +236,6 @@ level names rather than concrete model names.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `default_level` | string | `"medium"` | Level used when no explicit level is selected. |
-| `ask_default_level` | string or null | `null` | Optional level used for `ask` CLI command. Falls back to `default_level` when null. |
 | `store_provider_response` | boolean | `false` | Store raw provider responses in thread state. |
 | `max_agent_rounds` | integer | `100` | Maximum model/tool loop rounds for one turn. |
 | `compression` | object | see below | Context compression settings. |
@@ -305,7 +304,7 @@ Completion notification options:
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Enable completion notifications. |
 | `terminal` | boolean | `true` | Add a short transcript event when a background thread finishes. |
-| `bell` | boolean | `true` | Play a completion sound when a turn finishes. The Textual TUI uses the Windows system notification sound on Windows; `tui2` uses a short buzzer-like terminal cue. Other platforms write a terminal BEL. |
+| `bell` | boolean | `true` | Play a completion sound when a turn finishes. The terminal UI uses a short buzzer-like cue when available; other platforms write a terminal BEL. |
 
 The `/config` panel can edit `runtime.default_level`,
 `runtime.compression.enabled`, `ui.language`, and

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import traceback
 from dataclasses import dataclass
 from typing import Any
 
@@ -163,7 +162,7 @@ class JsonRpcDispatcher:
             try:
                 args = list(params.get("args") or []) if set(params).issubset({"args", "kwargs"}) else []
                 kwargs = dict(params.get("kwargs") or {}) if set(params).issubset({"args", "kwargs"}) else dict(params)
-                result = helper(name=name, args=args, kwargs=kwargs)
+                result = helper(name=name, args=args, kwargs=kwargs, context=session.context)
                 if inspect.isawaitable(result):
                     from .registry import _run_awaitable
 
@@ -173,16 +172,13 @@ class JsonRpcDispatcher:
                 raise JsonRpcError(
                     BUSINESS_ERROR,
                     f"{exc.__class__.__name__}: {exc}",
-                    data={"type": exc.__class__.__name__, "traceback": "".join(traceback.format_exception(exc))},
+                    data={"type": exc.__class__.__name__},
                 ) from exc
         except Exception as exc:
             raise JsonRpcError(
                 BUSINESS_ERROR,
                 f"{exc.__class__.__name__}: {exc}",
-                data={
-                    "type": exc.__class__.__name__,
-                    "traceback": "".join(traceback.format_exception(exc)),
-                },
+                data={"type": exc.__class__.__name__},
             ) from exc
 
 

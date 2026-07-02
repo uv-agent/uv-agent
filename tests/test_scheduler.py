@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from uv_agent.plugins.registry import ActionRegistry
-from uv_agent.scheduler import SchedulerConfig, SchedulerService
+from uv_agent.builtin.scheduler.service import SchedulerConfig, SchedulerService
 from uv_agent.state_db import connect_state_db
 
 
@@ -118,6 +118,7 @@ async def test_scheduler_workflow_prompt_action_is_plugin_owned(tmp_path):
     from uv_agent.plugins import PluginManifest
     from uv_agent.plugins.context import PluginContext
     from uv_agent.plugins.events import EventBus
+    from uv_agent.plugins.i18n import PluginI18nRegistry
     from uv_agent.plugins.registry import CommandRegistry, RuntimeNamespaceRegistry, UiRegistry
     from uv_agent.plugins.storage import PluginStorage
     from uv_agent.session import ThreadStore
@@ -135,14 +136,37 @@ async def test_scheduler_workflow_prompt_action_is_plugin_owned(tmp_path):
         action_registry=actions,
         command_registry=CommandRegistry(),
         ui_registry=UiRegistry(),
+        i18n_registry=PluginI18nRegistry(),
         context_broker=__import__("uv_agent.plugins.context", fromlist=["PluginContextBroker"]).PluginContextBroker(),
         storage=PluginStorage("builtin.workflow", tmp_path, tmp_path / "user"),
         submitter=None,
         task_factory=lambda plugin, coro, name=None: asyncio.create_task(coro),
+        compaction_section_providers=[],
+        epoch_context_refreshers=[],
         thread_store=thread_store,
     )
     setup_workflow(plugin_context)
-    service = SchedulerService(tmp_path, SchedulerConfig(), actions.get, actions.call, thread_store=thread_store)
+    scheduler_context = PluginContext(
+        manifest=PluginManifest("builtin.scheduler", "0", "Scheduler", "test"),
+        project_root=tmp_path,
+        user_state_dir=tmp_path / "user",
+        config={},
+        events=EventBus(),
+        logger=__import__("logging").getLogger("test"),
+        runtime_registry=RuntimeNamespaceRegistry(),
+        action_registry=actions,
+        command_registry=CommandRegistry(),
+        ui_registry=UiRegistry(),
+        i18n_registry=PluginI18nRegistry(),
+        context_broker=__import__("uv_agent.plugins.context", fromlist=["PluginContextBroker"]).PluginContextBroker(),
+        storage=PluginStorage("builtin.scheduler", tmp_path, tmp_path / "user"),
+        submitter=None,
+        task_factory=lambda plugin, coro, name=None: asyncio.create_task(coro),
+        compaction_section_providers=[],
+        epoch_context_refreshers=[],
+        thread_store=thread_store,
+    )
+    service = SchedulerService(tmp_path, SchedulerConfig(), actions.get, actions.call, threads=scheduler_context.threads)
     schedule = service.create(
         kind="interval",
         every={"minutes": 5},

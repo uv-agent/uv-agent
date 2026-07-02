@@ -1,7 +1,7 @@
 [project]
 name = "uv-agent"
 version = "0.19.1"
-description = "Experimental Python-runner coding agent with a Textual TUI"
+description = "Experimental Python-runner coding agent with a terminal TUI"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -11,10 +11,8 @@ dependencies = [
     "mcp>=1.27.1",
     "openai>=2.36.0",
     "pillow>=12.0.0",
-    "pluggy>=1.6.0",
     "pygments>=2.20.0",
-    "textual>=6.5.0",
-    "textual-image[textual]>=0.12.0",
+    "rich>=14.0.0",
     "tomlkit>=0.15.0",
     "tree-sitter>=0.25.2",
     "tree-sitter-language-pack>=1.8.1,<1.9",
@@ -28,13 +26,16 @@ Repository = "https://github.com/4fuu/uv-agent"
 [project.scripts]
 uv-agent = "uv_agent.cli:main"
 
+[project.entry-points."uv_agent.plugins"]
+builtin_goal = "uv_agent.builtin.goal:plugin"
+builtin_worktree = "uv_agent.builtin.worktree:plugin"
+builtin_skills = "uv_agent.builtin.skills:plugin"
+builtin_mcp = "uv_agent.builtin.mcp:plugin"
+builtin_workflow = "uv_agent.builtin.workflow:plugin"
+builtin_scheduler = "uv_agent.builtin.scheduler:plugin"
+
 [dependency-groups]
 dev = ["pytest>=9.0.0", "pytest-asyncio>=1.3.0"]
-
-[tool.pytest.ini_options]
-filterwarnings = [
-    "ignore:Image\\.Image\\.getdata is deprecated.*:DeprecationWarning:textual_image\\._pixeldata",
-]
 
 [build-system]
 requires = ["hatchling"]

@@ -185,6 +185,42 @@ def test_runtime_rpc_server_maps_method_errors(tmp_path: Path) -> None:
             failed = json.loads(body)
             assert failed["error"]["code"] == -32000
             assert failed["error"]["data"]["type"] == "ValueError"
+            assert "traceback" not in failed["error"]["data"]
+        finally:
+            handle.close()
+    finally:
+        server.close()
+
+
+def test_runtime_rpc_server_handles_unexpected_post_errors_without_traceback(tmp_path: Path, capsys) -> None:
+    server = RuntimeRPCServer()
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
+    try:
+        handle = server.open_session(
+            run_id="run_rpc",
+            thread_id=None,
+            turn_id=None,
+            cwd=tmp_path,
+            structured_events=[],
+            writer=writer,
+        )
+        try:
+            def boom(_body, *, session):
+                raise RuntimeError("dispatch boom")
+
+            server.dispatch = boom  # type: ignore[method-assign]
+            status, body = _post(
+                server.url,
+                handle.token,
+                {"jsonrpc": "2.0", "id": "1", "method": "call.anything", "params": {}},
+            )
+            payload = json.loads(body)
+            captured = capsys.readouterr()
+            assert status == 500
+            assert payload["error"]["code"] == -32603
+            assert payload["error"]["data"]["type"] == "RuntimeError"
+            assert "Traceback" not in captured.err
         finally:
             handle.close()
     finally:
@@ -206,7 +242,6 @@ def test_runtime_rpc_server_supports_dynamic_namespace_proxy(tmp_path: Path, mon
                 "name": "demo",
                 "plugin": "demo-plugin",
                 "doc": "Demo namespace.",
-                "transport": "rpc",
                 "functions": [{"name": "greet", "full_name": "demo.greet", "doc": "Greet.", "schema": {"type": "object"}}],
             },
             "demo.greet": {
@@ -218,11 +253,13 @@ def test_runtime_rpc_server_supports_dynamic_namespace_proxy(tmp_path: Path, mon
                 "plugin": "demo-plugin",
                 "doc": "Greet.",
                 "schema": {"type": "object"},
-                "transport": "rpc",
             },
         }.get(name, {"found": False, "name": name}),
     )
-    server.register_method("helper.call", lambda name, args=None, kwargs=None: {"name": name, "payload": dict(kwargs or {})})
+    server.register_method(
+        "helper.call",
+        lambda name, args=None, kwargs=None, context=None: {"name": name, "payload": dict(kwargs or {})},
+    )
     try:
         handle = server.open_session(
             run_id="run_rpc",
@@ -259,7 +296,6 @@ def test_runtime_rpc_server_supports_local_module_namespace(tmp_path: Path, monk
             "name": "json",
             "plugin": "demo-plugin",
             "doc": "JSON module.",
-            "transport": "local_module",
             "module": "json",
             "functions": [],
         }

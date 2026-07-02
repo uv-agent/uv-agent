@@ -5,7 +5,7 @@ from pathlib import Path
 
 from uv_agent.agent.context_builder import model_levels_context
 from uv_agent.config import config_paths, editable_config_path, load_config, parse_config, redact_config
-from uv_agent.scheduler import scheduler_config_from_plugin_config
+from uv_agent.builtin.scheduler.service import scheduler_config_from_plugin_config
 from uv_agent.paths import ensure_project_local_dir, project_config_path, project_state_dir, user_config_path
 
 
@@ -187,31 +187,6 @@ def test_runner_settings_can_be_configured(tmp_path: Path) -> None:
     assert config.runner.scriptenv_index_url == "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 
-def test_legacy_reasoning_option_fields_are_ignored(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "providers": {
-                    "p": {
-                        "base_url": "https://example.com",
-                        "reasoning_options": [
-                            {"name": "low", "params": {"reasoning": {"effort": "low"}}},
-                        ],
-                    }
-                },
-                "models": {"m": {"provider": "p", "model": "remote"}},
-                "levels": {"medium": {"model": "m", "reasoning": "low", "params": {"temperature": 0}}},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    config = load_config(tmp_path, [config_path])
-
-    assert config.model_for_level("medium").params == {"temperature": 0}
-
-
 def test_model_inherits_provider_passthrough_and_reasoning_display(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -385,27 +360,6 @@ def test_plugin_config_layers_deep_merge_without_replacing_other_plugins(tmp_pat
         "timeout_s": 5,
     }
     assert config.plugins.plugin_config("third.demo") == {"kept": True}
-
-
-def test_legacy_workflow_default_level_fields_are_ignored(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "providers": {"p": {"base_url": "https://example.com"}},
-                "models": {"m": {"provider": "p", "model": "remote"}},
-                "levels": {"fast": {"model": "m"}, "deep": {"model": "m"}},
-                "runtime": {"default_level": "fast", "workflow_default_level": "deep", "ask_default_level": "deep"},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    config = load_config(tmp_path, [config_path])
-
-    assert config.runtime.default_level == "fast"
-    assert not hasattr(config.runtime, "workflow_default_level")
-    assert config.plugins.plugin_config("builtin.workflow") == {}
 
 
 def test_default_title_and_compression_levels_do_not_assume_small(tmp_path: Path) -> None:

@@ -4,8 +4,8 @@ import json
 import sys
 from pathlib import Path
 
-from uv_agent.mcp_config import discover_mcp_servers
-from uv_agent.mcp_probe import (
+from uv_agent.builtin.mcp.config import discover_mcp_servers
+from uv_agent.builtin.mcp.probe import (
     MCP_INSTRUCTIONS_PREVIEW_CHARS,
     _probe_server,
 )

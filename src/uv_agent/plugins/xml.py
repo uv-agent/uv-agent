@@ -16,6 +16,8 @@ class XmlContribution:
     tag: str
     body: Any
     attrs: dict[str, Any] | None = None
+    plugin: str = ""
+    operation: str | None = None
 
 
 def render_contribution(
@@ -48,7 +50,7 @@ def render_contribution(
 
 def render_update_envelope(contributions: Sequence[XmlContribution]) -> str:
     inner = "\n\n".join(
-        render_contribution(item.tag, item.body, attrs=item.attrs, operation=(item.attrs or {}).get("operation"))
+        render_contribution(item.tag, item.body, attrs=item.attrs, operation=item.operation or (item.attrs or {}).get("operation"))
         for item in contributions
     )
     return f"<agent_epoch_context_update>\n{inner}\n</agent_epoch_context_update>"

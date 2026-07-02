@@ -7,7 +7,7 @@ import logging
 import re
 import sqlite3
 import traceback
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,19 +16,20 @@ from uv_agent.config import PluginsConfig
 from uv_agent.paths import uv_agent_home
 from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
 
-from .api import PluginManifest, PluginStatus, SetupPlugin, normalize_manifest
-from .context import PluginContext, PluginContextBroker, TurnContextBlock, TurnPrepareRequest, maybe_await
+from .api import PluginManifest, PluginStatus, SetupPlugin
+from .context import PluginActionAPI, PluginContext, PluginContextBroker, maybe_await
 from .events import EventBus
+from .i18n import PluginI18nRegistry
 from .registry import ActionRegistry, CommandRegistry, RuntimeFunctionSpec, RuntimeNamespaceRegistry, UiRegistry
 from .storage import PluginStorage, indexes_from_storage_schema
-from .helpers import payload_from_call
 
 PLUGIN_ENTRY_POINT_GROUP = "uv_agent.plugins"
-CORE_COMMANDS = {"/help", "/quit", "/clear", "/new", "/cancel", "/status", "/threads", "/show", "/image", "/level", "/model", "/title"}
+CORE_COMMANDS = {"/help", "/quit", "/clear", "/cancel", "/status", "/threads", "/show", "/image", "/level", "/model", "/title"}
 RESERVED_RUNTIME_NAMESPACES = {
     "file", "files", "search", "symbols", "query", "patch", "apply_patch", "diff", "compare",
     "snapshot", "restore", "transaction", "run", "deps", "cd", "pwd", "path", "events", "look_at", "threads",
 }
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -51,7 +52,6 @@ class PluginManager:
         submitter,
         thread_store=None,
         user_state_dir: Path | None = None,
-        host: Any = None,
     ) -> None:
         self.config = config
         self.project_root = project_root
@@ -61,10 +61,12 @@ class PluginManager:
         self.actions = ActionRegistry()
         self.commands = CommandRegistry(reserved=CORE_COMMANDS)
         self.ui = UiRegistry()
+        self.i18n = PluginI18nRegistry()
         self.contexts = PluginContextBroker()
+        self._compaction_section_providers: list[tuple[str, Callable[..., str]]] = []
+        self._epoch_context_refreshers: list[tuple[str, Callable[..., Any]]] = []
         self._submitter = submitter
         self._thread_store = thread_store
-        self._host = host
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._records: dict[str, _PluginRecord] = {}
         self._task: asyncio.Task[None] | None = None
@@ -95,22 +97,17 @@ class PluginManager:
         kwargs: dict[str, Any] | None = None,
         context: Any = None,
     ) -> Any:
-        return await self.runtime.call(name, payload_from_call(list(args or []), dict(kwargs or {})), context=context)
+        return await self.runtime.call(name, args=list(args or []), kwargs=dict(kwargs or {}), context=context)
 
     def resolve_action(self, action_id: str) -> dict[str, Any]:
-        spec = self.actions.get(action_id)
-        if spec is None:
-            return {"found": False, "action_id": action_id}
-        return {
-            "found": True,
-            "action_id": spec.action_id,
-            "plugin": spec.plugin,
-            "doc": spec.doc,
-            "schema": spec.schema,
-        }
+        return PluginActionAPI(plugin="host", registry=self.actions).resolve(action_id)
 
     async def call_action(self, action_id: str, payload: dict[str, Any] | None = None, *, context: Any = None) -> Any:
-        return await self.actions.call(action_id, payload or {}, context=context)
+        return await PluginActionAPI(
+            plugin="host",
+            registry=self.actions,
+            context_resolver=self.context_for,
+        ).call(action_id, payload, context=context)
 
     def command_suggestions(self):
         return self.commands.list()
@@ -130,13 +127,88 @@ class PluginManager:
         return result
 
     def picker_items(self, picker_id: str, query: str = ""):
-        return self.ui.picker_items(picker_id, query=query)
+        source = self.ui.picker(picker_id)
+        if source is None:
+            return []
+        try:
+            return self.ui.picker_items(picker_id, query=query)
+        except Exception as exc:
+            self._mark_plugin_warning(source.plugin, exc)
+            return []
 
-    async def prepare_turn(self, request: TurnPrepareRequest) -> list[TurnContextBlock]:
-        # Provider hooks were removed by the refactor.  Keep this method as a
-        # zero-cost transitional seam for Engine while turn context moves through
-        # PluginContextBroker instead of pluggy hooks.
-        return []
+    def text(self, key: str, language=None) -> str:
+        return self.i18n.text(key, language)
+
+    def compaction_sections(self, thread_id: str) -> list[str]:
+        sections: list[str] = []
+        for plugin_id, provider in list(self._compaction_section_providers):
+            try:
+                section = provider(thread_id=thread_id)
+            except Exception as exc:
+                self._mark_plugin_warning(plugin_id, exc)
+                continue
+            text = str(section or "").strip()
+            if text:
+                sections.append(text)
+        return sections
+
+    def refresh_epoch_context(self, thread_id: str, *, discard_plugins: set[str] | None = None) -> None:
+        discard_plugins = set(discard_plugins or ())
+        for plugin_id, handler in list(self._epoch_context_refreshers):
+            self._refresh_epoch_context_handler(
+                plugin_id,
+                handler,
+                thread_id,
+                discard=plugin_id in discard_plugins,
+            )
+
+    def _refresh_epoch_context_for_plugin(self, plugin_id: str, thread_id: str | None, *, discard: bool = False) -> None:
+        for current_plugin_id, handler in list(self._epoch_context_refreshers):
+            if current_plugin_id == plugin_id:
+                self._refresh_epoch_context_handler(current_plugin_id, handler, thread_id, discard=discard)
+
+    def _refresh_epoch_context_handler(
+        self,
+        plugin_id: str,
+        handler: Callable[..., Any],
+        thread_id: str | None,
+        *,
+        discard: bool = False,
+    ) -> None:
+        try:
+            if discard:
+                with self.contexts.suppress_epoch_outputs(plugin_id):
+                    result = self._call_epoch_context_refresher(handler, thread_id)
+            else:
+                result = self._call_epoch_context_refresher(handler, thread_id)
+        except Exception as exc:
+            self._mark_plugin_warning(plugin_id, exc)
+            return
+        if inspect.isawaitable(result):
+            self._mark_plugin_warning(
+                plugin_id,
+                RuntimeError("Epoch context refresh handlers must be synchronous"),
+            )
+
+    def _call_epoch_context_refresher(self, handler: Callable[..., Any], thread_id: str | None) -> Any:
+        signature = inspect.signature(handler)
+        parameters = list(signature.parameters.values())
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters) or "thread_id" in signature.parameters:
+            return handler(thread_id=thread_id)
+        if any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+            return handler(thread_id)
+        positional = [
+            parameter
+            for parameter in parameters
+            if parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }
+        ]
+        if positional:
+            return handler(thread_id)
+        return handler()
 
     def start_background(self) -> asyncio.Task[None]:
         if self._task is None or self._task.done():
@@ -157,14 +229,12 @@ class PluginManager:
             try:
                 await self._task
             except Exception:
-                pass
+                logger.exception("Plugin startup task failed during stop")
         for record in reversed(list(self._records.values())):
             await self._stop_record(record)
         await self.events.drain()
 
     def _discover(self) -> None:
-        for setup_plugin in _builtin_plugins():
-            self._add_discovered(setup_plugin)
         for entry_point in sorted(importlib.metadata.entry_points(group=PLUGIN_ENTRY_POINT_GROUP), key=lambda item: item.name):
             try:
                 setup_plugin = _normalize_plugin_object(entry_point.load())
@@ -260,12 +330,15 @@ class PluginManager:
             action_registry=self.actions,
             command_registry=self.commands,
             ui_registry=self.ui,
+            i18n_registry=self.i18n,
             context_broker=self.contexts,
             storage=storage,
             submitter=self._submitter,
             task_factory=self._create_task,
+            compaction_section_providers=self._compaction_section_providers,
+            epoch_context_refreshers=self._epoch_context_refreshers,
             thread_store=self._thread_store,
-            host=self._host,
+            action_context_resolver=self.context_for,
         )
         record.context = context
         try:
@@ -284,6 +357,11 @@ class PluginManager:
                 }
             )
             return
+        self._refresh_epoch_context_for_plugin(
+            manifest.id,
+            None,
+            discard=self.contexts.plugin_has_pending_epoch(manifest.id),
+        )
         if record.status.state != "warning":
             record.status.state = "started"
         self._publish({"type": "plugin.started", "plugin": manifest.id})
@@ -301,8 +379,10 @@ class PluginManager:
             record.status.error_type = exc.__class__.__name__
             record.status.message = str(exc) or repr(exc)
             self._publish({"type": "plugin.failed", "plugin": manifest.id, "error_type": exc.__class__.__name__, "message": str(exc) or repr(exc)})
+            self._close_logger_for(manifest.id)
             return
         await self._cancel_record_tasks(manifest.id)
+        self._close_logger_for(manifest.id)
         record.status.state = "stopped"
         self._publish({"type": "plugin.stopped", "plugin": manifest.id})
 
@@ -329,6 +409,21 @@ class PluginManager:
         task.add_done_callback(done)
         return task
 
+    def _mark_plugin_warning(self, plugin_id: str, exc: Exception) -> None:
+        record = self._records.get(plugin_id)
+        if record is not None and record.status.state in {"started", "starting", "warning"}:
+            record.status.state = "warning"
+            record.status.error_type = exc.__class__.__name__
+            record.status.message = str(exc) or repr(exc)
+            if record.context is not None:
+                record.context.logger.error("Plugin warning", exc_info=(type(exc), exc, exc.__traceback__))
+        self._publish({
+            "type": "plugin.warning",
+            "plugin": plugin_id,
+            "error_type": exc.__class__.__name__,
+            "message": str(exc) or repr(exc),
+        })
+
     async def _cancel_record_tasks(self, plugin: str, *, timeout_s: float = 5.0) -> None:
         tasks = list(self._tasks.get(plugin, set()))
         if not tasks:
@@ -350,7 +445,8 @@ class PluginManager:
     def _mark_first_load(self, plugin_id: str) -> bool:
         path = self._registry_db_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(path, timeout=SQLITE_TIMEOUT_SECONDS) as db:
+        db = sqlite3.connect(path, timeout=SQLITE_TIMEOUT_SECONDS)
+        try:
             db.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("CREATE TABLE IF NOT EXISTS loaded_plugins (id TEXT PRIMARY KEY, first_seen_at TEXT NOT NULL)")
@@ -360,7 +456,10 @@ class PluginManager:
             from uv_agent.time import utc_now_iso
 
             db.execute("INSERT INTO loaded_plugins(id, first_seen_at) VALUES (?, ?)", (plugin_id, utc_now_iso()))
+            db.commit()
             return True
+        finally:
+            db.close()
 
     def _logger_for(self, plugin_id: str) -> logging.Logger:
         logger = logging.getLogger(f"uv_agent.plugins.{plugin_id}")
@@ -374,35 +473,23 @@ class PluginManager:
             logger.addHandler(handler)
         return logger
 
-
-def _builtin_plugins() -> list[SetupPlugin]:
-    try:
-        from uv_agent.builtin import builtin_plugins
-    except Exception:
-        return []
-    return list(builtin_plugins())
-
+    def _close_logger_for(self, plugin_id: str) -> None:
+        logger = logging.getLogger(f"uv_agent.plugins.{plugin_id}")
+        log_path = self._plugin_dir(plugin_id) / "logs" / "plugin.log"
+        for handler in list(logger.handlers):
+            if isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path:
+                logger.removeHandler(handler)
+                handler.close()
 
 def _normalize_plugin_object(value: Any) -> SetupPlugin:
     if isinstance(value, SetupPlugin):
         return value
-    if callable(value) and not hasattr(value, "manifest"):
-        value = value()
-        if isinstance(value, SetupPlugin):
-            return value
-    if isinstance(value, Mapping):
-        manifest = normalize_manifest(value.get("manifest"))
-        setup = value.get("setup")
-        stop = value.get("stop")
-        if not callable(setup):
-            raise TypeError(f"Plugin {manifest.id!r} setup is not callable")
-        return SetupPlugin(manifest=manifest, setup=setup, stop=stop if callable(stop) else None)
-    manifest_value = getattr(value, "manifest", None)
-    setup = getattr(value, "setup", None)
-    if manifest_value is not None and callable(setup):
-        stop = getattr(value, "stop", None)
-        return SetupPlugin(manifest=normalize_manifest(manifest_value), setup=setup, stop=stop if callable(stop) else None)
-    raise TypeError(f"Unsupported plugin object: {type(value).__name__}")
+    if callable(value):
+        plugin = value()
+        if isinstance(plugin, SetupPlugin):
+            return plugin
+        raise TypeError(f"Plugin factory returned {type(plugin).__name__}, expected SetupPlugin")
+    raise TypeError(f"Plugin entry point must be SetupPlugin or a factory returning SetupPlugin, got {type(value).__name__}")
 
 
 def _safe_plugin_name(name: str) -> str:

@@ -372,12 +372,9 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
             continue
         provider_value = dict(value)
         provider_value.pop("name", None)
-        legacy_endpoint = provider_value.pop("endpoint", None)
-        legacy_api = provider_value.pop("api_format", None)
         responses_raw = provider_value.pop("responses", None)
         chat_raw = provider_value.pop("chat_completions", None)
         anthropic_raw = provider_value.pop("anthropic_messages", None)
-        provider_value.pop("reasoning_options", None)
         provider_value["message_passthrough"] = parse_message_passthrough(
             provider_value.pop("message_passthrough", {})
         )
@@ -386,7 +383,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         )
         provider_value["responses"] = parse_endpoint_config(
             responses_raw,
-            default_path=str(legacy_endpoint or "/responses"),
+            default_path="/responses",
         )
         provider_value["chat_completions"] = parse_endpoint_config(
             chat_raw,
@@ -396,9 +393,6 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
             anthropic_raw,
             default_path="/v1/messages",
         )
-        if legacy_api and legacy_api != "responses":
-            # Older experimental configs used provider-level api_format. Models now own API choice.
-            provider_value.setdefault("params", {})
         timeout_s = provider_value.get("timeout_s", 7200.0)
         provider_value["timeout_s"] = None if timeout_s is None else float(timeout_s)
         providers[name] = ProviderConfig(name=name, **provider_value)
@@ -408,8 +402,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         if not isinstance(value, dict):
             continue
         model_value = dict(value)
-        model_value.setdefault("api", model_value.pop("api_format", "responses"))
-        model_value.pop("reasoning_options", None)
+        model_value.setdefault("api", "responses")
         provider_defaults = providers.get(str(model_value.get("provider") or ""))
         provider_message_passthrough = (
             provider_defaults.message_passthrough
@@ -535,8 +528,7 @@ def parse_endpoint_config(value: object, *, default_path: str) -> EndpointConfig
     if value is None:
         return EndpointConfig(path=default_path)
     if isinstance(value, str):
-        # Accept a compact string form as a forgiving shorthand for path-only
-        # endpoints. Older configs already used provider-level endpoint strings.
+        # Compact path-only endpoint shorthand.
         return EndpointConfig(path=value or default_path)
     data = _object_dict(value)
     unexpected = sorted(set(data) - {"path", "params"})

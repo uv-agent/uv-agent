@@ -5,10 +5,11 @@ import json
 
 import pytest
 
-import uv_agent_runtime as rt
+from uv_agent.builtin.workflow import service as workflow
+from uv_agent.plugins.context import PluginThreadAPI
 from uv_agent.session import ThreadStore
 from uv_agent.state_db import connect_state_db
-from uv_agent.workflow_executor import WorkflowExecutor
+from uv_agent.builtin.workflow.executor import WorkflowExecutor
 
 
 class FakeHandle:
@@ -22,24 +23,24 @@ class FakeHandle:
         return self
 
 
-class FakeTurnManager:
+class FakeSubmitter:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    async def submit_turn(self, **kwargs):
+    async def __call__(self, **kwargs):
         self.calls.append(kwargs)
         return FakeHandle()
 
 
 @pytest.mark.asyncio
-async def test_workflow_executor_runs_ready_node_through_turn_manager(tmp_path, monkeypatch) -> None:
+async def test_workflow_executor_runs_ready_node_through_plugin_turn_api(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
-    wf = rt.workflow.start("host workflow", default_model_level="deep")
+    wf = workflow.start("host workflow", default_model_level="deep")
     node = wf.agent("Do host work", key="do")
 
     store = ThreadStore(tmp_path)
-    turns = FakeTurnManager()
-    executor = WorkflowExecutor(tmp_path, turns, store, lease_seconds=30)
+    submit = FakeSubmitter()
+    executor = WorkflowExecutor(tmp_path, submit, PluginThreadAPI(plugin="builtin.workflow", thread_store=store), lease_seconds=30)
 
     await executor.run_once()
     # Node execution is spawned in a task; allow it to finish.
@@ -55,8 +56,8 @@ async def test_workflow_executor_runs_ready_node_through_turn_manager(tmp_path, 
     assert row["executor_id"] == executor.executor_id
     assert row["lease_until"] is None
     assert json.loads(row["result_json"])["turn_id"] == "turn_fake"
-    assert turns.calls == [
-        {"user_text": "Do host work", "thread_id": row["thread_id"], "level": "deep", "conflict": "queue"}
+    assert submit.calls == [
+        {"text": "Do host work", "thread_id": row["thread_id"], "level": "deep", "conflict": "queue"}
     ]
     assert store.thread_metadata(row["thread_id"])["kind"] == "workflow_node"
 
@@ -64,12 +65,12 @@ async def test_workflow_executor_runs_ready_node_through_turn_manager(tmp_path, 
 @pytest.mark.asyncio
 async def test_workflow_executor_reaches_checkpoint_after_completed_dependency(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
-    wf = rt.workflow.start("checkpoint workflow")
+    wf = workflow.start("checkpoint workflow")
     node = wf.agent("Do work", key="do")
     checkpoint = wf.checkpoint(key="review", after=node, reason="Review")
 
     store = ThreadStore(tmp_path)
-    executor = WorkflowExecutor(tmp_path, FakeTurnManager(), store)
+    executor = WorkflowExecutor(tmp_path, FakeSubmitter(), PluginThreadAPI(plugin="builtin.workflow", thread_store=store))
     await executor.run_once()
     for _ in range(20):
         if wf._node_by_id(node.node_id)["status"] == "completed":
@@ -84,7 +85,7 @@ async def test_workflow_executor_reaches_checkpoint_after_completed_dependency(t
 
 def test_workflow_executor_cleanup_only_expires_stale_leases(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("UV_AGENT_RUNTIME_STATE_DIR", str(tmp_path))
-    wf = rt.workflow.start("stale workflow")
+    wf = workflow.start("stale workflow")
     stale = wf.agent("stale", key="stale")
     fresh = wf.agent("fresh", key="fresh")
     with connect_state_db(tmp_path) as db:
@@ -97,7 +98,11 @@ def test_workflow_executor_cleanup_only_expires_stale_leases(tmp_path, monkeypat
             (fresh.node_id,),
         )
 
-    executor = WorkflowExecutor(tmp_path, FakeTurnManager(), ThreadStore(tmp_path))
+    executor = WorkflowExecutor(
+        tmp_path,
+        FakeSubmitter(),
+        PluginThreadAPI(plugin="builtin.workflow", thread_store=ThreadStore(tmp_path)),
+    )
     assert executor.cleanup_stale_running() == 1
 
     assert wf._node_by_id(stale.node_id)["status"] == "failed"

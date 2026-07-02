@@ -10,7 +10,6 @@ import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
-from html import escape as xml_escape
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -44,7 +43,6 @@ from uv_agent.billing import (
 )
 from uv_agent.config import AppConfig
 from uv_agent.agent.context_builder import (
-    context_fingerprint,
     model_levels_context,
     runtime_environment_context,
     runtime_helpers_context,
@@ -55,23 +53,15 @@ from uv_agent.state_db import checkpoint_state_db
 from uv_agent.environment import detect_user_language, host_environment
 from uv_agent.host_events import HostEventBus
 from uv_agent.errors import EmptyModelStreamError, is_retryable_provider_error
-from uv_agent.goal_mode import (
-    GoalState,
-    ensure_goal_files,
-    read_goal_state,
-)
 from uv_agent.ids import new_id
 from uv_agent.agent.messages import assistant_output_item, message_item, message_item_text
-from uv_agent.mcp_config import McpInstructionsPreview
-from uv_agent.mcp_probe import McpInstructionsProbe
 from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
-from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, TurnContextBlock, TurnPrepareRequest, UserInput
+from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, UserInput
 from uv_agent.plugins.manager import RESERVED_RUNTIME_NAMESPACES
 from uv_agent.plugins.registry import RuntimeNamespaceRegistry
+from uv_agent.plugins.xml import render_update_envelope
 from uv_agent.turn_manager import TurnManager
-from uv_agent.scheduler import SchedulerService, scheduler_config_from_plugin_config
-from uv_agent.workflow_executor import WorkflowExecutor
 from uv_agent.prompts import (
     BRANCH_NAME_GENERATION_PROMPT,
     INTERRUPTED_STREAM_CONTEXT_BRIDGE,
@@ -90,17 +80,8 @@ from uv_agent.prompts import (
     INTERRUPTED_TOOL_ERROR,
     GUIDED_INPUT_CONTEXT_BRIDGE,
     ACTIVE_CWD_NOTICE_TEMPLATE,
-    CONTEXT_REMOVED_ALL,
-    CONTEXT_REMOVED_SOME_PREFIX,
-    CONTEXT_REMOVED_SOME_SUFFIX,
-    CONTEXT_UPDATE_CURRENT_PREFIX,
-    CONTEXT_UPDATE_CURRENT_SUFFIX,
-    PLUGIN_HELPERS_HEADER,
     TOOL_OUTPUT_TRUNCATED_MARKER,
     TOOL_OUTPUT_OMITTED_NOTE,
-    PLUGIN_HELPER_ENTRY_TEMPLATE,
-    PLUGIN_CONTEXT_TAG,
-    PLUGIN_HELPERS_FOOTER,
     PRE_USER_CONTEXT_MARKERS,
     TOOL_OUTPUT_SHORTENED_NOTE,
 )
@@ -116,7 +97,6 @@ from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.agent.tool_results import function_output, model_tool_payload
 from uv_agent.helper_calls import extract_runtime_helper_calls, runtime_corrected_helper_calls
-from uv_agent.workflow_context import active_workflows_compaction_section
 
 
 async def _await_next_stream_event(awaitable: Awaitable[Any]) -> Any:
@@ -139,7 +119,6 @@ class TurnInterrupted(Exception):
     """Raised internally when the active turn is interrupted by the user."""
 
 
-
 async def _ensure_async_runner_events(events: Any) -> AsyncIterator[RunnerEvent]:
     """Iterate over either an async runner stream or a small synchronous list.
 
@@ -155,94 +134,11 @@ async def _ensure_async_runner_events(events: Any) -> AsyncIterator[RunnerEvent]
     for event in events:
         yield event
 
-def _context_item_id(key: tuple[str, str, str]) -> str:
-    scope, name, path = key
-    return f"{scope}:{name}:{context_fingerprint(path)}"
-
-
-def _context_state_parts(state: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    if not state:
-        return {}
-    raw_parts = state.get("parts")
-    if not isinstance(raw_parts, dict):
-        return {}
-    parts: dict[str, dict[str, Any]] = {}
-    for key, value in raw_parts.items():
-        if not isinstance(key, str):
-            continue
-        if isinstance(value, dict):
-            fingerprint = value.get("fingerprint")
-            if isinstance(fingerprint, str):
-                parts[key] = {
-                    "fingerprint": fingerprint,
-                    "kind": str(value.get("kind") or ""),
-                    "dynamic": bool(value.get("dynamic")),
-                    "metadata": value.get("metadata") if isinstance(value.get("metadata"), dict) else {},
-                }
-        elif isinstance(value, str):
-            parts[key] = {
-                "fingerprint": value,
-                "kind": key,
-                "dynamic": key in {"skills", "mcp"},
-                "metadata": {},
-            }
-    return parts
-
-
-def _removed_context_text(removed: list[str], previous_parts: dict[str, dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for item_id in removed:
-        metadata = previous_parts.get(item_id, {}).get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        kind = str(metadata.get("kind") or "")
-        name = metadata.get("name")
-        scope = metadata.get("scope")
-        path = metadata.get("path") or metadata.get("config")
-        if kind == "skill" and name and scope:
-            lines.append(
-                REMOVED_SKILL_TEMPLATE.format(
-                    name=_xml_attr(name),
-                    scope=_xml_attr(scope),
-                    path=_xml_attr(path or ""),
-                )
-            )
-        elif kind == "mcp" and name and scope:
-            lines.append(
-                REMOVED_MCP_SERVER_TEMPLATE.format(
-                    name=_xml_attr(name),
-                    scope=_xml_attr(scope),
-                    config=_xml_attr(path or ""),
-                )
-            )
-    return "".join(lines)
-
-
-
 def _wrap_agent_context(tag: str, body: str) -> str:
     body = str(body or "").strip()
     if not body:
         return f"<{tag} />"
     return f"<{tag}>\n{body}\n</{tag}>"
-
-def _xml_attr(value: object) -> str:
-    return xml_escape(str(value), quote=True)
-
-
-def _mcp_preview_from_metadata(value: object) -> McpInstructionsPreview | None:
-    if not isinstance(value, dict):
-        return None
-    text = value.get("text")
-    if not isinstance(text, str) or not text:
-        return None
-    return McpInstructionsPreview(text=text, truncated=bool(value.get("truncated")))
-
-
-def _mcp_preview_metadata(preview: McpInstructionsPreview | None) -> dict[str, Any] | None:
-    if preview is None:
-        return None
-    return {"text": preview.text, "truncated": preview.truncated}
-
 
 @dataclass
 class TurnInputState:
@@ -412,9 +308,9 @@ class RunTurnPrelude:
     input_items: list[dict[str, Any]]
     request_input_items: list[dict[str, Any]]
     turn_started_event: dict[str, Any]
-    prepare_request: TurnPrepareRequest
     user_items: list[dict[str, Any]]
     image_events_by_user: list[list[dict[str, Any]]]
+    context_warning_events: list[dict[str, Any]]
 
     @property
     def user_item(self) -> dict[str, Any]:
@@ -445,7 +341,6 @@ class AgentEngine:
         attachments_dir: Path | None = None,
         project_root: Path,
         config_loader: Callable[[], AppConfig] | None = None,
-        mcp_instructions_probe: McpInstructionsProbe | None = None,
         host_events: HostEventBus | None = None,
     ) -> None:
         self.config = config
@@ -466,8 +361,7 @@ class AgentEngine:
         self._host_environment = host_environment()
         self._rule_states: OrderedDict[str, RuleRuntimeState] = OrderedDict()
         self._rule_states_max_size: int = 64
-        self._mcp_instructions_probe = mcp_instructions_probe or McpInstructionsProbe(self.project_root)
-        self._mcp_instructions_probe.start()
+        self._plugin_epoch_context_warning_state: dict[tuple[str, str, str], bool] = {}
         self.events = EventBus()
         self.host_events.register_plugin_bus(self.events)
         self.runtime_helpers = RuntimeNamespaceRegistry(reserved=RESERVED_RUNTIME_NAMESPACES)
@@ -478,7 +372,6 @@ class AgentEngine:
             helper_registry=self.runtime_helpers,
             submitter=self._plugin_submit_turn,
             thread_store=self.thread_store,
-            host=self,
         )
         rpc_server = getattr(self.runner, "rpc_server", None)
         if rpc_server is not None:
@@ -495,20 +388,6 @@ class AgentEngine:
             self,
             max_concurrent_turns=getattr(self.config.runtime, "max_concurrent_turns", 4),
         )
-        self.scheduler = SchedulerService(
-            self.thread_store.data_dir,
-            scheduler_config_from_plugin_config(self.config.plugins.plugin_config("builtin.scheduler")),
-            action_resolver=self.plugins.resolve_action,
-            action_caller=self.plugins.call_action,
-            thread_store=self.thread_store,
-        )
-        self.workflow_executor = WorkflowExecutor(self.thread_store.data_dir, self.turn_manager, self.thread_store)
-        if rpc_server is not None:
-            rpc_server.register_method("scheduler.create", self.scheduler.create)
-            rpc_server.register_method("scheduler.update", self.scheduler.update)
-            rpc_server.register_method("scheduler.list", self.scheduler.list)
-            rpc_server.register_method("scheduler.delete", self.scheduler.delete)
-            rpc_server.register_method("scheduler.run_now", self.scheduler.run_now)
 
     def _publish_host_event(self, event: dict[str, Any]) -> None:
         """Best-effort publish a host event; never raise."""
@@ -526,10 +405,8 @@ class AgentEngine:
             close()
 
     async def aclose(self) -> None:
-        await self.scheduler.stop()
-        await self.workflow_executor.stop()
-        await self.turn_manager.aclose()
         await self.plugins.stop()
+        await self.turn_manager.aclose()
         model_close = getattr(self.model_client, "aclose", None)
         if callable(model_close):
             await model_close()
@@ -589,13 +466,14 @@ class AgentEngine:
         thread_id: str | None = None,
         level: str | None = None,
         image_paths: list[Path] | None = None,
+        conflict: str = "queue",
     ) -> SubmittedTurn:
         handle = await self.turn_manager.submit_turn(
             user_text=text,
             thread_id=thread_id,
             level=level,
             image_paths=image_paths,
-            conflict="queue",
+            conflict=conflict,  # type: ignore[arg-type]
         )
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         started: asyncio.Future[tuple[str, str]] = asyncio.get_running_loop().create_future()
@@ -617,7 +495,15 @@ class AgentEngine:
 
         asyncio.create_task(forward_events(), name="uv-agent-plugin-submit-turn-forward")
         submitted_thread_id, submitted_turn_id = await started
-        return SubmittedTurn(thread_id=submitted_thread_id, turn_id=submitted_turn_id, _queue=queue)
+        return SubmittedTurn(
+            thread_id=submitted_thread_id,
+            turn_id=submitted_turn_id,
+            _queue=queue,
+            _waiter=handle.wait,
+            status=handle.status,
+            final_text=handle.final_text,
+            error=handle.error,
+        )
 
     def refresh_config(self, *, force: bool = False) -> None:
         """Reload user/project config for long-running sessions."""
@@ -678,6 +564,8 @@ class AgentEngine:
                 "turn_id": turn_id,
                 "turn_started_at": turn_started_event.get("created_at"),
             })
+            for event in prelude.context_warning_events:
+                yield self._publish_event(event)
 
             # ---- cache-aware compaction judge ----
             # The prelude intentionally leaves the current user message out of
@@ -705,13 +593,6 @@ class AgentEngine:
                     yield event
                 compacted_this_turn = judge_state.compacted
 
-            plugin_context_blocks = await self.plugins.prepare_turn(prelude.prepare_request)
-            self._append_plugin_context_items(
-                thread_id=thread_id,
-                turn_id=turn_id,
-                turn_input=turn_input,
-                blocks=plugin_context_blocks,
-            )
             self._append_agent_turn_context_items(
                 thread_id=thread_id,
                 turn_id=turn_id,
@@ -985,36 +866,20 @@ class AgentEngine:
         turn_id = new_id("turn")
         should_generate_title = self._should_generate_title(thread_id)
         metadata = dict(self.thread_store.thread_metadata(thread_id))
-        last_turn_completed_at = self._latest_event_created_at(
-            thread_id,
-            event_types={"turn.completed"},
-        )
-        last_assistant_completed_at = self._latest_event_created_at(
-            thread_id,
-            event_types={"item.model_response", "item.assistant"},
-        )
         normalized_user_inputs = list(user_inputs) if user_inputs is not None else [
             UserInput(text=user_text, image_paths=tuple(image_paths or ()))
         ]
         if not normalized_user_inputs:
             normalized_user_inputs = [UserInput(text=user_text, image_paths=tuple(image_paths or ())) ]
-        first_user_text = normalized_user_inputs[0].text
         turn_input = self._prepare_turn_input(thread_id, level=level)
         input_items = turn_input.input_items
         request_input_items = turn_input.request_input_items()
-        pre_user_items = self._pre_user_context_items(thread_id)
+        context_warning_events: list[dict[str, Any]] = []
         turn_started_event = self.thread_store.append(thread_id, "turn.started", turn_id=turn_id)
-        prepare_request = TurnPrepareRequest(
-            thread_id=thread_id,
-            turn_id=turn_id,
-            user_text=first_user_text,
+        pre_user_items = self._pre_user_context_items(
+            thread_id,
             level=level,
-            is_new_thread=is_new_thread,
-            is_first_turn=int(metadata.get("user_message_count") or 0) == 0,
-            created_at=str(turn_started_event.get("created_at") or "") or None,
-            last_turn_completed_at=last_turn_completed_at,
-            last_assistant_completed_at=last_assistant_completed_at,
-            metadata=metadata,
+            context_warning_events=context_warning_events,
         )
         user_items = [message_item("user", item.text) for item in normalized_user_inputs]
 
@@ -1067,9 +932,9 @@ class AgentEngine:
             input_items=input_items,
             request_input_items=request_input_items,
             turn_started_event=turn_started_event,
-            prepare_request=prepare_request,
             user_items=user_items,
             image_events_by_user=image_events_by_user,
+            context_warning_events=context_warning_events,
         )
 
     def _latest_event_created_at(self, thread_id: str, *, event_types: set[str]) -> str | None:
@@ -1079,38 +944,6 @@ class AgentEngine:
         created_at = events[-1].get("created_at")
         return str(created_at) if created_at else None
 
-    def _append_plugin_context_items(
-        self,
-        *,
-        thread_id: str,
-        turn_id: str,
-        turn_input: TurnInputState,
-        blocks: list[TurnContextBlock],
-    ) -> None:
-        """Append transitional rendered turn context returned by legacy seams.
-
-        New plugins should enqueue structured turn context through
-        ``PluginContextBroker``. This method remains only so any in-flight
-        integration that still returns ``TurnContextBlock`` fails soft while the
-        engine consumes the new broker-backed item group below.
-        """
-
-        for block in blocks:
-            text = self._plugin_context_text(block)
-            if not text:
-                continue
-            self.thread_store.append(
-                thread_id,
-                "item.plugin_context",
-                turn_id=turn_id,
-                plugin=getattr(block, "plugin", ""),
-                metadata=getattr(block, "metadata", {}),
-                text=text,
-            )
-            item = message_item("user", text)
-            turn_input.input_items.append(item)
-            turn_input.pending_items.append(copy.deepcopy(item))
-
     def _append_agent_turn_context_items(
         self,
         *,
@@ -1118,10 +951,7 @@ class AgentEngine:
         turn_id: str,
         turn_input: TurnInputState,
     ) -> None:
-        broker = getattr(self.plugins, "contexts", None)
-        if broker is None or not hasattr(broker, "turn_context_text"):
-            return
-        text = str(broker.turn_context_text(thread_id) or "").strip()
+        text = str(self.plugins.contexts.turn_context_text(thread_id) or "").strip()
         if not text:
             return
         wrapped = _wrap_agent_context("agent_turn_context", text)
@@ -1129,16 +959,6 @@ class AgentEngine:
         item = message_item("user", wrapped)
         turn_input.input_items.append(item)
         turn_input.pending_items.append(copy.deepcopy(item))
-
-    @staticmethod
-    def _plugin_context_text(block: TurnContextBlock) -> str:
-        body = str(getattr(block, "text", "") or "").strip()
-        if not body:
-            return ""
-        plugin = getattr(block, "plugin", "") or "unknown"
-        tag = getattr(block, "tag", "") or PLUGIN_CONTEXT_TAG
-        attrs = [f'plugin="{_xml_attr(plugin)}"']
-        return f"<{tag} {' '.join(attrs)}>\n{body}\n</{tag}>"
 
     def _append_current_user_items(
         self,
@@ -2140,12 +1960,11 @@ class AgentEngine:
                     ),
                 }))
         assert response is not None, "compaction retry loop must produce a response"  # type: ignore[unreachable]
-        summary_text = self._compaction_summary_with_active_workflows(
+        summary_text = self._compaction_summary_with_plugin_sections(
             thread_id,
             compaction_response_summary_text(response),
         )
         replacement_input = self._compaction_replacement_input(compaction_source_items, response, K=retain_K)
-        context_state = self._latest_context_state(thread_id)
         self.thread_store.append(
             thread_id,
             "item.compaction",
@@ -2153,7 +1972,6 @@ class AgentEngine:
             text=summary_text,
             output=response.output,
             replacement_input=replacement_input,
-            context_state=context_state,
             usage=response.usage,
         )
         self._record_billing_charge(
@@ -2174,17 +1992,15 @@ class AgentEngine:
         )
 
 
-    def _compaction_summary_with_active_workflows(self, thread_id: str, summary_text: str) -> str:
+    def _compaction_summary_with_plugin_sections(self, thread_id: str, summary_text: str) -> str:
         if not self._is_main_agent_thread(thread_id):
             return summary_text
-        section = active_workflows_compaction_section(
-            self.thread_store.data_dir,
-            parent_thread_id=thread_id,
-        )
-        if not section:
+        sections = self.plugins.compaction_sections(thread_id)
+        if not sections:
             return summary_text
         base = summary_text.rstrip()
-        return f"{base}\n\n{section}" if base else section
+        suffix = "\n\n".join(sections)
+        return f"{base}\n\n{suffix}" if base else suffix
 
     @staticmethod
     def _compaction_started_event(thread_id: str, turn_id: str) -> dict[str, Any]:
@@ -2436,7 +2252,6 @@ class AgentEngine:
 
         return event.get("type") in {
             "item.user",
-            "item.plugin_context",
             "item.agent_turn_context",
             "item.assistant",
             "item.model_response",
@@ -2634,7 +2449,7 @@ class AgentEngine:
         turn_started_at: object,
         cancel_event: asyncio.Event | None,
     ) -> ToolCallTurnResult:
-        """Backward-compatible helper that waits for the final tool result."""
+        """Run a tool call stream and return its final result."""
 
         final: ToolCallTurnResult | None = None
         async for event in self._stream_tool_call_for_turn(
@@ -3043,43 +2858,8 @@ class AgentEngine:
                         self._load_unseen_rules_for_dir(thread_id, entered, source="tool_result")
                     )
                 continue
-            if event.get("kind") == "subagent.completed":
-                self._record_subagent_billing_from_event(event, thread_id=thread_id, turn_id=turn_id)
             visible_events.append(event)
         return rules_loaded, visible_events
-
-    def _record_subagent_billing_from_event(
-        self,
-        event: dict[str, Any],
-        *,
-        thread_id: str,
-        turn_id: str,
-    ) -> None:
-        """Roll nested model-call costs into the parent thread total."""
-
-        subthread_id = str(event.get("thread_id") or "")
-        if not subthread_id or subthread_id == thread_id:
-            return
-        try:
-            metadata = self.thread_store.thread_metadata(subthread_id)
-        except (OSError, ValueError, FileNotFoundError):
-            return
-        total = billing_total_from_metadata(
-            metadata,
-            preferred_currency=self.config.pricing.currency,
-        )
-        if total is None or total[0] == 0:
-            return
-        amount, currency = total
-        self.thread_store.append(
-            thread_id,
-            "thread.billing_accumulated",
-            turn_id=turn_id,
-            source="subagent",
-            subthread_id=subthread_id,
-            amount=decimal_to_string(amount),
-            currency=currency,
-        )
 
     def _handle_enter_dir_event(
         self,
@@ -3179,7 +2959,6 @@ class AgentEngine:
             thread_id,
             "item.system_instructions",
             text=instructions,
-            fingerprint=context_fingerprint(instructions),
             after_compaction=self._has_compaction(thread_id, snapshot=snapshot),
         )
         return instructions
@@ -3262,7 +3041,6 @@ class AgentEngine:
         input_items: list[dict[str, Any]] = []
         pending_pre_user: list[dict[str, Any]] = []
         pending_tool_attachments: list[dict[str, Any]] = []
-        pending_legacy_tool_attachments: list[dict[str, Any]] = []
 
         def flush_tool_attachments() -> None:
             nonlocal pending_tool_attachments
@@ -3306,14 +3084,9 @@ class AgentEngine:
                 input_items.append(copy.deepcopy(event["item"]))
                 if expected_tool_outputs > 0:
                     expected_tool_outputs -= 1
-                if pending_legacy_tool_attachments:
-                    pending_tool_attachments.extend(pending_legacy_tool_attachments)
-                    pending_legacy_tool_attachments = []
             elif event.get("type") == "item.image_attachment":
                 if event.get("source") == "tool":
                     pending_tool_attachments.append(copy.deepcopy(event["attachment"]))
-                elif expected_tool_outputs > 0:
-                    pending_legacy_tool_attachments.append(copy.deepcopy(event["attachment"]))
                 else:
                     flush_tool_attachments()
                     input_items.append(image_message_item(event["attachment"]))
@@ -3340,7 +3113,6 @@ class AgentEngine:
         input_items: list[dict[str, Any]] = []
         pending_pre_user: list[dict[str, Any]] = []
         pending_tool_attachments: list[dict[str, Any]] = []
-        pending_legacy_tool_attachments: list[dict[str, Any]] = []
         expected_tool_outputs = 0
 
         def flush_tool_attachments() -> None:
@@ -3361,9 +3133,9 @@ class AgentEngine:
             events_after_context: list[dict[str, Any]] = []
             reached_replayable_history = False
             for event in events:
-                if event.get("type") in {"item.plugin_context", "item.agent_turn_context"}:
+                if event.get("type") == "item.agent_turn_context":
                     # Turn context belongs to the turn that requested it. Unlike
-                    # regenerated epoch context (rules/runtime/workflow), keep it
+                    # regenerated epoch context (rules/runtime/plugin context), keep it
                     # with the following user message after a compaction checkpoint.
                     reached_replayable_history = True
                     events_after_context.append(event)
@@ -3415,14 +3187,9 @@ class AgentEngine:
                 input_items.append(event["item"])
                 if expected_tool_outputs > 0:
                     expected_tool_outputs -= 1
-                if pending_legacy_tool_attachments:
-                    pending_tool_attachments.extend(pending_legacy_tool_attachments)
-                    pending_legacy_tool_attachments = []
             elif event.get("type") == "item.image_attachment":
                 if event.get("source") == "tool":
                     pending_tool_attachments.append(event["attachment"])
-                elif expected_tool_outputs > 0:
-                    pending_legacy_tool_attachments.append(event["attachment"])
                 else:
                     flush_tool_attachments()
                     input_items.append(image_message_item(event["attachment"]))
@@ -3442,11 +3209,7 @@ class AgentEngine:
 
     def _pre_user_event_item(self, event: dict[str, Any]) -> dict[str, Any] | None:
         event_type = event.get("type")
-        if event_type == "item.context_update":
-            text = str(event.get("text") or "")
-        elif event_type in {"item.agent_epoch_context", "item.agent_epoch_context_update", "item.agent_turn_context"}:
-            text = str(event.get("text") or "")
-        elif event_type == "item.plugin_context":
+        if event_type in {"item.agent_epoch_context", "item.agent_epoch_context_update", "item.agent_turn_context"}:
             text = str(event.get("text") or "")
         elif event_type == "item.rules_loaded" and event.get("source") in {
             "project",
@@ -3506,54 +3269,133 @@ class AgentEngine:
                 saw_model_response = True
         return saw_partial and not saw_model_response
 
-    def _runtime_context_items(self, thread_id: str | None = None) -> list[dict[str, Any]]:
+    def _runtime_context_items(
+        self,
+        thread_id: str | None = None,
+        *,
+        level: str | None = None,
+        context_warning_events: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Return current epoch context items using the active context pipeline.
 
-        The previous fingerprint/diff implementation lived entirely in Engine and
-        rediscovered every dynamic domain (skills, MCP, plugin helpers) on demand.
-        The plugin refactor moves those domains behind PluginContextBroker: Engine
-        now sends one full epoch context item per epoch and then only explicit
-        plugin-published updates.
+        Engine sends one full epoch context item per epoch and then only
+        explicit plugin-published updates. Plugins own their refresh state; the
+        broker is only a send queue.
         """
 
         core_text = self._turn_context_text()
         if not thread_id:
             return [message_item("user", core_text)] if core_text else []
 
-        broker = getattr(self.plugins, "contexts", None)
+        broker = self.plugins.contexts
         has_full_epoch = self.thread_store.has_event_after_latest_compaction(
             thread_id,
             event_types={"item.agent_epoch_context"},
         )
         if not has_full_epoch:
-            if broker is not None and self._has_compaction(thread_id) and hasattr(broker, "replay_after_compaction"):
+            after_compaction = self._has_compaction(thread_id)
+            if after_compaction:
                 broker.replay_after_compaction(thread_id)
-            if broker is not None and hasattr(broker, "full_context_text"):
-                main_agent = self._is_main_agent_thread(thread_id)
-                text = broker.full_context_text(
-                    thread_id,
-                    core_texts=[core_text],
-                    include_document=lambda document: document.attrs.get("scope") != "main_agent" or main_agent,
-                )
-            else:
-                text = core_text
+                broker.clear_epoch(thread_id)
+            discard_plugins = set(broker.plugins_with_pending_epoch(thread_id))
+            self.plugins.refresh_epoch_context(thread_id, discard_plugins=discard_plugins)
+            main_agent = self._is_main_agent_thread(thread_id)
+            include_contribution = (
+                lambda contribution: (contribution.attrs or {}).get("scope") != "main_agent" or main_agent
+            )
+            rendered_documents = broker.consume_epoch(thread_id, include_contribution=include_contribution)
+            self._record_plugin_epoch_context_warnings(
+                thread_id,
+                rendered_documents,
+                level=level,
+                context_warning_events=context_warning_events,
+            )
+            parts = [core_text] if core_text else []
+            parts.extend(rendered.text for rendered in rendered_documents)
+            text = "\n\n".join(parts)
             text = _wrap_agent_context("agent_epoch_context", str(text or "").strip())
             self.thread_store.append(thread_id, "item.agent_epoch_context", text=text)
             return [message_item("user", text)]
 
-        if broker is None or not hasattr(broker, "update_context_text"):
-            return []
-        text = str(broker.update_context_text(thread_id) or "").strip()
+        rendered_updates = broker.consume_updates(thread_id)
+        self._record_plugin_epoch_context_warnings(
+            thread_id,
+            rendered_updates,
+            level=level,
+            context_warning_events=context_warning_events,
+        )
+        text = render_update_envelope([item.contribution for item in rendered_updates]) if rendered_updates else ""
         if not text:
             return []
         self.thread_store.append(thread_id, "item.agent_epoch_context_update", text=text)
         return [message_item("user", text)]
 
-    def _pre_user_context_items(self, thread_id: str) -> list[dict[str, Any]]:
+    def _record_plugin_epoch_context_warnings(
+        self,
+        thread_id: str,
+        rendered_documents: list[Any],
+        *,
+        level: str | None = None,
+        context_warning_events: list[dict[str, Any]] | None = None,
+    ) -> None:
+        threshold_chars = self._plugin_epoch_context_warning_threshold_chars(level)
+        if threshold_chars <= 0:
+            return
+        for rendered in rendered_documents:
+            contribution = getattr(rendered, "contribution", None)
+            text = str(getattr(rendered, "text", "") or "")
+            plugin = str(getattr(contribution, "plugin", "") or "")
+            tag = str(getattr(contribution, "tag", "") or "")
+            if not plugin or not tag:
+                continue
+            key = (thread_id, plugin, tag)
+            too_large = len(text) > threshold_chars
+            if not too_large:
+                self._plugin_epoch_context_warning_state[key] = False
+                continue
+            if self._plugin_epoch_context_warning_state.get(key):
+                continue
+            self._plugin_epoch_context_warning_state[key] = True
+            context_window_chars = self._context_window_chars_for_level(level)
+            message = (
+                f"插件 {plugin} 发布的 epoch context `{tag}` 较大，"
+                f"约 {len(text)} 字符，超过当前上下文字符预算的一半。"
+                "请按需禁用或精简对应插件配置。"
+            )
+            stored = self.thread_store.append(
+                thread_id,
+                "thread.plugin_epoch_context_warning",
+                plugin=plugin,
+                tag=tag,
+                message=message,
+                chars=len(text),
+                threshold_chars=threshold_chars,
+                context_window_chars=context_window_chars,
+            )
+            if context_warning_events is not None:
+                context_warning_events.append(self._public_event(stored))
+
+    def _plugin_epoch_context_warning_threshold_chars(self, level: str | None = None) -> int:
+        return max(1, self._context_window_chars_for_level(level) // 2)
+
+    def _context_window_chars_for_level(self, level: str | None) -> int:
+        try:
+            tokens = int(self.config.model_for_level(level).context_window_tokens)
+        except Exception:
+            tokens = 0
+        return max(0, tokens * 4)
+
+    def _pre_user_context_items(
+        self,
+        thread_id: str,
+        *,
+        level: str | None = None,
+        context_warning_events: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for text in self._rule_context_texts(thread_id):
             items.append(message_item("user", text))
-        items.extend(self._runtime_context_items(thread_id))
+        items.extend(self._runtime_context_items(thread_id, level=level, context_warning_events=context_warning_events))
         return items
 
 
@@ -3564,98 +3406,6 @@ class AgentEngine:
         except FileNotFoundError:
             return False
         return kind == "thread"
-
-    def enable_goal_mode(self, thread_id: str, *, objective: str = "") -> GoalState:
-        """Enable per-thread goal mode and preserve any existing goal files."""
-
-        state = ensure_goal_files(self.thread_store.data_dir, thread_id, objective=objective)
-        event = self.thread_store.append(
-            thread_id,
-            "thread.goal_mode_updated",
-            enabled=True,
-            objective=state.objective,
-            files=self._goal_files_payload(state),
-        )
-        return GoalState(
-            enabled=True,
-            status="enabled",
-            paths=state.paths,
-            objective=state.objective,
-            created_at=state.created_at,
-            updated_at=str(event.get("created_at") or state.updated_at),
-        )
-
-    def disable_goal_mode(self, thread_id: str) -> GoalState:
-        """Disable per-thread goal mode without modifying the durable files."""
-
-        previous = self.goal_state(thread_id)
-        if previous is None:
-            previous = read_goal_state(self.thread_store.data_dir, thread_id, enabled=False)
-        event = self.thread_store.append(
-            thread_id,
-            "thread.goal_mode_updated",
-            enabled=False,
-            objective=previous.objective,
-            files=self._goal_files_payload(previous),
-        )
-        return GoalState(
-            enabled=False,
-            status="disabled",
-            paths=previous.paths,
-            objective=previous.objective,
-            created_at=previous.created_at,
-            updated_at=str(event.get("created_at") or previous.updated_at),
-        )
-
-    def reset_goal_files(self, thread_id: str, *, objective: str = "") -> GoalState:
-        """Reset the durable goal files while leaving goal mode disabled."""
-
-        current = self.goal_state(thread_id)
-        if current is not None and current.enabled:
-            raise ValueError("goal files can only be reset while goal mode is disabled")
-        state = ensure_goal_files(self.thread_store.data_dir, thread_id, objective=objective, reset=True)
-        event = self.thread_store.append(
-            thread_id,
-            "thread.goal_files_reset",
-            objective=state.objective,
-            files=self._goal_files_payload(state),
-        )
-        return GoalState(
-            enabled=False,
-            status="disabled",
-            paths=state.paths,
-            objective=state.objective,
-            created_at=state.created_at,
-            updated_at=str(event.get("created_at") or state.updated_at),
-        )
-
-    def goal_state(self, thread_id: str | None) -> GoalState | None:
-        """Return the current goal-mode state for a thread, if one is active."""
-
-        if not thread_id:
-            return None
-        try:
-            metadata = self.thread_store.thread_metadata(thread_id)
-        except FileNotFoundError:
-            return None
-        raw_goal = metadata.get("goal_mode")
-        enabled = isinstance(raw_goal, dict) and bool(raw_goal.get("enabled"))
-        return read_goal_state(self.thread_store.data_dir, thread_id, enabled=enabled)
-
-
-
-
-    @staticmethod
-    def _goal_files_payload(state: GoalState) -> dict[str, str]:
-        return {
-            "state": str(state.paths.state),
-            "checklist": str(state.paths.checklist),
-            "notes": str(state.paths.notes),
-        }
-
-
-
-
 
     def _rule_context_texts(self, thread_id: str) -> list[str]:
         state = self._rule_state(thread_id)
@@ -3883,99 +3633,6 @@ class AgentEngine:
             return str(resolved)
         return "." if not relative.parts else relative.as_posix()
 
-    def _turn_context_update(self, thread_id: str | None) -> dict[str, Any] | None:
-        previous = self._latest_context_state(thread_id) if thread_id else None
-        previous_parts = _context_state_parts(previous)
-        parts = self._turn_context_parts(previous_parts=previous_parts)
-        full_rendered = "\n\n".join(part.text for part in parts)
-        fingerprint = context_fingerprint(full_rendered)
-        state_parts = {
-            part.id: {
-                "fingerprint": context_fingerprint(part.text),
-                "kind": part.kind,
-                "dynamic": part.dynamic,
-                "metadata": part.metadata,
-            }
-            for part in parts
-        }
-        previous_fingerprint = previous.get("fingerprint") if previous else None
-        initial = previous_fingerprint is None
-        if initial:
-            removed = [key for key in previous_parts if key not in state_parts]
-            rendered_parts = parts
-        else:
-            current_kinds = {part.kind for part in parts}
-            previous_dynamic = {
-                key
-                for key, value in previous_parts.items()
-                if value.get("dynamic")
-                or key in {"skills", "mcp"}
-                or (value.get("kind") in {"skills", "mcp"} and value.get("kind") not in current_kinds)
-            }
-            current_dynamic = {part.id for part in parts if part.dynamic}
-            changed = [
-                part.id
-                for part in parts
-                if part.dynamic
-                and previous_parts.get(part.id, {}).get("fingerprint")
-                != state_parts[part.id]["fingerprint"]
-            ]
-            removed = [
-                key
-                for key in previous_dynamic
-                if key not in current_dynamic
-            ]
-            if not changed and not removed:
-                return None
-            changed_set = set(changed)
-            rendered_parts = [part for part in parts if part.id in changed_set]
-        rendered = "\n\n".join(part.text for part in rendered_parts)
-        if not full_rendered:
-            if previous_fingerprint is None:
-                return None
-            return {
-                "fingerprint": fingerprint,
-                "state": {"fingerprint": fingerprint, "parts": state_parts},
-                "removed": removed or sorted(previous_parts),
-                "text": CONTEXT_REMOVED_ALL,
-            }
-        if initial:
-            text = rendered
-        else:
-            body_parts = [CONTEXT_UPDATE_CURRENT_PREFIX]
-            if removed:
-                body_parts.append(
-                    CONTEXT_REMOVED_SOME_PREFIX
-                    + _removed_context_text(removed, previous_parts)
-                    + CONTEXT_REMOVED_SOME_SUFFIX
-                )
-            if rendered:
-                body_parts.append(rendered)
-            text = "\n\n".join(body_parts) + CONTEXT_UPDATE_CURRENT_SUFFIX
-        return {
-            "fingerprint": fingerprint,
-            "state": {"fingerprint": fingerprint, "parts": state_parts},
-            "removed": removed,
-            "text": text,
-        }
-
-    def _latest_context_state(self, thread_id: str | None) -> dict[str, Any] | None:
-        if not thread_id:
-            return None
-        try:
-            event = self.thread_store.latest_event_after_latest_compaction(
-                thread_id,
-                event_types={"item.context_update"},
-            )
-        except FileNotFoundError:
-            return None
-        if event is None:
-            return None
-        state = event.get("context_state")
-        if isinstance(state, dict):
-            return state
-        return {"fingerprint": str(event.get("context_fingerprint") or ""), "parts": {}}
-
     def _turn_context_text(self) -> str:
         return "\n\n".join(part.text for part in self._turn_context_parts())
 
@@ -4062,9 +3719,7 @@ class AgentEngine:
             snapshot = self.thread_store.snapshot(thread_id)
             used = self._latest_usage_tokens(thread_id, snapshot=snapshot)
             if used is None:
-                update = self._turn_context_update(thread_id)
-                context_items = [message_item("user", update["text"])] if update else []
-                used = estimate_tokens(self._reconstruct_input(thread_id, snapshot=snapshot) + context_items)
+                used = estimate_tokens(self._reconstruct_input(thread_id, snapshot=snapshot))
                 source = "estimate"
         percent = min(100, max(0, round(used * 100 / model.context_window_tokens)))
         stats = ContextStats(
@@ -4119,70 +3774,6 @@ class AgentEngine:
 
     def _runtime_helpers_context(self) -> str:
         return runtime_helpers_context()
-
-    def _plugin_runtime_helpers_context(self) -> str:
-        helpers = self.plugins.helper_specs()
-        if not helpers:
-            return ""
-        lines = [
-            PLUGIN_HELPERS_HEADER,
-        ]
-        # TODO: When plugins can load or unload after startup, split this into
-        # per-plugin context parts so runtime context updates can mention only
-        # the changed plugin. Startup-time loading means the current block-level
-        # refresh is enough for now.
-        for helper in helpers:
-            lines.append(
-                PLUGIN_HELPER_ENTRY_TEMPLATE.format(
-                    name=xml_text(helper.name),
-                    plugin=xml_text(helper.plugin),
-                    signature=xml_text(_handler_signature(helper.name, helper.schema)),
-                    doc=xml_text(helper.doc),
-                )
-            )
-        lines.append(PLUGIN_HELPERS_FOOTER)
-        return "\n".join(lines)
-
-def _handler_signature(name: str, schema: dict[str, Any]) -> str:
-    properties = schema.get("properties") if isinstance(schema, dict) else None
-    required = set(schema.get("required") or []) if isinstance(schema, dict) else set()
-    if not isinstance(properties, dict) or not properties:
-        return f"rt.{name}(payload: dict) -> Any"
-    parts = []
-    for prop_name, prop_schema in properties.items():
-        if not isinstance(prop_schema, dict):
-            typ = "Any"
-            default = None
-        else:
-            typ = _json_schema_type_name(prop_schema.get("type"), prop_schema.get("enum"))
-            default = prop_schema.get("default")
-        if prop_name in required:
-            parts.append(f"{prop_name}: {typ}")
-        elif "default" in (prop_schema if isinstance(prop_schema, dict) else {}):
-            parts.append(f"{prop_name}: {typ} = {default!r}")
-        else:
-            parts.append(f"{prop_name}: {typ} | None = None")
-    return f"rt.{name}({', '.join(parts)}) -> Any"
-
-
-def _json_schema_type_name(value: Any, enum: Any = None) -> str:
-    if isinstance(enum, list) and enum and all(isinstance(item, str) for item in enum[:8]):
-        return "Literal[" + ", ".join(repr(item) for item in enum[:8]) + "]"
-    values = value if isinstance(value, list) else [value]
-    mapped = []
-    for item in values:
-        mapped.append({
-            "string": "str",
-            "boolean": "bool",
-            "integer": "int",
-            "number": "float",
-            "object": "dict",
-            "array": "list",
-            "null": "None",
-        }.get(str(item), "Any"))
-    result = " | ".join(dict.fromkeys(mapped))
-    return result or "Any"
-
 
 def tool_attachment_context_items(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return a neutral assistant bridge followed by tool-produced image context."""

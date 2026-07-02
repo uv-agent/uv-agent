@@ -106,12 +106,11 @@ Available helper groups:
 | `rt.look_at()` / `rt.events.look_at()` | Attach image context to the conversation. |
 | **Thread introspection** | |
 | `rt.threads.list()` / `.view()` / `.detail()` | Find stored threads, view conversation-only epochs, and expand process/run details by id or turn id. |
-| **Nested model work** | |
-| `rt.workflow.start()` / `.resume()` / `.agent()` | Build persistent workflow graphs for nested or long-running model tasks. |
-| **MCP** | |
-| `rt.mcp.list()` | List MCP servers from user and project declarations. |
-| `rt.mcp.connect()` / `.connect_declared()` | Connect to declared MCP servers. |
-| `rt.mcp.connect_url()` / `.connect_stdio()` | Connect to MCP servers via HTTP/SSE URL or local stdio command. |
+
+Plugins may register additional runtime namespaces. Those helpers appear as
+normal Python attributes such as `rt.workflow` or `rt.mcp` when the corresponding
+plugin is enabled; their signatures are published by plugin-owned epoch context,
+not by the core runtime helper block.
 
 ## Structured Events And Host Calls
 
@@ -177,9 +176,11 @@ The host copies image metadata into project state and appends the image to later
 model input. Large image bytes are not embedded directly in the thread event
 payload.
 
-## Nested Agents
+## Plugin Runtime Helpers
 
-Managed scripts can launch nested model work through `rt.workflow`:
+Runtime helpers registered by plugins use the same `uv_agent_runtime` facade as
+core helpers. For example, the builtin workflow plugin can expose nested model
+work helpers:
 
 ```python
 import uv_agent_runtime as rt
@@ -190,25 +191,23 @@ result = node.wait()
 print(result.text())
 ```
 
-Workflow nodes run through managed uv-agent subprocesses from inside the Python runner, preserving
-the single external action surface. When project state is available, retained
-subagents are stored in SQLite with `kind='subagent'` and linked to the parent
-thread, turn, and run ids.
+Workflow nodes are submitted to the host through the builtin workflow plugin.
+The model still only calls `run_python`; the script-side helper is a normal
+Python facade over host RPC.
 
-## MCP From Runtime
-
-MCP is available from managed Python scripts, not as direct model tools.
+The builtin MCP plugin can expose MCP client helpers. MCP remains available from
+managed Python scripts, not as direct model tools:
 
 ```python
 import uv_agent_runtime as rt
 
-with rt.mcp.connect("filesystem") as client:
+with rt.mcp.connect_named("filesystem") as client:
     client.initialize()
     print(client.list_tools())
 ```
 
-`rt.mcp.connect()` searches user/project MCP declarations such as
-`.agents/mcp.json`. Declarations may use stdio, Streamable HTTP, or SSE.
+`rt.mcp.connect_named()` searches user/project MCP declarations when the builtin
+MCP plugin is enabled. Declarations may use stdio, Streamable HTTP, or SSE.
 
 ## Environment
 

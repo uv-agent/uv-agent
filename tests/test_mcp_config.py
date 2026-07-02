@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from uv_agent.mcp_config import McpInstructionsPreview, discover_mcp_servers, render_mcp_summary
+from uv_agent.builtin.mcp.config import McpInstructionsPreview, discover_mcp_servers, render_mcp_summary
 
 
 def test_discover_mcp_servers_from_agents_dir(tmp_path: Path) -> None:

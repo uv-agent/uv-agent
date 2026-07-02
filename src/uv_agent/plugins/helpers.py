@@ -4,19 +4,6 @@ import json
 from typing import Any
 
 
-def payload_from_call(args: list[Any], kwargs: dict[str, Any]) -> dict[str, Any]:
-    if args and kwargs:
-        raise TypeError("Runtime helpers accept either one payload dict or keyword arguments, not both")
-    if len(args) > 1:
-        raise TypeError("Runtime helpers accept at most one positional payload dict")
-    if args:
-        payload = args[0]
-        if not isinstance(payload, dict):
-            raise TypeError("Runtime helper payload must be a dict")
-        return dict(payload)
-    return dict(kwargs)
-
-
 def validate_json_value(value: Any, *, label: str = "value") -> None:
     try:
         json.dumps(value, ensure_ascii=False)

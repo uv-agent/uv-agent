@@ -1,44 +1,59 @@
-"""Centralized color tokens for the TUI.
-
-A small palette is intentional: every surface, border, and accent in the
-application should resolve to one of these constants. This keeps the visual
-language consistent and makes whole-theme changes a single-file edit.
-"""
-
 from __future__ import annotations
 
-# Surfaces (three-step hierarchy).
-BG_CANVAS = "#0b0f14"     # main background, transcript, composer
-BG_SURFACE = "#121821"    # raised surfaces, modal shell, option list rows
-BG_OVERLAY = "#1a2230"    # popovers, hover, sticky buttons
+from dataclasses import dataclass, field
 
-# Foreground text.
-TEXT = "#d8dee9"
-TEXT_STRONG = "#dce7f3"
-TEXT_MUTED = "#7b8796"
 
-# Borders and accents.
-BORDER = "#2a3646"
-BORDER_FOCUS = "#3f9bc9"
-ACCENT = "#7dd3fc"
-ACCENT_DIM = "#3a4a60"
+@dataclass(frozen=True)
+class AnsiTheme:
+    """Semantic ANSI palette used by tui components.
 
-# Modal scrim (rgba so the underlying transcript shows through).
-SCRIM = "rgba(5, 7, 10, 0.78)"
+    Values are SGR fragments without the leading escape wrapper.  The raw ANSI
+    TUI deliberately avoids background colours in normal transcript output so
+    transparent terminals and native selection keep working well.
+    """
 
-# Role colors for the TranscriptCell left "stripe".
-ROLE_USER = "#7dd3fc"        # cyan
-ROLE_ASSISTANT = "#a7f3d0"   # mint
-ROLE_REASONING = "#c4b5fd"   # violet
-ROLE_TOOL = "#fbbf24"        # amber
-ROLE_EVENT = "#64748b"       # slate
-ROLE_ERROR = "#f87171"       # red
-ROLE_PROCESS = "#94a3b8"     # gray
+    reset: str = "0"
+    bold: str = "1"
+    dim: str = "2"
+    italic: str = "3"
+    accent: str = "38;5;117"
+    muted: str = "38;5;245"
+    user: str = "38;5;80"
+    assistant: str = "38;5;121"
+    reasoning: str = "38;5;141"
+    success: str = "38;5;114"
+    warning: str = "38;5;221"
+    goal: str = "1;38;5;202"
+    image_token: str = "1;38;5;117"
+    error: str = "38;5;203"
+    border: str = "38;5;240"
+    border_faint: str = "38;5;237"
+    border_accent: str = "38;5;75"
+    tool_title: str = "38;5;153"
+    tool_output: str = "38;5;252"
+    status: str = "38;5;250"
+    command_palette: str = "38;5;252"
+    command_palette_selected: str = "1;38;5;117"
+    command_palette_border: str = "38;5;60"
+    spinner_frames: tuple[str, ...] = field(
+        default=("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    )
 
-# Error fill (the only role that keeps a background tint).
-BG_ERROR = "#241316"
-TEXT_ERROR = "#ffb4b4"
 
-# Selection highlight (used by TranscriptCell.SELECTION_STYLE).
-SELECTION_BG = ACCENT
-SELECTION_FG = "#061018"
+DEFAULT_THEME = AnsiTheme()
+
+
+def sgr(code: str, text: str) -> str:
+    """Wrap *text* in a single SGR code."""
+
+    if not text:
+        return text
+    return f"[{code}m{text}[0m"
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from *text* for width and tests."""
+
+    import re
+
+    return re.sub(r"\[[0-?]*[ -/]*[@-~]", "", text)

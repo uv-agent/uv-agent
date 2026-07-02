@@ -5,12 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from uv_agent.worktree import (
+from uv_agent.builtin.worktree.operations import (
     CommandResult,
     WorktreeError,
     cleanup_worktree,
     create_worktree,
-    render_worktree_notice,
     validate_worktree_branch_name,
     worktree_path_for_branch,
 )
@@ -31,43 +30,6 @@ def test_worktree_path_for_branch_stays_single_child(tmp_path: Path) -> None:
 
     assert path == project / ".uv-agent" / "worktrees" / "feature"
     assert (project / ".uv-agent" / ".gitignore").read_text(encoding="utf-8") == "*\n"
-
-
-def test_render_worktree_notice_describes_active_and_deleted_context(tmp_path: Path) -> None:
-    project = tmp_path / "repo"
-    worktree = project / ".uv-agent" / "worktrees" / "feature"
-    metadata = {
-        "worktree_status": "active",
-        "worktree_branch": "feature",
-        "worktree_path": str(worktree),
-        "worktree_base_ref": "HEAD",
-        "worktree_origin_root": str(project),
-        "worktree_head": "abc123",
-        "worktree_created_at": "2026-01-01T00:00:00Z",
-        "latest_cwd": str(worktree),
-    }
-
-    active = render_worktree_notice(metadata, status="active")
-    deleted = render_worktree_notice(
-        {
-            **metadata,
-            "worktree_status": "deleted",
-            "latest_cwd": str(project),
-            "worktree_deleted_at": "2026-01-02T00:00:00Z",
-            "worktree_deleted_head": "def456",
-            "worktree_deleted_status": " M file.py",
-        },
-        status="deleted",
-    )
-
-    assert '<worktree status="active">' in active
-    assert "此线程的 Worktree mode 处于活动状态" in active
-    assert str(worktree) in active
-    assert "origin workspace" in active and "不是" in active
-    assert '<worktree status="deleted">' in deleted
-    assert "不要依赖已删除的路径" in deleted
-    assert "def456" in deleted
-    assert " M file.py" in deleted
 
 
 def test_create_and_cleanup_worktree_with_git(tmp_path: Path) -> None:

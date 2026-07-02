@@ -35,12 +35,6 @@ class FffSearchNotAvailableError(HelperRuntimeError):
             ),
         )
 
-
-# Backward-compatible name for callers that imported the old exception.  New
-# code should not mention ripgrep; the runtime no longer shells out to it.
-RipgrepNotFoundError = FffSearchNotAvailableError
-
-
 @dataclass(frozen=True)
 class Submatch:
     """Byte-range of a single match inside the surrounding line."""
@@ -378,7 +372,7 @@ def _resolve_roots(
     root: str | Path,
     roots: str | Path | Sequence[str | Path] | None,
 ) -> list[Path]:
-    """Resolve either the legacy single root or the newer multi-root list."""
+    """Resolve either one root or a multi-root list."""
 
     if roots is None:
         return [resolve_workspace_path(root)]
@@ -456,9 +450,9 @@ def find_files(
 
     ``query`` performs FFF's typo-tolerant filename search. ``globs`` and
     ``types``/``file_types`` are deterministic filters applied to relative paths.
-    FFF respects gitignore/ignore files during indexing by default; the legacy
-    ``hidden`` and ``no_ignore`` parameters are accepted for compatibility but do
-    not alter the native indexer.
+    FFF respects gitignore/ignore files during indexing by default; ``hidden``
+    and ``no_ignore`` are accepted by the shared helper signature but do not alter
+    the native indexer.
     """
 
     _reject_extra_args(extra_args)
@@ -658,9 +652,9 @@ def search_text(
     """Search file contents with FFF and return structured matches.
 
     The default mode is plain text, which is safer for exact code snippets than
-    regular expressions.  Use ``mode="regex"`` for regex patterns or
-    ``mode="fuzzy"`` for typo-tolerant line search.  ``literal`` and
-    ``fixed_string`` are retained as compatibility aliases for plain-text mode.
+    regular expressions. Use ``mode="regex"`` for regex patterns or
+    ``mode="fuzzy"`` for typo-tolerant line search. ``literal`` and
+    ``fixed_string`` force plain-text matching.
     """
 
     _reject_extra_args(extra_args)

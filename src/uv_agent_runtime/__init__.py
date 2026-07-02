@@ -31,7 +31,6 @@ from .facade import (
     file,
     files,
     look_at,
-    mcp,
     normalize,
     patch,
     convert_patch,
@@ -56,10 +55,9 @@ from .textops import (
     TextComparison,
     TextFile,
 )
-from .codesearch import FffSearchNotAvailableError, Match, RipgrepNotFoundError, Submatch
+from .codesearch import FffSearchNotAvailableError, Match, Submatch
 from .codequery import Capture, Symbol
 from .lockfile import HeldFileLock
-from .mcp import McpClient, McpResult, McpServerConfig
 from .patch import PatchResult
 from .threads import (
     BoundedText,
@@ -77,9 +75,6 @@ from .threads import (
     ThreadTurn,
     ThreadView,
 )
-from . import workflow as workflow
-from . import scheduler as scheduler
-
 if os.environ.get(MANAGED_RUN_ENV):
     install_friendly_excepthook()
 
@@ -102,16 +97,12 @@ __all__ = [
     "HelperRuntimeError",
     "HelperValueError",
     "Match",
-    "McpClient",
-    "McpResult",
-    "McpServerConfig",
     "PatchResult",
     "PathInfo",
     "ProcessDetail",
     "ProcessRef",
     "ReplacementResult",
     "FffSearchNotAvailableError",
-    "RipgrepNotFoundError",
     "RunEventDetail",
     "SearchResults",
     "SelectionError",
@@ -139,7 +130,6 @@ __all__ = [
     "file",
     "files",
     "look_at",
-    "mcp",
     "normalize",
     "patch",
     "convert_patch",
@@ -149,12 +139,10 @@ __all__ = [
     "restore",
     "run",
     "search",
-    "scheduler",
     "snapshot",
     "symbols",
     "threads",
     "transaction",
-    "workflow",
 ]
 
 
@@ -206,10 +194,10 @@ def _dynamic_host_helper(name: str) -> Any:
         return None
     kind = resolved.get("kind")
     if kind == "namespace":
-        if resolved.get("transport") == "local_module" and resolved.get("module"):
+        if resolved.get("module"):
             return import_module(str(resolved["module"]))
         return _HostNamespaceProxy(name, resolved)
-    if kind == "function" and resolved.get("transport") == "local_module" and resolved.get("module"):
+    if kind == "function" and resolved.get("module"):
         module = import_module(str(resolved["module"]))
         return getattr(module, str(resolved.get("function") or name.rpartition(".")[2]))
     return _host_function(str(resolved.get("name") or name), resolved)

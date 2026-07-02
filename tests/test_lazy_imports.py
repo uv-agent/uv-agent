@@ -1,11 +1,8 @@
-"""Guards against regressions in TUI/model startup-time imports.
+"""Guards against regressions in model/provider startup-time imports.
 
-The recent lazy-import work moved provider SDKs (OpenAI, Anthropic, MCP),
-image/markdown rendering libraries, and Pygments out of module-level imports
-so the Textual TUI can reach first paint without paying their cost. These
-tests pin that behavior: importing ``uv_agent.model``, ``uv_agent.tui.app``,
-``uv_agent.errors``, or ``uv_agent.thread_titles`` must not pull those heavy
-dependencies into ``sys.modules`` as a side effect.
+Importing ``uv_agent.model``, ``uv_agent.tui.app``, ``uv_agent.errors``, or
+``uv_agent.thread_titles`` must not pull provider SDKs or optional runtime
+integration libraries into ``sys.modules`` as a side effect.
 
 We spawn fresh interpreters because once *any* other test imports e.g.
 ``openai`` the module stays cached in this process, which would mask the
@@ -27,9 +24,6 @@ HEAVY_MODULES = (
     "anthropic",
     "mcp",
     "PIL",
-    "textual_image",
-    "pygments",
-    "rich.markdown",
 )
 
 
@@ -75,7 +69,6 @@ def test_import_uv_agent_thread_titles_stays_lazy() -> None:
 
 
 def test_import_uv_agent_tui_app_stays_lazy() -> None:
-    # The TUI app module is the main beneficiary of the lazy-import work: it
-    # must be importable without dragging in provider SDKs, MCP, Pillow,
-    # textual_image, Pygments, or Rich's Markdown renderer.
+    # The TUI app must be importable without dragging in provider SDKs, MCP, or
+    # Pillow. Rich is a direct dependency of the terminal renderer.
     _assert_imports_stay_lazy("uv_agent.tui.app")

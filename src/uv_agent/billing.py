@@ -231,8 +231,8 @@ def billing_total_from_metadata(
 
     Metadata keeps a per-currency map so a later currency change does not destroy
     the old total. UI surfaces still show a single amount, so they prefer the
-    current pricing currency when available and otherwise fall back to the legacy
-    single ``billing_total`` fields.
+    current pricing currency when available and otherwise fall back to the
+    original single ``billing_total`` fields.
     """
 
     totals = metadata.get("billing_totals")

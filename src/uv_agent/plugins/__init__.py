@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from .api import PluginConfig, PluginManifest, PluginStatus, SetupPlugin
-from .context import PluginContext, PluginContextBroker, SubmittedTurn, TurnContextBlock, TurnPrepareRequest, UserInput
+from .context import PluginContext, PluginContextBroker, PluginRegistration, SubmittedTurn, UserInput
 from .events import EventBus
+from .i18n import I18nTextSpec, LocalizedText, PluginI18nRegistry, localize_text
 from .manager import PluginManager
 from .registry import (
     ActionRegistry,
@@ -11,14 +12,12 @@ from .registry import (
     CommandResult,
     CommandSpec,
     OpenPickerAction,
-    Panel,
     PickerItem,
     PickerSource,
     RuntimeFunctionSpec,
     RuntimeNamespaceRegistry,
     RuntimeNamespaceSpec,
     SetComposerAction,
-    StatusItem,
     TranscriptAction,
     TranscriptEventSpec,
     UiRegistry,
@@ -35,23 +34,24 @@ __all__ = [
     "CommandResult",
     "CommandSpec",
     "EventBus",
-    "Panel",
     "PickerSource",
     "PluginConfig",
     "PluginContext",
     "PluginContextBroker",
+    "PluginRegistration",
     "PluginManager",
     "PluginManifest",
     "PluginStatus",
+    "I18nTextSpec",
+    "LocalizedText",
+    "PluginI18nRegistry",
     "RuntimeFunctionSpec",
     "RuntimeNamespaceRegistry",
     "RuntimeNamespaceSpec",
     "SetupPlugin",
-    "StatusItem",
     "SubmittedTurn",
     "TranscriptEventSpec",
-    "TurnContextBlock",
-    "TurnPrepareRequest",
     "UiRegistry",
     "UserInput",
+    "localize_text",
 ]

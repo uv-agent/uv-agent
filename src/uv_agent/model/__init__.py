@@ -3,11 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 
-# Public names are kept for backwards compatibility, but provider-specific
-# modules are imported only when a caller actually asks for those symbols. This
-# is especially important for TUI startup: importing ``uv_agent.model`` used to
-# import OpenAI, Anthropic, and large generated type modules even before the
-# first screen could be drawn.
+# Provider-specific modules are imported only when a caller asks for their public
+# symbols. This keeps TUI startup from importing OpenAI, Anthropic, and large
+# generated type modules before the first screen is drawn.
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "CHAT_DELTA_CONTROL_FIELDS": ("uv_agent.model.chat", "CHAT_DELTA_CONTROL_FIELDS"),
     "FakeModelClient": ("uv_agent.model.client", "FakeModelClient"),
@@ -57,10 +55,9 @@ __all__ = sorted(_LAZY_EXPORTS)
 def __getattr__(name: str) -> Any:
     """Import public model helpers on demand.
 
-    ``from uv_agent.model import UnifiedModelClient`` still works exactly like
-    before, but unrelated provider SDKs stay unloaded until their APIs are used.
-    The resolved attribute is cached in ``globals()`` so repeated access is as
-    cheap as a normal module global lookup.
+    Unrelated provider SDKs stay unloaded until their APIs are used. The resolved
+    attribute is cached in ``globals()`` so repeated access is as cheap as a
+    normal module global lookup.
     """
 
     try:

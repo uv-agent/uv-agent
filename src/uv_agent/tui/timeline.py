@@ -122,7 +122,7 @@ def _image_id(attachment: dict[str, Any], event: dict[str, Any]) -> str:
 
 @dataclass
 class TimelineItem:
-    """A stable, renderable transcript item independent of Textual widgets."""
+    """A stable, renderable transcript item independent of UI widgets."""
 
     id: str
     kind: TimelineItemKind
@@ -487,7 +487,9 @@ class ThreadTimelineState:
         elif event_type == "model.stream_retry":
             acc.pending_stream_retries.append(dict(event))
         elif event_type == "thread.token_estimation_warning":
-            self._apply_warning(event)
+            self._apply_warning(event, kind="token_estimation")
+        elif event_type == "thread.plugin_epoch_context_warning":
+            self._apply_warning(event, kind="plugin_epoch_context")
         elif event_type == "compaction.completed":
             self._finalize_turn(acc)
             self._apply_compaction(event)
@@ -678,6 +680,8 @@ class ThreadTimelineState:
             items.append(self._warning_item(event, kind="token_estimation"))
         elif event_type == "thread.model_switch_warning":
             items.append(self._warning_item(event, kind="model_switch"))
+        elif event_type == "thread.plugin_epoch_context_warning":
+            items.append(self._warning_item(event, kind="plugin_epoch_context"))
         return items
 
     def _turn(self, turn_id: str) -> TurnAccumulator:
@@ -1033,8 +1037,8 @@ class ThreadTimelineState:
             group.collapsed = True
             self.changed_process_group_ids.add(turn_id)
 
-    def _apply_warning(self, event: dict[str, Any]) -> None:
-        self._append_or_update(self._warning_item(event, kind="token_estimation"))
+    def _apply_warning(self, event: dict[str, Any], *, kind: str) -> None:
+        self._append_or_update(self._warning_item(event, kind=kind))
 
     def _warning_item(self, event: dict[str, Any], *, kind: str) -> TimelineItem:
         event_id = _event_id(event)

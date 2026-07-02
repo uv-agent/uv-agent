@@ -130,8 +130,8 @@ def summarize_runtime_helper_calls(calls: list[HelperCall], *, max_helpers: int 
         if isinstance(duration, float):
             entry["total_duration_ms"] = round(duration, 3)
         if entry.get("count") == 1:
-            # Keep the count available for machine consumers but avoid relying on
-            # it in older callers; display code already treats missing as one.
+            # Keep the count explicit for machine consumers; display code treats
+            # missing and one-count entries the same way.
             entry["count"] = 1
     return result
 

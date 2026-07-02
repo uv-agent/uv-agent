@@ -86,7 +86,6 @@
   },
   "runtime": {
     "default_level": "medium",
-    "ask_default_level": "small",
     "store_provider_response": false,
     "max_agent_rounds": 100,
     "compression": {

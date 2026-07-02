@@ -56,7 +56,6 @@ from uv_agent.config import (
     load_config,
 )
 from uv_agent.errors import EmptyModelStreamError, format_error, is_retryable_provider_error
-from uv_agent.mcp_config import McpInstructionsPreview
 from uv_agent.model import (
     FakeModelClient,
     ModelStreamEvent,
@@ -165,21 +164,6 @@ class ReasoningStreamClient(FakeModelClient):
         )
 
 
-class FakeMcpInstructionsProbe:
-    def __init__(
-        self,
-        instructions: dict[tuple[str, str, str], McpInstructionsPreview] | None = None,
-    ) -> None:
-        self.instructions = instructions or {}
-        self.started = False
-
-    def start(self) -> None:
-        self.started = True
-
-    def snapshot(self) -> dict[tuple[str, str, str], McpInstructionsPreview]:
-        return dict(self.instructions)
-
-
 class DelayedPluginManager:
     def __init__(self, engine: AgentEngine) -> None:
         self.engine = engine
@@ -210,7 +194,11 @@ class DelayedPluginManager:
     def resolve_helper(self, name: str) -> dict[str, Any]:
         return {"found": False, "name": name}
 
-    async def prepare_turn(self, request):
+    def refresh_epoch_context(self, thread_id: str, *, discard_plugins: set[str] | None = None) -> None:
+        del thread_id, discard_plugins
+
+    def compaction_sections(self, thread_id: str) -> list[str]:
+        del thread_id
         return []
 
 
@@ -587,7 +575,7 @@ async def test_agent_persists_compaction_item(tmp_path: Path) -> None:
     assert client.requests[1]["level"] == "small"
     assert client.requests[1]["tools"] == [PYTHON_TOOL]
     assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
-    assert "context_compaction_request" in str(client.requests[1]["input"][-1])
+    assert "agent_context_compaction_request" in str(client.requests[1]["input"][-1])
     assert "CONTEXT CHECKPOINT COMPACTION" in str(client.requests[1]["input"][-1])
     assert "Target length" not in str(client.requests[1]["input"][-1])
     assert COMPACTED_CONTEXT_CONTINUATION in str(compaction["replacement_input"])
@@ -663,7 +651,7 @@ def test_strip_compaction_judge_history_removes_internal_exchange_only() -> None
     )
     filtered_text = "\n".join(message_item_text(item) for item in filtered if item.get("type") == "message")
 
-    assert "<compaction_judge_request>" not in filtered_text
+    assert "<agent_compaction_judge_request>" not in filtered_text
     assert "remaining_calls_bucket" not in filtered_text
     assert [message_item_text(item) for item in filtered if item.get("type") == "message"] == [
         "old request",
@@ -740,7 +728,7 @@ async def test_cache_aware_judge_replays_completed_judge_before_user_without_cou
     assert [event["type"] for event in stored].count("item.user") == 1
     assert any(event["type"] == "item.judge_request" for event in stored)
     assert any(event["type"] == "item.judge_response" for event in stored)
-    assert "<compaction_judge_request>" in "\n".join(main_texts)
+    assert "<agent_compaction_judge_request>" in "\n".join(main_texts)
     assert '{"remaining_calls_bucket":"60_plus"' in str(main_input)
     assert main_texts[-1] == "fresh task"
 
@@ -922,9 +910,9 @@ async def test_cache_aware_judge_can_compact_below_threshold_and_keeps_current_u
     assert any(event["type"] == "compaction.completed" for event in events)
     assert any(event["type"] == "item.compaction" for event in stored)
     assert client.requests[1]["input"][-1]  # compaction request ran before main response
-    assert "<conversation_summary>" in "\n".join(main_texts)
+    assert "<agent_conversation_summary>" in "\n".join(main_texts)
     assert "history summary" in "\n".join(main_texts)
-    assert "<compaction_judge_request>" not in "\n".join(main_texts)
+    assert "<agent_compaction_judge_request>" not in "\n".join(main_texts)
     assert main_texts[-1] == "new work"
     assert engine.last_judge_summary()["compacted"] is True
 
@@ -1083,11 +1071,11 @@ async def test_compaction_sanitizes_prior_judge_history_without_changing_replay(
     compaction = next(event for event in engine.thread_store.read(thread_id) if event.get("type") == "item.compaction")
     replacement_text = "\n".join(str(item) for item in compaction.get("replacement_input") or [])
 
-    assert "<compaction_judge_request>" in replay_text
+    assert "<agent_compaction_judge_request>" in replay_text
     assert "remaining_calls_bucket" in replay_text
-    assert "<compaction_judge_request>" not in compact_text
+    assert "<agent_compaction_judge_request>" not in compact_text
     assert "remaining_calls_bucket" not in compact_text
-    assert "<compaction_judge_request>" not in replacement_text
+    assert "<agent_compaction_judge_request>" not in replacement_text
     assert "remaining_calls_bucket" not in replacement_text
 
 @pytest.mark.asyncio
@@ -1402,7 +1390,7 @@ def test_compaction_replacement_keeps_recent_user_messages_with_budget(tmp_path:
     recent_text = "recent request"
     input_items = [
         message_item("user", old_text),
-        message_item("user", "<workspace_rule_index>\nAGENTS.md\n</workspace_rule_index>"),
+        message_item("user", "<agent_workspace_rule_index>\nAGENTS.md\n</agent_workspace_rule_index>"),
         message_item("assistant", "assistant output"),
         message_item("user", recent_text),
     ]
@@ -1423,20 +1411,20 @@ def test_compaction_replacement_keeps_recent_user_messages_with_budget(tmp_path:
     replacement = engine._compaction_replacement_input(input_items, response)
     text = message_item_text(replacement[0])
 
-    assert text.startswith("<compaction_handoff>")
+    assert text.startswith("<agent_compaction_handoff>")
     assert recent_text in text
     assert "workspace_rule_index" not in text
     assert "assistant output" not in text
     assert COMPACTION_TRUNCATION_SUFFIX.strip() in text
-    assert "<retained_history>" in text
+    assert "<agent_retained_history>" in text
     assert '<message role="user">' in text
     assert "<retained_history_message" not in text
-    assert text.index("<retained_history>") < text.index("<conversation_summary>") < text.index("<compaction_continuation>")
+    assert text.index("<agent_retained_history>") < text.index("<agent_conversation_summary>") < text.index("<agent_compaction_continuation>")
     assert COMPACTED_CONTEXT_CONTINUATION in text
     assert "<compacted_context_continuation>" not in text
 
 
-def test_cache_aware_retained_history_merges_legacy_users_and_recent_context(tmp_path: Path) -> None:
+def test_cache_aware_retained_history_deduplicates_user_and_recent_context(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -1474,7 +1462,7 @@ def test_cache_aware_retained_history_merges_legacy_users_and_recent_context(tmp
 
     handoff = message_item_text(engine._compaction_replacement_input(input_items, response, K=1_000)[0])
 
-    assert handoff.startswith("<compaction_handoff>")
+    assert handoff.startswith("<agent_compaction_handoff>")
     assert handoff.count("same request") == 1
     assert handoff.count('<message role="user">') == 1
     assert '<message role="assistant">' in handoff
@@ -1482,7 +1470,7 @@ def test_cache_aware_retained_history_merges_legacy_users_and_recent_context(tmp
     assert '<tool_call name="run_python" call_id="call_1">' in handoff
     assert '<tool_output call_id="call_1">' in handoff
     assert "<retained_history_message" not in handoff
-    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
+    assert handoff.index("<agent_retained_history>") < handoff.index("<agent_conversation_summary>") < handoff.index("<agent_compaction_continuation>")
 
 
 @pytest.mark.asyncio
@@ -1553,10 +1541,10 @@ async def test_agent_compacts_after_tool_outputs_before_next_model_request(tmp_p
     assert events[-1]["type"] == "turn.completed"
     assert events[-1]["final_text"] == "done after compaction"
     assert len(client.requests) == 3
-    assert "context_compaction_request" in str(client.requests[1]["input"][-1])
+    assert "agent_context_compaction_request" in str(client.requests[1]["input"][-1])
     assert POST_TOOL_COMPACTION_BRIDGE in str(client.requests[1]["input"])
     assert client.requests[2]["previous_response_id"] is None
-    assert "conversation_summary" in str(client.requests[2]["input"])
+    assert "agent_conversation_summary" in str(client.requests[2]["input"])
     assert "summary includes tool result" in str(client.requests[2]["input"])
     assert any(event["type"] == "item.assistant" for event in stored)
     assert any(event["type"] == "item.compaction" for event in stored)
@@ -3164,54 +3152,6 @@ async def test_responses_tool_look_at_resends_full_context_before_resuming_incre
     assert "follow up" in str(client.requests[2]["input"])
 
 
-def test_reconstructs_legacy_tool_image_after_tool_output(tmp_path: Path) -> None:
-    project_root = tmp_path / "project"
-    project_root.mkdir()
-    image = tmp_path / "legacy.png"
-    image.write_bytes(b"\x89PNG\r\n\x1a\n")
-    config = make_test_config(project_root)
-    engine = AgentEngine(
-        config=config,
-        model_client=FakeModelClient([]),
-        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
-        thread_store=ThreadStore(tmp_path / "state"),
-        project_root=project_root,
-    )
-    thread_id = engine.thread_store.create_thread()
-    attachment = engine.attachments.register_image(image, cwd=project_root, thread_id=thread_id)
-    engine.thread_store.append(
-        thread_id,
-        "item.model_response",
-        turn_id="t1",
-        output=[
-            {
-                "type": "function_call",
-                "call_id": "call_1",
-                "name": "run_python",
-                "arguments": "{}",
-            }
-        ],
-    )
-    engine.thread_store.append(
-        thread_id,
-        "item.image_attachment",
-        turn_id="t1",
-        attachment=attachment.to_event_payload(),
-    )
-    engine.thread_store.append(
-        thread_id,
-        "item.tool_output",
-        turn_id="t1",
-        item={"type": "function_call_output", "call_id": "call_1", "output": "{}"},
-    )
-
-    reconstructed = engine._reconstruct_input(thread_id)
-    messages = chat_messages(reconstructed, instructions=None, model=config.model_for_level(None))
-
-    assert [message["role"] for message in messages[-3:]] == ["tool", "assistant", "user"]
-    assert messages[-1]["content"][1]["type"] == "image_url"
-
-
 def test_anthropic_tool_image_context_keeps_tool_result_before_bridge(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -3596,14 +3536,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
         "{\"servers\":{\"demo\":{\"command\":\"python\",\"description\":\"Demo MCP\"}}}",
         encoding="utf-8",
     )
-    mcp_probe = FakeMcpInstructionsProbe(
-        {
-            ("project", "demo", str(mcp_path)): McpInstructionsPreview(
-                "Use demo tools carefully.",
-                truncated=False,
-            )
-        }
-    )
     config = load_config(project_root, [])
     runner = PythonRunner(
         project_root=project_root,
@@ -3622,7 +3554,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
         runner=runner,
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
-        mcp_instructions_probe=mcp_probe,
     )
 
     prompt = engine.system_instructions()
@@ -3685,14 +3616,17 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "如果某项能力能减少步骤、节省时间或降低风险，就优先使用" in prompt
     assert "Actively use available capabilities" not in prompt
     assert "Actively use available external capabilities" not in prompt
-    assert "runtime helpers、declared skills、declared MCP servers" in prompt
+    assert "runtime helpers、插件提供的上下文能力" in prompt
+    assert "declared skills" not in prompt
+    assert "declared MCP servers" not in prompt
     assert "subprocesses through Python" not in prompt
     assert "Prefer existing helpers and declared external capabilities" not in prompt
     assert "use simple Python for glue code or very small work" not in prompt
     assert "only when it materially helps" not in prompt
-    assert "使用 workflow 相关的 runtime helper 函数" in prompt and "独立或长时间运行的模型任务" in prompt
     assert "并发运行相互独立的任务" in prompt
-    assert "workflow nodes 或 run_python 内的独立 helper operations" in prompt
+    assert "插件提供的后台能力或 run_python 内的独立 helper operations" in prompt
+    assert "使用 workflow 相关的 runtime helper 函数" not in prompt
+    assert "workflow nodes" not in prompt
     assert "对同一文件的写入保持顺序执行" in prompt
     assert "Plan each run_python call as a complete work unit" not in prompt
     assert "Use one call for a complete work unit" not in prompt
@@ -3708,9 +3642,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "item.context_update is an internal persistence event" not in prompt
     assert "After compaction, current context updates are re-sent" not in prompt
     assert "Interrupted turns may appear in context" not in prompt
-    assert "<runtime_environment>" not in prompt
-    assert "<model_levels>" not in prompt
-    assert "</runtime_helpers>" not in prompt
+    assert "<agent_runtime_environment>" not in prompt
+    assert "<agent_model_levels>" not in prompt
+    assert "</agent_runtime_helpers>" not in prompt
     assert "custom patch envelope" not in prompt
     assert "connect_named(\"files\")" not in prompt
     assert "saved_scripts" not in prompt
@@ -3718,7 +3652,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
 
     turn_context = engine._turn_context_text()
 
-    assert "<runtime_environment>" in turn_context
+    assert "<agent_runtime_environment>" in turn_context
     assert "<host>" in turn_context
     assert "<user_language>" in turn_context
     assert str(project_root) in turn_context
@@ -3728,8 +3662,8 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert str(runner.scriptenv_dir / "pyproject.toml") in turn_context
     assert "uv-agent&gt;=0.6.2" not in turn_context
     assert "<dependency>requests&gt;=2</dependency>" in turn_context
-    assert "<model_levels>" not in turn_context
-    assert "</runtime_helpers>" in turn_context
+    assert "<agent_model_levels>" not in turn_context
+    assert "</agent_runtime_helpers>" in turn_context
     assert "import uv_agent_runtime as rt" in turn_context
     assert "<common_types>" in turn_context
     assert "CollectionResult[T]" in turn_context
@@ -3854,7 +3788,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "edit=用 File.replace 替换唯一小段文本" in turn_context
     assert "完整文件或生成的内容用 File.write" in turn_context
     assert "普通外部命令（包括" in turn_context
-    assert "包括 skills 或 docs 中展示的 shell commands" in turn_context
+    assert "包括 docs 或插件上下文中展示的 shell commands" in turn_context
     assert "优先用 `rt.run(...)` 而不是 raw subprocess" in turn_context
     assert "自定义进程控制" in turn_context
     assert "thread history=rt.threads.list/view/detail" in turn_context
@@ -3881,6 +3815,10 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "pathlib" in turn_context
     assert "这些 mentions 只是纯文本提示" in prompt
     assert "在 run_python 中使用对应 runtime helper 读取并检查它" in prompt
+    assert "@mcp:name" not in prompt
+    assert "@skill:name" not in prompt
+    assert "available skills context" not in prompt
+    assert "runtime MCP helpers" not in prompt
     assert "read_text, write_text" not in prompt
     assert "list_files" not in prompt
     assert "run_command/check_command" not in prompt
@@ -3893,7 +3831,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert '<mcp_server name="demo" scope="project"' not in turn_context
     assert "<description>Demo MCP</description>" not in turn_context
     assert '<instructions truncated="false">Use demo tools carefully.</instructions>' not in turn_context
-    assert mcp_probe.started is True
     assert "遇到适合任务的 skill 时" not in turn_context
     assert "遇到适合任务的 MCP server 时" not in turn_context
 
@@ -3926,13 +3863,12 @@ def test_agent_prompt_lists_configured_model_levels_without_fixed_examples(tmp_p
         runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
-        mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
 
     prompt = engine.system_instructions()
     turn_context = engine._turn_context_text()
 
-    assert "<model_levels>" not in turn_context
+    assert "<agent_model_levels>" not in turn_context
     assert "<default>deep</default>" not in turn_context
     assert "<level>fast</level>" not in turn_context
     assert "<level>deep</level>" not in turn_context
@@ -4112,54 +4048,6 @@ async def test_agent_accumulates_billing_for_model_response(tmp_path: Path) -> N
     assert any(event["type"] == "thread.billing_accumulated" for event in engine.thread_store.read(thread_id))
 
 
-def test_subagent_billing_rolls_into_parent_thread(tmp_path: Path) -> None:
-    project_root = tmp_path / "project"
-    project_root.mkdir()
-    config = make_test_config(
-        project_root,
-        pricing=PricingConfig(
-            currency="USD",
-            unit="1M_tokens",
-            models={"default": ModelPricingConfig(input=1.0, output=2.0, cached_input=0.25)},
-        ),
-    )
-    engine = AgentEngine(
-        config=config,
-        model_client=FakeModelClient([]),
-        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
-        thread_store=ThreadStore(tmp_path / "state"),
-        project_root=project_root,
-    )
-    parent_id = engine.thread_store.create_thread()
-    subthread_id = engine.thread_store.create_thread(
-        "Subagent",
-        kind="subagent",
-        parent_thread_id=parent_id,
-        parent_turn_id="turn_parent",
-    )
-    engine.thread_store.append(
-        subthread_id,
-        "thread.billing_accumulated",
-        amount="0.00042",
-        currency="USD",
-        source="model_response",
-    )
-
-    _rules, visible = engine._process_runner_events(
-        [{"kind": "subagent.completed", "thread_id": subthread_id}],
-        thread_id=parent_id,
-        turn_id="turn_parent",
-    )
-    digest = engine.thread_store.thread_digest(parent_id)
-
-    assert visible == [{"kind": "subagent.completed", "thread_id": subthread_id}]
-    assert digest["billing_total"] == "0.00042"
-    event = engine.thread_store.latest_event(parent_id, "thread.billing_accumulated")
-    assert event is not None
-    assert event["source"] == "subagent"
-    assert event["subthread_id"] == subthread_id
-
-
 def test_context_percent_prefers_latest_usage(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -4258,10 +4146,10 @@ async def test_agent_sends_project_rule_index_without_rule_contents(tmp_path: Pa
     events = [event async for event in engine.run_turn(user_text="hello")]
 
     request_text = str(client.requests[0]["input"])
-    assert '<workspace_rules path=".">' in request_text
+    assert '<agent_workspace_rules path=".">' in request_text
     assert '<rule file="AGENTS.md">' in request_text
     assert "Use the local rule." in request_text
-    assert "<workspace_rule_index>" in request_text
+    assert "<agent_workspace_rule_index>" in request_text
     assert "AGENTS.md" in request_text
     stored = engine.thread_store.read(events[-1]["thread_id"])
     assert any(event["type"] == "item.rules_loaded" and event.get("source") == "project" for event in stored)
@@ -4333,12 +4221,12 @@ async def test_compaction_request_reuses_main_prefix(tmp_path: Path) -> None:
     events = [event async for event in engine.run_turn(user_text="hello")]
 
     assert events[-1]["type"] == "turn.completed"
-    assert '<workspace_rules path=".">' in str(client.requests[0]["input"])
+    assert '<agent_workspace_rules path=".">' in str(client.requests[0]["input"])
     assert "Never persist this rule." in str(client.requests[0]["input"])
-    assert "<workspace_rule_index>" in str(client.requests[0]["input"])
+    assert "<agent_workspace_rule_index>" in str(client.requests[0]["input"])
     assert "AGENTS.md" in str(client.requests[0]["input"])
     assert client.requests[0]["input"] == client.requests[1]["input"][: len(client.requests[0]["input"])]
-    assert "context_compaction_request" in str(client.requests[1]["input"][-1])
+    assert "agent_context_compaction_request" in str(client.requests[1]["input"][-1])
     assert "CONTEXT CHECKPOINT COMPACTION" in str(client.requests[1]["input"][-1])
 
 
@@ -4428,7 +4316,7 @@ async def test_project_rules_are_deduped_and_not_reloaded_on_file_change(tmp_pat
     [event async for event in engine.run_turn(user_text="two", thread_id=first)]
     requests_text = [str(request["input"]) for request in client.requests[:2]]
 
-    assert '<workspace_rules path=".">' in requests_text[0]
+    assert '<agent_workspace_rules path=".">' in requests_text[0]
     assert "AGENTS.md" in requests_text[0]
     assert "Rule v1." in requests_text[0]
     assert client.requests[1]["previous_response_id"] == "resp_1"
@@ -4546,9 +4434,9 @@ async def test_project_rules_reappear_after_compaction_epoch(tmp_path: Path) -> 
 
     assert first
     assert second
-    assert '<workspace_rules path=".">' in str(second)
+    assert '<agent_workspace_rules path=".">' in str(second)
     assert "After compaction rule." in str(second)
-    assert "<workspace_rule_index>" in str(second)
+    assert "<agent_workspace_rule_index>" in str(second)
     assert "AGENTS.md" in str(second)
 
 
@@ -4579,16 +4467,16 @@ async def test_compaction_epoch_reloads_project_rules_and_active_cwd_rules(tmp_p
     items = engine._pre_user_context_items(thread_id)
     text = str(items)
 
-    assert "<workspace_rule_index>" in text
-    assert '<workspace_rules path=".">' in text
-    assert '<workspace_rules path="src">' in text
+    assert "<agent_workspace_rule_index>" in text
+    assert '<agent_workspace_rules path=".">' in text
+    assert '<agent_workspace_rules path="src">' in text
     assert '<rule file="AGENTS.md">' in text
     assert "AGENTS.md" in text
     assert "src/AGENTS.md" in text
     assert "pkg/AGENTS.md" in text
     assert "Root rule." in text
     assert "Child rule." in text
-    assert "active_cwd_notice" in text
+    assert "agent_active_cwd_notice" in text
     assert "src" in text
 
 
@@ -4647,7 +4535,7 @@ async def test_system_instructions_are_persisted_before_first_model_request(tmp_
     stored_after = engine.thread_store.read(thread_id)
     assert sum(1 for event in stored_after if event["type"] == "item.system_instructions") == 1
     assert client.requests[1]["instructions"] == frozen
-    assert "<model_levels>" not in client.requests[1]["instructions"]
+    assert "<agent_model_levels>" not in client.requests[1]["instructions"]
 
 
 @pytest.mark.asyncio
@@ -4696,8 +4584,8 @@ async def test_system_instructions_refresh_after_compaction(tmp_path: Path) -> N
 
     assert "<agent_epoch_context>" in str(client.requests[0]["input"])
     assert "<agent_epoch_context>" in str(client.requests[1]["input"])
-    assert "<model_levels>" not in str(client.requests[0]["input"])
-    assert "<model_levels>" not in str(client.requests[1]["input"])
+    assert "<agent_model_levels>" not in str(client.requests[0]["input"])
+    assert "<agent_model_levels>" not in str(client.requests[1]["input"])
     stored = engine.thread_store.read(thread_id)
     assert sum(1 for event in stored if event["type"] == "item.system_instructions") == 2
 
@@ -4717,19 +4605,30 @@ def test_plugin_epoch_context_reappears_after_compaction_epoch(tmp_path: Path) -
     engine.plugins.contexts.publish(
         plugin="demo-plugin",
         tag="demo_status",
-        body={"state": "ready"},
+        body={"state": "setup"},
     )
+    engine.plugins._epoch_context_refreshers.append((
+        "demo-plugin",
+        lambda thread_id=None: engine.plugins.contexts.publish(
+            plugin="demo-plugin",
+            tag="demo_status",
+            body={"state": "refresh"},
+        ),
+    ))
 
     first = engine._runtime_context_items(thread_id)
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
     second = engine._runtime_context_items(thread_id)
 
     assert "<agent_demo_status>" in str(first)
+    assert "<state>setup</state>" in str(first)
+    assert "<state>refresh</state>" not in str(first)
     assert "<agent_demo_status>" in str(second)
+    assert "<state>refresh</state>" in str(second)
     assert "<agent_epoch_context>" in str(second)
-    assert "<runtime_environment>" in str(second)
-    assert "<runtime_helpers>" in str(second)
-    assert "<model_levels>" not in str(second)
+    assert "<agent_runtime_environment>" in str(second)
+    assert "<agent_runtime_helpers>" in str(second)
+    assert "<agent_model_levels>" not in str(second)
 
 
 def test_plugin_epoch_context_is_not_repeated_after_compaction_epoch_update(tmp_path: Path) -> None:
@@ -4749,6 +4648,14 @@ def test_plugin_epoch_context_is_not_repeated_after_compaction_epoch_update(tmp_
         tag="demo_status",
         body={"state": "ready"},
     )
+    engine.plugins._epoch_context_refreshers.append((
+        "demo-plugin",
+        lambda thread_id=None: engine.plugins.contexts.publish(
+            plugin="demo-plugin",
+            tag="demo_status",
+            body={"state": "ready"},
+        ),
+    ))
 
     engine._runtime_context_items(thread_id)
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
@@ -4782,15 +4689,15 @@ def test_plugin_epoch_publish_sends_incremental_section_only(tmp_path: Path) -> 
 
     first_text = message_item_text(first[0])
     assert first_text.startswith("<agent_epoch_context>\n")
-    assert "<runtime_environment>" in first_text
-    assert "<runtime_helpers>" in first_text
+    assert "<agent_runtime_environment>" in first_text
+    assert "<agent_runtime_helpers>" in first_text
     text = message_item_text(second[0])
     assert text.startswith("<agent_epoch_context_update>\n")
     assert text.endswith("</agent_epoch_context_update>")
     assert '<agent_available_skills operation="publish">' in text
     assert "<name>demo</name>" in text
-    assert "<runtime_environment>" not in text
-    assert "<runtime_helpers>" not in text
+    assert "<agent_runtime_environment>" not in text
+    assert "<agent_runtime_helpers>" not in text
 
 
 def test_plugin_epoch_remove_sends_removal_only(tmp_path: Path) -> None:
@@ -4803,7 +4710,6 @@ def test_plugin_epoch_remove_sends_removal_only(tmp_path: Path) -> None:
         runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
-        mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
     thread_id = engine.thread_store.create_thread()
     engine.plugins.contexts.publish(
@@ -4821,8 +4727,8 @@ def test_plugin_epoch_remove_sends_removal_only(tmp_path: Path) -> None:
     assert text.startswith("<agent_epoch_context_update>\n")
     assert '<agent_available_mcp_servers operation="remove">' in text
     assert "<reason>removed</reason>" in text
-    assert "<runtime_environment>" not in text
-    assert "<runtime_helpers>" not in text
+    assert "<agent_runtime_environment>" not in text
+    assert "<agent_runtime_helpers>" not in text
 
 
 def test_plugin_epoch_update_sends_single_document_only(tmp_path: Path) -> None:
@@ -4835,7 +4741,6 @@ def test_plugin_epoch_update_sends_single_document_only(tmp_path: Path) -> None:
         runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
-        mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
     thread_id = engine.thread_store.create_thread()
     engine.plugins.contexts.publish(
@@ -4856,7 +4761,7 @@ def test_plugin_epoch_update_sends_single_document_only(tmp_path: Path) -> None:
     assert text.startswith("<agent_epoch_context_update>\n")
     assert '<agent_mcp_server operation="update">' in text
     assert "<instructions>Use the first MCP carefully.</instructions>" in text
-    assert "<runtime_environment>" not in text
+    assert "<agent_runtime_environment>" not in text
 
 
 def test_runtime_context_restart_preserves_sent_epoch_until_plugins_republish(tmp_path: Path) -> None:
@@ -4870,7 +4775,6 @@ def test_runtime_context_restart_preserves_sent_epoch_until_plugins_republish(tm
         runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
         thread_store=store,
         project_root=project_root,
-        mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
     thread_id = store.create_thread()
     first_engine.plugins.contexts.publish(
@@ -4886,7 +4790,6 @@ def test_runtime_context_restart_preserves_sent_epoch_until_plugins_republish(tm
         runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
-        mcp_instructions_probe=FakeMcpInstructionsProbe(),
     )
     second = restarted_engine._runtime_context_items(thread_id)
 
@@ -4894,7 +4797,7 @@ def test_runtime_context_restart_preserves_sent_epoch_until_plugins_republish(tm
     assert second == []
 
 
-def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> None:
+def test_turn_context_text_has_stable_order_and_prefix(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -4906,14 +4809,11 @@ def test_runtime_context_update_has_stable_order_and_prefix(tmp_path: Path) -> N
         project_root=project_root,
     )
 
-    update = engine._turn_context_update(None)
-
-    assert update is not None
-    text = update["text"]
-    assert text.startswith("<runtime_environment>")
-    assert "<context_update" not in text
-    assert text.index("<runtime_environment>") < text.index("<runtime_helpers>")
-    assert "<model_levels>" not in text
+    text = engine._turn_context_text()
+    assert text.startswith("<agent_runtime_environment>")
+    assert "<agent_context_update" not in text
+    assert text.index("<agent_runtime_environment>") < text.index("<agent_runtime_helpers>")
+    assert "<agent_model_levels>" not in text
     assert text.index('name="file"') < text.index('name="search"')
     assert text.index('name="search"') < text.index('name="files"')
     assert text.index('name="files"') < text.index('name="symbols"')
@@ -4951,11 +4851,40 @@ def test_plugin_epoch_context_is_grouped_after_core_context(tmp_path: Path) -> N
     assert len(items) == 1
     text = message_item_text(items[0])
     assert text.startswith("<agent_epoch_context>\n")
-    assert text.index("<runtime_helpers>") < text.index("<agent_demo_helper>")
+    assert text.index("<agent_runtime_helpers>") < text.index("<agent_demo_helper>")
     assert "<signature>rt.demo.helper(name: str) -&gt; Any</signature>" in text
     assert "<description>Demo helper.</description>" in text
     stored = engine.thread_store.read_events(thread_id, event_types={"item.agent_epoch_context"})
     assert len(stored) == 1
+
+
+def test_large_plugin_epoch_context_records_generic_warning(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root, context_window_tokens=20)
+    engine = AgentEngine(
+        config=config,
+        model_client=FakeModelClient([]),
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread()
+    engine.plugins.contexts.publish(
+        plugin="demo-plugin",
+        tag="demo_context",
+        body={"text": "x" * 200},
+    )
+
+    engine._runtime_context_items(thread_id)
+    engine._runtime_context_items(thread_id)
+
+    warnings = engine.thread_store.read_events(thread_id, event_types={"thread.plugin_epoch_context_warning"})
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning["plugin"] == "demo-plugin"
+    assert warning["tag"] == "demo_context"
+    assert warning["chars"] > warning["threshold_chars"]
 
 
 @pytest.mark.asyncio
@@ -5037,7 +4966,6 @@ async def test_run_turn_injects_plugin_pre_user_context_before_user_message(tmp_
 
     class InjectingPluginManager:
         def __init__(self) -> None:
-            self.requests = []
             self.contexts = PluginContextBroker()
 
         def start_background(self) -> asyncio.Task[None]:
@@ -5052,27 +4980,26 @@ async def test_run_turn_injects_plugin_pre_user_context_before_user_message(tmp_
         def resolve_helper(self, name: str) -> dict[str, Any]:
             return {"found": False, "name": name}
 
-        async def prepare_turn(self, request):
-            self.requests.append(request)
-            self.contexts.enqueue_turn(
-                plugin="time-plugin",
-                thread_id=request.thread_id,
-                tag="current_time",
-                body={"value": "2026-06-22T12:00:00+00:00"},
-            )
+        def refresh_epoch_context(self, thread_id: str, *, discard_plugins: set[str] | None = None) -> None:
+            del thread_id, discard_plugins
+
+        def compaction_sections(self, thread_id: str) -> list[str]:
+            del thread_id
             return []
 
     plugins = InjectingPluginManager()
     engine.plugins = plugins  # type: ignore[assignment]
+    thread_id = engine.thread_store.create_thread()
+    plugins.contexts.enqueue_turn(
+        plugin="time-plugin",
+        thread_id=thread_id,
+        tag="current_time",
+        body={"value": "2026-06-22T12:00:00+00:00"},
+    )
 
-    events = [event async for event in engine.run_turn(user_text="hello")]
+    events = [event async for event in engine.run_turn(user_text="hello", thread_id=thread_id)]
 
     assert events[-1]["type"] == "turn.completed"
-    assert len(plugins.requests) == 1
-    request = plugins.requests[0]
-    assert request.user_text == "hello"
-    assert request.is_first_turn is True
-    assert request.last_assistant_completed_at is None
     request_texts = [message_item_text(item) for item in client.requests[0]["input"] if item.get("type") == "message"]
     plugin_index = next(index for index, text in enumerate(request_texts) if text.startswith("<agent_turn_context>"))
     user_index = request_texts.index("hello")
@@ -5080,7 +5007,6 @@ async def test_run_turn_injects_plugin_pre_user_context_before_user_message(tmp_
     assert "<agent_current_time>" in request_texts[plugin_index]
     assert "2026-06-22T12:00:00+00:00" in request_texts[plugin_index]
 
-    thread_id = events[-1]["thread_id"]
     stored_plugin_contexts = [
         event for event in engine.thread_store.read(thread_id) if event["type"] == "item.agent_turn_context"
     ]
@@ -5088,109 +5014,22 @@ async def test_run_turn_injects_plugin_pre_user_context_before_user_message(tmp_
     assert "<agent_current_time>" in stored_plugin_contexts[0]["text"]
 
 
-@pytest.mark.asyncio
-async def test_prepare_turn_request_includes_previous_completion_times(tmp_path: Path) -> None:
-    project_root = tmp_path / "project"
-    project_root.mkdir()
-    config = make_test_config(project_root)
-    client = CompletedOnlyStreamClient(
-        [
-            {
-                "id": "resp_1",
-                "output_text": "first",
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "first"}],
-                    }
-                ],
-            },
-            {
-                "id": "resp_2",
-                "output_text": "second",
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "second"}],
-                    }
-                ],
-            },
-        ]
-    )
-    engine = AgentEngine(
-        config=config,
-        model_client=client,
-        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
-        thread_store=ThreadStore(tmp_path / "state"),
-        project_root=project_root,
-    )
+def test_workflow_context_is_structured_and_examples_compile() -> None:
+    from uv_agent.builtin.workflow.context import WORKFLOW_CONTEXT_EXAMPLES, render_workflow_context
 
-    class RecordingPluginManager:
-        def __init__(self) -> None:
-            self.requests = []
+    body = render_workflow_context()
 
-        def start_background(self) -> asyncio.Task[None]:
-            async def start() -> None:
-                return None
-
-            return asyncio.create_task(start())
-
-        def helper_specs(self):
-            return []
-
-        def resolve_helper(self, name: str) -> dict[str, Any]:
-            return {"found": False, "name": name}
-
-        async def prepare_turn(self, request):
-            self.requests.append(request)
-            return []
-
-    plugins = RecordingPluginManager()
-    engine.plugins = plugins  # type: ignore[assignment]
-
-    first_events = [event async for event in engine.run_turn(user_text="first request")]
-    thread_id = first_events[-1]["thread_id"]
-    await asyncio.sleep(0)
-    second_events = [event async for event in engine.run_turn(user_text="second request", thread_id=thread_id)]
-
-    assert second_events[-1]["type"] == "turn.completed"
-    assert len(plugins.requests) == 2
-    assert plugins.requests[0].is_new_thread is True
-    assert plugins.requests[0].is_first_turn is True
-    assert plugins.requests[0].last_turn_completed_at is None
-    assert plugins.requests[0].last_assistant_completed_at is None
-    assert plugins.requests[1].is_new_thread is False
-    assert plugins.requests[1].is_first_turn is False
-    assert plugins.requests[1].last_turn_completed_at is not None
-    assert plugins.requests[1].last_assistant_completed_at is not None
-
-
-
-def test_workflow_context_xml_has_compact_prompt_format() -> None:
-    from uv_agent.workflow_context import render_workflow_context
-
-    context = render_workflow_context()
-    lines = context.splitlines()
-
-    assert lines[0] == '<workflow_context scope="main_agent" status="current">'
-    assert lines[-1] == "</workflow_context>"
-    assert "  <" not in context
-    assert "\n\n<" not in context
-
-    import re
-
-    examples = re.findall(r"<example name=\"([^\"]+)\">", context)
-    code_blocks = re.findall(r"<code>\n(.*?)\n</code>", context, flags=re.S)
-    assert examples == [
+    assert body["purpose"]
+    assert "<workflow_context" not in str(body)
+    assert "rt.workflow.start" in body["helper"]["signature"]
+    assert [item["name"] for item in WORKFLOW_CONTEXT_EXAMPLES] == [
         "create_investigation_graph",
         "inspect_first_checkpoint_and_extend_graph",
         "inspect_review_checkpoint_and_finalize",
     ]
-    assert len(code_blocks) == 3
-    for code in code_blocks:
-        compile(code, "<workflow_context_example>", "exec")
+    assert body["examples"] == [dict(item) for item in WORKFLOW_CONTEXT_EXAMPLES]
+    for example in WORKFLOW_CONTEXT_EXAMPLES:
+        compile(example["code"], "<workflow_context_example>", "exec")
 
 
 def start_builtin_plugins(engine: AgentEngine) -> None:
@@ -5199,6 +5038,12 @@ def start_builtin_plugins(engine: AgentEngine) -> None:
 
 def context_text(items: list[dict[str, Any]]) -> str:
     return "\n".join(message_item_text(item) for item in items)
+
+
+def agent_turn_context_text(engine: AgentEngine, thread_id: str) -> str:
+    state = SimpleNamespace(input_items=[], pending_items=[])
+    engine._append_agent_turn_context_items(thread_id=thread_id, turn_id="test-turn", turn_input=state)
+    return context_text(state.input_items)
 
 
 def enable_plugin_goal(engine: AgentEngine, thread_id: str, objective: str = "") -> None:
@@ -5224,12 +5069,14 @@ def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -
     repeated = context_text(engine._pre_user_context_items(thread_id))
 
     assert '<agent_workflow_context scope="main_agent">' in first
-    assert 'example name="create_investigation_graph"' in first
-    assert 'example name="inspect_first_checkpoint_and_extend_graph"' in first
-    assert 'example name="inspect_review_checkpoint_and_finalize"' in first
+    assert "<name>create_investigation_graph</name>" in first
+    assert "<name>inspect_first_checkpoint_and_extend_graph</name>" in first
+    assert "<name>inspect_review_checkpoint_and_finalize</name>" in first
+    assert "rt.workflow.start(objective: str" in first
     assert "## 目标和任务" in first
     assert "## 要求和说明" in first
     assert "wf.continue_checkpoint" in first
+    assert "&lt;workflow_context" not in first
     assert "Workflow " + "replaces " + "ask" not in first
     assert "verify.final" in first
     assert '<agent_workflow_context scope="main_agent">' not in repeated
@@ -5254,7 +5101,7 @@ def test_workflow_context_is_not_sent_to_workflow_node_threads(tmp_path: Path) -
 
     text = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(node_thread))
 
-    assert "<workflow_context" not in text
+    assert "<agent_workflow_context" not in text
 
 
 def test_workflow_context_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
@@ -5278,8 +5125,8 @@ def test_workflow_context_is_pre_user_context_and_not_retained(tmp_path: Path) -
     assert retain_item_after_compaction(workflow_item) is False
 
 
-def test_compaction_summary_appends_active_workflows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import uv_agent_runtime as rt
+def test_compaction_summary_appends_plugin_sections(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from uv_agent.builtin.workflow import service as workflow
 
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -5294,10 +5141,11 @@ def test_compaction_summary_appends_active_workflows(tmp_path: Path, monkeypatch
     )
     thread_id = engine.thread_store.create_thread()
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", thread_id)
-    wf = rt.workflow.start("Long task", state_dir=state_dir)
+    wf = workflow.start("Long task", state_dir=state_dir)
     wf.agent("Do the first part", key="first")
+    start_builtin_plugins(engine)
 
-    summary = engine._compaction_summary_with_active_workflows(thread_id, "Conversation summary")
+    summary = engine._compaction_summary_with_plugin_sections(thread_id, "Conversation summary")
 
     assert summary.startswith("Conversation summary")
     assert "## 活跃工作流" in summary
@@ -5318,23 +5166,25 @@ def test_goal_plugin_context_emits_once_per_epoch_and_after_disable(tmp_path: Pa
     thread_id = engine.thread_store.create_thread()
 
     enable_plugin_goal(engine, thread_id, "Ship the goal feature")
-    first_text = context_text(engine._pre_user_context_items(thread_id))
-    repeated = engine._pre_user_context_items(thread_id)
+    first_text = agent_turn_context_text(engine, thread_id)
+    repeated = agent_turn_context_text(engine, thread_id)
 
     assert '<agent_goal_mode status="enabled">' in first_text
     assert "Ship the goal feature" in first_text
     assert "rt.goal.*" in first_text
-    assert "<agent_goal_mode" not in str(repeated)
+    assert "<agent_goal_mode" not in repeated
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
-    after_compaction = engine._pre_user_context_items(thread_id)
-    assert "<agent_goal_mode" in str(after_compaction)
+    engine._pre_user_context_items(thread_id)
+    after_compaction = agent_turn_context_text(engine, thread_id)
+    assert "<agent_goal_mode" in after_compaction
 
     engine.plugins.call_command("/goal", {"arg": "disable", "thread_id": thread_id})
     disabled_text = context_text(engine._pre_user_context_items(thread_id))
     repeated_disabled = engine._pre_user_context_items(thread_id)
     assert '<agent_goal_mode operation="remove">' in disabled_text
-    assert "Goal mode disabled" in disabled_text
+    assert "goal mode" in disabled_text
+    assert "禁用" in disabled_text
     assert "<agent_goal_mode" not in str(repeated_disabled)
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t2", text="summary", usage={})
@@ -5394,20 +5244,21 @@ def test_goal_mode_reenable_before_next_turn_emits_enabled_notice(tmp_path: Path
     )
     thread_id = engine.thread_store.create_thread()
     enable_plugin_goal(engine, thread_id)
-    assert '<agent_goal_mode status="enabled">' in str(engine._pre_user_context_items(thread_id))
+    assert '<agent_goal_mode status="enabled">' in agent_turn_context_text(engine, thread_id)
 
     engine.plugins.call_command("/goal", {"arg": "disable", "thread_id": thread_id})
     engine.plugins.call_command("/goal", {"arg": "reset fresh goal", "thread_id": thread_id})
     engine.plugins.call_command("/goal", {"arg": "enable", "thread_id": thread_id})
 
     notice = context_text(engine._pre_user_context_items(thread_id))
-    assert '<agent_goal_mode operation="publish" status="enabled">' in notice
     assert '<agent_goal_mode operation="remove">' in notice
-    assert "fresh goal" in notice
+    turn_notice = agent_turn_context_text(engine, thread_id)
+    assert '<agent_goal_mode status="enabled">' in turn_notice
+    assert "fresh goal" in turn_notice
 
 
 
-def test_goal_mode_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
+def test_goal_mode_notice_is_turn_context_and_not_retained(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -5420,8 +5271,9 @@ def test_goal_mode_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -
     )
     thread_id = engine.thread_store.create_thread()
     enable_plugin_goal(engine, thread_id)
-    pre_user_items = engine._pre_user_context_items(thread_id)
-    goal_item = next(item for item in pre_user_items if "<agent_goal_mode" in message_item_text(item))
+    state = SimpleNamespace(input_items=[], pending_items=[])
+    engine._append_agent_turn_context_items(thread_id=thread_id, turn_id="t1", turn_input=state)
+    goal_item = next(item for item in state.input_items if "<agent_goal_mode" in message_item_text(item))
     engine.thread_store.append(thread_id, "item.user", turn_id="t1", item=message_item("user", "do work"))
 
     assert engine._is_pre_user_context_item(goal_item)
@@ -5429,12 +5281,11 @@ def test_goal_mode_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -
     reconstructed = engine._reconstruct_input(thread_id)
     reconstructed_texts = [message_item_text(item) for item in reconstructed]
     goal_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<agent_goal_mode" in item_text)
-    runtime_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<runtime_helpers>" in item_text)
-    assert runtime_index <= goal_index < reconstructed_texts.index("do work")
+    assert goal_index < reconstructed_texts.index("do work")
     assert "do work" in reconstructed_texts
 
 
-def test_worktree_notice_emits_once_per_epoch_and_after_delete(tmp_path: Path) -> None:
+def test_worktree_context_emits_once_per_epoch_and_after_delete(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -5449,17 +5300,17 @@ def test_worktree_notice_emits_once_per_epoch_and_after_delete(tmp_path: Path) -
     start_builtin_plugins(engine)
     worktree_path = project_root / ".uv-agent" / "worktrees" / "feature"
 
-    engine.thread_store.append(
-        thread_id,
-        "thread.worktree_created",
-        worktree_status="active",
-        worktree_branch="feature",
-        worktree_path=str(worktree_path),
-        worktree_base_ref="HEAD",
-        worktree_origin_root=str(project_root),
-        worktree_head="abc123",
-        worktree_created_at="2026-01-01T00:00:00Z",
-    )
+    worktree_metadata = {
+        "worktree_status": "active",
+        "worktree_branch": "feature",
+        "worktree_path": str(worktree_path),
+        "worktree_base_ref": "HEAD",
+        "worktree_origin_root": str(project_root),
+        "worktree_head": "abc123",
+        "worktree_created_at": "2026-01-01T00:00:00Z",
+    }
+    engine.thread_store.append(thread_id, "thread.worktree_created", **worktree_metadata)
+    engine.thread_store.update_thread_metadata(thread_id, updates=worktree_metadata)
     engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
     first = engine._pre_user_context_items(thread_id)
     repeated = engine._pre_user_context_items(thread_id)
@@ -5474,16 +5325,17 @@ def test_worktree_notice_emits_once_per_epoch_and_after_delete(tmp_path: Path) -
     after_compaction = engine._pre_user_context_items(thread_id)
     assert '<agent_worktree status="active">' in str(after_compaction)
 
-    engine.thread_store.append(
-        thread_id,
-        "thread.worktree_deleted",
-        worktree_branch="feature",
-        worktree_path=str(worktree_path),
-        worktree_origin_root=str(project_root),
-        worktree_deleted_at="2026-01-02T00:00:00Z",
-        worktree_deleted_head="def456",
-        worktree_deleted_status=" M file.py",
-    )
+    deleted_metadata = {
+        "worktree_status": "deleted",
+        "worktree_branch": "feature",
+        "worktree_path": str(worktree_path),
+        "worktree_origin_root": str(project_root),
+        "worktree_deleted_at": "2026-01-02T00:00:00Z",
+        "worktree_deleted_head": "def456",
+        "worktree_deleted_status": " M file.py",
+    }
+    engine.thread_store.append(thread_id, "thread.worktree_deleted", **deleted_metadata)
+    engine.thread_store.update_thread_metadata(thread_id, updates=deleted_metadata)
     engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(project_root))
     deleted = engine._pre_user_context_items(thread_id)
     repeated_deleted = engine._pre_user_context_items(thread_id)
@@ -5493,9 +5345,11 @@ def test_worktree_notice_emits_once_per_epoch_and_after_delete(tmp_path: Path) -
     assert '<agent_worktree' not in str(repeated_deleted)
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t2", text="summary", usage={})
-    assert "<agent_worktree" not in str(engine._pre_user_context_items(thread_id))
+    after_deleted_compaction = str(engine._pre_user_context_items(thread_id))
+    assert '<agent_worktree status=' not in after_deleted_compaction
+    assert '<agent_worktree operation=' not in after_deleted_compaction
 
-def test_worktree_notice_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
+def test_worktree_context_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -5509,15 +5363,15 @@ def test_worktree_notice_is_pre_user_context_and_not_retained(tmp_path: Path) ->
     thread_id = engine.thread_store.create_thread("Worktree")
     start_builtin_plugins(engine)
     worktree_path = project_root / ".uv-agent" / "worktrees" / "feature"
-    engine.thread_store.append(
-        thread_id,
-        "thread.worktree_created",
-        worktree_status="active",
-        worktree_branch="feature",
-        worktree_path=str(worktree_path),
-        worktree_base_ref="HEAD",
-        worktree_origin_root=str(project_root),
-    )
+    worktree_metadata = {
+        "worktree_status": "active",
+        "worktree_branch": "feature",
+        "worktree_path": str(worktree_path),
+        "worktree_base_ref": "HEAD",
+        "worktree_origin_root": str(project_root),
+    }
+    engine.thread_store.append(thread_id, "thread.worktree_created", **worktree_metadata)
+    engine.thread_store.update_thread_metadata(thread_id, updates=worktree_metadata)
     engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
     pre_user_items = engine._pre_user_context_items(thread_id)
     worktree_item = next(item for item in pre_user_items if "<agent_worktree" in message_item_text(item))
@@ -5527,13 +5381,13 @@ def test_worktree_notice_is_pre_user_context_and_not_retained(tmp_path: Path) ->
     assert retain_item_after_compaction(worktree_item) is False
     reconstructed = engine._reconstruct_input(thread_id)
     reconstructed_texts = [message_item_text(item) for item in reconstructed]
-    runtime_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<runtime_helpers>" in item_text)
+    runtime_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<agent_runtime_helpers>" in item_text)
     worktree_index = next(index for index, item_text in enumerate(reconstructed_texts) if "<agent_worktree" in item_text)
     assert runtime_index <= worktree_index < reconstructed_texts.index("do work")
     assert "do work" in reconstructed_texts
 
 
-def test_goal_mode_reset_requires_disabled_mode_and_preserves_files_on_disable(tmp_path: Path) -> None:
+def test_engine_no_longer_exposes_builtin_goal_api(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -5544,19 +5398,9 @@ def test_goal_mode_reset_requires_disabled_mode_and_preserves_files_on_disable(t
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
     )
-    thread_id = engine.thread_store.create_thread()
-    state = engine.enable_goal_mode(thread_id)
-    state.paths.checklist.write_text("custom checklist", encoding="utf-8")
-
-    with pytest.raises(ValueError):
-        engine.reset_goal_files(thread_id)
-
-    engine.disable_goal_mode(thread_id)
-    assert state.paths.checklist.read_text(encoding="utf-8") == "custom checklist"
-    reset_state = engine.reset_goal_files(thread_id, objective="new objective")
-    assert "new objective" in reset_state.paths.checklist.read_text(encoding="utf-8")
-    assert engine.goal_state(thread_id) is not None
-    assert engine.goal_state(thread_id).enabled is False
+    assert not hasattr(engine, "enable_goal_mode")
+    assert not hasattr(engine, "disable_goal_mode")
+    assert not hasattr(engine, "goal_state")
 
 
 @pytest.mark.asyncio
@@ -5672,7 +5516,7 @@ def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> 
             "content": [
                 {
                     "type": "input_text",
-                    "text": "<conversation_summary>\nsummary\n</conversation_summary>",
+                    "text": "<agent_conversation_summary>\nsummary\n</agent_conversation_summary>",
                 }
             ],
         },
@@ -5691,11 +5535,11 @@ def test_reconstruct_input_uses_compaction_replacement_input(tmp_path: Path) -> 
     text = str(reconstructed)
 
     handoff = message_item_text(reconstructed[0])
-    assert handoff.startswith("<compaction_handoff>")
-    assert "<retained_history>" in handoff
+    assert handoff.startswith("<agent_compaction_handoff>")
+    assert "<agent_retained_history>" in handoff
     assert '<message role="user">' in handoff
     assert "<retained_history_message" not in handoff
-    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
+    assert handoff.index("<agent_retained_history>") < handoff.index("<agent_conversation_summary>") < handoff.index("<agent_compaction_continuation>")
     assert "kept" in text
     assert "summary" in text
     assert "new" in text
@@ -5716,7 +5560,7 @@ def test_reconstruct_input_places_post_compaction_context_before_replacement(tmp
     thread_id = engine.thread_store.create_thread()
     replacement = [
         message_item("user", "kept request"),
-        message_item("user", "<conversation_summary>\nsummary\n</conversation_summary>"),
+        message_item("user", "<agent_conversation_summary>\nsummary\n</agent_conversation_summary>"),
     ]
     engine.thread_store.append(
         thread_id,
@@ -5728,31 +5572,27 @@ def test_reconstruct_input_places_post_compaction_context_before_replacement(tmp
     )
     engine.thread_store.append(
         thread_id,
-        "item.context_update",
+        "item.agent_epoch_context",
         turn_id="t1",
-        context_fingerprint="fp",
-        context_state={"fingerprint": "fp", "parts": {"runtime": {}}},
-        context_kind="runtime",
-        removed=[],
-        text="<context_update id=\"runtime_context\" status=\"current\">\ncurrent context\n</context_update>",
+        text="<agent_epoch_context>\ncurrent context\n</agent_epoch_context>",
     )
     engine.thread_store.append(thread_id, "item.user", turn_id="t2", item=message_item("user", "new request"))
 
     reconstructed = engine._reconstruct_input(thread_id)
 
-    assert message_item_text(reconstructed[0]).startswith("<context_update")
+    assert message_item_text(reconstructed[0]).startswith("<agent_epoch_context")
     handoff = message_item_text(reconstructed[1])
-    assert handoff.startswith("<compaction_handoff>")
-    assert "<retained_history>" in handoff
+    assert handoff.startswith("<agent_compaction_handoff>")
+    assert "<agent_retained_history>" in handoff
     assert '<message role="user">' in handoff
     assert "<retained_history_message" not in handoff
     assert "kept request" in handoff
-    assert "<conversation_summary>" in handoff
-    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
+    assert "<agent_conversation_summary>" in handoff
+    assert handoff.index("<agent_retained_history>") < handoff.index("<agent_conversation_summary>") < handoff.index("<agent_compaction_continuation>")
     assert message_item_text(reconstructed[2]) == "new request"
 
 
-def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_path: Path) -> None:
+def test_run_turn_prelude_inserts_new_context_before_compacted_history(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "AGENTS.md").write_text("Reloaded rule.", encoding="utf-8")
@@ -5773,12 +5613,12 @@ def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_p
         text="summary",
         replacement_input=[
             message_item("user", "kept request"),
-            message_item("user", "<conversation_summary>\nsummary\n</conversation_summary>"),
+            message_item("user", "<agent_conversation_summary>\nsummary\n</agent_conversation_summary>"),
         ],
         usage={},
     )
 
-    prelude = engine._prepare_run_turn_prelude(
+    run_prelude = engine._prepare_run_turn_prelude(
         user_text="new request",
         thread_id=thread_id,
         level=None,
@@ -5786,22 +5626,22 @@ def test_prepare_turn_prelude_inserts_new_context_before_compacted_history(tmp_p
         cancel_event=None,
     )
 
-    texts = [message_item_text(item) for item in prelude.input_items if item.get("type") == "message"]
-    assert texts[0].startswith("<workspace_rules")
+    texts = [message_item_text(item) for item in run_prelude.input_items if item.get("type") == "message"]
+    assert texts[0].startswith("<agent_workspace_rules")
     assert "Reloaded rule." in texts[0]
     runtime_index = next(index for index, text in enumerate(texts) if text.startswith("<agent_epoch_context>"))
-    handoff_index = next(index for index, text in enumerate(texts) if text.startswith("<compaction_handoff>"))
-    assert "<runtime_environment>" in texts[runtime_index]
-    assert "<runtime_helpers>" in texts[runtime_index]
-    assert "<model_levels>" not in texts[runtime_index]
+    handoff_index = next(index for index, text in enumerate(texts) if text.startswith("<agent_compaction_handoff>"))
+    assert "<agent_runtime_environment>" in texts[runtime_index]
+    assert "<agent_runtime_helpers>" in texts[runtime_index]
+    assert "<agent_model_levels>" not in texts[runtime_index]
     assert "<agent_workflow_context" in texts[runtime_index]
     assert runtime_index < handoff_index
     handoff = texts[handoff_index]
     assert "kept request" in handoff
-    assert "<retained_history>" in handoff
+    assert "<agent_retained_history>" in handoff
     assert "<retained_history_message" not in handoff
-    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
-    assert message_item_text(prelude.user_item) == "new request"
+    assert handoff.index("<agent_retained_history>") < handoff.index("<agent_conversation_summary>") < handoff.index("<agent_compaction_continuation>")
+    assert message_item_text(run_prelude.user_item) == "new request"
     assert "new request" not in texts
 
 
@@ -5865,66 +5705,20 @@ async def test_mid_turn_compaction_readds_epoch_context_before_continuing(tmp_pa
 
     continued_input = client.requests[2]["input"]
     continued_texts = [message_item_text(item) for item in continued_input if item.get("type") == "message"]
-    assert continued_texts[0].startswith("<workspace_rules")
+    assert continued_texts[0].startswith("<agent_workspace_rules")
     assert "Mid-turn rule." in continued_texts[0]
     runtime_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<agent_epoch_context>"))
-    handoff_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<compaction_handoff>"))
-    assert "<runtime_environment>" in continued_texts[runtime_index]
-    assert "<runtime_helpers>" in continued_texts[runtime_index]
-    assert "<model_levels>" not in continued_texts[runtime_index]
+    handoff_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<agent_compaction_handoff>"))
+    assert "<agent_runtime_environment>" in continued_texts[runtime_index]
+    assert "<agent_runtime_helpers>" in continued_texts[runtime_index]
+    assert "<agent_model_levels>" not in continued_texts[runtime_index]
     assert "<agent_workflow_context" in continued_texts[runtime_index]
     assert runtime_index < handoff_index
     handoff = continued_texts[handoff_index]
-    assert "<retained_history>" in handoff
+    assert "<agent_retained_history>" in handoff
     assert "<retained_history_message" not in handoff
-    assert handoff.index("<retained_history>") < handoff.index("<conversation_summary>") < handoff.index("<compaction_continuation>")
+    assert handoff.index("<agent_retained_history>") < handoff.index("<agent_conversation_summary>") < handoff.index("<agent_compaction_continuation>")
     assert continued_texts[-1] == COMPACTION_CONTINUE_WITHOUT_CURRENT_USER
-
-
-def test_context_update_reconstructs_as_stable_prefix(tmp_path: Path) -> None:
-    project_root = tmp_path / "project"
-    project_root.mkdir()
-    config = AppConfig(
-        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
-        models={
-            "default": ModelConfig(
-                name="default",
-                provider="p",
-                model="fake",
-                context_window_tokens=100_000,
-                params={},
-            )
-        },
-        levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
-        runner=RunnerConfig(
-        ),
-    )
-    engine = AgentEngine(
-        config=config,
-        model_client=FakeModelClient([]),
-        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
-        thread_store=ThreadStore(tmp_path / "state"),
-        project_root=project_root,
-    )
-    thread_id = engine.thread_store.create_thread()
-    engine.thread_store.append(
-        thread_id,
-        "item.context_update",
-        turn_id="t1",
-        context_fingerprint="fp",
-        context_state={"fingerprint": "fp", "parts": {"rules": "rules-fp"}},
-        context_kind="runtime",
-        removed=[],
-        text="stable rules",
-    )
-    engine.thread_store.append(thread_id, "item.user", turn_id="t1", item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]})
-
-    reconstructed = engine._reconstruct_input(thread_id)
-
-    assert reconstructed[0]["role"] == "user"
-    assert "stable rules" in str(reconstructed[0])
-    assert "hello" in str(reconstructed[1])
 
 
 def test_rules_loaded_from_tool_result_is_not_reconstructed_between_tool_call_and_output(tmp_path: Path) -> None:
@@ -5988,75 +5782,6 @@ def test_rules_loaded_from_tool_result_is_not_reconstructed_between_tool_call_an
     assert "must not become user message" not in str(reconstructed)
 
 
-def test_context_update_is_reanchored_before_next_user_when_reconstructing(tmp_path: Path) -> None:
-    project_root = tmp_path / "project"
-    project_root.mkdir()
-    config = AppConfig(
-        providers={"p": ProviderConfig(name="p", base_url="https://example.com")},
-        models={
-            "default": ModelConfig(
-                name="default",
-                provider="p",
-                model="fake",
-                context_window_tokens=100_000,
-                params={},
-            )
-        },
-        levels={"medium": LevelConfig(name="medium", model="default", params={})},
-        runtime=RuntimeConfig(compression=CompressionConfig(enabled=False)),
-        runner=RunnerConfig(
-        ),
-    )
-    engine = AgentEngine(
-        config=config,
-        model_client=FakeModelClient([]),
-        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
-        thread_store=ThreadStore(tmp_path / "state"),
-        project_root=project_root,
-    )
-    thread_id = engine.thread_store.create_thread()
-    engine.thread_store.append(
-        thread_id,
-        "item.model_response",
-        turn_id="t1",
-        output=[
-            {
-                "type": "function_call",
-                "call_id": "call_1",
-                "name": "run_python",
-                "arguments": "{}",
-            }
-        ],
-    )
-    engine.thread_store.append(
-        thread_id,
-        "item.context_update",
-        turn_id="t1",
-        context_fingerprint="fp",
-        context_state={"fingerprint": "fp", "parts": {"skills": "s"}},
-        text="capability update",
-    )
-    engine.thread_store.append(
-        thread_id,
-        "item.tool_output",
-        turn_id="t1",
-        item={"type": "function_call_output", "call_id": "call_1", "output": "{}"},
-    )
-    engine.thread_store.append(
-        thread_id,
-        "item.user",
-        turn_id="t2",
-        item=message_item("user", "next"),
-    )
-
-    reconstructed = engine._reconstruct_input(thread_id)
-
-    assert reconstructed[0]["type"] == "function_call"
-    assert reconstructed[1]["type"] == "function_call_output"
-    assert message_item_text(reconstructed[2]) == "capability update"
-    assert message_item_text(reconstructed[3]) == "next"
-
-
 def test_rule_state_restore_uses_local_index_when_active_cwd_is_child(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     child = project_root / "src"
@@ -6097,11 +5822,11 @@ def test_rule_state_restore_uses_local_index_when_active_cwd_is_child(tmp_path: 
     text = str(items)
 
     assert "child rule" in text
-    assert "<workspace_rule_index>" in text
+    assert "<agent_workspace_rule_index>" in text
     assert "AGENTS.md" in text
     assert "src/AGENTS.md" in text
     assert "pkg/AGENTS.md" in text
-    assert "active_cwd_notice" in text
+    assert "agent_active_cwd_notice" in text
 
 
 def test_refresh_config_updates_engine_and_runner(tmp_path: Path, monkeypatch) -> None:

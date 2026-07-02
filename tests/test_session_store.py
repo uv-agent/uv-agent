@@ -102,21 +102,21 @@ def test_thread_level_and_model_switch_warning_update_metadata(tmp_path: Path) -
     assert digest["latest_model_switch_warning"]["_event_id"] == warning["_event_id"]
 
 
-def test_thread_worktree_events_update_metadata(tmp_path: Path) -> None:
+def test_thread_digest_exposes_extra_metadata(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Worktree")
     worktree_path = tmp_path / "project" / ".uv-agent" / "worktrees" / "feature"
-
-    store.append(
+    store.update_thread_metadata(
         thread_id,
-        "thread.worktree_created",
-        worktree_status="active",
-        worktree_branch="feature",
-        worktree_path=str(worktree_path),
-        worktree_base_ref="HEAD",
-        worktree_origin_root=str(tmp_path / "project"),
-        worktree_head="abc123",
-        worktree_created_at="2026-01-01T00:00:00Z",
+        updates={
+            "worktree_status": "active",
+            "worktree_branch": "feature",
+            "worktree_path": str(worktree_path),
+            "worktree_base_ref": "HEAD",
+            "worktree_origin_root": str(tmp_path / "project"),
+            "worktree_head": "abc123",
+            "worktree_created_at": "2026-01-01T00:00:00Z",
+        },
     )
     store.append(thread_id, "thread.cwd_updated", cwd=str(worktree_path))
 
@@ -126,11 +126,13 @@ def test_thread_worktree_events_update_metadata(tmp_path: Path) -> None:
     assert active["worktree_path"] == str(worktree_path)
     assert active["latest_cwd"] == str(worktree_path)
 
-    store.append(
+    store.update_thread_metadata(
         thread_id,
-        "thread.worktree_deleted",
-        worktree_deleted_head="def456",
-        worktree_deleted_status=" M file.py",
+        updates={
+            "worktree_status": "deleted",
+            "worktree_deleted_head": "def456",
+            "worktree_deleted_status": " M file.py",
+        },
     )
 
     deleted = store.thread_digest(thread_id)
@@ -300,7 +302,7 @@ def test_read_after_latest_compaction_returns_only_needed_suffix(tmp_path: Path)
 def test_read_after_latest_compaction_filters_suffix_events(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Filtered suffix")
-    store.append(thread_id, "item.context_update", context_state={"fingerprint": "old"})
+    store.append(thread_id, "item.agent_epoch_context", text="old")
     store.append(thread_id, "item.compaction", text="summary")
     store.append(
         thread_id,
@@ -308,37 +310,37 @@ def test_read_after_latest_compaction_filters_suffix_events(tmp_path: Path) -> N
         turn_id="t1",
         item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "new"}]},
     )
-    store.append(thread_id, "item.context_update", context_state={"fingerprint": "new"})
+    store.append(thread_id, "item.agent_epoch_context", text="new")
 
     events, compaction = store.read_after_latest_compaction(
         thread_id,
-        event_types={"item.context_update"},
+        event_types={"item.agent_epoch_context"},
     )
 
     assert compaction is not None
     assert compaction["text"] == "summary"
-    assert [event["type"] for event in events] == ["item.context_update"]
-    assert events[0]["context_state"] == {"fingerprint": "new"}
+    assert [event["type"] for event in events] == ["item.agent_epoch_context"]
+    assert events[0]["text"] == "new"
 
 
 def test_latest_event_helpers_are_scoped_to_open_epoch(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Epoch helpers")
     store.append(thread_id, "item.rule_index", text="before")
-    store.append(thread_id, "item.context_update", context_state={"fingerprint": "before"})
+    store.append(thread_id, "item.agent_epoch_context", text="before")
     store.append(thread_id, "item.compaction", text="summary")
 
     assert not store.has_event_after_latest_compaction(thread_id, event_types={"item.rule_index"})
-    assert store.latest_event_after_latest_compaction(thread_id, event_types={"item.context_update"}) is None
+    assert store.latest_event_after_latest_compaction(thread_id, event_types={"item.agent_epoch_context"}) is None
 
     store.append(thread_id, "item.rule_index", text="after")
-    store.append(thread_id, "item.context_update", context_state={"fingerprint": "after"})
+    store.append(thread_id, "item.agent_epoch_context", text="after")
 
-    latest = store.latest_event_after_latest_compaction(thread_id, event_types={"item.context_update"})
+    latest = store.latest_event_after_latest_compaction(thread_id, event_types={"item.agent_epoch_context"})
 
     assert store.has_event_after_latest_compaction(thread_id, event_types={"item.rule_index"})
     assert latest is not None
-    assert latest["context_state"] == {"fingerprint": "after"}
+    assert latest["text"] == "after"
 
 
 def test_history_segment_cache_is_lru_bounded_and_cleared_on_append(tmp_path: Path) -> None:
@@ -494,12 +496,12 @@ def test_thread_lock_permission_does_not_leak_to_other_contexts(tmp_path: Path) 
             _THREAD_LOCK_CONTEXT.reset(reset_token)
 
 
-def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -> None:
+def test_child_threads_are_stored_in_sqlite_and_listed_by_parent(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     parent = store.create_thread("Parent")
     child = store.create_thread(
-        "Subagent: inspect",
-        kind="subagent",
+        "Workflow node: inspect",
+        kind="workflow_node",
         parent_thread_id=parent,
         parent_turn_id="turn_1",
         parent_run_id="run_1",
@@ -508,20 +510,19 @@ def test_subthreads_are_stored_separately_and_listed_by_parent(tmp_path: Path) -
 
     assert (tmp_path / "uv-agent.sqlite3").exists()
     assert not (tmp_path / "threads" / f"{parent}.jsonl").exists()
-    assert not (tmp_path / "subthreads" / f"{child}.jsonl").exists()
     assert [thread["thread_id"] for thread in store.list_threads()] == [parent]
 
-    subthreads = store.list_subthreads(parent)
+    children = store.list_child_threads(parent)
 
-    assert [thread["thread_id"] for thread in subthreads] == [child]
-    assert subthreads[0]["kind"] == "subagent"
-    assert subthreads[0]["parent_turn_id"] == "turn_1"
+    assert [thread["thread_id"] for thread in children] == [child]
+    assert children[0]["kind"] == "workflow_node"
+    assert children[0]["parent_turn_id"] == "turn_1"
 
 
-def test_sqlite_store_does_not_create_legacy_thread_directories(tmp_path: Path) -> None:
+def test_sqlite_store_does_not_create_jsonl_thread_directories(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     parent = store.create_thread("Parent")
-    child = store.create_thread("Subagent", kind="subagent", parent_thread_id=parent)
+    child = store.create_thread("Workflow node", kind="workflow_node", parent_thread_id=parent)
     store.append(
         parent,
         "item.user",
@@ -538,49 +539,21 @@ def test_sqlite_store_does_not_create_legacy_thread_directories(tmp_path: Path) 
     assert store.read(parent)
     assert store.thread_digest(child)["items"] == [{"role": "user", "text": "child"}]
     assert [thread["thread_id"] for thread in store.list_threads()] == [parent]
-    assert [thread["thread_id"] for thread in store.list_subthreads(parent)] == [child]
+    assert [thread["thread_id"] for thread in store.list_child_threads(parent)] == [child]
     assert (tmp_path / "uv-agent.sqlite3").exists()
     assert not (tmp_path / "threads").exists()
-    assert not (tmp_path / "subthreads").exists()
 
-
-def test_store_removes_empty_legacy_jsonl_directories(tmp_path: Path) -> None:
-    (tmp_path / "threads").mkdir()
-    (tmp_path / "subthreads").mkdir()
-
-    ThreadStore(tmp_path)
-
-    assert not (tmp_path / "threads").exists()
-    assert not (tmp_path / "subthreads").exists()
-
-
-def test_store_preserves_non_empty_legacy_jsonl_directories(tmp_path: Path) -> None:
-    threads_dir = tmp_path / "threads"
-    subthreads_dir = tmp_path / "subthreads"
-    threads_dir.mkdir()
-    subthreads_dir.mkdir()
-    (threads_dir / "legacy.jsonl").write_text("{}\n", encoding="utf-8")
-    (subthreads_dir / "legacy.jsonl").write_text("{}\n", encoding="utf-8")
-
-    ThreadStore(tmp_path)
-
-    assert (threads_dir / "legacy.jsonl").exists()
-    assert (subthreads_dir / "legacy.jsonl").exists()
 
 def test_update_thread_metadata_persists_extra_metadata(tmp_path: Path) -> None:
     store = ThreadStore(tmp_path)
     thread_id = store.create_thread("Metadata")
-    store.append(
-        thread_id,
-        "thread.goal_mode_updated",
-        enabled=True,
-        objective="ship it",
-        files={},
-    )
 
     store.update_thread_metadata(
         thread_id,
-        updates={"token_ratio": {"visible_units": 40, "output_tokens": 10}},
+        updates={
+            "goal_mode": {"enabled": True, "objective": "ship it"},
+            "token_ratio": {"visible_units": 40, "output_tokens": 10},
+        },
     )
     metadata = ThreadStore(tmp_path).thread_metadata(thread_id)
 
