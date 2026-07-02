@@ -2286,6 +2286,17 @@ def test_composer_history_save_load_uses_original_tui_format(monkeypatch, tmp_pa
     assert load_composer_history() == ["one", "two"]
 
 
+def test_composer_history_repairs_surrogate_pairs(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("uv_agent.tui.app.uv_agent_home", lambda: tmp_path)
+    split_emoji = chr(0xD83D) + chr(0xDE00)
+
+    save_composer_history(["emoji " + split_emoji, "orphan " + chr(0xD83D)])
+    raw = json.loads((tmp_path / "composer_history.json").read_text(encoding="utf-8"))
+
+    assert raw == {"items": ["emoji " + chr(0x1F600), "orphan \ufffd"]}
+    assert load_composer_history() == ["emoji " + chr(0x1F600), "orphan \ufffd"]
+
+
 def test_history_arrow_keys_navigate_submissions(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     app._history = ["first", "second"]
@@ -4077,6 +4088,22 @@ def test_windows_terminal_coalesces_unbracketed_paste(monkeypatch) -> None:
     _install_fake_msvcrt(monkeypatch, "one\r\ntwo")
 
     assert terminal.read_key() == PASTE_PREFIX + "one\ntwo"
+
+
+def test_windows_terminal_repairs_surrogate_pair_key(monkeypatch) -> None:
+    terminal = Terminal()
+    terminal._windows = True
+    _install_fake_msvcrt(monkeypatch, chr(0xD83D) + chr(0xDE00))
+
+    assert terminal.read_key() == chr(0x1F600)
+
+
+def test_windows_terminal_replaces_orphan_surrogate_key(monkeypatch) -> None:
+    terminal = Terminal()
+    terminal._windows = True
+    _install_fake_msvcrt(monkeypatch, chr(0xD83D))
+
+    assert terminal.read_key() == "\ufffd"
 
 
 def test_windows_terminal_translates_oem_102_to_angle_bracket(monkeypatch) -> None:

@@ -8,9 +8,19 @@ from contextlib import AbstractContextManager
 from time import monotonic, sleep
 from typing import TextIO
 
+from uv_agent.tui.text import repair_utf16_surrogates
+
 
 PASTE_PREFIX = "\x00paste\x00"
 UNBRACKETED_PASTE_IDLE_S = 0.01
+
+
+def _is_high_surrogate(ch: str) -> bool:
+    return len(ch) == 1 and 0xD800 <= ord(ch) <= 0xDBFF
+
+
+def _is_low_surrogate(ch: str) -> bool:
+    return len(ch) == 1 and 0xDC00 <= ord(ch) <= 0xDFFF
 
 
 class Terminal(AbstractContextManager["Terminal"]):
@@ -181,10 +191,25 @@ class Terminal(AbstractContextManager["Terminal"]):
         if self._windows:
             import msvcrt
 
-            return msvcrt.getwch()
+            ch = msvcrt.getwch()
+            if _is_high_surrogate(ch):
+                pending = self._read_pending_windows_char(msvcrt)
+                return repair_utf16_surrogates(ch + (pending or ""))
+            if _is_low_surrogate(ch):
+                return "\ufffd"
+            return ch
         if self._raw_fd is not None:
             return self._read_char_posix()
         return self.stdin.read(1)
+
+    @staticmethod
+    def _read_pending_windows_char(msvcrt_module) -> str | None:
+        deadline = monotonic() + 0.03
+        while monotonic() < deadline:
+            if msvcrt_module.kbhit():
+                return msvcrt_module.getwch()
+            sleep(0.001)
+        return None
 
     def _read_char_posix(self) -> str:
         """Read one character from the raw fd, handling UTF-8 sequences.
@@ -375,7 +400,8 @@ class Terminal(AbstractContextManager["Terminal"]):
 
     @staticmethod
     def _normalize_paste_text(text: str) -> str:
-        return text.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        return repair_utf16_surrogates(normalized)
 
     def _enable_windows_vt(self) -> None:
         """Enable VT input/output when running under a Windows console.

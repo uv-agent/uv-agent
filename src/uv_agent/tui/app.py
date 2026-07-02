@@ -52,6 +52,7 @@ from uv_agent.tui.streaming import (
     usage_output_tokens,
 )
 from uv_agent.tui.terminal import PASTE_PREFIX, Terminal, TerminalKeyReader
+from uv_agent.tui.text import repair_utf16_surrogates
 
 CODE_FILE_SUFFIXES = {
     ".cfg",
@@ -337,7 +338,7 @@ def load_composer_history() -> list[str]:
     for value in raw_items:
         if not isinstance(value, str):
             continue
-        text = value.strip()
+        text = repair_utf16_surrogates(value).strip()
         if not text:
             continue
         if items and items[-1] == text:
@@ -350,7 +351,7 @@ def save_composer_history(items: list[str]) -> None:
     path = composer_history_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    payload = {"items": items[-MAX_COMPOSER_HISTORY:]}
+    payload = {"items": [repair_utf16_surrogates(item) for item in items[-MAX_COMPOSER_HISTORY:]]}
     tmp_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -1607,10 +1608,12 @@ class UvAgentApp:
         return max(0, min(cursor, len(self.state.composer)))
 
     def _set_composer_text(self, text: str, *, cursor: int | None = None) -> None:
+        text = repair_utf16_surrogates(text)
         self.state.composer = text
         self.state.composer_cursor = len(text) if cursor is None else max(0, min(cursor, len(text)))
 
     def _insert_composer_text(self, text: str) -> None:
+        text = repair_utf16_surrogates(text)
         cursor = self._composer_cursor()
         value = self.state.composer
         self._set_composer_text(value[:cursor] + text + value[cursor:], cursor=cursor + len(text))
