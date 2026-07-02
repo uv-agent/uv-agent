@@ -376,12 +376,29 @@ class Renderer:
             live_lines, live_cursor_row, live_cursor_col = self._render_live(live_state, cols, rows)
 
         buf = [self._SYNC_ON + self._AUTOWRAP_OFF]
-        # A completed cell replaces the old live tail.  Clearing only tracked
-        # live rows preserves completed transcript rows above it.
+        # A completed cell replaces the old live tail.  When the replacement is
+        # taller than the rows currently available below the frame top, scroll
+        # first and only then erase the old live rows.  Clearing first would turn
+        # the previous live frame into blank terminal rows; those blanks then get
+        # scrolled into history as the new transcript pushes the viewport upward.
+        replacement_height = len(hard_lines) + len(live_lines)
         if self._has_frame:
             if self._frame_anchored:
-                self._clear_rows(buf, self._frame_top_row, self._frame_top_row + self._frame_rows - 1, rows)
-                buf.append(self._cup(max(1, min(self._frame_top_row, rows)), 1))
+                frame_top = self._frame_top_row
+                frame_bottom = frame_top + self._frame_rows - 1
+                draw_top = frame_top
+                if replacement_height > 0:
+                    draw_top = max(1, min(frame_top, rows - replacement_height + 1))
+                scroll_delta = max(0, frame_top - draw_top)
+                if scroll_delta > 0:
+                    buf.append(self._cup(rows, 1) + "\n" * scroll_delta)
+                    self._transcript_rows = max(0, self._transcript_rows - scroll_delta)
+                    frame_top = max(1, frame_top - scroll_delta)
+                    frame_bottom = max(0, frame_bottom - scroll_delta)
+                    draw_top = frame_top
+                clear_bottom = max(frame_bottom, draw_top + replacement_height - 1)
+                self._clear_rows(buf, draw_top, clear_bottom, rows)
+                buf.append(self._cup(max(1, min(draw_top, rows)), 1))
             else:
                 self._clear_floating_frame(buf)
         buf.append("\r\n".join(hard_lines) + "\r\n")

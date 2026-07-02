@@ -415,6 +415,23 @@ async def test_runner_prunes_old_run_records(
     assert not sorted(runner.runs_dir.glob("*.jsonl"))
 
 
+def test_scriptenv_uv_captures_decode_with_replacement(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(scriptenv.subprocess, "run", fake_run)
+
+    scriptenv._run_uv(["uv", "--version"], check=True)
+
+    assert calls
+    assert calls[0]["text"] is True
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
+
+
 def test_ensure_venv_installs_runtime_package(tmp_path: Path) -> None:
     python = ensure_venv(tmp_path / "scriptenv")
 
@@ -423,6 +440,25 @@ def test_ensure_venv_installs_runtime_package(tmp_path: Path) -> None:
     assert any(dependency.startswith("uv-agent") for dependency in direct_dependencies(tmp_path / "scriptenv"))
     result = subprocess.run([str(python), "-c", "import uv_agent_runtime"], check=False)
     assert result.returncode == 0
+
+
+def test_installed_runtime_version_decodes_with_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="1.2.3\n", stderr="")
+
+    monkeypatch.setattr(scriptenv.subprocess, "run", fake_run)
+
+    assert scriptenv._installed_runtime_version(tmp_path / "python") == "1.2.3"
+    assert calls
+    assert calls[0]["text"] is True
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
 
 
 def test_ensure_venv_reuses_ready_environment_without_probe(

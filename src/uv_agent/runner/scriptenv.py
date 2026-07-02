@@ -304,7 +304,15 @@ def _restore_project_files(
 
 
 def _run_uv(args: Sequence[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(list(args), env=_uv_env(), text=True, capture_output=True, check=check)
+    return subprocess.run(
+        list(args),
+        env=_uv_env(),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=check,
+    )
 
 
 def _pin_dependency(pyproject: Path, package: str, version: str) -> bool:
@@ -357,6 +365,8 @@ def _installed_runtime_version(python: Path) -> str | None:
             [str(python), "-c", code],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except OSError:

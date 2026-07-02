@@ -973,6 +973,39 @@ def test_flush_cell_redraws_post_flush_live_region(monkeypatch) -> None:
     assert renderer._frame_rows > 0
 
 
+def test_flush_cell_growth_scrolls_before_clearing_anchored_live_frame(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui.renderer.terminal_size", lambda default=(100, 30): (60, 10))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    live_state = TuiState(composer="")
+
+    for index in range(7):
+        renderer.flush_cell(TranscriptCell("assistant", text=f"previous {index}"), live_state)
+    assert renderer._frame_anchored
+
+    before = output.getvalue()
+    output.seek(0)
+    output.truncate(0)
+
+    renderer.flush_cell(
+        TranscriptCell("user", text="\n".join(f"fresh {index}" for index in range(1, 5))),
+        live_state,
+    )
+    rendered = output.getvalue()
+
+    # Growing a completed cell plus the live composer scrolls the whole viewport.
+    # The old live frame must not be erased until after that scroll, otherwise the
+    # erased rows become blank scrollback and visually swallow the transcript tail.
+    scroll = "\x1b[10;1H\n"
+    first_clear = re.search(r"\x1b\[\d+;1H\x1b\[2K", rendered)
+    assert scroll in rendered
+    assert first_clear is not None
+    assert rendered.index(scroll) < first_clear.start()
+
+    screen = _terminal_screen_lines(before + rendered, cols=60, rows=10)
+    assert any("fresh 4" in line for line in screen)
+
+
 def _plain_renderer_lines(rendered: str) -> list[str]:
     cleaned = (
         strip_ansi(rendered)
