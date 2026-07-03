@@ -113,6 +113,8 @@ def test_load_config_merges_project_file(tmp_path: Path) -> None:
     assert config.pricing.models["m"].cached_input == 0.5
     assert config.runner.default_timeout_s == 7200
     assert config.runner.max_run_logs == 200
+    assert config.logging.level == "INFO"
+    assert config.logging.file_enabled is True
 
 
 def test_endpoint_config_string_shorthand_and_bad_nested_values(tmp_path: Path) -> None:
@@ -185,6 +187,32 @@ def test_runner_settings_can_be_configured(tmp_path: Path) -> None:
 
     assert config.runner.max_run_logs == 12
     assert config.runner.scriptenv_index_url == "https://pypi.tuna.tsinghua.edu.cn/simple"
+
+
+def test_logging_settings_can_be_configured(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "logging": {
+                    "level": "DEBUG",
+                    "file_enabled": False,
+                    "console_enabled": True,
+                    "max_bytes": 12345,
+                    "backup_count": 7,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path, [config_path])
+
+    assert config.logging.level == "DEBUG"
+    assert config.logging.file_enabled is False
+    assert config.logging.console_enabled is True
+    assert config.logging.max_bytes == 12345
+    assert config.logging.backup_count == 7
 
 
 def test_model_inherits_provider_passthrough_and_reasoning_display(tmp_path: Path) -> None:

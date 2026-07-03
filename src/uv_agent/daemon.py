@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 from contextlib import suppress
@@ -12,7 +13,11 @@ from typing import Any
 
 from uv_agent.app_factory import create_engine
 from uv_agent.ids import new_id
+from uv_agent.logging_config import active_log_file
 from uv_agent.state_db import connect_state_db
+
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -37,6 +42,7 @@ class DaemonLease:
                 pid = int(row["pid"] or 0)
                 if not replace:
                     raise RuntimeError(f"uv-agent daemon is already running (pid={pid}, owner={row['owner_id']})")
+                logger.info("Replacing existing uv-agent daemon pid=%s owner=%s", pid, row["owner_id"])
                 self._terminate_old(pid)
             db.execute(
                 """
@@ -84,6 +90,7 @@ class DaemonLease:
     def _terminate_old(self, pid: int) -> None:
         if pid <= 0 or pid == os.getpid() or not _pid_alive(pid):
             return
+        logger.info("Terminating existing uv-agent daemon pid=%s", pid)
         os.kill(pid, signal.SIGTERM)
         # This path runs before the async service loop starts; use a simple sleep loop.
         import time
@@ -140,8 +147,14 @@ def _pid_alive_windows(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
-async def run_daemon(*, project_root: Path, data_dir: Path | None = None, replace: bool = False) -> None:
-    engine = create_engine(project_root, data_dir=data_dir)
+async def run_daemon(
+    *,
+    project_root: Path,
+    data_dir: Path | None = None,
+    replace: bool = False,
+    log_level: str | int | None = None,
+) -> None:
+    engine = create_engine(project_root, data_dir=data_dir, log_level=log_level)
     lease = DaemonLease(engine.thread_store.data_dir)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -152,9 +165,15 @@ async def run_daemon(*, project_root: Path, data_dir: Path | None = None, replac
         lease.acquire(replace=replace)
         lease.start_heartbeat()
         await engine.plugins.start()
-        print(f"uv-agent daemon started pid={os.getpid()} state={engine.thread_store.data_dir}", flush=True)
+        log_path = active_log_file()
+        started_message = f"uv-agent daemon started pid={os.getpid()} state={engine.thread_store.data_dir}"
+        logger.info("%s log=%s", started_message, log_path)
+        if log_path is not None:
+            started_message = f"{started_message} log={log_path}"
+        print(started_message, flush=True)
         await stop.wait()
     finally:
         await engine.aclose()
         await lease.release()
+        logger.info("uv-agent daemon stopped")
         print("uv-agent daemon stopped", flush=True)

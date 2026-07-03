@@ -187,6 +187,15 @@ class RunnerConfig:
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    level: str = "INFO"
+    file_enabled: bool = True
+    console_enabled: bool = False
+    max_bytes: int = 5_000_000
+    backup_count: int = 3
+
+
+@dataclass(frozen=True)
 class PluginConfigBlock:
     """Merged config for one plugin id.
 
@@ -222,6 +231,7 @@ class AppConfig:
     levels: dict[str, LevelConfig]
     runtime: RuntimeConfig
     runner: RunnerConfig
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     ui: UiConfig = field(default_factory=UiConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
@@ -310,6 +320,13 @@ def default_config(project_root: Path) -> dict[str, Any]:
             "max_output_bytes": 1_000_000,
             "max_run_logs": 200,
             "scriptenv_index_url": None,
+        },
+        "logging": {
+            "level": "INFO",
+            "file_enabled": True,
+            "console_enabled": False,
+            "max_bytes": 5_000_000,
+            "backup_count": 3,
         },
         "plugins": {},
         "pricing": {
@@ -467,6 +484,16 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         max_run_logs=int(runner_raw.get("max_run_logs", 200)),
         scriptenv_index_url=str(scriptenv_index_url) if scriptenv_index_url else None,
     )
+    logging_raw = _object_dict(raw.get("logging", {}))
+    log_max_bytes = logging_raw.get("max_bytes", 5_000_000)
+    log_backup_count = logging_raw.get("backup_count", 3)
+    logging_config = LoggingConfig(
+        level=str(logging_raw.get("level", "INFO") or "INFO"),
+        file_enabled=bool(logging_raw.get("file_enabled", logging_raw.get("enabled", True))),
+        console_enabled=bool(logging_raw.get("console_enabled", logging_raw.get("console", False))),
+        max_bytes=max(0, int(log_max_bytes or 0)),
+        backup_count=max(0, int(log_backup_count or 0)),
+    )
     ui_raw = _object_dict(raw.get("ui", {}))
     plugins_raw = _object_dict(raw.get("plugins", {}))
     plugin_entries: dict[str, PluginConfigBlock] = {}
@@ -488,6 +515,7 @@ def parse_config(raw: dict[str, Any], project_root: Path) -> AppConfig:
         levels=levels,
         runtime=runtime,
         runner=runner,
+        logging=logging_config,
         ui=UiConfig(
             language=str(ui_raw.get("language", "auto")),
             completion_notification=parse_completion_notification(

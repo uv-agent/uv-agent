@@ -107,12 +107,23 @@ IGNORED_MENTION_DIRS = {
 MAX_MENTION_ITEMS = 300
 
 
-def create_engine(project_root: Path | None = None, *, data_dir: Path | None = None):
+def create_engine(
+    project_root: Path | None = None,
+    *,
+    data_dir: Path | None = None,
+    log_level: str | int | None = None,
+    log_to_console: bool | None = False,
+):
     """Create the shared uv-agent engine lazily for the raw ANSI TUI."""
 
     from uv_agent.app_factory import create_engine as _create_engine
 
-    return _create_engine(project_root, data_dir=data_dir)
+    return _create_engine(
+        project_root,
+        data_dir=data_dir,
+        log_level=log_level,
+        log_to_console=log_to_console,
+    )
 
 
 def save_clipboard_image(target_dir: Path):
@@ -362,9 +373,20 @@ def save_composer_history(items: list[str]) -> None:
 class UvAgentApp:
     """Terminal-native ANSI interface for :class:`uv_agent.agent.AgentEngine`."""
 
-    def __init__(self, project_root: Path | None = None, *, data_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        project_root: Path | None = None,
+        *,
+        data_dir: Path | None = None,
+        log_level: str | int | None = None,
+    ) -> None:
         self.project_root = (project_root or Path.cwd()).resolve()
-        self.engine = create_engine(self.project_root, data_dir=data_dir)
+        self.engine = create_engine(
+            self.project_root,
+            data_dir=data_dir,
+            log_level=log_level,
+            log_to_console=False,
+        )
         ui_config = getattr(self.engine.config, "ui", None)
         self.language = detect_user_language(getattr(ui_config, "language", None))
         self.state = TuiState(

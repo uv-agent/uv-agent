@@ -423,6 +423,13 @@ class AgentEngine:
         else:
             await asyncio.to_thread(self.close)
         self.host_events.close()
+        try:
+            from uv_agent.logging_config import close_logging
+
+            close_logging()
+        except Exception:
+            # Logging cleanup is best-effort and should not mask shutdown errors.
+            pass
 
     def start_plugins_background(self) -> asyncio.Task[None]:
         self._plugins_started = True

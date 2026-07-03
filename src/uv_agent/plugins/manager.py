@@ -483,7 +483,8 @@ class PluginManager:
 
     def _logger_for(self, plugin_id: str) -> logging.Logger:
         logger = logging.getLogger(f"uv_agent.plugins.{plugin_id}")
-        logger.setLevel(logging.INFO)
+        app_level = logging.getLogger("uv_agent").level or logging.INFO
+        logger.setLevel(app_level)
         log_dir = self._plugin_dir(plugin_id) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "plugin.log"
