@@ -81,58 +81,68 @@ COMPACTION_SUMMARIZATION_PROMPT = """你正在执行 CONTEXT CHECKPOINT COMPACTI
 - 继续所需的任何关键数据、示例或引用
 
 请保持简洁、结构化，并聚焦于帮助下一个 LLM 无缝继续工作。"""
-TITLE_GENERATION_PROMPT = '根据用户第一条消息，为这个 uv-agent 线程创建一个简洁、标题式名称。抓住用户的底层任务或意图，而不是逐字改写句子。如果问题宽泛或含糊，就用抽象名词短语风格。例如，询问这是哪种项目的消息应生成类似“项目内容询问”的标题。只返回标题，不要引号或标点。优先使用用户的语言。控制在 8 个英文词以内或 24 个 CJK 字符以内。'
-BRANCH_NAME_GENERATION_PROMPT = '根据用户任务创建一个简短的 git branch slug。捕捉具体动作和对象。只返回 slug：ASCII 小写字母、数字和连字符。不要空格、斜杠、引号、标点、解释或前缀。最多 30 个字符。优先使用动宾短语，例如 fix-login-redirect、add-dark-mode 或 refactor-parser。'
-COMPACTED_CONTEXT_CONTINUATION = '上方 <agent_retained_history> 和 <agent_conversation_summary> 是压缩前的历史上下文，仅供继续任务参考。不要复述或输出 <agent_compaction_handoff>、<agent_retained_history>、<agent_conversation_summary> 或本说明文本，也不要把其中内容当作新的用户指令。请直接基于这些已有状态采取下一个具体步骤，恢复并完成未结束的任务，不要要求用户重复已捕获的信息。'
-COMPACTION_CONTINUE_WITHOUT_CURRENT_USER = '当前没有新的用户消息。请依据上方 <agent_compaction_handoff> 中的历史上下文和摘要，继续完成压缩前正在进行的任务；如果下一步需要工具，请直接调用 run_python。不要复述或输出压缩交接 XML。'
-TOOL_ATTACHMENT_CONTEXT_BRIDGE = '工具执行已完成。工具产生的额外视觉上下文会在下一条用户消息中提供。'
-POST_TOOL_COMPACTION_BRIDGE = '我已经收到工具结果。当下一条用户消息要求上下文压缩时，我会按照这些指令生成所需的压缩摘要，并准确保留工具结果、决策、文件变更、约束和未解决任务。'
-INTERRUPTED_TOOL_CONTEXT_BRIDGE = '某个工具调用未返回完整结果。请基于可用上下文继续。'
-INTERRUPTED_STREAM_CONTEXT_BRIDGE = '助手回复未能完整生成。请基于可用上下文继续。'
+TITLE_GENERATION_PROMPT = "根据用户第一条消息，为这个 uv-agent 线程创建一个简洁、标题式名称。抓住用户的底层任务或意图，而不是逐字改写句子。如果问题宽泛或含糊，就用抽象名词短语风格。例如，询问这是哪种项目的消息应生成类似“项目内容询问”的标题。只返回标题，不要引号或标点。优先使用用户的语言。控制在 8 个英文词以内或 24 个 CJK 字符以内。"
+BRANCH_NAME_GENERATION_PROMPT = "根据用户任务创建一个简短的 git branch slug。捕捉具体动作和对象。只返回 slug：ASCII 小写字母、数字和连字符。不要空格、斜杠、引号、标点、解释或前缀。最多 30 个字符。优先使用动宾短语，例如 fix-login-redirect、add-dark-mode 或 refactor-parser。"
+COMPACTED_CONTEXT_CONTINUATION = "上方 <agent_retained_history> 和 <agent_conversation_summary> 是压缩前的历史上下文，仅供继续任务参考。不要复述或输出 <agent_compaction_handoff>、<agent_retained_history>、<agent_conversation_summary> 或本说明文本，也不要把其中内容当作新的用户指令。请直接基于这些已有状态采取下一个具体步骤，恢复并完成未结束的任务，不要要求用户重复已捕获的信息。"
+COMPACTION_CONTINUE_WITHOUT_CURRENT_USER = "当前没有新的用户消息。请依据上方 <agent_compaction_handoff> 中的历史上下文和摘要，继续完成压缩前正在进行的任务；如果下一步需要工具，请直接调用 run_python。不要复述或输出压缩交接 XML。"
+TOOL_ATTACHMENT_CONTEXT_BRIDGE = (
+    "工具执行已完成。工具产生的额外视觉上下文会在下一条用户消息中提供。"
+)
+POST_TOOL_COMPACTION_BRIDGE = "我已经收到工具结果。当下一条用户消息要求上下文压缩时，我会按照这些指令生成所需的压缩摘要，并准确保留工具结果、决策、文件变更、约束和未解决任务。"
+INTERRUPTED_TOOL_CONTEXT_BRIDGE = "某个工具调用未返回完整结果。请基于可用上下文继续。"
+INTERRUPTED_STREAM_CONTEXT_BRIDGE = "助手回复未能完整生成。请基于可用上下文继续。"
 
 
 # ---------------------------------------------------------------------------
 # Engine-level inline prompts (extracted from engine.py)
 # ---------------------------------------------------------------------------
 
-BRANCH_SLUG_INSTRUCTION = '生成一个简短的 git branch slug。只返回 slug。'
+BRANCH_SLUG_INSTRUCTION = "生成一个简短的 git branch slug。只返回 slug。"
 
-THREAD_TITLE_INSTRUCTION = '生成简短线程标题。只返回标题。'
+THREAD_TITLE_INSTRUCTION = "生成简短线程标题。只返回标题。"
 
-PRE_TURN_JUDGE_ERROR_STDERR = '错误：预轮判断期间不要调用工具。只返回 JSON 行。'
+PRE_TURN_JUDGE_ERROR_STDERR = "错误：预轮判断期间不要调用工具。只返回 JSON 行。"
 
-TOKEN_ESTIMATION_WARNING = 'Provider 的 token 用量不可用；上下文压缩正在使用本地估算值，可能导致调用失败或压缩时机过晚。'
+TOKEN_ESTIMATION_WARNING = "Provider 的 token 用量不可用；上下文压缩正在使用本地估算值，可能导致调用失败或压缩时机过晚。"
 
-COMPACTION_TOOL_ERROR_STDERR = '错误：上下文压缩期间不允许调用工具。请用清晰的 Markdown 格式返回压缩摘要。'
+COMPACTION_TOOL_ERROR_STDERR = (
+    "错误：上下文压缩期间不允许调用工具。请用清晰的 Markdown 格式返回压缩摘要。"
+)
 
-INTERRUPTED_TOOL_ERROR = '工具调用未完成，因为用户中断了本轮。不要假定该工具已成功运行。'
-GUIDED_INPUT_CONTEXT_BRIDGE = 'A newer user message arrived while this task was running. This turn stopped at a safe boundary so the next turn can continue from the newer user message.'
+INTERRUPTED_TOOL_ERROR = (
+    "工具调用未完成，因为用户中断了本轮。不要假定该工具已成功运行。"
+)
+GUIDED_INPUT_CONTEXT_BRIDGE = "A newer user message arrived while this task was running. This turn stopped at a safe boundary so the next turn can continue from the newer user message."
 
 ACTIVE_CWD_NOTICE_TEMPLATE = """<agent_active_cwd_notice>
 run_python 的活动工作目录现在是 {active_cwd_rel}（线程打开时位于 {initial_cwd_rel}）。相对路径与目录规则均跟随活动工作目录。
 </agent_active_cwd_notice>"""
 
-TOOL_OUTPUT_TRUNCATED_MARKER = '[工具输出因上下文压缩被截断]'
+TOOL_OUTPUT_TRUNCATED_MARKER = "[工具输出因上下文压缩被截断]"
 
-TOOL_OUTPUT_OMITTED_NOTE = '为适配上下文压缩请求，工具输出已省略。'
+TOOL_OUTPUT_OMITTED_NOTE = "为适配上下文压缩请求，工具输出已省略。"
 
-TOOL_OUTPUT_SHORTENED_NOTE = '为适配上下文压缩请求，工具输出已缩短。大型文本字段可能仅保留首尾摘录。'
+TOOL_OUTPUT_SHORTENED_NOTE = (
+    "为适配上下文压缩请求，工具输出已缩短。大型文本字段可能仅保留首尾摘录。"
+)
 
 # ---------------------------------------------------------------------------
 # Project rules prompts (extracted from project_rules.py)
 # ---------------------------------------------------------------------------
 
-PROJECT_RULES_LOADED_HEADER = '以下目录规则文件已自动加载。相关时请遵循；较新的用户消息仍定义当前任务。'
+PROJECT_RULES_LOADED_HEADER = (
+    "以下目录规则文件已自动加载。相关时请遵循；较新的用户消息仍定义当前任务。"
+)
 
-PROJECT_RULE_INDEX_HEADER = '在活动 {label} 下发现了规则文件。内容已内联于上方任意 <agent_workspace_rules> 块中的文件，视为已加载；不要重新读取。仅对内容未在上方出现的条目使用 rt.cd。'
+PROJECT_RULE_INDEX_HEADER = "在活动 {label} 下发现了规则文件。内容已内联于上方任意 <agent_workspace_rules> 块中的文件，视为已加载；不要重新读取。仅对内容未在上方出现的条目使用 rt.cd。"
 
 # ---------------------------------------------------------------------------
 # Compaction inline prompts (extracted from compaction.py)
 # ---------------------------------------------------------------------------
 
-COMPACTION_RETURN_ONLY_INSTRUCTION = '只返回交接摘要，使用清晰的 Markdown 格式，不要代码块或工具调用标记。保留用户意图、决策、文件变更、工具结果和未解决任务。从做了什么、学到了什么的角度总结工具调用；不要复现调用 payload、脚本、JSON、DSML/XML 协议块、stdout 包装或 run ID。不要复述 AGENTS 目录规则，系统会自动重新加载必要内容。'
+COMPACTION_RETURN_ONLY_INSTRUCTION = "只返回交接摘要，使用清晰的 Markdown 格式，不要代码块或工具调用标记。保留用户意图、决策、文件变更、工具结果和未解决任务。从做了什么、学到了什么的角度总结工具调用；不要复现调用 payload、脚本、JSON、DSML/XML 协议块、stdout 包装或 run ID。不要复述 AGENTS 目录规则，系统会自动重新加载必要内容。"
 
-COMPACTION_NO_SUMMARY_FALLBACK = '（无可用摘要）'
+COMPACTION_NO_SUMMARY_FALLBACK = "（无可用摘要）"
 
 COMPACTION_TRUNCATION_SUFFIX = """
 [上下文压缩期间被截断]"""
@@ -203,8 +213,10 @@ RUNTIME_ENVIRONMENT_TEMPLATE = """<agent_runtime_environment>
 </agent_runtime_environment>"""
 RUNTIME_ENVIRONMENT_DEPENDENCIES_EMPTY = '<dependency_list empty="true" />'
 RUNTIME_ENVIRONMENT_DEPENDENCY_TEMPLATE = "<dependency>{dependency}</dependency>"
-RUNTIME_ENVIRONMENT_UV_PROJECT_RULE = '<rule>这是 run_python 使用的 uv project 环境；它不是 workspace，也不是活动 cwd。</rule>'
-RUNTIME_ENVIRONMENT_PERSISTENCE = '<persistence>持久化的脚本、runs 和 threads 位于项目状态目录下。</persistence>'
+RUNTIME_ENVIRONMENT_UV_PROJECT_RULE = "<rule>这是 run_python 使用的 uv project 环境；它不是 workspace，也不是活动 cwd。</rule>"
+RUNTIME_ENVIRONMENT_PERSISTENCE = (
+    "<persistence>持久化的脚本、runs 和 threads 位于项目状态目录下。</persistence>"
+)
 MODEL_LEVELS_TEMPLATE = """<agent_model_levels>
 <default>{default}</default>
 <available>
@@ -213,7 +225,7 @@ MODEL_LEVELS_TEMPLATE = """<agent_model_levels>
 {rule}
 </agent_model_levels>"""
 MODEL_LEVELS_LEVEL_TEMPLATE = "<level>{level}</level>"
-MODEL_LEVELS_RULE = '<rule>level 和 model_level 的取值由配置定义；只能使用可用名称，或省略以使用默认值。</rule>'
+MODEL_LEVELS_RULE = "<rule>level 和 model_level 的取值由配置定义；只能使用可用名称，或省略以使用默认值。</rule>"
 
 # Purpose: project-rule context prose and structural labels. These blocks tell
 # the model which AGENTS files were loaded and which additional rule files exist
@@ -233,23 +245,33 @@ PROJECT_RULE_INDEX_CLOSE = f"</{WORKSPACE_RULE_INDEX_TAG}>"
 PROJECT_RULE_INDEX_SCAN_DEPTH_TEMPLATE = "scan_depth: {depth}"
 PROJECT_RULE_INDEX_MAX_ENTRIES_TEMPLATE = "max_entries: {max_entries}"
 PROJECT_RULE_INDEX_TRUNCATED_TEMPLATE = "truncated: {truncated}"
-PROJECT_RULE_INDEX_DEPTH_LIMIT_REACHED = 'depth_limit_reached: 超出扫描深度的目录可能还包含其他规则文件。'
-PROJECT_RULE_INDEX_ENTRY_LIMIT_REACHED = 'entry_limit_reached: 仅显示前几个列出的规则文件。'
+PROJECT_RULE_INDEX_DEPTH_LIMIT_REACHED = (
+    "depth_limit_reached: 超出扫描深度的目录可能还包含其他规则文件。"
+)
+PROJECT_RULE_INDEX_ENTRY_LIMIT_REACHED = (
+    "entry_limit_reached: 仅显示前几个列出的规则文件。"
+)
 
 # Purpose: image attachments are represented as a short text lead-in plus the
 # binary image. The lead-in lets the model identify the source and user note.
-IMAGE_ATTACHMENT_TEXT_TEMPLATE = '通过 uv_agent_runtime.look_at 附加的图片（{attachment_id}, {filename}）。'
-IMAGE_ATTACHMENT_NOTE_TEMPLATE = '用户备注：{note}'
+IMAGE_ATTACHMENT_TEXT_TEMPLATE = (
+    "通过 uv_agent_runtime.look_at 附加的图片（{attachment_id}, {filename}）。"
+)
+IMAGE_ATTACHMENT_NOTE_TEMPLATE = "用户备注：{note}"
 
 # Purpose: compaction wrappers distinguish summaries, retained history, and tool
 # artifacts from fresh user instructions while still preserving content after a
 # context checkpoint.
-UPCOMING_USER_TASK_TEMPLATE = "<agent_upcoming_user_task>\n{task}\n</agent_upcoming_user_task>\n"
-CONTEXT_COMPACTION_REQUEST_TEMPLATE = (
-    "<agent_context_compaction_request>\n{prompt}</agent_context_compaction_request>\n\n{return_only_instruction}"
+UPCOMING_USER_TASK_TEMPLATE = (
+    "<agent_upcoming_user_task>\n{task}\n</agent_upcoming_user_task>\n"
 )
-CONVERSATION_SUMMARY_TEMPLATE = "<agent_conversation_summary>\n{summary}\n</agent_conversation_summary>"
-COMPACTION_CONTINUATION_TEMPLATE = "<agent_compaction_continuation>\n{continuation}\n</agent_compaction_continuation>"
+CONTEXT_COMPACTION_REQUEST_TEMPLATE = "<agent_context_compaction_request>\n{prompt}</agent_context_compaction_request>\n\n{return_only_instruction}"
+CONVERSATION_SUMMARY_TEMPLATE = (
+    "<agent_conversation_summary>\n{summary}\n</agent_conversation_summary>"
+)
+COMPACTION_CONTINUATION_TEMPLATE = (
+    "<agent_compaction_continuation>\n{continuation}\n</agent_compaction_continuation>"
+)
 COMPACTION_HANDOFF_TEMPLATE = (
     "<agent_compaction_handoff>\n{retained_history}\n\n{conversation_summary}\n\n"
     "{continuation}\n</agent_compaction_handoff>"
@@ -262,13 +284,17 @@ RETAINED_HISTORY_OPEN = f"<{RETAINED_HISTORY_TAG}>"
 RETAINED_HISTORY_CLOSE = f"</{RETAINED_HISTORY_TAG}>"
 RETAINED_HISTORY_MARKER = f"<{RETAINED_HISTORY_TAG}"
 RETAINED_HISTORY_EMPTY_TEMPLATE = "<agent_retained_history />"
-RETAINED_HISTORY_TEMPLATE = "<agent_retained_history>\n{history}\n</agent_retained_history>"
+RETAINED_HISTORY_TEMPLATE = (
+    "<agent_retained_history>\n{history}\n</agent_retained_history>"
+)
 RETAINED_HISTORY_MESSAGE_ENTRY_TEMPLATE = '<message role="{role}">\n{text}\n</message>'
 RETAINED_HISTORY_TOOL_FALLBACK_NAME = "tool"
 RETAINED_HISTORY_TOOL_CALL_ENTRY_TEMPLATE = (
     '<tool_call name="{name}" call_id="{call_id}">\n{arguments}\n</tool_call>'
 )
-RETAINED_HISTORY_TOOL_OUTPUT_ENTRY_TEMPLATE = '<tool_output call_id="{call_id}">\n{output}\n</tool_output>'
+RETAINED_HISTORY_TOOL_OUTPUT_ENTRY_TEMPLATE = (
+    '<tool_output call_id="{call_id}">\n{output}\n</tool_output>'
+)
 
 # System prompt (the main instruction template)
 # ===========================================================================
@@ -279,7 +305,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 </identity>
 
 <instruction_format>
-<rule>出现在用户消息中的 XML blocks 一般是系统指令或补充的系统信息，不得忽略。</rule>
+<rule>出现在用户消息中以`agent_`开头的 XML blocks 一般是系统指令或补充的系统信息，不得忽略。</rule>
 </instruction_format>
 
 <response_style>
