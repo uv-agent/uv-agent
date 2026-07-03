@@ -49,9 +49,6 @@ may change.
 - **Goal mode durable memory** — `/goal` creates a per-thread checklist/notes layer
   independent of the chat transcript. After compaction or resume, the model consults
   goal plugin state rather than relying solely on summarized history.
-- **Agent View parallel workspaces** — dispatch bug investigations, implementation
-  experiments, and test fixes to isolated Git worktree background sessions. Track
-  them all from a single dashboard.
 - **Prompt-cache-friendly design** — the system prompt prefix is guaranteed
   byte-identical within an epoch. Compaction requests share the same prefix structure
   as normal calls, maximizing provider-side cache hits. Cache reads are nearly free.
@@ -264,7 +261,6 @@ settings. See [configuration](docs/configuration.md) for every option and
 - `/level <name>` to switch models; `/status` to inspect runtime state including
   cache compaction judge details.
 - `/goal enable [objective]` for durable task checklists across long sessions.
-- Agent View dispatches background tasks to isolated Git worktrees.
 See [TUI and slash commands](docs/tui.md) for the full list.
 
 ## TUI Interfaces
@@ -272,13 +268,6 @@ See [TUI and slash commands](docs/tui.md) for the full list.
 - **tui** (default, `uv-agent` or `uv-agent tui`) — lightweight ANSI TUI rendered
   directly in the terminal. Compact status rows, streaming events, Goal/Worktree
   mode, and image attachments.
-
-## Agent View
-
-Agent View is a dashboard for managing multiple background agent sessions. Tasks
-run in isolated Git worktrees on auto-generated branches, keeping edits away from
-your current checkout. Track status, skim output, continue or discard tasks — all
-from one panel.
 
 ## Service Mode
 
