@@ -3017,14 +3017,35 @@ class UvAgentApp:
         model = self._level_model_name(level)
         if metadata.get("active_level") == level and metadata.get("active_model") == model:
             return
+        previous_level = metadata.get("active_level")
+        previous_model = metadata.get("active_model")
         append(
             thread_id,
             "thread.level_updated",
             level=level,
             model=model,
-            previous_level=metadata.get("active_level"),
-            previous_model=metadata.get("active_model"),
+            previous_level=previous_level,
+            previous_model=previous_model,
         )
+        if previous_model and model and previous_model != model:
+            message = self._text("model_switch_warning")
+            append(
+                thread_id,
+                "thread.model_switch_warning",
+                from_level=previous_level,
+                to_level=level,
+                from_model=previous_model,
+                to_model=model,
+                message=message,
+            )
+            logger.warning(
+                "Thread warning recorded type=model_switch thread_id=%s from_level=%s to_level=%s from_model=%s to_model=%s",
+                thread_id,
+                previous_level,
+                level,
+                previous_model,
+                model,
+            )
 
     def _current_level_for_thread(self, thread_id: str | None = None) -> str | None:
         if thread_id and thread_id != self.state.thread_id:

@@ -2155,6 +2155,14 @@ class AgentEngine:
                 token_count.tokens,
                 trigger_tokens,
             )
+            logger.warning(
+                "Thread warning recorded type=token_estimation thread_id=%s turn_id=%s tokens=%d threshold=%d source=%s",
+                thread_id,
+                turn_id,
+                token_count.tokens,
+                trigger_tokens,
+                token_count.source,
+            )
         if not force:
             if token_count.tokens < self.config.runtime.compression.min_tokens:
                 logger.debug(
@@ -3745,6 +3753,14 @@ class AgentEngine:
                 chars=len(text),
                 threshold_chars=threshold_chars,
                 context_window_chars=context_window_chars,
+            )
+            logger.warning(
+                "Thread warning recorded type=plugin_epoch_context thread_id=%s plugin=%s tag=%s chars=%d threshold_chars=%d",
+                thread_id,
+                plugin,
+                tag,
+                len(text),
+                threshold_chars,
             )
             if context_warning_events is not None:
                 context_warning_events.append(self._public_event(stored))

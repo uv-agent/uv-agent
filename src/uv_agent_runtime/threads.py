@@ -216,6 +216,7 @@ _PROCESS_REF_EVENT_TYPES = {
     "item.reasoning_partial",
     "thread.token_estimation_warning",
     "thread.model_switch_warning",
+    "thread.plugin_epoch_context_warning",
     "turn.stream_retry",
     "turn.interrupted",
     "turn.error",
@@ -1070,6 +1071,7 @@ def _process_kind(event: dict[str, Any]) -> str:
         "item.reasoning_partial": "reasoning",
         "thread.token_estimation_warning": "warning",
         "thread.model_switch_warning": "warning",
+        "thread.plugin_epoch_context_warning": "warning",
         "turn.stream_retry": "retry",
         "turn.interrupted": "interrupted",
         "turn.error": "error",
@@ -1083,6 +1085,8 @@ def _event_status(event: dict[str, Any]) -> str:
         return "error"
     if event_type == "turn.interrupted":
         return "interrupted"
+    if event_type.startswith("thread.") and event_type.endswith("_warning"):
+        return "warning"
     if event_type == "item.runner_result":
         result = event.get("result") if isinstance(event.get("result"), dict) else {}
         if result.get("timed_out"):
@@ -1154,6 +1158,8 @@ def _event_human_text(event: dict[str, Any]) -> str:
     if event_type == "turn.interrupted":
         return str(event.get("reason") or "")
     if event_type == "thread.model_switch_warning":
+        return str(event.get("message") or "")
+    if event_type == "thread.plugin_epoch_context_warning":
         return str(event.get("message") or "")
     return ""
 

@@ -765,6 +765,35 @@ def test_runtime_thread_view_returns_dialogue_and_process_refs(tmp_path: Path) -
     ]
 
 
+def test_runtime_thread_view_includes_plugin_epoch_warning_ref(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    thread_id = store.create_thread("Warnings")
+    store.append(
+        thread_id,
+        "item.user",
+        turn_id="turn_one",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+    )
+    store.append(
+        thread_id,
+        "thread.plugin_epoch_context_warning",
+        turn_id="turn_one",
+        plugin="demo",
+        tag="context",
+        message="plugin context is large",
+        chars=200,
+        threshold_chars=100,
+    )
+
+    view = thread_view(thread_id, state_dir=tmp_path)
+
+    refs = view["turns"][0]["process_refs"]
+    assert len(refs) == 1
+    assert refs[0]["kind"] == "warning"
+    assert refs[0]["status"] == "warning"
+    assert refs[0]["summary"] == "plugin context is large"
+
+
 def test_runtime_replace_text_preserves_mixed_newlines(tmp_path: Path) -> None:
     path = tmp_path / "sample.txt"
     path.write_bytes(b"first\r\nold\nlast\r")

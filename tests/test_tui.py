@@ -3781,6 +3781,27 @@ def test_start_turn_persists_selected_level_for_new_thread(monkeypatch) -> None:
     assert app.engine.thread_store.threads[0]["active_level"] == "alpha"
     assert app.engine.thread_store.threads[0]["active_model"] == "alpha-model"
 
+
+def test_level_command_records_model_switch_warning_for_existing_thread(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    thread_id = app.engine.thread_store.create_thread("Existing")
+    app.engine.thread_store.append(thread_id, "thread.level_updated", level="test", model="test-model")
+    app.state.thread_id = thread_id
+
+    app._handle_command("/level alpha")
+
+    warnings = [
+        event for event in app.engine.thread_store.events if event["type"] == "thread.model_switch_warning"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["thread_id"] == thread_id
+    assert warnings[0]["from_level"] == "test"
+    assert warnings[0]["to_level"] == "alpha"
+    assert warnings[0]["from_model"] == "test-model"
+    assert warnings[0]["to_model"] == "alpha-model"
+    assert warnings[0]["message"] == app._text("model_switch_warning")
+
+
 def test_start_turn_keeps_user_cell_in_live_until_flushed(monkeypatch) -> None:
     app = _make_app(monkeypatch)
 

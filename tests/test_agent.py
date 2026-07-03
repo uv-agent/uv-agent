@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import logging
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1261,7 +1262,10 @@ async def test_compaction_trigger_prefers_provider_usage(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_compaction_warns_when_trigger_uses_estimate(tmp_path: Path) -> None:
+async def test_compaction_warns_when_trigger_uses_estimate(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="uv_agent.agent.engine")
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(
@@ -1312,6 +1316,7 @@ async def test_compaction_warns_when_trigger_uses_estimate(tmp_path: Path) -> No
     assert [event["type"] for event in stored].index("thread.token_estimation_warning") < [
         event["type"] for event in stored
     ].index("item.compaction")
+    assert any("type=token_estimation" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -4862,7 +4867,10 @@ def test_plugin_epoch_context_is_grouped_after_core_context(tmp_path: Path) -> N
     assert len(stored) == 1
 
 
-def test_large_plugin_epoch_context_records_generic_warning(tmp_path: Path) -> None:
+def test_large_plugin_epoch_context_records_generic_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="uv_agent.agent.engine")
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root, context_window_tokens=20)
@@ -4889,6 +4897,7 @@ def test_large_plugin_epoch_context_records_generic_warning(tmp_path: Path) -> N
     assert warning["plugin"] == "demo-plugin"
     assert warning["tag"] == "demo_context"
     assert warning["chars"] > warning["threshold_chars"]
+    assert any("type=plugin_epoch_context" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
