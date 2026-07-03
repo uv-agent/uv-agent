@@ -32,9 +32,14 @@ may change.
   `uv_agent_runtime` provides helpers for read/write/edit, FFF-backed search,
   subprocesses, dependency installation, images, and plugin-provided namespaces.
   Scripts serve as documentation — no opaque shell commands.
-- **Plugin system** — plain Python packages discovered via `uv_agent.plugins` entry
-  point. Register runtime helpers, subscribe to events, submit turns from external
-  systems. `uvx --with your-plugin uv-agent` and you're set.
+- **Plugin system** — trusted Python packages discovered via `uv_agent.plugins`
+  can add runtime namespaces (`rt.mcp`, `rt.workflow`, custom helpers), actions,
+  slash commands, UI providers, model context, event subscriptions, durable
+  storage, and programmatic turn submission while preserving the single
+  `run_python` model boundary.
+- **Headless service mode** — `uv-agent daemon` starts the host and plugins
+  without opening the TUI, so schedulers, chat bridges, webhooks, and other
+  long-running integrations can keep working for a project state.
 - **Self-bootstrapping** — uv-agent is developed using uv-agent. Reading, editing,
   testing, and iterating on the project are done with uv-agent itself.
 - **Progressive context disclosure** — skills, MCP servers, and workspace rules are
@@ -93,6 +98,9 @@ uvx uv-agent@latest ask "Summarize the project structure"
 
 # Resume an existing thread
 uvx uv-agent@latest ask --thread thr_xxx "Continue where we left off"
+
+# Run the headless service host for plugins and schedulers
+uvx uv-agent@latest daemon --replace
 ```
 
 ## Model Configuration
@@ -272,12 +280,40 @@ run in isolated Git worktrees on auto-generated branches, keeping edits away fro
 your current checkout. Track status, skim output, continue or discard tasks — all
 from one panel.
 
+## Service Mode
+
+`uv-agent daemon` runs the same host/plugin stack without launching the terminal
+UI. Use it when plugin capabilities need a long-lived process: scheduled actions,
+external chat or webhook bridges, programmatic turn submission, or background
+event relays.
+
+The daemon acquires a project-state lease and heartbeat so one active host owns
+integrations for that workspace. Use `--replace` to stop a stale or older daemon
+for the same state.
+
+```powershell
+uv-agent daemon --replace
+```
+
 ## Plugins
 
-Plugins are Python packages discovered via the `uv_agent.plugins` entry point. They
-run in the uv-agent host process and can register runtime helpers, actions,
-commands, UI providers, model context, i18n text, event subscriptions, and
-programmatic turn submission.
+Plugins are trusted Python packages discovered via the `uv_agent.plugins` entry
+point and loaded into the uv-agent host process. They extend the host without
+changing the model boundary: the model still acts through `run_python`, while
+plugin capabilities appear as script helpers, commands, actions, UI additions,
+and structured model context.
+
+Plugins can:
+
+- expose runtime helper namespaces such as `rt.mcp`, `rt.workflow`, or
+  project-specific `rt.<name>` helpers;
+- register actions for schedulers and other automation;
+- add slash commands, picker/UI providers, and localized text;
+- subscribe to host events, keep private storage, and submit turns from external
+  systems.
+
+Built-in Goal, Worktree, Skills, MCP, Workflow, and Scheduler capabilities use
+this same plugin surface. Install only plugins you trust.
 
 ```powershell
 uvx --with your-uv-agent-plugin uv-agent@latest
