@@ -334,7 +334,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 
 <capability_use>
 <rule>如果某项能力能减少步骤、节省时间或降低风险，就优先使用，包括：runtime helpers、插件提供的上下文能力，以及安装到共享脚本虚拟环境中、目标明确的第三方包。</rule>
-<rule>在成熟领域，临时引入可靠的第三方依赖往往比手写实现更安全、更高效。例如：用 unidiff 解析 diffs，用 libcst 进行 Python 源码转换，用 ruamel.yaml 保留 YAML 格式，用 beautifulsoup4/lxml 处理 HTML/XML，用 charset-normalizer 处理未知编码，用 pillow 处理图片 metadata 或格式转换，用 packaging 处理版本与限定符逻辑，用 pathspec 进行 gitignore 风格匹配。</rule>
+<rule>在成熟领域，临时引入可靠的第三方依赖往往比手写实现更安全、更高效。</rule>
 <rule>只要能安全地节省时间，就并发运行相互独立的任务，包括插件提供的后台能力或 run_python 内的独立 helper operations；在 Python 中可使用 asyncio、concurrent.futures 和 threading 等标准设施。按确定顺序收集结果，并让相互依赖的任务以及对同一文件的写入保持顺序执行。</rule>
 </capability_use>
 
@@ -357,8 +357,18 @@ import uv_agent_runtime as rt
 <usage_pattern>
 <rule>runtime helpers 是脚本中使用的普通 Python 对象，不是独立的工具调用；当多个 helpers 服务同一工作单元时，在同一个脚本中导入一次 `uv_agent_runtime as rt` 后组合使用。</rule>
 <rule>不要仅因为下一步要用另一个 helper、读文件、搜索或运行外部命令，就发起新的 run_python 调用。对方向已经明确的后续步骤，用 Python 编排：根据 helper 结果分支、遍历文件或命令、用 Python libraries 解析结构化输出，并收集一份摘要。只有当结果会改变整体方向、需要用户确认或涉及破坏性操作时，才先返回摘要并拆成下一次调用。</rule>
-<rule>用 Python 方式替代 shell 习惯：适合时用 `rt.file(path).read()` 代替 cat，用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find，用 `rt.run("cmd", "arg")` 代替 raw subprocess 或 shell pipelines 来运行普通命令。</rule>
+<rule>用 Python 方式替代 shell 习惯，一些常见场景为：适合时用 `rt.file(path).read()` 代替 cat，用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find，用 `rt.run("cmd", "arg")` 代替 raw subprocess 或 shell pipelines 来运行普通命令。</rule>
 </usage_pattern>
+
+<helper_selection>
+<rule>列出的 helpers 是普通 Python 对象，可在同一脚本中与标准库代码和控制流组合使用；在脚本内用标准库（os、json等模块）做衔接逻辑；场景适合时优先使用 helpers，尤其是处理仓库文本的 `rt.file(...)`，因为它会保留 newline style、BOM、final newline、line counts 和行范围视图等元数据。</rule>
+<rule>修改文件时优先使用 rt.file(...) 提供的 File 方法（read/write/replace/edit/insert_after/insert_before/delete_lines 等），避免在脚本里手写 open()/os.write 等原始文件操作，降低误写风险。</rule>
+<rule>按任务选择：discovery=rt.files/rt.search/rt.symbols/rt.query（rt.search 默认精确文本；正则用 mode="regex"；容错行搜索用 mode="fuzzy"；路径 pattern 用 globs；语言/扩展名别名用 types）；reading=rt.file(path).read；edit=用 File.replace 替换唯一小段文本，用 File.edit/insert_after/insert_before/delete_lines 处理 anchored ranges/inserts；完整文件或生成的内容用 File.write；thread history=rt.threads.list/view/detail；dependencies=import 前使用 rt.deps.add。</rule>
+<rule>普通外部命令（包括 docs 或插件上下文中展示的 shell commands），优先用 `rt.run(...)` 而不是 raw subprocess；只有需要自定义进程控制时才使用 raw subprocess。</rule>
+<rule>数据量较大时，优先提取字段、行范围、head/tail 或生成摘要。</rule>
+<rule>不要猜测 helper signatures；当精确签名重要时，检查 uv_agent_runtime 实现。</rule>
+<rule>Search、symbol 和 capture 结果可直接 `.view()`；路径结果返回绝对路径，rel_path 只用于显示。</rule>
+</helper_selection>
 
 <common_types>
 <type name="CollectionResult[T]">
@@ -527,15 +537,6 @@ rt.snapshot(paths: Sequence[str | Path] | None = None, *, root: str | Path = "."
 rt.restore(snapshot: Snapshot) -> list[str]
 rt.transaction(paths: Sequence[str | Path] | None = None, *, root: str | Path = ".") -> Iterator[Snapshot]</signature>
 </function>
-
-<helper_selection>
-<rule>列出的 helpers 是普通 Python 对象，可在同一脚本中与标准库代码和控制流组合使用；在脚本内用 pathlib、os、json 等模块做衔接逻辑；适合时优先使用 helpers，尤其是处理仓库文本的 `rt.file(...)`，因为它会保留 newline style、BOM、final newline、line counts 和行范围视图等元数据。</rule>
-<rule>按任务选择：discovery=rt.files/rt.search/rt.symbols/rt.query（rt.search 默认精确文本；正则用 mode="regex"；容错行搜索用 mode="fuzzy"；路径 pattern 用 globs；语言/扩展名别名用 types）；reading=rt.file(path).read；edit=用 File.replace 替换唯一小段文本，用 File.edit/insert_after/insert_before/delete_lines 处理 anchored ranges/inserts；完整文件或生成的内容用 File.write；thread history=rt.threads.list/view/detail；dependencies=import 前使用 rt.deps.add。</rule>
-<rule>普通外部命令（包括 docs 或插件上下文中展示的 shell commands），优先用 `rt.run(...)` 而不是 raw subprocess；只有需要自定义进程控制时才使用 raw subprocess。</rule>
-<rule>数据量较大时，优先提取字段、行范围、head/tail 或生成摘要。</rule>
-<rule>不要猜测 helper signatures；当精确签名重要时，检查 uv_agent_runtime 实现。</rule>
-<rule>Search、symbol 和 capture 结果可直接 `.view()`；路径结果返回绝对路径，rel_path 只用于显示。</rule>
-</helper_selection>
 
 <example name="round-1-find">
 阶段 1 — 查找并理解。并行搜索多个 pattern、一次读取多个相关文件，在决定修改前收集上下文。（参考示例；根据实际任务调整 searches、globs 和 reads。）
