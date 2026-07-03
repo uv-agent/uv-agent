@@ -4582,8 +4582,10 @@ async def test_system_instructions_refresh_after_compaction(tmp_path: Path) -> N
     engine.config = make_test_config(project_root, api="chat_completions", default_level="small")
     [event async for event in engine.run_turn(user_text="two", thread_id=thread_id)]
 
-    assert "<agent_epoch_context>" in str(client.requests[0]["input"])
-    assert "<agent_epoch_context>" in str(client.requests[1]["input"])
+    assert "<agent_runtime_environment>" in str(client.requests[0]["input"])
+    assert "<agent_runtime_environment>" in str(client.requests[1]["input"])
+    assert "<agent_epoch_context>" not in str(client.requests[0]["input"])
+    assert "<agent_epoch_context>" not in str(client.requests[1]["input"])
     assert "<agent_model_levels>" not in str(client.requests[0]["input"])
     assert "<agent_model_levels>" not in str(client.requests[1]["input"])
     stored = engine.thread_store.read(thread_id)
@@ -4625,7 +4627,7 @@ def test_plugin_epoch_context_reappears_after_compaction_epoch(tmp_path: Path) -
     assert "<state>refresh</state>" not in str(first)
     assert "<agent_demo_status>" in str(second)
     assert "<state>refresh</state>" in str(second)
-    assert "<agent_epoch_context>" in str(second)
+    assert "<agent_epoch_context>" not in str(second)
     assert "<agent_runtime_environment>" in str(second)
     assert "<agent_runtime_helpers>" in str(second)
     assert "<agent_model_levels>" not in str(second)
@@ -4688,7 +4690,8 @@ def test_plugin_epoch_publish_sends_incremental_section_only(tmp_path: Path) -> 
     second = engine._runtime_context_items(thread_id)
 
     first_text = message_item_text(first[0])
-    assert first_text.startswith("<agent_epoch_context>\n")
+    assert first_text.startswith("<agent_runtime_environment>")
+    assert "<agent_epoch_context>" not in first_text
     assert "<agent_runtime_environment>" in first_text
     assert "<agent_runtime_helpers>" in first_text
     text = message_item_text(second[0])
@@ -4850,7 +4853,8 @@ def test_plugin_epoch_context_is_grouped_after_core_context(tmp_path: Path) -> N
 
     assert len(items) == 1
     text = message_item_text(items[0])
-    assert text.startswith("<agent_epoch_context>\n")
+    assert text.startswith("<agent_runtime_environment>")
+    assert "<agent_epoch_context>" not in text
     assert text.index("<agent_runtime_helpers>") < text.index("<agent_demo_helper>")
     assert "<signature>rt.demo.helper(name: str) -&gt; Any</signature>" in text
     assert "<description>Demo helper.</description>" in text
@@ -4931,7 +4935,8 @@ async def test_run_turn_waits_for_plugin_start_before_context_update(tmp_path: P
     assert plugins.start_count == 1
     assert events[-1]["type"] == "turn.completed"
     request_text = "\n".join(message_item_text(item) for item in client.requests[0]["input"])
-    assert "<agent_epoch_context>" in request_text
+    assert "<agent_runtime_environment>" in request_text
+    assert "<agent_epoch_context>" not in request_text
     assert "<agent_delayed_status>" in request_text
     assert "<state>ready</state>" in request_text
 
@@ -5574,13 +5579,13 @@ def test_reconstruct_input_places_post_compaction_context_before_replacement(tmp
         thread_id,
         "item.agent_epoch_context",
         turn_id="t1",
-        text="<agent_epoch_context>\ncurrent context\n</agent_epoch_context>",
+        text="<agent_runtime_environment>\ncurrent context\n</agent_runtime_environment>",
     )
     engine.thread_store.append(thread_id, "item.user", turn_id="t2", item=message_item("user", "new request"))
 
     reconstructed = engine._reconstruct_input(thread_id)
 
-    assert message_item_text(reconstructed[0]).startswith("<agent_epoch_context")
+    assert message_item_text(reconstructed[0]).startswith("<agent_runtime_environment")
     handoff = message_item_text(reconstructed[1])
     assert handoff.startswith("<agent_compaction_handoff>")
     assert "<agent_retained_history>" in handoff
@@ -5629,7 +5634,7 @@ def test_run_turn_prelude_inserts_new_context_before_compacted_history(tmp_path:
     texts = [message_item_text(item) for item in run_prelude.input_items if item.get("type") == "message"]
     assert texts[0].startswith("<agent_workspace_rules")
     assert "Reloaded rule." in texts[0]
-    runtime_index = next(index for index, text in enumerate(texts) if text.startswith("<agent_epoch_context>"))
+    runtime_index = next(index for index, text in enumerate(texts) if text.startswith("<agent_runtime_environment>"))
     handoff_index = next(index for index, text in enumerate(texts) if text.startswith("<agent_compaction_handoff>"))
     assert "<agent_runtime_environment>" in texts[runtime_index]
     assert "<agent_runtime_helpers>" in texts[runtime_index]
@@ -5707,7 +5712,7 @@ async def test_mid_turn_compaction_readds_epoch_context_before_continuing(tmp_pa
     continued_texts = [message_item_text(item) for item in continued_input if item.get("type") == "message"]
     assert continued_texts[0].startswith("<agent_workspace_rules")
     assert "Mid-turn rule." in continued_texts[0]
-    runtime_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<agent_epoch_context>"))
+    runtime_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<agent_runtime_environment>"))
     handoff_index = next(index for index, text in enumerate(continued_texts) if text.startswith("<agent_compaction_handoff>"))
     assert "<agent_runtime_environment>" in continued_texts[runtime_index]
     assert "<agent_runtime_helpers>" in continued_texts[runtime_index]

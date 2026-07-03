@@ -47,6 +47,7 @@ from uv_agent_runtime.textops import (
     write_text_lossless,
 )
 from uv_agent_runtime.threads import list_thread_digests, thread_detail, thread_digest, thread_view
+from uv_agent_runtime.transport import RPC_TOKEN_ENV, RPC_URL_ENV
 from uv_agent_runtime.vision import look_at
 from uv_agent.session import ThreadStore
 
@@ -77,7 +78,15 @@ missing = [name for name in names if name in rt.__all__ or hasattr(rt, name)]
 if missing:
     raise SystemExit(",".join(sorted(missing)))
 """
-    result = __import__("subprocess").run([sys.executable, "-c", script], capture_output=True, text=True)
+    env = os.environ.copy()
+    for key in (RPC_URL_ENV, RPC_TOKEN_ENV, "UV_AGENT_RUNTIME_RUN_ID"):
+        env.pop(key, None)
+    result = __import__("subprocess").run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     for name in ("goal", "mcp", "scheduler", "workflow", "worktree"):
         with pytest.raises(ModuleNotFoundError):

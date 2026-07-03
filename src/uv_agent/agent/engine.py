@@ -3312,10 +3312,9 @@ class AgentEngine:
             )
             parts = [core_text] if core_text else []
             parts.extend(rendered.text for rendered in rendered_documents)
-            text = "\n\n".join(parts)
-            text = _wrap_agent_context("agent_epoch_context", str(text or "").strip())
+            text = str("\n\n".join(parts) or "").strip()
             self.thread_store.append(thread_id, "item.agent_epoch_context", text=text)
-            return [message_item("user", text)]
+            return [message_item("user", text)] if text else []
 
         rendered_updates = broker.consume_updates(thread_id)
         self._record_plugin_epoch_context_warnings(
