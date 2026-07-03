@@ -611,7 +611,7 @@ def render_command_palette(
     inner = max(8, width - 4)
     content_rows = max(1, total_rows - 2)
     item_count = len(items) if items else 1
-    needs_marker = bool(items) and item_count > content_rows
+    needs_marker = bool(items) and item_count > content_rows and content_rows >= 2
     window_size = max(1, content_rows - (1 if needs_marker else 0))
     if items:
         selected = max(0, min(selected, len(items) - 1))
@@ -646,7 +646,7 @@ def render_command_palette(
             pad = " " * max(0, inner - visible_len(rendered))
             rows.append(sgr(theme.command_palette_border, "│ ") + rendered + pad + sgr(theme.command_palette_border, " │"))
             used_content_rows += 1
-        if hidden_before or hidden_after:
+        if needs_marker and (hidden_before or hidden_after):
             parts: list[str] = []
             if hidden_before:
                 parts.append(f"↑ {hidden_before}")
@@ -1386,6 +1386,15 @@ def render_live_with_cursor(
         language=state.language,
         image_token_numbers=state.image_token_numbers,
     )
+    chrome_gap_before_chrome = transcript_before_chrome
+    if state.command_palette_open and max_height is not None and not cell_lines and chrome_gap_before_chrome:
+        fixed_with_gap = len(composer_lines) + len(status_lines) + 1
+        fixed_without_gap = len(composer_lines) + len(status_lines)
+        if max_height - fixed_with_gap < 3 <= max_height - fixed_without_gap:
+            # The separator is cosmetic; on very short terminals it can be the
+            # single row that prevents even a minimal command palette from opening.
+            chrome_gap_before_chrome = False
+
     palette_lines: list[str] = []
     if state.command_palette_open:
         palette_available_rows: int | None = None
@@ -1393,7 +1402,7 @@ def render_live_with_cursor(
             # Reserve one row for live transcript content when present so the
             # picker never consumes the whole repaintable frame.  The transcript
             # content itself may later be collapsed to a hidden-lines marker.
-            chrome_gap_rows = 1 if transcript_before_chrome else 0
+            chrome_gap_rows = 1 if chrome_gap_before_chrome else 0
             min_cell_rows = 1 if cell_lines else 0
             fixed_rows = len(composer_lines) + len(status_lines) + chrome_gap_rows + min_cell_rows
             palette_available_rows = max_height - fixed_rows
@@ -1410,7 +1419,7 @@ def render_live_with_cursor(
     if max_height is not None and cell_lines:
         # Reserve the transcript/chrome separator whenever a transcript cell is
         # visible either in this live frame or immediately above it in scrollback.
-        chrome_gap_rows = 1 if transcript_before_chrome else 0
+        chrome_gap_rows = 1 if chrome_gap_before_chrome else 0
         reserved = len(composer_lines) + len(status_lines) + len(palette_lines) + chrome_gap_rows
         available = max(1, max_height - reserved)
         if len(cell_lines) > available:
@@ -1431,7 +1440,7 @@ def render_live_with_cursor(
     # (for example, a just-flushed tool or previous assistant response), so this
     # cannot depend only on ``state.live``.  Status rows remain adjacent because
     # row1/row2 are one chrome strip, not separate transcript cells.
-    if transcript_before_chrome and (not lines or lines[-1].strip()):
+    if chrome_gap_before_chrome and (not lines or lines[-1].strip()):
         lines.append("")
     lines.extend(status_lines)
     cursor_row = len(lines) + row

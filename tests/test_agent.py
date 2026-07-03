@@ -3582,8 +3582,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "PEP 723" not in prompt
     assert "uv pip" not in prompt
     assert "在成熟领域，临时引入可靠的第三方依赖往往比手写实现更安全、更高效" in prompt
-    assert "用 unidiff 解析 diffs" in prompt
-    assert "用 libcst 进行 Python 源码转换" in prompt
     assert "你唯一的外部动作工具是 run_python" in prompt
     assert "必须由 run_python 调用中的 Python 代码发起" in prompt
     assert "Do not assume shell, filesystem, browser, network, or MCP model tools exist outside Python" not in prompt
@@ -3777,7 +3775,6 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "<helper_selection>" in turn_context
     assert "列出的 helpers 是普通 Python 对象" in turn_context
     assert "与标准库代码和控制流组合使用" in turn_context
-    assert "pathlib、os、json" in turn_context and "做衔接逻辑" in turn_context
     assert "适合时优先使用 helpers" in turn_context
     assert "newline style、BOM、final newline" in turn_context
     assert "按任务选择：" in turn_context

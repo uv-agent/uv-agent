@@ -228,7 +228,13 @@ class Renderer:
         *,
         max_height: int | None = None,
     ) -> tuple[list[str], int, int]:
-        live_max_height = max(3, max_height if max_height is not None else rows - 1)
+        if max_height is None:
+            # Normal transcript mode leaves a spare row so first paint/repaints do
+            # not create scrollback just to place the composer.  Full-height
+            # pickers are different: on very short terminals the command palette
+            # needs the final row to show even its minimal bordered panel.
+            max_height = rows if state.command_palette_open else rows - 1
+        live_max_height = max(3, max_height)
         return render_live_with_cursor(
             state,
             self.width,
@@ -513,12 +519,37 @@ class Renderer:
                 preserve_rows = self._transcript_rows_to_preserve_on_growth(state)
                 available_height = max(1, rows - preserve_rows)
                 if height > available_height:
-                    lines, cursor_row, cursor_col = self._rerender_live_with_height(
+                    clipped_lines, clipped_cursor_row, clipped_cursor_col = self._rerender_live_with_height(
                         state,
                         cols,
                         rows,
                         available_height,
                     )
+                    if preserve_rows > 0 and len(clipped_lines) < available_height:
+                        # If preserving the transcript tail leaves too little room
+                        # for even a minimal picker, retry with the whole viewport.
+                        # The write below may scroll the tail into normal
+                        # scrollback, but it will not clear it first.
+                        expanded_lines, expanded_cursor_row, expanded_cursor_col = self._rerender_live_with_height(
+                            state,
+                            cols,
+                            rows,
+                            rows,
+                        )
+                        if len(expanded_lines) > len(clipped_lines):
+                            lines, cursor_row, cursor_col = (
+                                expanded_lines,
+                                expanded_cursor_row,
+                                expanded_cursor_col,
+                            )
+                        else:
+                            lines, cursor_row, cursor_col = (
+                                clipped_lines,
+                                clipped_cursor_row,
+                                clipped_cursor_col,
+                            )
+                    else:
+                        lines, cursor_row, cursor_col = clipped_lines, clipped_cursor_row, clipped_cursor_col
                     height = len(lines)
             self._clear_floating_frame(buf)
             buf.append("\r\n".join(lines))
@@ -550,15 +581,16 @@ class Renderer:
 
         if new_top < old_top:
             # A growing live frame must not erase completed transcript rows above
-            # the previous frame.  If the old frame already reached the viewport
-            # bottom, move those rows into scrollback before clearing; otherwise
-            # consume any blank rows below the old frame and clip the live content
-            # to the safe area starting at ``old_top``.
+            # the previous frame.  First scroll only rows that can move while
+            # preserving the latest transcript tail, then clip transient chrome to
+            # the remaining safe area.  If that clipped command palette still
+            # cannot render even though more completed transcript rows exist, let
+            # just enough of those rows move into normal scrollback for the picker
+            # to open; an explicit picker is more useful than a hidden panel.
             desired_delta = old_top - new_top
             preserve_rows = self._transcript_rows_to_preserve_on_growth(state)
             max_scroll = max(0, self._transcript_rows - preserve_rows)
-            scrollable = desired_delta if old_bottom >= rows else 0
-            delta = min(desired_delta, max_scroll, scrollable)
+            delta = min(desired_delta, max_scroll)
             if delta > 0:
                 buf.append(self._cup(rows, 1) + "\n" * delta)
                 self._transcript_rows = max(0, self._transcript_rows - delta)
@@ -574,6 +606,26 @@ class Renderer:
                     available_height,
                 )
                 height = len(lines)
+                while (
+                    state.command_palette_open
+                    and delta < desired_delta
+                    and self._transcript_rows > 0
+                    and len(lines) < available_height
+                ):
+                    buf.append(self._cup(rows, 1) + "\n")
+                    self._transcript_rows = max(0, self._transcript_rows - 1)
+                    old_top = max(1, old_top - 1)
+                    old_bottom = max(0, old_bottom - 1)
+                    delta += 1
+                    new_top = old_top
+                    available_height = max(1, rows - new_top + 1)
+                    lines, cursor_row, cursor_col = self._rerender_live_with_height(
+                        state,
+                        cols,
+                        rows,
+                        available_height,
+                    )
+                    height = len(lines)
         self._cap_transcript_rows_above_live(rows, height)
 
         clear_top = min(new_top, old_top)

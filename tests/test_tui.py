@@ -1242,6 +1242,98 @@ def test_live_frame_growth_preserves_transcript_above_unpinned_frame(monkeypatch
     assert previous_index < user_index
 
 
+def test_command_palette_opens_when_previous_frame_has_bottom_slack(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui.renderer.terminal_size", lambda default=(100, 30): (60, 8))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    state = TuiState(composer="")
+
+    renderer.repaint(state)
+    previous_user = TranscriptCell("user", text="previous user")
+    previous_answer = TranscriptCell("assistant", text="previous answer", status="streaming")
+    state.live.append(previous_user)
+    state.busy = True
+    state.status_message = "running"
+    renderer.repaint(state)
+    state.live.append(previous_answer)
+    renderer.repaint(state)
+
+    state.live.remove(previous_user)
+    renderer.flush_cell(previous_user, state)
+    state.live.remove(previous_answer)
+    previous_answer.status = "done"
+    renderer.flush_cell(previous_answer, state)
+    state.busy = False
+    state.status_message = "ready"
+    renderer.repaint(state)
+    assert renderer._frame_top_row + renderer._frame_rows - 1 < 8
+
+    state.composer = "/"
+    state.command_palette_open = True
+    state.command_palette_items = [CommandSuggestion(f"/cmd{index}", f"command {index}") for index in range(12)]
+    state.command_palette_index = 3
+    renderer.repaint(state)
+
+    screen = _terminal_screen_lines(output.getvalue(), cols=60, rows=8)
+
+    assert any("/cmd3" in line for line in screen)
+    assert any("previous answer" in line for line in screen)
+
+
+def test_command_palette_uses_tiny_terminal_height_instead_of_disappearing(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui.renderer.terminal_size", lambda default=(100, 30): (60, 6))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    state = TuiState(composer="")
+
+    renderer.flush_cell(TranscriptCell("assistant", text="previous answer"), state)
+
+    state.composer = "/"
+    state.command_palette_open = True
+    state.command_palette_items = [CommandSuggestion(f"/cmd{index}", f"command {index}") for index in range(4)]
+    state.command_palette_index = 1
+    renderer.repaint(state)
+
+    screen = _terminal_screen_lines(output.getvalue(), cols=60, rows=6)
+
+    assert any("/cmd1" in line for line in screen)
+    # The previous answer may move into normal scrollback on such a short
+    # terminal.  The important regression is that the picker opens instead of
+    # being clipped away to preserve a cosmetic transcript/chrome gap.
+
+
+def test_command_palette_reflows_after_terminal_resize(monkeypatch) -> None:
+    size = (80, 12)
+
+    def terminal_size(default=(100, 30)):
+        del default
+        return size
+
+    monkeypatch.setattr("uv_agent.tui.renderer.terminal_size", terminal_size)
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    state = TuiState(
+        composer="/",
+        command_palette_open=True,
+        command_palette_index=5,
+        command_palette_items=[CommandSuggestion(f"/cmd{index}", f"command {index}") for index in range(12)],
+    )
+
+    renderer.repaint(state)
+    output.seek(0)
+    output.truncate(0)
+
+    size = (40, 6)
+    renderer.repaint(state)
+
+    screen = _terminal_screen_lines(output.getvalue(), cols=40, rows=6)
+
+    assert renderer.width == 39
+    assert renderer._frame_rows <= 6
+    assert any("/cmd5" in line for line in screen)
+    assert all(visible_len(line) <= 39 for line in screen if line)
+
+
 def test_command_palette_preserves_latest_assistant_tail(monkeypatch) -> None:
     monkeypatch.setattr("uv_agent.tui.renderer.terminal_size", lambda default=(100, 30): (60, 8))
     output = io.StringIO()
