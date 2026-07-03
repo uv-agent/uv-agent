@@ -5,7 +5,6 @@ from typing import Any
 
 from uv_agent.plugins import PluginManifest, SetupPlugin
 
-
 SUBAGENT_HELPER_SIGNATURE = """SubagentResult = {status: str, thread_id: str | None, turn_id: str | None, final_text: str, error: dict[str, Any] | None, timed_out: bool}
 rt.subagent.run(prompt: str, *, level: str | None = None, timeout_s: float | None = None, thread_id: str | None = None, title: str | None = None) -> SubagentResult"""
 
@@ -13,7 +12,10 @@ MANIFEST = PluginManifest(
     id="builtin.subagent",
     version="0.1.0",
     display_name={"zh": "子代理", "en": "Subagent"},
-    description={"zh": "一次性子代理线程和计划任务 prompt action。", "en": "One-shot subagent threads and scheduled prompt actions."},
+    description={
+        "zh": "一次性子代理线程和计划任务 prompt action。",
+        "en": "One-shot subagent threads and scheduled prompt actions.",
+    },
     builtin=True,
     priority=300,
     capabilities=("runtime_namespace", "action", "context"),
@@ -56,7 +58,9 @@ def setup(context) -> None:
         "subagent",
         doc="运行一次性子代理线程，并返回子线程 turn 的结果。",
         functions={"run": run},
-        docs={"run": "创建或复用一个子代理线程，提交 prompt，并等待该 turn 完成或超时。"},
+        docs={
+            "run": "创建或复用一个子代理线程，提交 prompt，并等待该 turn 完成或超时。"
+        },
         schemas={
             "run": {
                 "type": "object",
@@ -97,8 +101,8 @@ def _publish_subagent_context(context) -> None:
         body={
             "instructions": [
                 "使用 rt.subagent.run(...) 启动一次性子代理线程；子代理适合调查、验证或独立处理一段任务。",
-                "level 由用户或调用方传入；不传时使用 uv-agent 默认 level。",
-                "计划任务请使用 action_id=\"subagent.prompt\"，payload 中传 prompt/level/timeout_s。",
+                "level 如果用户没有提及，就不用填写；不传时使用 uv-agent 默认 level。",
+                '计划任务请使用 action_id="subagent.prompt"，payload 中传 prompt/level/timeout_s。',
                 "子代理只返回结果摘要和 thread_id；需要完整对话时再用 rt.threads helpers 查看对应线程。",
             ],
             "helper": {
@@ -114,7 +118,11 @@ async def _scheduled_prompt(payload: dict[str, Any], context=None) -> dict[str, 
     if context is None:
         raise RuntimeError("subagent.prompt requires scheduler action context")
     prompt = _required_prompt(payload)
-    level_value = payload.get("level") if payload.get("level") is not None else payload.get("model_level")
+    level_value = (
+        payload.get("level")
+        if payload.get("level") is not None
+        else payload.get("model_level")
+    )
     level = _normalize_level(level_value)
     thread_id = _normalize_optional_str(payload.get("thread_id"))
     if thread_id is None and hasattr(context, "schedule_thread"):
@@ -123,7 +131,9 @@ async def _scheduled_prompt(payload: dict[str, Any], context=None) -> dict[str, 
     submit_turn = getattr(context, "submit_turn", None)
     if not callable(submit_turn):
         raise RuntimeError("scheduler action context cannot submit turns")
-    submitted = await submit_turn(text=prompt, thread_id=thread_id, level=level, conflict="queue")
+    submitted = await submit_turn(
+        text=prompt, thread_id=thread_id, level=level, conflict="queue"
+    )
     return await _wait_for_submitted(submitted, timeout_s=timeout_s)
 
 
@@ -161,11 +171,15 @@ async def _run_subagent(
                 "subagent": True,
             },
         )
-    submitted = await submit_turn(text=prompt, thread_id=thread_id, level=level, conflict="queue")
+    submitted = await submit_turn(
+        text=prompt, thread_id=thread_id, level=level, conflict="queue"
+    )
     return await _wait_for_submitted(submitted, timeout_s=timeout_s)
 
 
-async def _wait_for_submitted(submitted: Any, *, timeout_s: float | None) -> dict[str, Any]:
+async def _wait_for_submitted(
+    submitted: Any, *, timeout_s: float | None
+) -> dict[str, Any]:
     timed_out = False
     try:
         if timeout_s is None:
@@ -178,7 +192,9 @@ async def _wait_for_submitted(submitted: Any, *, timeout_s: float | None) -> dic
     except asyncio.TimeoutError:
         completed = submitted
         timed_out = True
-    status = "timeout" if timed_out else str(getattr(completed, "status", "") or "unknown")
+    status = (
+        "timeout" if timed_out else str(getattr(completed, "status", "") or "unknown")
+    )
     return {
         "status": status,
         "thread_id": _normalize_optional_str(getattr(completed, "thread_id", None)),
@@ -189,15 +205,21 @@ async def _wait_for_submitted(submitted: Any, *, timeout_s: float | None) -> dic
     }
 
 
-def _raise_if_nested_subagent(plugin_context: Any, parent_thread_id: str | None) -> None:
+def _raise_if_nested_subagent(
+    plugin_context: Any, parent_thread_id: str | None
+) -> None:
     if not parent_thread_id or plugin_context.threads is None:
         return
     try:
-        kind = str(plugin_context.threads.metadata(parent_thread_id).get("kind") or "thread")
+        kind = str(
+            plugin_context.threads.metadata(parent_thread_id).get("kind") or "thread"
+        )
     except Exception:
         return
     if kind != "thread":
-        raise RuntimeError("rt.subagent.run is only available from main Agent threads, not inside child agent threads")
+        raise RuntimeError(
+            "rt.subagent.run is only available from main Agent threads, not inside child agent threads"
+        )
 
 
 def _required_prompt(payload: dict[str, Any]) -> str:
