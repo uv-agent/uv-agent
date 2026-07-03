@@ -55,6 +55,7 @@ class SchedulerActionContext:
     due_at: str | None
     manual: bool = False
     threads: Any | None = None
+    submitter: Callable[..., Any] | None = None
 
     def schedule_thread(self) -> str | None:
         if self.threads is None:
@@ -69,6 +70,25 @@ class SchedulerActionContext:
             metadata={"schedule_id": schedule_id},
         )
 
+    async def submit_turn(
+        self,
+        *,
+        text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        image_paths: list[Any] | None = None,
+        conflict: str = "queue",
+    ) -> Any:
+        if self.submitter is None:
+            raise RuntimeError("Scheduled actions cannot submit turns in this host context")
+        kwargs = {"text": text, "thread_id": thread_id, "level": level, "conflict": conflict}
+        if image_paths is not None:
+            kwargs["image_paths"] = image_paths
+        result = self.submitter(**kwargs)
+        if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+            result = await result
+        return result
+
 
 @dataclass
 class SchedulerService:
@@ -77,6 +97,7 @@ class SchedulerService:
     action_resolver: Callable[[str], Any]
     action_caller: Callable[..., Any]
     threads: Any | None = None
+    submitter: Callable[..., Any] | None = None
     poll_interval_s: float = 1.0
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _stop: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
@@ -367,6 +388,7 @@ class SchedulerService:
             due_at=due_at,
             manual=manual,
             threads=self.threads,
+            submitter=self.submitter,
         )
         result = self.action_caller(action_id, dict(action.get("payload") or {}), context=context)
         if asyncio.iscoroutine(result) or hasattr(result, "__await__"):

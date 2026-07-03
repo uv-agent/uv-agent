@@ -31,6 +31,7 @@ builtin_goal = "uv_agent.builtin.goal:plugin"
 builtin_worktree = "uv_agent.builtin.worktree:plugin"
 builtin_skills = "uv_agent.builtin.skills:plugin"
 builtin_mcp = "uv_agent.builtin.mcp:plugin"
+builtin_subagent = "uv_agent.builtin.subagent:plugin"
 builtin_workflow = "uv_agent.builtin.workflow:plugin"
 builtin_scheduler = "uv_agent.builtin.scheduler:plugin"
 

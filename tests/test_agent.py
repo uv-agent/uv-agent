@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -42,6 +43,8 @@ from uv_agent.prompts import (
 from uv_agent.billing import billing_charge_for_usage, billing_token_breakdown, format_billing_total
 from uv_agent.config import (
     AppConfig,
+    PluginConfigBlock,
+    PluginsConfig,
     CompressionConfig,
     LevelConfig,
     ModelConfig,
@@ -5053,7 +5056,7 @@ def enable_plugin_goal(engine: AgentEngine, thread_id: str, objective: str = "")
     engine.plugins.call_command("/goal", {"arg": f"enable {objective}".strip(), "thread_id": thread_id})
 
 
-def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -> None:
+def test_subagent_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -5070,24 +5073,17 @@ def test_workflow_context_emits_for_main_thread_once_per_epoch(tmp_path: Path) -
     first = context_text(engine._pre_user_context_items(thread_id))
     repeated = context_text(engine._pre_user_context_items(thread_id))
 
-    assert '<agent_workflow_context scope="main_agent">' in first
-    assert "<name>create_investigation_graph</name>" in first
-    assert "<name>inspect_first_checkpoint_and_extend_graph</name>" in first
-    assert "<name>inspect_review_checkpoint_and_finalize</name>" in first
-    assert "rt.workflow.start(objective: str" in first
-    assert "## 目标和任务" in first
-    assert "## 要求和说明" in first
-    assert "wf.continue_checkpoint" in first
-    assert "&lt;workflow_context" not in first
-    assert "Workflow " + "replaces " + "ask" not in first
-    assert "verify.final" in first
-    assert '<agent_workflow_context scope="main_agent">' not in repeated
+    assert '<agent_subagent_helpers scope="main_agent">' in first
+    assert "rt.subagent.run(prompt: str" in first
+    assert 'action_id="subagent.prompt"' in first
+    assert "<agent_workflow_context" not in first
+    assert '<agent_subagent_helpers scope="main_agent">' not in repeated
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
     after_compaction = context_text(engine._pre_user_context_items(thread_id))
-    assert '<agent_workflow_context scope="main_agent">' in after_compaction
+    assert '<agent_subagent_helpers scope="main_agent">' in after_compaction
 
-def test_workflow_context_is_not_sent_to_workflow_node_threads(tmp_path: Path) -> None:
+def test_subagent_context_is_not_sent_to_child_agent_threads(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -5099,14 +5095,15 @@ def test_workflow_context_is_not_sent_to_workflow_node_threads(tmp_path: Path) -
         project_root=project_root,
     )
     parent = engine.thread_store.create_thread()
-    node_thread = engine.thread_store.create_thread("Node", kind="workflow_node", parent_thread_id=parent)
+    node_thread = engine.thread_store.create_thread("Node", kind="subagent", parent_thread_id=parent)
+    start_builtin_plugins(engine)
 
     text = "\n".join(message_item_text(item) for item in engine._pre_user_context_items(node_thread))
 
-    assert "<agent_workflow_context" not in text
+    assert "<agent_subagent_helpers" not in text
 
 
-def test_workflow_context_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
+def test_subagent_context_is_pre_user_context_and_not_retained(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     config = make_test_config(project_root)
@@ -5119,12 +5116,12 @@ def test_workflow_context_is_pre_user_context_and_not_retained(tmp_path: Path) -
     )
     thread_id = engine.thread_store.create_thread()
     start_builtin_plugins(engine)
-    workflow_item = next(
-        item for item in engine._pre_user_context_items(thread_id) if "<agent_workflow_context" in message_item_text(item)
+    subagent_item = next(
+        item for item in engine._pre_user_context_items(thread_id) if "<agent_subagent_helpers" in message_item_text(item)
     )
 
-    assert engine._is_pre_user_context_item(workflow_item)
-    assert retain_item_after_compaction(workflow_item) is False
+    assert engine._is_pre_user_context_item(subagent_item)
+    assert retain_item_after_compaction(subagent_item) is False
 
 
 def test_compaction_summary_appends_plugin_sections(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5133,7 +5130,10 @@ def test_compaction_summary_appends_plugin_sections(tmp_path: Path, monkeypatch:
     project_root = tmp_path / "project"
     project_root.mkdir()
     state_dir = tmp_path / "state"
-    config = make_test_config(project_root)
+    config = replace(
+        make_test_config(project_root),
+        plugins=PluginsConfig(entries={"builtin.workflow": PluginConfigBlock(enabled=True)}),
+    )
     engine = AgentEngine(
         config=config,
         model_client=FakeModelClient([]),
@@ -5646,7 +5646,7 @@ def test_run_turn_prelude_inserts_new_context_before_compacted_history(tmp_path:
     assert "<agent_runtime_environment>" in texts[runtime_index]
     assert "<agent_runtime_helpers>" in texts[runtime_index]
     assert "<agent_model_levels>" not in texts[runtime_index]
-    assert "<agent_workflow_context" in texts[runtime_index]
+    assert "<agent_subagent_helpers" in texts[runtime_index]
     assert runtime_index < handoff_index
     handoff = texts[handoff_index]
     assert "kept request" in handoff
@@ -5724,7 +5724,7 @@ async def test_mid_turn_compaction_readds_epoch_context_before_continuing(tmp_pa
     assert "<agent_runtime_environment>" in continued_texts[runtime_index]
     assert "<agent_runtime_helpers>" in continued_texts[runtime_index]
     assert "<agent_model_levels>" not in continued_texts[runtime_index]
-    assert "<agent_workflow_context" in continued_texts[runtime_index]
+    assert "<agent_subagent_helpers" in continued_texts[runtime_index]
     assert runtime_index < handoff_index
     handoff = continued_texts[handoff_index]
     assert "<agent_retained_history>" in handoff

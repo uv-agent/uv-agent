@@ -39,6 +39,7 @@ def setup(context) -> None:
         action_resolver=context.actions.resolve,
         action_caller=context.actions.call,
         threads=context.threads,
+        submitter=context.submit_turn if context.can_submit_turn else None,
     )
     _SERVICES[id(context)] = service
     context.runtime.register_namespace(
@@ -72,7 +73,7 @@ def _publish_scheduler_context(context) -> None:
             "instructions": [
                 "使用 rt.scheduler.* helpers 管理持久化计划任务。",
                 "计划任务只调用 action registry；不要使用旧的 helper 或 prompt 字段。",
-                '如果 builtin.workflow 已启用，可用 action_id="workflow.prompt" 并在 payload 中传入 prompt/objective/model_level。',
+                '使用 action_id="subagent.prompt" 可定时向线程提交 prompt；payload 中传 prompt/level/timeout_s。',
                 "使用 once 任务时传 at；使用 interval 任务时传 every；使用 cron 任务时传 cron。",
             ],
             "helper": {

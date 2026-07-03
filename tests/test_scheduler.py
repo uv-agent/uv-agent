@@ -113,8 +113,8 @@ async def test_scheduler_run_due_once_advances_interval_and_runs_action(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_scheduler_workflow_prompt_action_is_plugin_owned(tmp_path):
-    from uv_agent.builtin.workflow import setup as setup_workflow
+async def test_scheduler_subagent_prompt_action_uses_stable_schedule_thread(tmp_path):
+    from uv_agent.builtin.subagent import setup as setup_subagent
     from uv_agent.plugins import PluginManifest
     from uv_agent.plugins.context import PluginContext
     from uv_agent.plugins.events import EventBus
@@ -123,10 +123,27 @@ async def test_scheduler_workflow_prompt_action_is_plugin_owned(tmp_path):
     from uv_agent.plugins.storage import PluginStorage
     from uv_agent.session import ThreadStore
 
+    class Submitted:
+        def __init__(self, thread_id: str | None) -> None:
+            self.thread_id = thread_id
+            self.turn_id = "turn_scheduled"
+            self.status = "completed"
+            self.final_text = "scheduled done"
+            self.error = None
+
+        async def wait(self):
+            return self
+
+    submitted_calls = []
+
+    async def submitter(**kwargs):
+        submitted_calls.append(dict(kwargs))
+        return Submitted(kwargs.get("thread_id"))
+
     actions = ActionRegistry()
     thread_store = ThreadStore(tmp_path)
     plugin_context = PluginContext(
-        manifest=PluginManifest("builtin.workflow", "0", "Workflow", "test"),
+        manifest=PluginManifest("builtin.subagent", "0", "Subagent", "test"),
         project_root=tmp_path,
         user_state_dir=tmp_path / "user",
         config={},
@@ -138,14 +155,14 @@ async def test_scheduler_workflow_prompt_action_is_plugin_owned(tmp_path):
         ui_registry=UiRegistry(),
         i18n_registry=PluginI18nRegistry(),
         context_broker=__import__("uv_agent.plugins.context", fromlist=["PluginContextBroker"]).PluginContextBroker(),
-        storage=PluginStorage("builtin.workflow", tmp_path, tmp_path / "user"),
+        storage=PluginStorage("builtin.subagent", tmp_path, tmp_path / "user"),
         submitter=None,
         task_factory=lambda plugin, coro, name=None: asyncio.create_task(coro),
         compaction_section_providers=[],
         epoch_context_refreshers=[],
         thread_store=thread_store,
     )
-    setup_workflow(plugin_context)
+    setup_subagent(plugin_context)
     scheduler_context = PluginContext(
         manifest=PluginManifest("builtin.scheduler", "0", "Scheduler", "test"),
         project_root=tmp_path,
@@ -166,23 +183,41 @@ async def test_scheduler_workflow_prompt_action_is_plugin_owned(tmp_path):
         epoch_context_refreshers=[],
         thread_store=thread_store,
     )
-    service = SchedulerService(tmp_path, SchedulerConfig(), actions.get, actions.call, threads=scheduler_context.threads)
+    service = SchedulerService(
+        tmp_path,
+        SchedulerConfig(),
+        actions.get,
+        actions.call,
+        threads=scheduler_context.threads,
+        submitter=submitter,
+    )
     schedule = service.create(
         kind="interval",
         every={"minutes": 5},
-        action_id="workflow.prompt",
-        payload={"prompt": "Do scheduled work", "objective": "Scheduled objective"},
-        name="workflow job",
+        action_id="subagent.prompt",
+        payload={"prompt": "Do scheduled work", "level": "large"},
+        name="subagent job",
     )
 
     result = await service.run_now(schedule["schedule_id"])
 
     assert result["status"] == "completed"
-    assert result["workflow_id"].startswith("wf_")
+    assert "workflow_id" not in result
+    assert result["result"]["status"] == "completed"
+    assert result["result"]["final_text"] == "scheduled done"
     assert result["result"]["thread_id"].startswith("thr_")
+    assert submitted_calls == [
+        {
+            "text": "Do scheduled work",
+            "thread_id": result["result"]["thread_id"],
+            "level": "large",
+            "conflict": "queue",
+        }
+    ]
+    metadata = thread_store.thread_metadata(result["result"]["thread_id"])
+    assert metadata["owner_plugin"] == "builtin.scheduler"
+    assert metadata["external_source"] == "scheduler"
+    assert metadata["external_id"] == schedule["schedule_id"]
     with connect_state_db(tmp_path) as db:
-        workflow = db.execute("SELECT * FROM workflows WHERE workflow_id = ?", (result["workflow_id"],)).fetchone()
-        node = db.execute("SELECT * FROM workflow_nodes WHERE workflow_id = ?", (result["workflow_id"],)).fetchone()
-    assert workflow["objective"] == "Scheduled objective"
-    assert workflow["parent_thread_id"] == result["result"]["thread_id"]
-    assert node["prompt"] == "Do scheduled work"
+        row = db.execute("SELECT workflow_id FROM schedule_runs WHERE run_id = ?", (result["run_id"],)).fetchone()
+    assert row["workflow_id"] is None

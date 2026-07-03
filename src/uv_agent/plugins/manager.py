@@ -273,6 +273,8 @@ class PluginManager:
             state=state,
             builtin=manifest.builtin,
             first_load=first_load,
+            deprecated=manifest.deprecated,
+            deprecation_message=manifest.deprecation_message,
         )
         self._records[manifest.id] = _PluginRecord(plugin=plugin, status=status)
         self._publish({"type": "plugin.discovered", "plugin": manifest.id, "first_load": first_load, "builtin": manifest.builtin})
@@ -303,7 +305,11 @@ class PluginManager:
         manifest = record.plugin.manifest
         if record.status.state in {"disabled", "failed"}:
             return
-        missing = [dep for dep in manifest.dependencies if self._records.get(dep) is None or self._records[dep].status.state != "started"]
+        missing = [
+            dep
+            for dep in manifest.dependencies
+            if self._records.get(dep) is None or self._records[dep].status.state not in {"started", "warning"}
+        ]
         if missing:
             record.status.state = "failed"
             record.status.error_type = "MissingDependency"
@@ -362,6 +368,20 @@ class PluginManager:
             None,
             discard=self.contexts.plugin_has_pending_epoch(manifest.id),
         )
+        if manifest.deprecated:
+            record.status.state = "warning"
+            record.status.error_type = "DeprecatedPlugin"
+            record.status.message = _deprecation_message(manifest)
+            logger.warning(record.status.message)
+            self._publish(
+                {
+                    "type": "plugin.warning",
+                    "plugin": manifest.id,
+                    "error_type": record.status.error_type,
+                    "message": record.status.message,
+                    "deprecated": True,
+                }
+            )
         if record.status.state != "warning":
             record.status.state = "started"
         self._publish({"type": "plugin.started", "plugin": manifest.id})
@@ -496,6 +516,12 @@ def _safe_plugin_name(name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-_.")
     return safe or "plugin"
 
+
+def _deprecation_message(manifest: PluginManifest) -> str:
+    message = str(manifest.deprecation_message or "").strip()
+    if message:
+        return message
+    return f"Plugin {manifest.id!r} is deprecated and may be removed in a future uv-agent release."
 
 
 def _accepts_context(fn: Callable[..., Any]) -> bool:

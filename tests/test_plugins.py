@@ -53,6 +53,7 @@ def _builtin_entry_points() -> list[EntryPoint]:
     from uv_agent.builtin.mcp import plugin as mcp_plugin
     from uv_agent.builtin.scheduler import plugin as scheduler_plugin
     from uv_agent.builtin.skills import plugin as skills_plugin
+    from uv_agent.builtin.subagent import plugin as subagent_plugin
     from uv_agent.builtin.workflow import plugin as workflow_plugin
     from uv_agent.builtin.worktree import plugin as worktree_plugin
 
@@ -61,6 +62,7 @@ def _builtin_entry_points() -> list[EntryPoint]:
         EntryPoint("builtin_worktree", worktree_plugin),
         EntryPoint("builtin_skills", skills_plugin),
         EntryPoint("builtin_mcp", mcp_plugin),
+        EntryPoint("builtin_subagent", subagent_plugin),
         EntryPoint("builtin_workflow", workflow_plugin),
         EntryPoint("builtin_scheduler", scheduler_plugin),
     ]
@@ -118,7 +120,8 @@ async def test_builtin_plugins_publish_context_and_runtime_namespaces(monkeypatc
         assert states["builtin.worktree"] == "started"
         assert states["builtin.skills"] == "started"
         assert states["builtin.mcp"] == "started"
-        assert states["builtin.workflow"] == "started"
+        assert states["builtin.subagent"] == "started"
+        assert states["builtin.workflow"] == "disabled"
         assert states["builtin.scheduler"] == "started"
         text = _epoch_text(manager.contexts, "thr")
         assert "<agent_goal_helpers>" not in text
@@ -131,26 +134,154 @@ async def test_builtin_plugins_publish_context_and_runtime_namespaces(monkeypatc
         assert "class McpClient" in text
         assert "rt.mcp.connect_named" in text
         assert "<agent_worktree_helpers>" not in text
-        assert "<agent_workflow_context" in text
-        assert "rt.workflow.start(objective: str" in text
+        assert "<agent_subagent_helpers" in text
+        assert "rt.subagent.run(prompt: str" in text
+        assert 'action_id="subagent.prompt"' in text
+        assert "<agent_workflow_context" not in text
         assert "<agent_scheduler_helpers>" in text
         assert "rt.scheduler.create(*, action_id: str | None" in text
         assert "<functions>" not in text
         assert manager.resolve_helper("mcp")["module"] == "uv_agent.builtin.mcp.runtime"
         assert manager.resolve_helper("worktree")["module"] == "uv_agent.builtin.worktree.runtime"
-        assert manager.resolve_helper("workflow")["module"] == "uv_agent.builtin.workflow.runtime"
+        subagent = manager.resolve_helper("subagent")
+        assert subagent["module"] is None
+        assert {item["name"] for item in subagent["functions"]} == {"run"}
+        assert manager.resolve_helper("workflow")["found"] is False
         scheduler = manager.resolve_helper("scheduler")
         assert scheduler["module"] is None
         assert {item["name"] for item in scheduler["functions"]} >= {"create", "update", "list", "delete", "run_now"}
         assert manager.resolve_action("worktree.create")["found"] is True
         assert manager.resolve_action("worktree.cleanup")["found"] is True
-        assert manager.resolve_action("workflow.prompt")["found"] is True
+        assert manager.resolve_action("subagent.prompt")["found"] is True
+        assert manager.resolve_action("workflow.prompt")["found"] is False
         assert manager.text("goal_enabled", "zh-CN") == "已开启"
         assert manager.text("worktree_delete", "en") == "Delete worktree and branch"
         assert manager.text("mention_mcp_hint", "zh-CN") == "搜索后按 Enter 插入 MCP 引用"
         assert manager.text("mention_skills_hint", "en") == "Search and Enter to insert a skill mention"
     finally:
         await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_builtin_subagent_runtime_helper_creates_child_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from uv_agent.builtin.subagent import plugin as subagent_plugin
+
+    class Submitted:
+        def __init__(self, thread_id: str | None) -> None:
+            self.thread_id = thread_id
+            self.turn_id = "turn_child"
+            self.status = "completed"
+            self.final_text = "child done"
+            self.error = None
+
+        async def wait(self):
+            return self
+
+    submit_calls: list[dict[str, Any]] = []
+
+    async def submitter(**kwargs):
+        submit_calls.append(dict(kwargs))
+        return Submitted(kwargs.get("thread_id"))
+
+    monkeypatch.setattr(
+        "uv_agent.plugins.manager.importlib.metadata.entry_points",
+        lambda group: [EntryPoint("builtin_subagent", subagent_plugin)] if group == "uv_agent.plugins" else [],
+    )
+    store = ThreadStore(tmp_path / "project-state")
+    parent_thread_id = store.create_thread("Parent")
+    manager = PluginManager(
+        config=PluginsConfig(),
+        project_root=tmp_path,
+        events=EventBus(),
+        helper_registry=RuntimeNamespaceRegistry(),
+        submitter=submitter,
+        thread_store=store,
+        user_state_dir=tmp_path / "state",
+    )
+
+    await manager.start()
+    try:
+        result = await manager.call_helper(
+            "subagent.run",
+            args=["Investigate child task"],
+            kwargs={"level": "small", "title": "Child task"},
+            context=SimpleNamespace(thread_id=parent_thread_id, turn_id="turn_parent", run_id="run_parent"),
+        )
+
+        assert result["status"] == "completed"
+        assert result["final_text"] == "child done"
+        assert result["thread_id"].startswith("thr_")
+        assert submit_calls == [
+            {
+                "text": "Investigate child task",
+                "thread_id": result["thread_id"],
+                "level": "small",
+                "image_paths": None,
+                "conflict": "queue",
+            }
+        ]
+        metadata = store.thread_metadata(result["thread_id"])
+        assert metadata["kind"] == "subagent"
+        assert metadata["parent_thread_id"] == parent_thread_id
+        assert metadata["parent_turn_id"] == "turn_parent"
+        assert metadata["parent_run_id"] == "run_parent"
+        assert metadata["owner_plugin"] == "builtin.subagent"
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_deprecated_plugin_is_disabled_by_default_and_warns_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def setup(context) -> None:
+        context.runtime.register_namespace("legacy", functions={"ping": lambda: {"ok": True}})
+
+    legacy = SetupPlugin(
+        manifest=PluginManifest(
+            id="legacy-plugin",
+            version="0.1.0",
+            display_name="Legacy",
+            description="Deprecated test plugin",
+            default_enabled=False,
+            deprecated=True,
+            deprecation_message="legacy-plugin is deprecated; use demo-plugin instead.",
+        ),
+        setup=setup,
+    )
+
+    manager = _manager(tmp_path, monkeypatch, [legacy])
+    await manager.start()
+    assert manager.records[0].state == "disabled"
+    assert manager.records[0].deprecated is True
+    await manager.stop()
+
+    warnings: list[dict[str, Any]] = []
+    _install_entry_points(monkeypatch, [legacy])
+    enabled = PluginManager(
+        config=PluginsConfig(entries={"legacy-plugin": PluginConfigBlock(enabled=True)}),
+        project_root=tmp_path,
+        events=EventBus(),
+        helper_registry=RuntimeNamespaceRegistry(),
+        submitter=None,
+        thread_store=None,
+        user_state_dir=tmp_path / "state-enabled",
+    )
+    enabled.events.subscribe("plugin.warning", lambda event: warnings.append(event))
+
+    await enabled.start()
+
+    status = {record.id: record for record in enabled.records}["legacy-plugin"]
+    assert status.state == "warning"
+    assert status.error_type == "DeprecatedPlugin"
+    assert status.message == "legacy-plugin is deprecated; use demo-plugin instead."
+    assert warnings and warnings[0]["deprecated"] is True
+    assert enabled.resolve_helper("legacy")["found"] is True
+    await enabled.stop()
 
 
 @pytest.mark.asyncio

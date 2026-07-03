@@ -11,7 +11,7 @@ def _source(path: str) -> str:
 
 
 def test_builtin_plugins_live_in_package_directories() -> None:
-    for plugin in ("goal", "skills", "mcp", "workflow", "scheduler", "worktree"):
+    for plugin in ("goal", "skills", "mcp", "subagent", "workflow", "scheduler", "worktree"):
         assert (PROJECT_ROOT / "src" / "uv_agent" / "builtin" / plugin / "__init__.py").is_file()
         assert not (PROJECT_ROOT / "src" / "uv_agent" / "builtin" / f"{plugin}.py").exists()
 
@@ -96,6 +96,7 @@ def test_stable_prompt_excludes_builtin_plugin_domain_templates() -> None:
         "SKILLS_NONE_DISCOVERED",
         "MCP_DEFAULT_DESCRIPTION",
         "rt.workflow",
+        "rt.subagent",
         "rt.mcp",
     ):
         assert needle not in prompts

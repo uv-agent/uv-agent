@@ -17,6 +17,12 @@ MANIFEST = PluginManifest(
     display_name={"zh": "工作流", "en": "Workflow"},
     description={"zh": "持久化工作流任务图、节点执行器和计划任务 prompt action。", "en": "Persistent workflow task graphs, node execution, and scheduled prompt actions."},
     builtin=True,
+    default_enabled=False,
+    deprecated=True,
+    deprecation_message=(
+        "builtin.workflow is deprecated. Enable it only for legacy persistent workflow graphs; "
+        "use builtin.subagent and action_id='subagent.prompt' for new scheduled or delegated agent work."
+    ),
     priority=300,
     capabilities=("runtime_namespace", "action", "context"),
 )

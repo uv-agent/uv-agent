@@ -376,7 +376,8 @@ class AgentEngine:
         rpc_server = getattr(self.runner, "rpc_server", None)
         if rpc_server is not None:
             rpc_server.register_method("helper.resolve", self.plugins.resolve_helper)
-            rpc_server.register_method("helper.call", self.plugins.call_helper)
+            rpc_server.register_method("helper.call", self._plugin_call_helper_from_rpc)
+        self._event_loop: asyncio.AbstractEventLoop | None = None
         self._plugins_started = False
         self._plugins_start_task: asyncio.Task[None] | None = None
         self._last_judge: dict[str, Any] | None = None
@@ -440,6 +441,34 @@ class AgentEngine:
             # Individual plugin startup errors are recorded by PluginManager;
             # unexpected manager-level failures should not block an agent turn.
             return
+
+    def _plugin_call_helper_from_rpc(
+        self,
+        *,
+        name: str,
+        args: list[Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        context: Any = None,
+    ) -> Any:
+        """Resolve plugin runtime helpers on the engine loop from RPC workers.
+
+        Runtime RPC requests are served by worker threads. Helpers such as
+        ``rt.subagent.run`` need to interact with TurnManager and the active
+        asyncio objects owned by the engine loop, so running the coroutine in
+        the worker thread would split core state across event loops.
+        """
+
+        coroutine = self.plugins.call_helper(name=name, args=args, kwargs=kwargs, context=context)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        engine_loop = self._event_loop
+        if engine_loop is not None and engine_loop.is_running() and running_loop is not engine_loop:
+            return asyncio.run_coroutine_threadsafe(coroutine, engine_loop).result()
+        if running_loop is None:
+            return asyncio.run(coroutine)
+        raise RuntimeError("Plugin helper RPC cannot run synchronously on the engine event loop")
 
     async def submit_turn(
         self,
@@ -537,6 +566,7 @@ class AgentEngine:
         cancel_event: asyncio.Event | None = None,
         guide_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        self._event_loop = asyncio.get_running_loop()
         await self._ensure_plugins_started()
         is_new_thread = thread_id is None
         thread_id = thread_id or await asyncio.to_thread(self.thread_store.create_thread, "New thread")

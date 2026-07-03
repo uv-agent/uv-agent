@@ -46,6 +46,8 @@ class PluginManifest:
     capabilities: tuple[PluginCapability | str, ...] = ()
     config_schema: dict[str, Any] = field(default_factory=dict)
     storage_schema: dict[str, Any] = field(default_factory=dict)
+    deprecated: bool = False
+    deprecation_message: str = ""
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,8 @@ class PluginStatus:
     first_load: bool = False
     message: str = ""
     error_type: str | None = None
+    deprecated: bool = False
+    deprecation_message: str = ""
 
 
 @dataclass(frozen=True)
