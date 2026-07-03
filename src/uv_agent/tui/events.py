@@ -13,7 +13,7 @@ from uv_agent.tui.formatting import parse_tool_payload, short_thread
 def _default_language() -> UserLanguage:
     return normalize_language("en")
 
-CellKind = Literal["user", "assistant", "reasoning", "tool", "event", "error", "image"]
+CellKind = Literal["user", "assistant", "reasoning", "tool", "event", "error", "image", "ui_message"]
 TuiMode = Literal["transcript", "agent_view"]
 AgentViewInteractionMode = Literal["normal", "input", "help", "model"]
 AgentViewInputTarget = Literal["dispatch", "reply"]
@@ -200,6 +200,34 @@ def tool_payload_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
                 return None
             return value if isinstance(value, dict) else None
     return None
+
+
+def runtime_ui_messages_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return []
+    run_id = str(payload.get("run_id") or "")
+    messages: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        if not isinstance(event, dict) or event.get("kind") != "ui.message":
+            continue
+        message = str(event.get("message") or "")
+        if not message.strip():
+            continue
+        event_id = str(event.get("_uv_agent_event_id") or "")
+        if not event_id:
+            event_id = f"{run_id}:ui_message:{index}:{message}"
+        messages.append(
+            {
+                "id": event_id,
+                "message": message,
+                "format": str(event.get("format") or "markdown"),
+                "event": event,
+            }
+        )
+    return messages
 
 
 def tool_title(call: dict[str, Any] | None) -> str:

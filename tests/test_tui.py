@@ -57,6 +57,15 @@ def test_assistant_message_has_no_leading_separator() -> None:
     assert set(strip_ansi(lines[0]).rstrip()) != {"─"}
 
 
+def test_ui_message_renders_markdown() -> None:
+    lines = render_cell(TranscriptCell("ui_message", text="Open **link**"), 40)
+    plain = strip_ansi("\n".join(lines))
+
+    assert plain.startswith("◆ ")
+    assert "Open link" in plain
+    assert "**link**" not in plain
+
+
 def test_assistant_prefix_color_changes_with_streamed_chars() -> None:
     # The prefix colour cycles with cumulative streamed characters, calibrated
     # to ~12 phase changes per 100 chars.  Spinner frame is independent.
@@ -2775,6 +2784,38 @@ def test_tool_output_allows_next_response_reasoning_to_flush(monkeypatch) -> Non
     assert [cell.text for cell in reasoning_cells] == ["tool plan", "final plan"]
 
 
+def test_runtime_ui_message_from_tool_partial_is_flushed_once(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    call = {"name": "run_python", "call_id": "call_1"}
+    runtime_event = {
+        "kind": "ui.message",
+        "message": "Open **authorization link**",
+        "format": "markdown",
+        RUNTIME_EVENT_EVENT_ID_KEY: "evt_ui_1",
+        RUNTIME_EVENT_RUN_ID_KEY: "run_1",
+    }
+    payload = {
+        "run_id": "run_1",
+        "returncode": None,
+        "partial": True,
+        "events": [runtime_event],
+    }
+
+    app._handle_event({
+        "type": "tool.partial",
+        "call": call,
+        "output": {"output": json.dumps(payload)},
+    })
+    app._handle_event({
+        "type": "tool.output",
+        "call": call,
+        "output": {"output": json.dumps({**payload, "partial": False, "returncode": 0})},
+    })
+
+    ui_cells = [cell for cell in app.state.flushed if cell.kind == "ui_message"]
+    assert [cell.text for cell in ui_cells] == ["Open **authorization link**"]
+
+
 def test_flushed_tool_cells_retain_only_lightweight_payload(monkeypatch) -> None:
     app = _make_app(monkeypatch)
     call = {"name": "run_python", "call_id": "call_1", "arguments": '{"code":"print(1)"}'}
@@ -4850,6 +4891,50 @@ def test_history_cells_merge_tool_call_and_result(monkeypatch) -> None:
     assert tool_cells[0].call.get("call_id") == "call_123"
     assert tool_cells[0].payload is not None
     assert tool_cells[0].payload.get("run_id") == "run_abc"
+
+
+def test_history_cells_restore_runtime_ui_messages(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    thread_id = app.engine.thread_store.create_thread("ui message history test")
+
+    def fake_read_history_segment(thread_id, *, event_types=None):
+        from uv_agent.session.store import ThreadHistorySegment
+
+        return ThreadHistorySegment(
+            events=[
+                {
+                    "type": "item.runner_result",
+                    "thread_id": thread_id,
+                    "turn_id": "turn_1",
+                    "call_id": "call_123",
+                    "result": {
+                        "run_id": "run_abc",
+                        "returncode": 0,
+                        "events": [
+                            {
+                                "kind": "ui.message",
+                                "message": "Open **authorization link**",
+                                "format": "markdown",
+                                RUNTIME_EVENT_EVENT_ID_KEY: "evt_ui_1",
+                                RUNTIME_EVENT_RUN_ID_KEY: "run_abc",
+                            }
+                        ],
+                    },
+                },
+            ],
+            start_event_id=0,
+            end_event_id=1,
+            has_more=False,
+        )
+
+    monkeypatch.setattr(app.engine.thread_store, "read_history_segment", fake_read_history_segment)
+
+    cells = app._history_cells_for_thread(thread_id)
+    ui_cells = [cell for cell in cells if cell.kind == "ui_message"]
+    tool_cells = [cell for cell in cells if cell.kind == "tool"]
+
+    assert [cell.text for cell in ui_cells] == ["Open **authorization link**"]
+    assert len(tool_cells) == 1
 
 
 def test_history_merge_preserves_reasoning_before_tool_calls(monkeypatch) -> None:

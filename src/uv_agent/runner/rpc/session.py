@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from uv_agent.runner.run_log import EventWriter
 from uv_agent.time import utc_now_iso
+from uv_agent_runtime.events import RUNTIME_EVENT_EVENT_ID_KEY
+from uv_agent_runtime.ui import UI_MESSAGE_FORMAT, UI_MESSAGE_KIND
 
 if TYPE_CHECKING:
     from uv_agent.host_events import HostEventBus
@@ -69,15 +71,19 @@ class RunSession:
         with self._lock:
             if self.closed:
                 raise RuntimeError("Run session is closed")
+            created_at = utc_now_iso()
             self._on_structured_event(event_copy)
             self._writer.write(
                 {
                     "type": "run.event",
-                    "created_at": utc_now_iso(),
+                    "created_at": created_at,
                     "run_id": self.run_id,
                     "event": event_copy,
                 }
             )
+            ui_event = _runtime_ui_message_event(event_copy, context=self.context, created_at=created_at)
+            if ui_event is not None:
+                self._publish_host_event(ui_event)
 
     def record_helper_calls(self, calls: list[Any]) -> None:
         """Record sanitized helper-call summaries delivered by the runtime."""
@@ -158,6 +164,33 @@ def _normalize_helper_call(value: Any) -> dict[str, Any] | None:
     if error_types:
         call["error_types"] = sorted(set(error_types))
     return call
+
+
+def _runtime_ui_message_event(
+    event: dict[str, Any],
+    *,
+    context: RunContext,
+    created_at: str,
+) -> dict[str, Any] | None:
+    if event.get("kind") != UI_MESSAGE_KIND:
+        return None
+    message = str(event.get("message") or "")
+    if not message.strip():
+        return None
+    event_id = str(event.get(RUNTIME_EVENT_EVENT_ID_KEY) or "")
+    return {
+        "type": "runtime.ui.message",
+        "scope": "ui",
+        "created_at": created_at,
+        "run_id": context.run_id,
+        "thread_id": context.thread_id,
+        "turn_id": context.turn_id,
+        "cwd": str(context.cwd),
+        "event_id": event_id,
+        "message": message,
+        "format": str(event.get("format") or UI_MESSAGE_FORMAT),
+        "event": dict(event),
+    }
 
 
 def _positive_int(value: Any) -> int | None:

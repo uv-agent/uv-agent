@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from uv_agent.tui.events import runtime_ui_messages_from_payload
 from uv_agent.tui.formatting import parse_tool_payload, tool_call_helper_payload
 
 TimelineItemKind = Literal[
@@ -18,6 +19,7 @@ TimelineItemKind = Literal[
     "error",
     "stream_retry",
     "queued",
+    "ui_message",
 ]
 
 
@@ -640,6 +642,14 @@ class ThreadTimelineState:
             call = dict(event.get("call") or {}) if isinstance(event.get("call"), dict) else {}
             if call and "helper_calls" not in result:
                 result = {**result, "helper_calls": tool_call_helper_payload(call)}
+            for ui_message in runtime_ui_messages_from_payload(result):
+                items.append(TimelineItem(
+                    id=f"ui_message:{ui_message['id']}",
+                    kind="ui_message",
+                    content={"text": str(ui_message.get("message") or "")},
+                    turn_id=turn_id,
+                    event_id=event_id,
+                ))
             items.append(TimelineItem(
                 id=_tool_result_id(result, call_id, turn_id or ""),
                 kind="tool_result",

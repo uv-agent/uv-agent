@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 
-from . import codequery, codesearch, dependencies, events as _events, files as _files, patch as _patch
+from . import codequery, codesearch, dependencies, events as _events, files as _files, patch as _patch, ui as _ui
 from .errors import HelperValueError
 from . import textops, threads as _threads, vision as _vision
 from .cwd import enter_dir as _enter_dir
@@ -559,6 +559,12 @@ class _EventsNamespace:
         return _vision.look_at(path, note=note)
 
 
+class _UiNamespace:
+    @_track("ui.message")
+    def message(self, markdown: str) -> dict[str, object]:
+        return _ui.message(markdown)
+
+
 @_track("search")
 def search(
     query: str,
@@ -871,3 +877,4 @@ def _common_roots(paths: Sequence[str]) -> builtins.list[Path]:
 deps = _DepsNamespace()
 threads = _ThreadsNamespace()
 events = _EventsNamespace()
+ui = _UiNamespace()

@@ -37,6 +37,7 @@ from uv_agent.tui.events import (
     PendingTurn,
     TranscriptCell,
     TuiState,
+    runtime_ui_messages_from_payload,
     tool_payload_from_event,
 )
 from uv_agent.tui.renderer import Renderer
@@ -230,6 +231,7 @@ class ThreadRunState:
     rate_estimator: StreamRateEstimator = field(default_factory=StreamRateEstimator)
     token_ratio: ThreadTokenRatio = field(default_factory=ThreadTokenRatio)
     observed_tool_call_name_keys: set[str] = field(default_factory=set)
+    runtime_ui_message_ids: set[str] = field(default_factory=set)
     assistant_display_queue: str = ""
     assistant_display_credit: float = 0.0
     last_animation_tick_at: float | None = None
@@ -260,6 +262,7 @@ class ThreadRunState:
         self.tool_cells = {}
         self.rate_estimator = StreamRateEstimator()
         self.observed_tool_call_name_keys.clear()
+        self.runtime_ui_message_ids.clear()
         self.assistant_display_queue = ""
         self.assistant_display_credit = 0.0
         self.last_animation_tick_at = None
@@ -406,6 +409,7 @@ class UvAgentApp:
         self._user_cell: TranscriptCell | None = None
         self._reasoning_flushed_for_current_response = False
         self._tool_cells: dict[str, TranscriptCell] = {}
+        self._runtime_ui_message_ids: set[str] = set()
         self._history: list[str] = load_composer_history()
         self._history_cursor: int | None = None
         self._draft: str = ""
@@ -2627,6 +2631,7 @@ class UvAgentApp:
         self.state.pending_turns = []
         self.state.last_error = None
         self._tool_cells.clear()
+        self._runtime_ui_message_ids.clear()
         self._assistant_cell = None
         self._reasoning_cell = None
         self._user_cell: TranscriptCell | None = None
@@ -3229,6 +3234,9 @@ class UvAgentApp:
             else:
                 text = str(text_value or "")
             return TranscriptCell(item.kind, text=text) if text else None
+        if item.kind == "ui_message":
+            text = str(content.get("text") or "")
+            return TranscriptCell("ui_message", text=text) if text else None
         if item.kind == "tool_result":
             payload = content.get("payload") if isinstance(content.get("payload"), dict) else {}
             call = content.get("call") if isinstance(content.get("call"), dict) else {}
@@ -3490,8 +3498,10 @@ class UvAgentApp:
         elif event_type == "tool.partial":
             self.state.status_message = self._text("running_python")
             self._update_tool(event, running=True)
+            self._flush_runtime_ui_messages(event)
         elif event_type == "tool.output":
             self.state.status_message = self._text("working")
+            self._flush_runtime_ui_messages(event)
             self._update_tool(event, running=False)
             # A completed tool output is followed by a fresh model response, so
             # provider-only reasoning in that next response must still render.
@@ -3791,6 +3801,21 @@ class UvAgentApp:
             cell.finished_at = monotonic()
             self._flush(cell)
             self._tool_cells.pop(key, None)
+
+    def _flush_runtime_ui_messages(self, event: dict[str, Any]) -> None:
+        payload = tool_payload_from_event(event)
+        messages = runtime_ui_messages_from_payload(payload)
+        if not messages:
+            return
+        run_state = self._run_state_for_event(event) or self._run_state()
+        seen = run_state.runtime_ui_message_ids if run_state is not None else self._runtime_ui_message_ids
+        for item in messages:
+            event_id = str(item.get("id") or "")
+            if event_id and event_id in seen:
+                continue
+            if event_id:
+                seen.add(event_id)
+            self._flush(TranscriptCell("ui_message", text=str(item.get("message") or "")))
 
     @staticmethod
     def _tool_call_code(call: dict[str, Any] | None) -> str:

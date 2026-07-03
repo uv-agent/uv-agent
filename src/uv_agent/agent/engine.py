@@ -358,6 +358,11 @@ class AgentEngine:
             # host event bus, so attach the shared bus here without changing the
             # public ThreadStore constructor contract.
             self.thread_store._host_events = self.host_events
+        if getattr(self.runner, "_host_events", None) is None:
+            self.runner._host_events = self.host_events
+        runner_rpc_server = getattr(self.runner, "rpc_server", None)
+        if runner_rpc_server is not None and getattr(runner_rpc_server, "_host_events", None) is None:
+            runner_rpc_server._host_events = self.host_events
         self.project_root = project_root
         self.attachments = AttachmentStore(attachments_dir or thread_store.data_dir / "attachments")
         self._last_config_refresh_at = 0.0

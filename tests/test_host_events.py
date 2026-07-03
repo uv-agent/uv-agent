@@ -90,6 +90,20 @@ def test_host_event_bus_forwards_scoped_plugin_events() -> None:
     assert plugin_bus.events[0]["type"] == "telemetry"
 
 
+def test_host_event_bus_forwards_ui_events_to_plugin_bus() -> None:
+    bus = HostEventBus()
+    plugin_bus = FakePluginBus()
+    bus.register_plugin_bus(plugin_bus)
+
+    bus.publish({"type": "runtime.ui.message", "scope": "ui", "message": "Open **link**"})
+    bus.publish({"type": "runtime.ui.toast", "message": "Shown by type prefix"})
+
+    assert [event["type"] for event in plugin_bus.events] == [
+        "runtime.ui.message",
+        "runtime.ui.toast",
+    ]
+
+
 def test_host_event_bus_close_calls_handler_close() -> None:
     bus = HostEventBus()
     closed: list[bool] = []

@@ -43,6 +43,7 @@ from .facade import (
     snapshot,
     symbols,
     threads,
+    ui,
     transaction,
 )
 from .textops import (
@@ -142,6 +143,7 @@ __all__ = [
     "snapshot",
     "symbols",
     "threads",
+    "ui",
     "transaction",
 ]
 

@@ -3370,6 +3370,7 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
                                     "import uv_agent_runtime as rt\n"
                                     "print('visible before')\n"
                                     "rt.events.progress('internal progress')\n"
+                                    "rt.ui.message('Open **authorization link**')\n"
                                     "print('visible after')\n"
                                 )
                             }
@@ -3397,6 +3398,8 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
         thread_store=ThreadStore(tmp_path / "state"),
         project_root=project_root,
     )
+    plugin_events: list[dict[str, Any]] = []
+    engine.events.subscribe("runtime.ui.message", lambda event: plugin_events.append(event))
 
     events = [event async for event in engine.run_turn(user_text="run event")]
 
@@ -3412,7 +3415,14 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
     assert display_payload["events"][0]["message"] == "internal progress"
     assert display_payload["events"][0]["_uv_agent_run_id"] == display_payload["run_id"]
     assert display_payload["events"][0]["_uv_agent_event_id"].startswith("evt_")
+    assert display_payload["events"][1]["kind"] == "ui.message"
+    assert display_payload["events"][1]["message"] == "Open **authorization link**"
+    assert display_payload["events"][1]["format"] == "markdown"
+    assert display_payload["events"][1]["_uv_agent_run_id"] == display_payload["run_id"]
+    assert display_payload["events"][1]["_uv_agent_event_id"].startswith("evt_")
     assert '"kind": "progress"' not in display_payload["stdout"]
+    assert '"kind": "ui.message"' not in display_payload["stdout"]
+    assert [event["message"] for event in plugin_events] == ["Open **authorization link**"]
 
     stored = engine.thread_store.read(events[-1]["thread_id"])
     runner_result = next(event["result"] for event in stored if event["type"] == "item.runner_result")
@@ -3420,6 +3430,8 @@ async def test_agent_filters_internal_events_from_model_tool_output(tmp_path: Pa
     assert runner_result["events"][0]["message"] == "internal progress"
     assert runner_result["events"][0]["_uv_agent_run_id"] == runner_result["run_id"]
     assert runner_result["events"][0]["_uv_agent_event_id"].startswith("evt_")
+    assert runner_result["events"][1]["kind"] == "ui.message"
+    assert runner_result["events"][1]["message"] == "Open **authorization link**"
 
 
 @pytest.mark.asyncio
@@ -3703,6 +3715,9 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "rt.threads.list" in turn_context
     assert "rt.threads.view" in turn_context
     assert "rt.threads.detail" in turn_context
+    assert '<function name="ui">' in turn_context
+    assert "rt.ui.message(markdown: str" in turn_context
+    assert "外部完成授权、确认或等待" in turn_context
     assert '<function name="mcp">' not in turn_context
     assert "rt.mcp.connect" not in turn_context
     assert '<function name="workflow">' not in turn_context

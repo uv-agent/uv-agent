@@ -229,6 +229,10 @@ def render_message_cell(
         return _prefix_lines(sgr(theme.error, "✗ "), cell.text or cell.title, width)
     if cell.kind == "event":
         return _prefix_lines(sgr(theme.muted, "◆ "), cell.text or cell.title, width)
+    if cell.kind == "ui_message":
+        prefix = sgr(theme.accent, "◆ ")
+        md_lines = render_markdown(cell.text or cell.title, max(20, width - 2))
+        return [prefix + md_lines[0], *("  " + line for line in md_lines[1:])]
     if cell.kind == "image":
         return _prefix_lines(sgr(theme.accent, "▧ "), cell.text or cell.title, width)
     # Mirror the reasoning breath: the assistant glyph colour cycles based on

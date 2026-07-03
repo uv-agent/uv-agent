@@ -25,6 +25,7 @@ from uv_agent_runtime.errors import CommandError, FileSelectionError, HelperRunt
 from uv_agent_runtime.events import emit_event, emit_progress, emit_result
 from uv_agent_runtime.files import list_files, read_json, read_text, write_json, write_text
 from uv_agent_runtime.helper_stats import helper_stats_db_path
+from uv_agent_runtime.ui import message as ui_message
 from uv_agent.builtin.mcp.runtime import connect_declared, connect_named, connect_stdio, connect_url, list_declared_servers
 from uv_agent_runtime.patch import apply_patch
 from uv_agent_runtime.textops import (
@@ -1128,6 +1129,8 @@ def test_runtime_emit_helpers_return_event_dict(capsys, monkeypatch: pytest.Monk
     custom = emit_event("custom", value=1)
     progress = emit_progress("working", count=2)
     result = emit_result(ok=True)
+    ui = ui_message("**Authorize** at https://example.test")
+    facade_ui = rt.ui.message("Waiting for confirmation")
     captured = capsys.readouterr()
 
     assert custom["kind"] == "custom"
@@ -1143,13 +1146,23 @@ def test_runtime_emit_helpers_return_event_dict(capsys, monkeypatch: pytest.Monk
     assert result["ok"] is True
     assert result["_uv_agent_run_id"] == "run_events"
     assert result["_uv_agent_event_id"].startswith("evt_")
+    assert ui["kind"] == "ui.message"
+    assert ui["message"] == "**Authorize** at https://example.test"
+    assert ui["format"] == "markdown"
+    assert ui["_uv_agent_run_id"] == "run_events"
+    assert ui["_uv_agent_event_id"].startswith("evt_")
+    assert facade_ui["kind"] == "ui.message"
+    assert facade_ui["message"] == "Waiting for confirmation"
+    assert facade_ui["format"] == "markdown"
     assert len(
         {
             custom["_uv_agent_event_id"],
             progress["_uv_agent_event_id"],
             result["_uv_agent_event_id"],
+            ui["_uv_agent_event_id"],
+            facade_ui["_uv_agent_event_id"],
         }
-    ) == 3
+    ) == 5
     assert captured.out == ""
 
 

@@ -4,6 +4,7 @@ import http.client
 import json
 from pathlib import Path
 
+from uv_agent.host_events import HostEventBus
 from uv_agent.runner.run_log import RunLogStore
 from uv_agent.runner.rpc import RuntimeRPCServer
 
@@ -121,6 +122,58 @@ def test_runtime_rpc_server_accepts_helper_call_summaries(tmp_path: Path) -> Non
                     "argument_types": {"args": ["str"], "kwargs": {}},
                 }
             ]
+        finally:
+            handle.close()
+    finally:
+        server.close()
+
+
+def test_runtime_rpc_server_publishes_ui_message_host_events(tmp_path: Path) -> None:
+    host_events = HostEventBus()
+    published: list[dict] = []
+    host_events.subscribe(lambda event: published.append(event))
+    server = RuntimeRPCServer(host_events=host_events)
+    events: list[dict] = []
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
+    try:
+        handle = server.open_session(
+            run_id="run_rpc",
+            thread_id="thread_1",
+            turn_id="turn_1",
+            cwd=tmp_path,
+            structured_events=events,
+            writer=writer,
+        )
+        try:
+            status, body = _post(
+                server.url,
+                handle.token,
+                {
+                    "jsonrpc": "2.0",
+                    "method": "event.emit",
+                    "params": {
+                        "kind": "ui.message",
+                        "message": "**Authorize** at https://example.test",
+                        "format": "markdown",
+                        "_uv_agent_event_id": "evt_ui",
+                        "_uv_agent_run_id": "run_rpc",
+                    },
+                },
+            )
+
+            assert status == 204
+            assert body == b""
+            assert events[0]["kind"] == "ui.message"
+            assert len(published) == 1
+            assert published[0]["type"] == "runtime.ui.message"
+            assert published[0]["scope"] == "ui"
+            assert published[0]["message"] == "**Authorize** at https://example.test"
+            assert published[0]["format"] == "markdown"
+            assert published[0]["run_id"] == "run_rpc"
+            assert published[0]["thread_id"] == "thread_1"
+            assert published[0]["turn_id"] == "turn_1"
+            assert published[0]["event_id"] == "evt_ui"
         finally:
             handle.close()
     finally:
