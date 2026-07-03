@@ -121,17 +121,16 @@ async def test_builtin_plugins_publish_context_and_runtime_namespaces(monkeypatc
         assert states["builtin.workflow"] == "started"
         assert states["builtin.scheduler"] == "started"
         text = _epoch_text(manager.contexts, "thr")
-        assert "<agent_goal_helpers>" in text
-        assert "<signature>GoalTask" in text
-        assert "rt.goal.add_task(*, text: str" in text
+        assert "<agent_goal_helpers>" not in text
+        assert manager.resolve_helper("goal")["found"] is True
+        assert manager.resolve_helper("goal.add_task")["found"] is True
         assert "<agent_available_skills>" in text
         assert "<name>demo</name>" in text
         assert "<agent_available_mcp_servers>" in text
         assert "<name>files</name>" in text
         assert "class McpClient" in text
         assert "rt.mcp.connect_named" in text
-        assert "<agent_worktree_helpers>" in text
-        assert "rt.worktree.current(*, thread_id: str | None = None)" in text
+        assert "<agent_worktree_helpers>" not in text
         assert "<agent_workflow_context" in text
         assert "rt.workflow.start(objective: str" in text
         assert "<agent_scheduler_helpers>" in text

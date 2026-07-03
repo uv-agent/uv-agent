@@ -5168,22 +5168,28 @@ def test_goal_plugin_context_emits_once_per_epoch_and_after_disable(tmp_path: Pa
     thread_id = engine.thread_store.create_thread()
 
     enable_plugin_goal(engine, thread_id, "Ship the goal feature")
+    first_epoch_text = context_text(engine._pre_user_context_items(thread_id))
     first_text = agent_turn_context_text(engine, thread_id)
+    repeated_epoch = engine._pre_user_context_items(thread_id)
     repeated = agent_turn_context_text(engine, thread_id)
 
+    assert '<agent_goal_helpers>' in first_epoch_text
     assert '<agent_goal_mode status="enabled">' in first_text
     assert "Ship the goal feature" in first_text
-    assert "rt.goal.*" in first_text
+    assert "rt.goal.*" in first_epoch_text
+    assert "<agent_goal_helpers" not in str(repeated_epoch)
     assert "<agent_goal_mode" not in repeated
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
-    engine._pre_user_context_items(thread_id)
+    after_compaction_epoch = context_text(engine._pre_user_context_items(thread_id))
     after_compaction = agent_turn_context_text(engine, thread_id)
+    assert "<agent_goal_helpers" in after_compaction_epoch
     assert "<agent_goal_mode" in after_compaction
 
     engine.plugins.call_command("/goal", {"arg": "disable", "thread_id": thread_id})
     disabled_text = context_text(engine._pre_user_context_items(thread_id))
     repeated_disabled = engine._pre_user_context_items(thread_id)
+    assert '<agent_goal_helpers operation="remove">' in disabled_text
     assert '<agent_goal_mode operation="remove">' in disabled_text
     assert "goal mode" in disabled_text
     assert "禁用" in disabled_text
@@ -5318,13 +5324,16 @@ def test_worktree_context_emits_once_per_epoch_and_after_delete(tmp_path: Path) 
     repeated = engine._pre_user_context_items(thread_id)
 
     first_text = context_text(first)
+    assert '<agent_worktree_helpers>' in first_text
     assert '<agent_worktree status="active">' in first_text
     assert str(worktree_path) in first_text
     assert "Git worktree" in first_text
+    assert '<agent_worktree_helpers' not in str(repeated)
     assert '<agent_worktree' not in str(repeated)
 
     engine.thread_store.append(thread_id, "item.compaction", turn_id="t1", text="summary", usage={})
     after_compaction = engine._pre_user_context_items(thread_id)
+    assert '<agent_worktree_helpers>' in str(after_compaction)
     assert '<agent_worktree status="active">' in str(after_compaction)
 
     deleted_metadata = {
@@ -5341,6 +5350,7 @@ def test_worktree_context_emits_once_per_epoch_and_after_delete(tmp_path: Path) 
     engine.thread_store.append(thread_id, "thread.cwd_updated", cwd=str(project_root))
     deleted = engine._pre_user_context_items(thread_id)
     repeated_deleted = engine._pre_user_context_items(thread_id)
+    assert '<agent_worktree_helpers operation="remove">' in str(deleted)
     assert '<agent_worktree operation="update" status="deleted">' in str(deleted)
     assert '<agent_worktree operation="remove">' in str(deleted)
     assert "def456" in str(deleted)

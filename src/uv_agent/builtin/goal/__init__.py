@@ -137,13 +137,22 @@ def setup(context) -> None:
         provider=lambda query="": _goal_picker_items(query),
         trigger="/goal",
     )
-    _publish_goal_helpers(context)
-    context.epoch.on_refresh(lambda thread_id=None: _publish_goal_helpers(context))
+    context.epoch.on_refresh(lambda thread_id=None: _refresh_goal_epoch(context, thread_id))
 
 
-def _publish_goal_helpers(context) -> None:
+def _refresh_goal_epoch(context, thread_id: str | None = None) -> None:
+    if not thread_id:
+        return
+    state = _state(context.storage, thread_id, {})
+    if not state.get("enabled"):
+        return
+    _publish_goal_helpers(context, thread_id=thread_id)
+
+
+def _publish_goal_helpers(context, *, thread_id: str) -> None:
     context.epoch.publish(
         tag="goal_helpers",
+        thread_id=thread_id,
         body={
             "instructions": [
                 "当线程启用 goal mode 时，它由 builtin.goal 插件管理。",
@@ -251,6 +260,7 @@ def enable_thread_goal(context, thread_id: str, *, objective: str = "") -> dict[
     })
     state = _state(context.storage, thread_id, {})
     _record_goal_mode_event(context, thread_id, state)
+    _publish_goal_helpers(context, thread_id=thread_id)
     _publish_goal_notice(context, thread_id, state)
     return state
 
@@ -260,6 +270,7 @@ def disable_thread_goal(context, thread_id: str) -> dict[str, Any]:
     state = _state(context.storage, thread_id, {})
     state.update({"enabled": False, "updated_at": utc_now_iso()})
     kv.set("state", state)
+    context.epoch.remove(tag="goal_helpers", reason="此线程的 goal mode 已禁用。", thread_id=thread_id)
     context.epoch.remove(tag="goal_mode", reason="此线程的 goal mode 已禁用。", thread_id=thread_id)
     context.turn.clear_replay(thread_id=thread_id, replay_key="goal_state")
     _record_goal_mode_event(context, thread_id, state)
@@ -272,6 +283,7 @@ def reset_thread_goal(context, thread_id: str, *, objective: str = "") -> dict[s
     kv.set("state", {"enabled": False, "objective": objective.strip(), "phase": {}, "notes": "", "created_at": now, "updated_at": now})
     for task in context.storage.thread_collection(thread_id, "tasks").list(limit=500):
         context.storage.thread_collection(thread_id, "tasks").delete(task["doc_id"])
+    context.epoch.remove(tag="goal_helpers", reason="goal 状态已在禁用状态下重置。", thread_id=thread_id)
     context.epoch.remove(tag="goal_mode", reason="goal 状态已在禁用状态下重置。", thread_id=thread_id)
     state = _state(context.storage, thread_id, {})
     _record_goal_reset_event(context, thread_id, state)

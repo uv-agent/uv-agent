@@ -88,7 +88,6 @@ def setup(context) -> None:
             "required": ["branch", "path"],
         },
     )
-    _publish_worktree_helpers(context)
     if context.threads is not None:
         for metadata in context.threads.list_threads():
             thread_id = str(metadata.get("thread_id") or "").strip()
@@ -354,13 +353,13 @@ def _refresh_worktree_context(context, thread_id: str | None = None) -> None:
 
 
 def _refresh_worktree_epoch(context, thread_id: str | None = None) -> None:
-    _publish_worktree_helpers(context)
     _refresh_worktree_context(context, thread_id)
 
 
-def _publish_worktree_helpers(context) -> None:
+def _publish_worktree_helpers(context, *, thread_id: str) -> None:
     context.epoch.publish(
         tag="worktree_helpers",
+        thread_id=thread_id,
         body={
             "instructions": [
                 "使用 rt.worktree.current() 检查当前线程是否绑定 worktree。",
@@ -390,8 +389,10 @@ def _publish_worktree_context(context, thread_id: str, metadata: dict[str, Any],
     if status == "deleted":
         if event_type == "thread.worktree_deleted":
             context.epoch.update(tag="worktree", body=body, attrs={"status": "deleted"}, thread_id=thread_id)
+        context.epoch.remove(tag="worktree_helpers", reason="Worktree mode closed for this thread.", thread_id=thread_id)
         context.epoch.remove(tag="worktree", reason="Worktree mode closed for this thread.", thread_id=thread_id)
         return
+    _publish_worktree_helpers(context, thread_id=thread_id)
     context.epoch.publish(tag="worktree", body=body, attrs={"status": "active"}, thread_id=thread_id)
 
 
