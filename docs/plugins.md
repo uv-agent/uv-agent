@@ -2,8 +2,8 @@
 
 `uv-agent` plugins are trusted Python packages loaded into the host process.
 They extend the host without changing the agent boundary: the model still acts
-through `run_python`, and plugin capabilities appear as runtime helpers, commands,
-actions, UI providers, i18n text, and model-visible context.
+through `run_python`, and plugin capabilities appear as runtime helpers,
+commands, actions, UI providers, i18n text, and model-visible context.
 
 The API is intentionally small and breaking changes are allowed while the project
 is experimental. Install only plugins you trust.
@@ -40,9 +40,9 @@ project config:
 ```json
 {
   "plugins": {
-    "disabled": ["my.plugin"],
-    "config": {
-      "my.plugin": {
+    "my.plugin": {
+      "enabled": false,
+      "config": {
         "option": "value"
       }
     }
@@ -50,13 +50,52 @@ project config:
 }
 ```
 
-The config object is exposed as `context.config`.
+The per-plugin config object is exposed as `context.config`.
+
+## Manifest
+
+`PluginManifest` is a static, data-only declaration consumed before `setup`
+runs. Use it for anything the host needs to know before starting the plugin.
+
+```python
+from uv_agent.plugins import PluginManifest
+
+MANIFEST = PluginManifest(
+    id="my.plugin",
+    version="0.1.0",
+    display_name={"en": "My Plugin", "zh": "我的插件"},
+    description={"en": "Small example plugin.", "zh": "小型示例插件。"},
+    builtin=False,
+    default_enabled=True,
+    priority=100,
+    dependencies=(),
+    optional_dependencies=(),
+    capabilities=("runtime_namespace", "context", "command", "action", "ui", "storage"),
+    config_schema={},
+    storage_schema={"collections": {"messages": {"indexes": ["channel"]}}},
+)
+```
+
+| Field | Purpose |
+| --- | --- |
+| `id` | Unique plugin id. Use dotted names. |
+| `version` | Plugin version string. |
+| `display_name` | Short name; string or `{language: text}` map. |
+| `description` | Long description; string or localized map. |
+| `builtin` | True for built-in plugins. |
+| `default_enabled` | Whether the plugin is enabled when first seen. |
+| `priority` | Load order hint; lower numbers load first. |
+| `dependencies` | Other plugin ids that must start first. |
+| `optional_dependencies` | Optional ids used for load-order hints only. |
+| `capabilities` | Self-declared capability strings for documentation. |
+| `config_schema` | Optional JSON schema for validating `context.config`. |
+| `storage_schema` | Declares document collections and indexed fields. |
 
 ## Lifecycle
 
 `SetupPlugin.setup(context)` is called once when the plugin starts. It may be a
-normal function or an async function. Use it to register capabilities, initialize
-storage, subscribe to events, and start background tasks.
+normal function or an async function. Use it to register capabilities,
+initialize storage, subscribe to events, and start background tasks.
 
 `SetupPlugin.stop(context)` is optional and may also be async. Use it to dispose
 background tasks or external resources. If setup or stop fails, uv-agent logs the
@@ -71,7 +110,7 @@ failure and emits plugin lifecycle events without taking down the host.
 | `context.manifest` | The plugin manifest. |
 | `context.project_root` | Active workspace root. |
 | `context.user_state_dir` | User state directory, normally `~/.uv-agent`. |
-| `context.config` | Plugin config from `plugins.config.<id>`. |
+| `context.config` | Plugin config from `plugins.<id>.config`. |
 | `context.logger` | Plugin log writer. |
 | `context.events` | Event bus subscription API. |
 | `context.runtime` | Runtime helper namespace registry. |
@@ -81,16 +120,24 @@ failure and emits plugin lifecycle events without taking down the host.
 | `context.epoch` | Model-visible epoch context API. |
 | `context.turn` | Model-visible turn context API. |
 | `context.i18n` | Plugin-owned localization registry. |
-| `context.storage` | Private plugin storage paths and SQLite helpers. |
+| `context.storage` | SQLite-backed KV and document stores. |
 | `context.threads` | Narrow thread creation, metadata, and event API, when available. |
 | `context.submit_turn` | Programmatic turn submission, when configured. Returns a waitable `SubmittedTurn`. |
+| `context.create_task` | Launch a plugin-owned background `asyncio.Task`. |
+| `context.compaction` | Add compact handoff sections after compaction. |
 
 ## Minimal Plugin
 
 ```python
 from uv_agent.plugins import PluginManifest, SetupPlugin
 
-MANIFEST = PluginManifest("my.plugin", "0.1.0", "My Plugin", "Example")
+MANIFEST = PluginManifest(
+    id="my.plugin",
+    version="0.1.0",
+    display_name="My Plugin",
+    description="Example",
+    capabilities=("runtime_namespace", "context"),
+)
 
 
 def plugin() -> SetupPlugin:
@@ -154,7 +201,24 @@ through `uv_agent_runtime.transport.call_host(...)`. The host callable receives
 natural positional and keyword arguments. If it accepts a `context` keyword, the
 runner injects the current run context.
 
-Helper arguments and return values must be JSON-compatible.
+Helper arguments and return values must be JSON-compatible. Every helper
+function must be associated with a `{"type": "object"}` schema. You may also pass
+`RuntimeFunctionSpec` objects to set per-function `timeout_s`.
+
+### Reserved namespaces
+
+The following runtime namespaces are reserved by core and cannot be registered
+by plugins:
+
+```
+file, files, search, symbols, query, patch, apply_patch, diff, compare,
+snapshot, restore, transaction, run, deps, cd, pwd, path, events, look_at,
+threads
+```
+
+Builtin plugins also register the namespaces `goal`, `mcp`, `scheduler`,
+`skills`, `workflow`, and `worktree`. Third-party plugins should avoid all of
+these names to prevent conflicts.
 
 ## Actions
 
@@ -214,6 +278,21 @@ context.commands.register("/hello", hello_command, description="Say hello")
 
 The TUI calls command/action registries rather than importing builtin modules.
 Builtin plugins use the same surfaces as third-party plugins.
+
+Slash command handlers are invoked from the synchronous TUI path, so they must
+be synchronous. Async command handlers will raise `RuntimeError`.
+
+UI picker providers can be synchronous or async and return an iterable of
+`PickerItem` values or plain dicts:
+
+```python
+context.ui.picker(
+    id="my.items",
+    title="My Items",
+    provider=lambda query="": [{"value": f"item:{i}", "description": f"item {i}"} for i in range(5)],
+    trigger="@my",
+)
+```
 
 ## Model Context
 
@@ -324,21 +403,61 @@ if submitted.status == "completed":
     context.logger.info("turn result: %s", submitted.final_text)
 ```
 
+`submit_turn` is async and cannot be called from inside a plugin event handler;
+doing so raises `ReentrantSubmitError`. Use event handlers to react to state
+changes and schedule work through `context.create_task` instead.
+
 ## Storage
 
-`context.storage` exposes plugin-owned paths and SQLite helpers. Plugins own
-their schema and migrations.
+`context.storage` exposes SQLite-backed KV and document stores scoped to the
+plugin. Plugins own their schema and migrations.
 
 ```python
-with context.storage.open_db() as db:
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS messages "
-        "(id TEXT PRIMARY KEY, text TEXT NOT NULL)"
-    )
+kv = context.storage.thread_kv(thread_id)
+kv.set("last_seen", {"at": "2024-01-01T00:00:00Z"})
+value = kv.get("last_seen")
+
+messages = context.storage.thread_collection(thread_id, "messages")
+messages.put("msg_1", {"channel": "general", "text": "hello"})
+for item in messages.query_index("channel", "general"):
+    print(item["body"])
+```
+
+Available scopes are `global`, `project`, and `thread`. Declare indexed
+collections in `manifest.storage_schema` so the host can create the right indexes:
+
+```python
+storage_schema={
+    "collections": {
+        "messages": {"indexes": ["channel", {"field": "meta.kind"}]},
+    }
+}
 ```
 
 Use plugin storage for plugin state. Do not rely on host internals unless the
 data is exposed through `context.threads`, actions, or runtime helpers.
+
+## Background Tasks
+
+Use `context.create_task` to start plugin-owned background work that should be
+cancelled when the plugin stops:
+
+```python
+import asyncio
+
+
+async def poll():
+    while True:
+        await asyncio.sleep(60)
+        await check_queue()
+
+
+context.create_task(poll(), name="poll")
+```
+
+Tasks started this way are tracked per plugin and cancelled during shutdown.
+Uncaught task exceptions mark the plugin status as `warning` and publish a
+`plugin.task_failed` event.
 
 ## Events
 
@@ -355,10 +474,32 @@ unsubscribe = context.events.subscribe("turn.completed", on_turn_completed, logg
 Handlers may be sync or async. Slow or failing handlers should not block the main
 agent turn; exceptions are logged.
 
-Common event types include `plugin.started`, `plugin.failed`, `thread.event_stored`,
-`turn.started`, `assistant.delta`, `tool.started`, `tool.output`,
-`compaction.started`, `compaction.completed`, `turn.completed`, `turn.error`, and
-`turn.interrupted`.
+Plugin lifecycle events published by the plugin manager:
+
+- `plugin.discovered`
+- `plugin.first_load`
+- `plugin.starting`
+- `plugin.started`
+- `plugin.stopped`
+- `plugin.failed`
+- `plugin.warning`
+- `plugin.task_failed`
+
+Turn and thread events published by the agent and thread store:
+
+- `turn.started`
+- `turn.completed`
+- `turn.error`
+- `turn.interrupted`
+- `assistant.delta`
+- `tool.started`
+- `tool.output`
+- `compaction.started`
+- `compaction.completed`
+- `thread.event_stored`
+
+`thread.event_stored` is emitted by the thread store when any event is persisted;
+its payload includes the stored `event` object.
 
 ## Security
 
