@@ -548,16 +548,17 @@ class Renderer:
         old_top = self._frame_top_row
         old_bottom = old_top + self._frame_rows - 1
 
-        if new_top < old_top and old_bottom >= rows:
-            # Scroll before erasing the old frame, but never scroll away the
-            # visible tail of the latest completed transcript cell.  Command
-            # palettes are transient chrome; if there is not enough room after
-            # preserving that tail, shrink the palette instead of consuming the
-            # answer the user is reading.
+        if new_top < old_top:
+            # A growing live frame must not erase completed transcript rows above
+            # the previous frame.  If the old frame already reached the viewport
+            # bottom, move those rows into scrollback before clearing; otherwise
+            # consume any blank rows below the old frame and clip the live content
+            # to the safe area starting at ``old_top``.
             desired_delta = old_top - new_top
             preserve_rows = self._transcript_rows_to_preserve_on_growth(state)
             max_scroll = max(0, self._transcript_rows - preserve_rows)
-            delta = min(desired_delta, max_scroll)
+            scrollable = desired_delta if old_bottom >= rows else 0
+            delta = min(desired_delta, max_scroll, scrollable)
             if delta > 0:
                 buf.append(self._cup(rows, 1) + "\n" * delta)
                 self._transcript_rows = max(0, self._transcript_rows - delta)

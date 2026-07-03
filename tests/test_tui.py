@@ -1196,6 +1196,52 @@ def test_user_submit_after_assistant_tail_preserves_last_visible_line(monkeypatc
     assert tail_index < user_index
 
 
+def test_live_frame_growth_preserves_transcript_above_unpinned_frame(monkeypatch) -> None:
+    monkeypatch.setattr("uv_agent.tui.renderer.terminal_size", lambda default=(100, 30): (60, 6))
+    output = io.StringIO()
+    renderer = Renderer(output=output)
+    state = TuiState(composer="")
+
+    # Reproduce a completed short answer above a ready composer where the live
+    # frame is anchored but not touching the bottom row.  Growing the next live
+    # frame used to clear from the newly computed top row and erase this answer
+    # instead of clipping the transient chrome below it.
+    renderer.repaint(state)
+    previous_user = TranscriptCell("user", text="previous user")
+    previous_answer = TranscriptCell("assistant", text="previous answer", status="streaming")
+    state.live.append(previous_user)
+    state.busy = True
+    state.status_message = "running"
+    renderer.repaint(state)
+    state.live.append(previous_answer)
+    renderer.repaint(state)
+
+    state.live.remove(previous_user)
+    renderer.flush_cell(previous_user, state)
+    state.live.remove(previous_answer)
+    previous_answer.status = "done"
+    renderer.flush_cell(previous_answer, state)
+    state.busy = False
+    state.status_message = "ready"
+    renderer.repaint(state)
+
+    before = _terminal_screen_lines(output.getvalue(), cols=60, rows=6)
+    assert any("previous answer" in line for line in before)
+    assert renderer._frame_anchored
+    assert renderer._frame_top_row + renderer._frame_rows - 1 < 6
+
+    state.live.append(TranscriptCell("user", text="new user"))
+    state.busy = True
+    state.status_message = "running"
+    renderer.repaint(state)
+
+    screen = _terminal_screen_lines(output.getvalue(), cols=60, rows=6)
+    previous_index = next(index for index, line in enumerate(screen) if "previous answer" in line)
+    user_index = next(index for index, line in enumerate(screen) if line.startswith("› new user"))
+
+    assert previous_index < user_index
+
+
 def test_command_palette_preserves_latest_assistant_tail(monkeypatch) -> None:
     monkeypatch.setattr("uv_agent.tui.renderer.terminal_size", lambda default=(100, 30): (60, 8))
     output = io.StringIO()
