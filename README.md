@@ -240,8 +240,15 @@ Supported API formats:
     }
   },
   "plugins": {
-    "disabled": [],
-    "config": {}
+    "my-plugin": {
+      "enabled": false
+    },
+    "another-plugin": {
+      "enabled": true,
+      "config": {
+        "option": "value"
+      }
+    }
   }
 }
 

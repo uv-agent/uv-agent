@@ -314,15 +314,17 @@ are edited in JSON.
 ## Plugin Options
 
 Plugins are installed Python packages discovered through the `uv_agent.plugins`
-entry point group. They are enabled by default unless listed in
-`plugins.disabled`.
+entry point group. They are enabled by default unless explicitly disabled.
 
 ```json
 {
   "plugins": {
-    "disabled": ["my-plugin"],
-    "config": {
-      "another-plugin": {
+    "my-plugin": {
+      "enabled": false
+    },
+    "another-plugin": {
+      "enabled": true,
+      "config": {
         "option": "value"
       }
     }
@@ -332,8 +334,8 @@ entry point group. They are enabled by default unless listed in
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `disabled` | list of strings | `[]` | Entry point names of installed plugins that should not be loaded. |
-| `config` | object | `{}` | Per-plugin config objects, keyed by plugin entry point name and passed to `PluginContext.config`. |
+| `enabled` | boolean | `true` | Whether the plugin is loaded. |
+| `config` | object | `{}` | Plugin-owned config object passed to `PluginContext.config`. |
 
 See [Plugin system](plugins.md) for the plugin API and examples.
 
