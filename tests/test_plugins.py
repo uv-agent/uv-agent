@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from uv_agent.config import PluginConfigBlock, PluginsConfig
+from uv_agent.config import LoggingConfig, PluginConfigBlock, PluginsConfig
 from uv_agent.session import ThreadStore
 from uv_agent.plugins import EventBus, PluginManager, PluginManifest, SetupPlugin
 from uv_agent.plugins.context import PluginContextBroker
@@ -68,7 +70,14 @@ def _builtin_entry_points() -> list[EntryPoint]:
     ]
 
 
-def _manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plugins: list[SetupPlugin], *, config: PluginsConfig | None = None) -> PluginManager:
+def _manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plugins: list[SetupPlugin],
+    *,
+    config: PluginsConfig | None = None,
+    logging_config: LoggingConfig | None = None,
+) -> PluginManager:
     _install_entry_points(monkeypatch, plugins)
     return PluginManager(
         config=config or PluginsConfig(),
@@ -77,6 +86,7 @@ def _manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plugins: list[Setu
         helper_registry=RuntimeNamespaceRegistry(),
         submitter=None,
         thread_store=None,
+        logging_config=logging_config,
         user_state_dir=tmp_path / "state",
     )
 
@@ -471,6 +481,79 @@ async def test_plugin_manager_orders_dependencies_and_isolates_setup_failures(mo
     child = next(record for record in manager.records if record.id == "child")
     assert child.error_type == "ValueError"
     assert "already registered" in child.message
+
+
+@pytest.mark.asyncio
+async def test_plugin_logs_use_rotating_file_handler(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def setup(context) -> None:
+        handlers = [
+            handler
+            for handler in context.logger.handlers
+            if isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename).name == "plugin.log"
+        ]
+        assert handlers
+        assert handlers[0].maxBytes == 400
+        assert handlers[0].backupCount == 1
+        for index in range(20):
+            context.logger.info("plugin log rotation smoke %02d %s", index, "x" * 80)
+
+    app_logger = logging.getLogger("uv_agent")
+    old_level = app_logger.level
+    app_logger.setLevel(logging.INFO)
+    try:
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            [_plugin("rotating-plugin", setup)],
+            logging_config=LoggingConfig(max_bytes=400, backup_count=1),
+        )
+
+        await manager.start()
+        await manager.stop()
+    finally:
+        app_logger.setLevel(old_level)
+
+    log_dir = tmp_path / "state" / "plugins" / "rotating-plugin" / "logs"
+    assert (log_dir / "plugin.log").exists()
+    assert (log_dir / "plugin.log.1").exists()
+
+
+@pytest.mark.asyncio
+async def test_plugin_log_rotation_updates_on_logging_config_reload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        [_plugin("reload-log-plugin", lambda context: None)],
+        logging_config=LoggingConfig(max_bytes=400, backup_count=1),
+    )
+
+    await manager.start()
+    try:
+        context = manager.context_for("reload-log-plugin")
+        assert context is not None
+
+        def rotating_handlers() -> list[RotatingFileHandler]:
+            return [
+                handler
+                for handler in context.logger.handlers
+                if isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename).name == "plugin.log"
+            ]
+
+        before = rotating_handlers()
+        assert len(before) == 1
+        assert before[0].maxBytes == 400
+        assert before[0].backupCount == 1
+
+        manager.reload_logging_config(LoggingConfig(max_bytes=800, backup_count=2))
+
+        after = rotating_handlers()
+        assert len(after) == 1
+        assert after[0].maxBytes == 800
+        assert after[0].backupCount == 2
+    finally:
+        await manager.stop()
 
 
 @pytest.mark.asyncio

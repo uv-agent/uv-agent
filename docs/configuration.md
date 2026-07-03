@@ -350,6 +350,33 @@ Runner settings control managed Python script execution.
 | `max_run_logs` | integer | `200` | Number of recent run records kept per project. Matching exported debug scripts are pruned with old rows. |
 | `scriptenv_index_url` | string or null | `null` | Optional uv default package index URL written to the managed `runner/scriptenv/pyproject.toml`. |
 
+## Logging Options
+
+Operational logs use Python's standard logging system under the `uv_agent`
+namespace. The main project log is written to:
+
+```text
+~/.uv-agent/projects/<project-id>/log/uv-agent.log
+```
+
+Plugin logs are written separately under:
+
+```text
+~/.uv-agent/plugins/<plugin-id>/logs/plugin.log
+```
+
+The main log and per-plugin `plugin.log` files use the same rotation settings.
+With the defaults, each active file is capped at about 5 MB and up to three
+rotated backups are retained.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `level` | string or integer | `"INFO"` | Logging level for `uv_agent` and plugin loggers. CLI `--log-level` overrides this for the current process. |
+| `file_enabled` | boolean | `true` | Write the main project log file. |
+| `console_enabled` | boolean | `false` | Also write logs to stderr. The TUI keeps this off by default to avoid corrupting terminal rendering. |
+| `max_bytes` | integer | `5000000` | Maximum bytes per active log file before rotation. Set `0` to disable rotation. |
+| `backup_count` | integer | `3` | Number of rotated backup files retained per log. |
+
 ## Full Example
 
 See [config.example.json](config.example.json).

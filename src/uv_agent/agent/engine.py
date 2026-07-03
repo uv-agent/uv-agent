@@ -376,6 +376,7 @@ class AgentEngine:
             helper_registry=self.runtime_helpers,
             submitter=self._plugin_submit_turn,
             thread_store=self.thread_store,
+            logging_config=self.config.logging,
         )
         rpc_server = getattr(self.runner, "rpc_server", None)
         if rpc_server is not None:
@@ -566,6 +567,7 @@ class AgentEngine:
         if hasattr(self.model_client, "reload_config"):
             self.model_client.reload_config(self.config)  # type: ignore[attr-defined]
         self.runner.config = self.config.runner
+        self.plugins.reload_logging_config(self.config.logging)
         self._last_config_refresh_at = now
         logger.debug("Configuration refreshed force=%s", force)
 

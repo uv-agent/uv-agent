@@ -126,6 +126,10 @@ failure and emits plugin lifecycle events without taking down the host.
 | `context.create_task` | Launch a plugin-owned background `asyncio.Task`. |
 | `context.compaction` | Add compact handoff sections after compaction. |
 
+`context.logger` writes to `~/.uv-agent/plugins/<plugin-id>/logs/plugin.log`.
+Plugin logs use the top-level `logging.max_bytes` and `logging.backup_count`
+rotation settings; see [Configuration](configuration.md#logging-options).
+
 ## Minimal Plugin
 
 ```python

@@ -216,7 +216,15 @@ Supported API formats:
   "runner": {
     "default_timeout_s": 7200,
     "max_output_bytes": 1000000,
+    "max_run_logs": 200,
     "scriptenv_index_url": null
+  },
+  "logging": {
+    "level": "INFO",
+    "file_enabled": true,
+    "console_enabled": false,
+    "max_bytes": 5000000,
+    "backup_count": 3
   },
   "pricing": {
     "currency": "RMB",
@@ -259,6 +267,15 @@ Supported API formats:
 Use `/config` in the TUI to switch default level, language, and compression
 settings. See [configuration](docs/configuration.md) for every option and
 [config.example.json](docs/config.example.json) for a standalone example.
+
+## Logging
+
+uv-agent writes operational logs to the project state log directory, usually
+`~/.uv-agent/projects/<project-id>/log/uv-agent.log`. Per-plugin logs live under
+`~/.uv-agent/plugins/<plugin-id>/logs/plugin.log`. Both use the top-level
+`logging.max_bytes` and `logging.backup_count` rotation settings; defaults keep
+about 5 MB per active log and 3 backups. `--log-level` overrides
+`logging.level` for the current process.
 
 ## Everyday Workflow
 

@@ -151,5 +151,12 @@
     "max_output_bytes": 1000000,
     "max_run_logs": 200,
     "scriptenv_index_url": null
+  },
+  "logging": {
+    "level": "INFO",
+    "file_enabled": true,
+    "console_enabled": false,
+    "max_bytes": 5000000,
+    "backup_count": 3
   }
 }

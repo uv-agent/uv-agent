@@ -9,10 +9,11 @@ import sqlite3
 import traceback
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from uv_agent.config import PluginsConfig
+from uv_agent.config import LoggingConfig, PluginsConfig
 from uv_agent.paths import uv_agent_home
 from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
 
@@ -51,9 +52,11 @@ class PluginManager:
         helper_registry: RuntimeNamespaceRegistry,
         submitter,
         thread_store=None,
+        logging_config: LoggingConfig | None = None,
         user_state_dir: Path | None = None,
     ) -> None:
         self.config = config
+        self.logging_config = logging_config or LoggingConfig()
         self.project_root = project_root
         self.user_state_dir = user_state_dir or uv_agent_home()
         self.events = events
@@ -76,6 +79,12 @@ class PluginManager:
     @property
     def records(self) -> list[PluginStatus]:
         return [record.status for record in self._records.values()]
+
+    def reload_logging_config(self, config: LoggingConfig) -> None:
+        self.logging_config = config
+        for plugin_id, record in self._records.items():
+            if record.context is not None:
+                self._logger_for(plugin_id)
 
     def context_for(self, plugin_id: str) -> PluginContext | None:
         record = self._records.get(plugin_id)
@@ -506,8 +515,29 @@ class PluginManager:
         log_dir = self._plugin_dir(plugin_id) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "plugin.log"
-        if not any(isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path for handler in logger.handlers):
-            handler = logging.FileHandler(log_path, encoding="utf-8")
+        max_bytes = max(0, int(self.logging_config.max_bytes))
+        backup_count = max(0, int(self.logging_config.backup_count))
+        has_handler = False
+        for existing in list(logger.handlers):
+            if not isinstance(existing, logging.FileHandler) or Path(existing.baseFilename) != log_path:
+                continue
+            if (
+                isinstance(existing, RotatingFileHandler)
+                and existing.maxBytes == max_bytes
+                and existing.backupCount == backup_count
+            ):
+                has_handler = True
+                continue
+            logger.removeHandler(existing)
+            existing.close()
+        if not has_handler:
+            handler = RotatingFileHandler(
+                log_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+                delay=True,
+            )
             handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
             logger.addHandler(handler)
         return logger
