@@ -73,6 +73,15 @@ def configure_logging(
     # their per-plugin file handlers.  Individual plugin code may still choose a
     # stricter level if it has a reason to be quieter.
     logging.getLogger("uv_agent.plugins").setLevel(level)
+    app_logger.debug(
+        "Logging configured level=%s file_enabled=%s console_enabled=%s log_file=%s max_bytes=%s backup_count=%s",
+        logging.getLevelName(level),
+        config.file_enabled,
+        config.console_enabled if console is None else console,
+        path if config.file_enabled else None,
+        config.max_bytes,
+        config.backup_count,
+    )
     return path
 
 

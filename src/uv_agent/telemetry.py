@@ -99,11 +99,13 @@ class _SqliteBatcher:
         if not model_calls and not run_stats:
             return
         try:
+            logger.debug("Telemetry batch flush model_calls=%d run_stats=%d", len(model_calls), len(run_stats))
             with self._connect() as db:
                 if model_calls:
                     db.executemany(_MODEL_CALL_INSERT, model_calls)
                 if run_stats:
                     db.executemany(_RUN_STAT_INSERT, run_stats)
+            logger.debug("Telemetry batch flush completed model_calls=%d run_stats=%d", len(model_calls), len(run_stats))
         except Exception:
             # Telemetry is best-effort; never let a flush failure propagate.
             logger.exception("Telemetry batch flush failed")
@@ -140,6 +142,7 @@ class TelemetryStore:
             max_age_ms=batch_max_age_ms,
         )
         self._ensure_schema()
+        logger.debug("Telemetry store initialized db_path=%s", self.db_path)
 
     def db_path_for_data_dir(self) -> Path:
         return self.db_path
@@ -287,6 +290,14 @@ class TelemetryStore:
                 billing.get("created_at") or utc_now_iso(),
             )
         )
+        logger.debug(
+            "Telemetry model call recorded thread_id=%s turn_id=%s level=%s source=%s model=%s",
+            event.get("thread_id"),
+            event.get("turn_id"),
+            event.get("level"),
+            billing.get("source") or event.get("source"),
+            billing.get("model"),
+        )
         self._update_turn_aggregate(
             event.get("thread_id"),
             event.get("turn_id"),
@@ -324,6 +335,14 @@ class TelemetryStore:
                 int(event.get("stderr_bytes") or 0),
                 int(event.get("event_count") or 0),
             )
+        )
+        logger.debug(
+            "Telemetry run stat recorded run_id=%s thread_id=%s turn_id=%s returncode=%s duration_ms=%s",
+            run_id,
+            event.get("thread_id"),
+            event.get("turn_id"),
+            event.get("returncode"),
+            duration_ms,
         )
         self._update_turn_aggregate(
             event.get("thread_id"),
@@ -517,6 +536,15 @@ class TelemetryStore:
                     agg["compactions"],
                 ),
             )
+        logger.debug(
+            "Telemetry turn aggregate flushed thread_id=%s turn_id=%s status=%s model_calls=%d run_python_calls=%d compactions=%d",
+            thread_id or agg.get("thread_id"),
+            turn_id,
+            status,
+            agg["model_calls"],
+            agg["run_python_calls"],
+            agg["compactions"],
+        )
 
     def query_turn_stats(self, turn_id: str) -> dict[str, Any] | None:
         with self._connect() as db:

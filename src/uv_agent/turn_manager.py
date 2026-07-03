@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -14,6 +15,8 @@ if TYPE_CHECKING:
     from uv_agent.agent.engine import AgentEngine
 
 TurnConflict = Literal["queue", "reject", "interrupt", "guide"]
+
+logger = logging.getLogger(__name__)
 
 
 class TurnConflictError(RuntimeError):
@@ -122,6 +125,7 @@ class TurnManager:
             task = asyncio.create_task(self._run_detached(handle), name=f"uv-agent-turn-{handle.request_id}")
             self._detached_tasks.add(task)
             task.add_done_callback(self._detached_tasks.discard)
+            logger.info("Turn submitted detached request_id=%s level=%s images=%d", handle.request_id, level, len(handle.image_paths))
             return handle
 
         async with self._lock:
@@ -130,15 +134,24 @@ class TurnManager:
             if not busy:
                 state.active = handle
                 self._ensure_worker_locked(thread_id, state)
+                logger.info("Turn submitted thread_id=%s request_id=%s conflict=%s status=active", thread_id, handle.request_id, conflict)
                 return handle
             if conflict == "reject":
+                logger.warning("Turn rejected thread_id=%s request_id=%s conflict=reject", thread_id, handle.request_id)
                 raise TurnConflictError(f"Thread {thread_id} already has pending or running work")
             if conflict == "queue" and state.takeover is None:
                 state.queue.append(handle)
                 self._ensure_worker_locked(thread_id, state)
+                logger.info(
+                    "Turn queued thread_id=%s request_id=%s queue_depth=%d",
+                    thread_id,
+                    handle.request_id,
+                    len(state.queue),
+                )
                 return handle
             if conflict == "queue":
                 self._merge_into_takeover_locked(state, handle)
+                logger.info("Turn merged into takeover thread_id=%s request_id=%s", thread_id, handle.request_id)
                 return handle
             self._absorb_queue_into_takeover_locked(state, incoming=handle, mode=conflict)  # guide/interrupt
             if state.active is not None:
@@ -147,6 +160,7 @@ class TurnManager:
                 elif state.takeover_mode == "guide":
                     state.active.guide_event.set()
             self._ensure_worker_locked(thread_id, state)
+            logger.info("Turn takeover submitted thread_id=%s request_id=%s mode=%s", thread_id, handle.request_id, conflict)
             return handle
 
     async def aclose(self) -> None:
@@ -239,7 +253,9 @@ class TurnManager:
         await self._run_handle(handle)
 
     async def _run_handle(self, handle: TurnHandle) -> None:
+        started = asyncio.get_running_loop().time()
         handle.status = "running"
+        logger.debug("Turn handle running request_id=%s thread_id=%s conflict=%s", handle.request_id, handle.thread_id, handle.conflict)
         try:
             async with self._semaphore:
                 async for event in self.engine.run_turn(
@@ -291,4 +307,12 @@ class TurnManager:
                     }
                 )
         finally:
+            logger.info(
+                "Turn handle finished request_id=%s thread_id=%s turn_id=%s status=%s duration_ms=%.1f",
+                handle.request_id,
+                handle.thread_id,
+                handle.turn_id,
+                handle.status,
+                (asyncio.get_running_loop().time() - started) * 1000,
+            )
             handle._finish()

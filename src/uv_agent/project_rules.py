@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,8 @@ from uv_agent.prompts import (
     PROJECT_RULES_LOADED_HEADER,
     PROJECT_RULES_OPEN_TEMPLATE,
 )
+
+logger = logging.getLogger(__name__)
 
 
 RULE_FILE_NAMES = ("AGENTS.md",)
@@ -179,7 +182,8 @@ def load_project_rules(
             continue
         try:
             text = resolved.read_text(encoding="utf-8")
-        except OSError:
+        except OSError as exc:
+            logger.debug("Project rule read failed path=%s error=%s", resolved, exc)
             continue
         remaining = max_total_chars - total
         limit = min(max_chars_per_file, remaining)
@@ -189,8 +193,16 @@ def load_project_rules(
         if truncated_file:
             clipped = clipped.rstrip() + PROJECT_RULE_TRUNCATED_SUFFIX
             truncated_context = True
+            logger.debug("Project rule truncated path=%s limit=%d", resolved, limit)
         rules.append(ProjectRule(path=resolved, scope=scope, text=clipped, truncated=truncated_file))
 
+    logger.debug(
+        "Project rules loaded root=%s count=%d truncated=%s omitted=%d",
+        root,
+        len(rules),
+        truncated_context,
+        omitted,
+    )
     return ProjectRuleContext(rules=rules, truncated=truncated_context, omitted_files=omitted)
 
 
@@ -215,7 +227,8 @@ def load_directory_rules(
             continue
         try:
             text = path.resolve().read_text(encoding="utf-8")
-        except OSError:
+        except OSError as exc:
+            logger.debug("Directory rule read failed path=%s error=%s", path, exc)
             continue
         remaining = max_total_chars - total
         limit = min(max_chars_per_file, remaining)
@@ -225,6 +238,7 @@ def load_directory_rules(
         if truncated_file:
             clipped = clipped.rstrip() + PROJECT_RULE_TRUNCATED_SUFFIX
             truncated_context = True
+            logger.debug("Directory rule truncated path=%s limit=%d", path, limit)
         rules.append(
             ProjectRule(
                 path=path.resolve(),
@@ -234,6 +248,13 @@ def load_directory_rules(
             )
         )
 
+    logger.debug(
+        "Directory rules loaded directory=%s count=%d truncated=%s omitted=%d",
+        resolved_dir,
+        len(rules),
+        truncated_context,
+        omitted,
+    )
     return ProjectRuleContext(rules=rules, truncated=truncated_context, omitted_files=omitted)
 
 
@@ -266,6 +287,7 @@ def discover_workspace_rule_index(
                 if child.is_dir() and not should_skip_rule_index_dir(child)
             )
         except OSError:
+            logger.debug("Workspace rule index directory read failed path=%s", directory)
             continue
         if depth >= max_depth:
             if children:
@@ -274,7 +296,7 @@ def discover_workspace_rule_index(
         for child in children:
             queue.append((child, depth + 1))
 
-    return WorkspaceRuleIndex(
+    index = WorkspaceRuleIndex(
         root=root,
         paths=paths,
         max_depth=max_depth,
@@ -282,6 +304,14 @@ def discover_workspace_rule_index(
         truncated_entries=truncated_entries,
         depth_limited=depth_limited,
     )
+    logger.debug(
+        "Workspace rule index discovered root=%s count=%d truncated=%s depth_limited=%s",
+        root,
+        len(paths),
+        truncated_entries,
+        depth_limited,
+    )
+    return index
 
 
 def discover_rule_files(project_root: Path, *, home: Path | None = None) -> list[tuple[str, Path]]:

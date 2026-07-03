@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -21,6 +22,9 @@ from uv_agent.runner.rpc import RuntimeRPCServer
 from uv_agent.runner.run_log import RunLogStore
 from uv_agent.runner.scriptenv import ensure_venv, uv_binary
 from uv_agent.time import utc_now_iso
+
+
+logger = logging.getLogger(__name__)
 
 
 def _deadline_expired(started_monotonic: float, timeout_s: float | None) -> bool:
@@ -87,6 +91,12 @@ class PythonRunner:
     async def stream_run(self, request: PythonRunRequest) -> AsyncIterator[RunnerEvent]:
         run_id = new_id("run")
         timeout_s = request.timeout_s or self.config.default_timeout_s
+        run_started_monotonic = monotonic()
+        logger.debug(
+            "Ensuring run_python environment run_id=%s scriptenv=%s",
+            run_id,
+            self.scriptenv_dir,
+        )
         await asyncio.to_thread(
             ensure_venv,
             self.scriptenv_dir,
@@ -138,6 +148,16 @@ class PythonRunner:
             "script_path": str(script_path),
         }
         writer.write(started)
+        logger.info(
+            "run_python started run_id=%s thread_id=%s turn_id=%s cwd=%s timeout_s=%s code_chars=%d args=%d",
+            run_id,
+            request.thread_id,
+            request.turn_id,
+            run_cwd,
+            timeout_s,
+            len(request.code),
+            len(request.script_args),
+        )
         yield RunnerEvent("run.started", started)
 
         capture = OutputCapture()
@@ -277,6 +297,7 @@ class PythonRunner:
                     partial_event = await emit_partial(reason="interrupted", force=True)
                     if partial_event is not None:
                         yield partial_event
+                    logger.info("run_python interrupted run_id=%s", run_id)
                     await kill_process_tree(process)
                     returncode = await wait_task
                     break
@@ -285,6 +306,7 @@ class PythonRunner:
                     partial_event = await emit_partial(reason="timeout", force=True)
                     if partial_event is not None:
                         yield partial_event
+                    logger.warning("run_python timed out run_id=%s timeout_s=%s", run_id, timeout_s)
                     await kill_process_tree(process)
                     returncode = await wait_task
                     break
@@ -303,6 +325,7 @@ class PythonRunner:
                 await kill_process_tree(process)
             raise
         except Exception as exc:
+            logger.exception("run_python failed run_id=%s error_type=%s", run_id, exc.__class__.__name__)
             failed = {
                 "type": "run.failed",
                 "created_at": utc_now_iso(),
@@ -351,6 +374,18 @@ class PythonRunner:
         }
         writer.write(completed)
         self.run_logs.prune()
+        logger.info(
+            "run_python completed run_id=%s returncode=%s timed_out=%s interrupted=%s truncated=%s duration_ms=%.1f stdout_chars=%d stderr_chars=%d events=%d",
+            run_id,
+            returncode,
+            timed_out,
+            interrupted,
+            capture.truncated,
+            (monotonic() - run_started_monotonic) * 1000,
+            len(result.stdout),
+            len(result.stderr),
+            len(capture.structured_events),
+        )
         yield RunnerEvent("run.completed", {**completed, "result": result})
 
     def _run_env(

@@ -47,6 +47,12 @@ class WorkflowExecutor:
             self.cleanup_stale_running()
             self._stop = asyncio.Event()
             self._task = asyncio.create_task(self._run(), name="uv-agent-workflow-executor")
+            logger.info(
+                "Workflow executor started executor_id=%s data_dir=%s poll_interval_s=%s",
+                self.executor_id,
+                self.data_dir,
+                self.default_poll_interval_s,
+            )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -56,6 +62,7 @@ class WorkflowExecutor:
             task.cancel()
         await asyncio.gather(*([self._task] if self._task is not None else []), *self._node_tasks, return_exceptions=True)
         self._node_tasks.clear()
+        logger.info("Workflow executor stopped executor_id=%s", self.executor_id)
 
     def cleanup_stale_running(self) -> int:
         """Fail running nodes whose lease has expired.
@@ -88,6 +95,8 @@ class WorkflowExecutor:
                 ).fetchone()
                 if unresolved is None:
                     db.execute("UPDATE workflows SET status = 'failed', updated_at = ? WHERE workflow_id = ?", (now, workflow_id))
+        if stale:
+            logger.warning("Workflow executor marked stale running nodes failed count=%d", len(stale))
         return len(stale)
 
     async def _run(self) -> None:
@@ -111,6 +120,13 @@ class WorkflowExecutor:
             if self._claim_ready_checkpoint(workflow) is not None:
                 continue
             for node in self._claim_ready_agent_nodes(workflow):
+                logger.info(
+                    "Workflow node claimed workflow_id=%s node_id=%s kind=%s executor_id=%s",
+                    workflow["workflow_id"],
+                    node["node_id"],
+                    node["kind"],
+                    self.executor_id,
+                )
                 task = asyncio.create_task(self._execute_node(workflow, node), name=f"uv-agent-workflow-node-{node['node_id']}")
                 self._node_tasks.add(task)
                 task.add_done_callback(self._node_tasks.discard)
@@ -205,6 +221,13 @@ class WorkflowExecutor:
         level = str(node.get("model_level") or workflow.get("default_model_level") or "") or None
         thread_id = str(node.get("thread_id") or "") or self._create_node_thread(workflow, node)
         heartbeat = asyncio.create_task(self._heartbeat(node_id), name=f"uv-agent-workflow-heartbeat-{node_id}")
+        logger.info(
+            "Workflow node execution started workflow_id=%s node_id=%s thread_id=%s level=%s",
+            workflow["workflow_id"],
+            node_id,
+            thread_id,
+            level,
+        )
         try:
             submitted = await self.submit_turn(
                 text=str(node.get("prompt") or ""),
@@ -234,6 +257,14 @@ class WorkflowExecutor:
                     (status, completed, thread_id, submitted.final_text, _dumps(result), _dumps(error), node_id, self.executor_id),
                 )
                 db.execute("UPDATE workflows SET updated_at = ? WHERE workflow_id = ?", (completed, workflow["workflow_id"]))
+            logger.info(
+                "Workflow node execution completed workflow_id=%s node_id=%s thread_id=%s status=%s turn_id=%s",
+                workflow["workflow_id"],
+                node_id,
+                thread_id,
+                status,
+                submitted.turn_id,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -248,6 +279,14 @@ class WorkflowExecutor:
                     (completed, thread_id, _dumps({"type": exc.__class__.__name__, "message": str(exc) or repr(exc)}), node_id, self.executor_id),
                 )
                 db.execute("UPDATE workflows SET updated_at = ? WHERE workflow_id = ?", (completed, workflow["workflow_id"]))
+            logger.warning(
+                "Workflow node execution failed workflow_id=%s node_id=%s thread_id=%s error_type=%s",
+                workflow["workflow_id"],
+                node_id,
+                thread_id,
+                exc.__class__.__name__,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -266,6 +305,7 @@ class WorkflowExecutor:
         self.threads.record_event(thread_id, "thread.workflow_node_bound", workflow_id=workflow["workflow_id"], node_id=node["node_id"])
         with connect_workflow_db(self.data_dir) as db:
             db.execute("UPDATE workflow_nodes SET thread_id = ? WHERE node_id = ?", (thread_id, node["node_id"]))
+        logger.info("Workflow node thread created workflow_id=%s node_id=%s thread_id=%s", workflow["workflow_id"], node["node_id"], thread_id)
         return thread_id
 
     async def _heartbeat(self, node_id: str) -> None:
@@ -285,6 +325,7 @@ class WorkflowExecutor:
         status = "failed" if any(node["status"] == "failed" for node in nodes) else "completed"
         with connect_workflow_db(self.data_dir) as db:
             db.execute("UPDATE workflows SET status = ?, updated_at = ? WHERE workflow_id = ? AND status = 'running'", (status, now, workflow_id))
+        logger.info("Workflow completed workflow_id=%s status=%s", workflow_id, status)
 
 
 def _lease_deadline(seconds: float) -> str:

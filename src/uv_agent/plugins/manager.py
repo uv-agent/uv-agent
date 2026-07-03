@@ -221,7 +221,9 @@ class PluginManager:
                 return
             self._started = True
             self._discover()
-            for plugin_id in self._load_order():
+            load_order = self._load_order()
+            logger.info("Plugin manager starting plugins=%d enabled=%d", len(self._records), len(load_order))
+            for plugin_id in load_order:
                 await self._start_record(self._records[plugin_id])
 
     async def stop(self) -> None:
@@ -230,6 +232,7 @@ class PluginManager:
                 await self._task
             except Exception:
                 logger.exception("Plugin startup task failed during stop")
+        logger.info("Plugin manager stopping plugins=%d", len(self._records))
         for record in reversed(list(self._records.values())):
             await self._stop_record(record)
         await self.events.drain()
@@ -254,6 +257,7 @@ class PluginManager:
         manifest = plugin.manifest
         existing = self._records.get(manifest.id)
         if existing is not None:
+            logger.warning("Duplicate plugin discovered plugin=%s", manifest.id)
             status = PluginStatus(
                 id=f"{manifest.id}#duplicate",
                 display_name=manifest.display_name,
@@ -277,6 +281,13 @@ class PluginManager:
             deprecation_message=manifest.deprecation_message,
         )
         self._records[manifest.id] = _PluginRecord(plugin=plugin, status=status)
+        logger.debug(
+            "Plugin discovered plugin=%s enabled=%s builtin=%s first_load=%s",
+            manifest.id,
+            enabled,
+            manifest.builtin,
+            first_load,
+        )
         self._publish({"type": "plugin.discovered", "plugin": manifest.id, "first_load": first_load, "builtin": manifest.builtin})
         if first_load:
             self._publish({"type": "plugin.first_load", "plugin": manifest.id})
@@ -314,11 +325,13 @@ class PluginManager:
             record.status.state = "failed"
             record.status.error_type = "MissingDependency"
             record.status.message = f"Missing required plugin dependencies: {', '.join(missing)}"
+            logger.warning("Plugin failed missing dependencies plugin=%s missing=%s", manifest.id, ",".join(missing))
             self._publish({"type": "plugin.failed", "plugin": manifest.id, "message": record.status.message})
             return
         record.status.state = "starting"
         self._publish({"type": "plugin.starting", "plugin": manifest.id})
-        logger = self._logger_for(manifest.id)
+        logger.info("Plugin starting plugin=%s", manifest.id)
+        plugin_logger = self._logger_for(manifest.id)
         storage = PluginStorage(
             plugin_id=manifest.id,
             project_data_dir=self._thread_store.data_dir if self._thread_store is not None else self.project_root / ".uv-agent",
@@ -331,7 +344,7 @@ class PluginManager:
             user_state_dir=self.user_state_dir,
             config=self.config.plugin_config(manifest.id),
             events=self.events,
-            logger=logger,
+            logger=plugin_logger,
             runtime_registry=self.runtime,
             action_registry=self.actions,
             command_registry=self.commands,
@@ -353,7 +366,8 @@ class PluginManager:
             record.status.state = "failed"
             record.status.error_type = exc.__class__.__name__
             record.status.message = str(exc) or repr(exc)
-            logger.exception("Plugin setup failed")
+            plugin_logger.exception("Plugin setup failed")
+            logger.warning("Plugin setup failed plugin=%s error_type=%s", manifest.id, exc.__class__.__name__)
             self._publish(
                 {
                     "type": "plugin.failed",
@@ -372,7 +386,7 @@ class PluginManager:
             record.status.state = "warning"
             record.status.error_type = "DeprecatedPlugin"
             record.status.message = _deprecation_message(manifest)
-            logger.warning(record.status.message)
+            plugin_logger.warning(record.status.message)
             self._publish(
                 {
                     "type": "plugin.warning",
@@ -385,12 +399,14 @@ class PluginManager:
         if record.status.state != "warning":
             record.status.state = "started"
         self._publish({"type": "plugin.started", "plugin": manifest.id})
+        logger.info("Plugin started plugin=%s state=%s", manifest.id, record.status.state)
 
     async def _stop_record(self, record: _PluginRecord) -> None:
         if record.status.state not in {"started", "warning", "failed"}:
             return
         manifest = record.plugin.manifest
         self._publish({"type": "plugin.stopping", "plugin": manifest.id})
+        logger.info("Plugin stopping plugin=%s state=%s", manifest.id, record.status.state)
         try:
             if record.plugin.stop is not None and record.context is not None:
                 await maybe_await(record.plugin.stop(record.context))
@@ -398,6 +414,7 @@ class PluginManager:
             record.status.state = "failed"
             record.status.error_type = exc.__class__.__name__
             record.status.message = str(exc) or repr(exc)
+            logger.warning("Plugin stop failed plugin=%s error_type=%s", manifest.id, exc.__class__.__name__)
             self._publish({"type": "plugin.failed", "plugin": manifest.id, "error_type": exc.__class__.__name__, "message": str(exc) or repr(exc)})
             self._close_logger_for(manifest.id)
             return
@@ -405,6 +422,7 @@ class PluginManager:
         self._close_logger_for(manifest.id)
         record.status.state = "stopped"
         self._publish({"type": "plugin.stopped", "plugin": manifest.id})
+        logger.info("Plugin stopped plugin=%s", manifest.id)
 
     def _create_task(self, plugin: str, coro, name: str | None = None) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro, name=name or f"uv-agent-plugin-{plugin}")

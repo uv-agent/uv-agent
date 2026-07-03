@@ -123,6 +123,12 @@ class SchedulerService:
             self.prune_history()
             self._stop = asyncio.Event()
             self._task = asyncio.create_task(self._run_loop(), name="uv-agent-scheduler")
+            logger.info(
+                "Scheduler started data_dir=%s max_concurrent_jobs=%s poll_interval_s=%s",
+                self.data_dir,
+                getattr(self.config, "max_concurrent_jobs", 8),
+                self.poll_interval_s,
+            )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -132,6 +138,7 @@ class SchedulerService:
             task.cancel()
         await asyncio.gather(*([self._task] if self._task is not None else []), *self._running_tasks, return_exceptions=True)
         self._running_tasks.clear()
+        logger.info("Scheduler stopped")
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
@@ -183,6 +190,7 @@ class SchedulerService:
                 """,
                 row,
             )
+        logger.info("Schedule created schedule_id=%s kind=%s enabled=%s next_run_at=%s", schedule_id, kind, bool(row["enabled"]), next_run_at)
         return self._public_row(row)
 
     def update(self, schedule_id: str, **changes: Any) -> dict[str, Any]:
@@ -224,6 +232,7 @@ class SchedulerService:
                 """,
                 data,
             )
+            logger.info("Schedule updated schedule_id=%s enabled=%s next_run_at=%s", schedule_id, bool(data["enabled"]), data.get("next_run_at"))
             return self._public_row(data)
 
     def list(self, *, enabled: bool | None = None, limit: int = 100) -> list[dict[str, Any]]:
@@ -243,6 +252,7 @@ class SchedulerService:
             if row is None:
                 raise LookupError(f"Unknown schedule: {schedule_id}")
             db.execute("DELETE FROM schedules WHERE schedule_id = ?", (schedule_id,))
+        logger.info("Schedule deleted schedule_id=%s", schedule_id)
         return {"deleted": True, "schedule_id": schedule_id}
 
     async def run_now(self, schedule_id: str) -> dict[str, Any]:
@@ -266,6 +276,7 @@ class SchedulerService:
         for row in rows:
             schedule = dict(row)
             if not self._handle_overlap(schedule):
+                logger.info("Schedule run skipped for overlap schedule_id=%s policy=%s", schedule.get("schedule_id"), schedule.get("overlap_policy"))
                 self._advance_schedule(schedule, base=now_dt)
                 continue
             self._advance_schedule(schedule, base=now_dt)
@@ -273,13 +284,18 @@ class SchedulerService:
             self._running_tasks.add(task)
             task.add_done_callback(self._running_tasks.discard)
             started.append(self._public_row(schedule))
+        if started:
+            logger.info("Scheduler started due jobs count=%d", len(started))
         return started
 
     def prune_history(self) -> int:
         days = max(1, int(getattr(self.config, "run_history_retention_days", 7) or 7))
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         with self._connect() as db:
-            return db.execute("DELETE FROM schedule_runs WHERE started_at < ?", (cutoff,)).rowcount
+            deleted = db.execute("DELETE FROM schedule_runs WHERE started_at < ?", (cutoff,)).rowcount
+        if deleted:
+            logger.debug("Scheduler pruned history deleted=%d cutoff=%s", deleted, cutoff)
+        return deleted
 
     async def _run_with_semaphore(self, schedule: dict[str, Any], *, due_at: str | None) -> None:
         async with self._semaphore:
@@ -337,6 +353,13 @@ class SchedulerService:
         action = _loads(schedule["action_json"], {})
         snapshot = self._public_row(schedule)
         started = utc_now_iso()
+        logger.info(
+            "Schedule run started schedule_id=%s run_id=%s manual=%s due_at=%s",
+            schedule.get("schedule_id"),
+            run_id,
+            manual,
+            due_at,
+        )
         with self._connect() as db:
             db.execute(
                 """
@@ -356,6 +379,13 @@ class SchedulerService:
             payload = {}
             workflow_id = None
             error = {"type": exc.__class__.__name__, "message": str(exc) or repr(exc)}
+            logger.warning(
+                "Schedule run failed schedule_id=%s run_id=%s error_type=%s",
+                schedule.get("schedule_id"),
+                run_id,
+                exc.__class__.__name__,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
         completed = utc_now_iso()
         with self._connect() as db:
             db.execute(
@@ -365,6 +395,13 @@ class SchedulerService:
         response = {"run_id": run_id, "schedule_id": schedule.get("schedule_id"), "status": status, **payload, "error": error}
         if workflow_id:
             response["workflow_id"] = workflow_id
+        logger.info(
+            "Schedule run completed schedule_id=%s run_id=%s status=%s workflow_id=%s",
+            schedule.get("schedule_id"),
+            run_id,
+            status,
+            workflow_id,
+        )
         return response
 
     async def _call_action(

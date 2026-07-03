@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from uv_agent.agent import AgentEngine
@@ -19,6 +20,9 @@ from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
 
 
+logger = logging.getLogger(__name__)
+
+
 def create_engine(
     project_root: Path | None = None,
     *,
@@ -36,6 +40,12 @@ def create_engine(
         level_override=log_level,
         console=log_to_console,
     )
+    logger.info(
+        "Creating uv-agent engine project_root=%s state_dir=%s log_level=%s",
+        root,
+        state_dir,
+        log_level or config.logging.level,
+    )
     host_events = HostEventBus()
     telemetry = TelemetryStore(state_dir)
     host_events.subscribe(telemetry.on_event)
@@ -49,6 +59,12 @@ def create_engine(
     )
     thread_store = ThreadStore(state_dir, host_events=host_events)
     model_client = UnifiedModelClient(config)
+    logger.debug(
+        "Engine components initialized runner_scripts=%s scriptenv=%s attachments=%s",
+        project_run_scripts_dir(root) if data_dir is None else state_dir / "runner" / "scripts",
+        project_scriptenv_dir(root) if data_dir is None else state_dir / "runner" / "scriptenv",
+        project_attachments_dir(root) if data_dir is None else state_dir / "attachments",
+    )
     return AgentEngine(
         config=config,
         model_client=model_client,

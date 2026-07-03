@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import os
 import sqlite3
 from collections import OrderedDict
@@ -96,6 +97,8 @@ _THREAD_LOCK_CONTEXT: contextvars.ContextVar[dict[tuple[str, str], tuple[str, in
 )
 HISTORY_SEGMENT_CACHE_MAX_ENTRIES = 32
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class ThreadSnapshot:
@@ -168,6 +171,7 @@ class ThreadStore:
         if parent_run_id:
             created["parent_run_id"] = parent_run_id
         self._write_event(thread_id, created, kind=kind)
+        logger.info("Thread created thread_id=%s kind=%s parent_thread_id=%s", thread_id, kind, parent_thread_id)
         return thread_id
 
     def lock_path(self, thread_id: str, *, kind: str | None = None) -> Path:
@@ -223,6 +227,7 @@ class ThreadStore:
         try:
             self._host_events.publish(event)
         except Exception:
+            logger.debug("Thread host event publish failed type=%s", event.get("type"), exc_info=True)
             return
 
     def update_title(self, thread_id: str, title: str, *, source: str = "manual") -> None:
@@ -602,6 +607,15 @@ class ThreadStore:
             _apply_metadata_event(metadata, stored)
             self._upsert_metadata(db, metadata)
         self._history_segment_cache.clear()
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Thread event stored thread_id=%s kind=%s event_type=%s event_id=%s turn_id=%s",
+                thread_id,
+                resolved_kind,
+                event.get("type"),
+                stored.get("_event_id"),
+                event.get("turn_id"),
+            )
         return stored
 
     def _kind_for_thread(self, thread_id: str) -> str:
@@ -636,8 +650,10 @@ class ThreadStore:
                     ),
                 )
         except sqlite3.IntegrityError as exc:
+            logger.warning("Thread lock conflict thread_id=%s kind=%s", thread_id, kind)
             raise ThreadLockedError(thread_id, self.lock_path(thread_id, kind=kind), self._read_lock_owner(thread_id)) from exc
         self._held_thread_locks[thread_id] = token
+        logger.debug("Thread lock acquired thread_id=%s kind=%s", thread_id, kind)
 
     def _release_thread_lock(self, thread_id: str, *, token: str, kind: str) -> None:
         self._held_thread_locks.pop(thread_id, None)
@@ -646,6 +662,7 @@ class ThreadStore:
                 "DELETE FROM thread_locks WHERE thread_id = ? AND owner_id = ? AND token = ?",
                 (thread_id, self._lock_owner_id, token),
             )
+        logger.debug("Thread lock released thread_id=%s kind=%s", thread_id, kind)
 
     def _assert_thread_write_allowed(self, thread_id: str, *, kind: str) -> None:
         owner = self._read_lock_owner(thread_id)

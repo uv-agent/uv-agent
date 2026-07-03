@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -10,6 +11,8 @@ from uv_agent.model.sdk import default_headers, sdk_base_url
 
 
 _openai_client_cache: dict[tuple[Any, ...], AsyncOpenAI] = {}
+
+logger = logging.getLogger(__name__)
 
 
 def _openai_client_key(provider: ProviderConfig, api: str, endpoint_suffix: str) -> tuple[Any, ...]:
@@ -39,6 +42,7 @@ def openai_client(provider: ProviderConfig, api: str, endpoint_suffix: str) -> A
     key = _openai_client_key(provider, api, endpoint_suffix)
     cached = _openai_client_cache.get(key)
     if cached is not None:
+        logger.debug("Reusing OpenAI-compatible client provider=%s api=%s", provider.name, api)
         return cached
     kwargs = {
         "api_key": provider.resolved_api_key(),
@@ -51,6 +55,7 @@ def openai_client(provider: ProviderConfig, api: str, endpoint_suffix: str) -> A
         kwargs["timeout"] = Timeout(provider.timeout_s, connect=5.0)
     client = AsyncOpenAI(**kwargs)
     _openai_client_cache[key] = client
+    logger.debug("Created OpenAI-compatible client provider=%s api=%s endpoint=%s", provider.name, api, endpoint_suffix)
     return client
 
 
@@ -60,6 +65,7 @@ async def close_all_openai_clients() -> None:
     clients: list[AsyncOpenAI] = []
     clients.extend(_openai_client_cache.values())
     _openai_client_cache.clear()
+    logger.debug("Closing OpenAI-compatible clients count=%d", len(clients))
     for client in clients:
         await client.close()
 

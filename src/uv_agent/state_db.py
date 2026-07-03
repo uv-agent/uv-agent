@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -9,6 +10,8 @@ DB_FILENAME = "uv-agent.sqlite3"
 SCHEMA_VERSION = 7
 SQLITE_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
+
+logger = logging.getLogger(__name__)
 
 
 class StateDbConnection(sqlite3.Connection):
@@ -74,9 +77,11 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     if existing_version == str(SCHEMA_VERSION):
         return
     if existing_version is None:
+        logger.info("Creating state database schema version=%s", SCHEMA_VERSION)
         _create_schema(connection)
         return
 
+    logger.info("Migrating state database schema from version=%s to version=%s", existing_version, SCHEMA_VERSION)
     migrations = {
         "1": _migrate_v1_to_v2,
         "2": _migrate_v2_to_v3,
@@ -234,6 +239,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
     """Advance old project databases past the former plugin-table schema version."""
 
+    logger.info("Migrating state database schema version 1 -> 2")
     with connection:
         _create_host_lease_schema(connection)
         connection.execute(
@@ -245,6 +251,7 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
 def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
     """Add runtime helper-call summaries to persisted run records."""
 
+    logger.info("Migrating state database schema version 2 -> 3")
     with connection:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)")}
         if "helper_calls_json" not in columns:
@@ -258,6 +265,7 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
 def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
     """Advance old project databases past a former plugin-table schema version."""
 
+    logger.info("Migrating state database schema version 3 -> 4")
     with connection:
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
@@ -268,6 +276,7 @@ def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
 def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
     """Advance old project databases past a former plugin-table lease version."""
 
+    logger.info("Migrating state database schema version 4 -> 5")
     with connection:
         _create_host_lease_schema(connection)
         connection.execute(
@@ -279,6 +288,7 @@ def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
 def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
     """Add host daemon lease table."""
 
+    logger.info("Migrating state database schema version 5 -> 6")
     with connection:
         _create_host_lease_schema(connection)
         connection.execute(
@@ -290,6 +300,7 @@ def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
 def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
     """Add core-managed plugin storage tables."""
 
+    logger.info("Migrating state database schema version 6 -> 7")
     with connection:
         _create_plugin_storage_schema(connection)
         connection.execute(
@@ -362,6 +373,7 @@ def _ensure_wal(connection: sqlite3.Connection) -> None:
     journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
     current = str(journal_mode[0] if journal_mode else "").lower()
     if current != "wal":
+        logger.info("Switching state database journal_mode to WAL current=%s", current or "unknown")
         connection.execute("PRAGMA journal_mode=WAL")
     # NORMAL is the usual durability/concurrency trade-off for SQLite WAL and
     # avoids extra fsync pressure when many short-lived processes append events.
@@ -384,6 +396,7 @@ def checkpoint_state_db(data_dir: Path, *, mode: str = "PASSIVE") -> None:
         check_same_thread=True,
     )
     try:
+        logger.debug("Running state database checkpoint path=%s mode=%s", db_path, mode)
         connection.execute(f"PRAGMA wal_checkpoint({mode})")
     finally:
         connection.close()

@@ -5,6 +5,7 @@ import copy
 import inspect
 import importlib
 import json
+import logging
 import random
 import re
 from collections import OrderedDict
@@ -97,6 +98,9 @@ from uv_agent.session.store import ThreadSnapshot, ThreadStore
 from uv_agent.thread_titles import DEFAULT_THREAD_TITLES
 from uv_agent.agent.tool_results import function_output, model_tool_payload
 from uv_agent.helper_calls import extract_runtime_helper_calls, runtime_corrected_helper_calls
+
+
+logger = logging.getLogger(__name__)
 
 
 async def _await_next_stream_event(awaitable: Awaitable[Any]) -> Any:
@@ -389,6 +393,12 @@ class AgentEngine:
             self,
             max_concurrent_turns=getattr(self.config.runtime, "max_concurrent_turns", 4),
         )
+        logger.info(
+            "Agent engine initialized project_root=%s data_dir=%s max_concurrent_turns=%s",
+            self.project_root,
+            self.thread_store.data_dir,
+            getattr(self.config.runtime, "max_concurrent_turns", 4),
+        )
 
     def _publish_host_event(self, event: dict[str, Any]) -> None:
         """Best-effort publish a host event; never raise."""
@@ -406,6 +416,7 @@ class AgentEngine:
             close()
 
     async def aclose(self) -> None:
+        logger.debug("Closing agent engine")
         await self.plugins.stop()
         await self.turn_manager.aclose()
         model_close = getattr(self.model_client, "aclose", None)
@@ -416,6 +427,7 @@ class AgentEngine:
         except Exception:
             # Checkpointing is best-effort; do not let cleanup failures mask
             # the real shutdown path.
+            logger.debug("State database checkpoint failed during shutdown", exc_info=True)
             pass
         close = getattr(self.runner, "aclose", None)
         if callable(close):
@@ -433,6 +445,7 @@ class AgentEngine:
 
     def start_plugins_background(self) -> asyncio.Task[None]:
         self._plugins_started = True
+        logger.debug("Starting plugins in background")
         self._plugins_start_task = self.plugins.start_background()
         return self._plugins_start_task
 
@@ -447,6 +460,7 @@ class AgentEngine:
         except Exception:
             # Individual plugin startup errors are recorded by PluginManager;
             # unexpected manager-level failures should not block an agent turn.
+            logger.warning("Plugin startup task failed before turn execution", exc_info=True)
             return
 
     def _plugin_call_helper_from_rpc(
@@ -553,6 +567,7 @@ class AgentEngine:
             self.model_client.reload_config(self.config)  # type: ignore[attr-defined]
         self.runner.config = self.config.runner
         self._last_config_refresh_at = now
+        logger.debug("Configuration refreshed force=%s", force)
 
     def _record_judge(self, data: dict[str, Any]) -> None:
         """Store the most recent judge calculation for /status display."""
@@ -574,6 +589,7 @@ class AgentEngine:
         guide_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         self._event_loop = asyncio.get_running_loop()
+        turn_started_monotonic = monotonic()
         await self._ensure_plugins_started()
         is_new_thread = thread_id is None
         thread_id = thread_id or await asyncio.to_thread(self.thread_store.create_thread, "New thread")
@@ -595,6 +611,17 @@ class AgentEngine:
             request_input_items = prelude.request_input_items
             turn_started_event = prelude.turn_started_event
             title_task: asyncio.Task[str | None] | None = None
+            logger.info(
+                "Agent turn started thread_id=%s turn_id=%s new_thread=%s level=%s user_items=%d image_attachments=%d input_items=%d request_items=%d",
+                thread_id,
+                turn_id,
+                is_new_thread,
+                level,
+                len(prelude.user_items),
+                len(prelude.image_events),
+                len(input_items),
+                len(request_input_items),
+            )
             yield self._publish_event({
                 "type": "turn.started",
                 "thread_id": thread_id,
@@ -657,6 +684,14 @@ class AgentEngine:
             try:
                 for round_index in range(self.config.runtime.max_agent_rounds):
                     self._raise_if_cancelled(cancel_event)
+                    logger.debug(
+                        "Agent round started thread_id=%s turn_id=%s round=%d request_items=%d previous_response=%s",
+                        thread_id,
+                        turn_id,
+                        round_index + 1,
+                        len(request_input_items),
+                        bool(turn_input.request_previous_response_id()),
+                    )
                     async for event in self._stream_model_response_with_retries(
                         thread_id=thread_id,
                         turn_id=turn_id,
@@ -680,6 +715,15 @@ class AgentEngine:
                     stream_state.reset()
 
                     tool_calls = [item for item in response.output if item.get("type") == "function_call"]
+                    logger.debug(
+                        "Agent round model response thread_id=%s turn_id=%s round=%d response_id=%s output_items=%d tool_calls=%d",
+                        thread_id,
+                        turn_id,
+                        round_index + 1,
+                        response.id,
+                        len(response.output),
+                        len(tool_calls),
+                    )
                     if not tool_calls:
                         final_text = response.output_text
                         break
@@ -741,6 +785,12 @@ class AgentEngine:
                             "created_at": interrupted_event.get("created_at"),
                             "completed_at": interrupted_event.get("created_at"),
                         })
+                        logger.info(
+                            "Agent turn interrupted for guided input thread_id=%s turn_id=%s partial_stream=%s",
+                            thread_id,
+                            turn_id,
+                            stream_state.saw_stream_output,
+                        )
                         if title_task is not None:
                             title_task.cancel()
                         return
@@ -803,6 +853,13 @@ class AgentEngine:
                     reason="user_interrupt",
                     partial_stream=stream_state.saw_stream_output,
                 )
+                logger.info(
+                    "Agent turn interrupted thread_id=%s turn_id=%s partial_stream=%s partial_text_chars=%d",
+                    thread_id,
+                    turn_id,
+                    stream_state.saw_stream_output,
+                    len(partial_text),
+                )
                 yield self._publish_event({
                     "type": "turn.interrupted",
                     "thread_id": thread_id,
@@ -814,6 +871,13 @@ class AgentEngine:
                     title_task.cancel()
                 return
             except Exception as exc:
+                logger.exception(
+                    "Agent turn failed thread_id=%s turn_id=%s error_type=%s retryable=%s",
+                    thread_id,
+                    turn_id,
+                    exc.__class__.__name__,
+                    is_retryable_provider_error(exc),
+                )
                 error_event = self.thread_store.append(
                     thread_id,
                     "turn.error",
@@ -866,6 +930,14 @@ class AgentEngine:
                     "turn_id": turn_id,
                     "title": generated_title,
                 })
+            logger.info(
+                "Agent turn completed thread_id=%s turn_id=%s duration_ms=%.1f final_text_chars=%d compacted=%s",
+                thread_id,
+                turn_id,
+                (monotonic() - turn_started_monotonic) * 1000,
+                len(final_text),
+                compacted_this_turn or compacted.result is not None,
+            )
             yield self._publish_event({
                 "type": "turn.completed",
                 "thread_id": thread_id,
@@ -882,6 +954,7 @@ class AgentEngine:
                     await asyncio.to_thread(checkpoint_state_db, self.thread_store.data_dir, mode="PASSIVE")
                 except Exception:
                     # Best-effort WAL checkpoint; failures should not break turns.
+                    logger.debug("State database checkpoint failed after turn", exc_info=True)
                     pass
 
     def _prepare_run_turn_prelude(
@@ -1064,6 +1137,7 @@ class AgentEngine:
         level: str | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        retry_started_monotonic = monotonic()
         await self._ensure_plugins_started()
         self.refresh_config(force=True)
         with self.thread_store.lock_thread(thread_id):
@@ -1072,6 +1146,14 @@ class AgentEngine:
             turn_id = new_id("turn")
             turn_started_event = self.thread_store.append(thread_id, "turn.started", turn_id=turn_id, retry=True)
             self.thread_store.append(thread_id, "turn.retry", turn_id=turn_id)
+            logger.info(
+                "Retry turn started thread_id=%s turn_id=%s level=%s pending_tool_calls=%d input_items=%d",
+                thread_id,
+                turn_id,
+                level,
+                len(retry_state.pending_tool_calls),
+                len(retry_state.input_items),
+            )
             yield self._publish_event({
                 "type": "turn.started",
                 "thread_id": thread_id,
@@ -1148,13 +1230,22 @@ class AgentEngine:
                         retry_state.pending_items.clear()
                         retry_state.pending_tool_calls.clear()
 
-                for _ in range(self.config.runtime.max_agent_rounds):
+                for round_index in range(self.config.runtime.max_agent_rounds):
                     self._raise_if_cancelled(cancel_event)
+                    request_items = retry_state.request_input_items()
+                    logger.debug(
+                        "Retry round started thread_id=%s turn_id=%s round=%d request_items=%d previous_response=%s",
+                        thread_id,
+                        turn_id,
+                        round_index + 1,
+                        len(request_items),
+                        bool(retry_state.request_previous_response_id()),
+                    )
                     async for event in self._stream_model_response_with_retries(
                         thread_id=thread_id,
                         turn_id=turn_id,
                         turn_started_at=turn_started_event.get("created_at"),
-                        input_items=retry_state.request_input_items(),
+                        input_items=request_items,
                         level=level,
                         instructions=system_instructions,
                         previous_response_id=retry_state.request_previous_response_id(),
@@ -1169,6 +1260,15 @@ class AgentEngine:
                     retry_state.pending_items.clear()
                     stream_state.reset()
                     tool_calls = [item for item in response.output if item.get("type") == "function_call"]
+                    logger.debug(
+                        "Retry round model response thread_id=%s turn_id=%s round=%d response_id=%s output_items=%d tool_calls=%d",
+                        thread_id,
+                        turn_id,
+                        round_index + 1,
+                        response.id,
+                        len(response.output),
+                        len(tool_calls),
+                    )
                     if not tool_calls:
                         final_text = response.output_text
                         break
@@ -1253,6 +1353,13 @@ class AgentEngine:
                     reason="user_interrupt",
                     partial_stream=stream_state.saw_stream_output,
                 )
+                logger.info(
+                    "Retry turn interrupted thread_id=%s turn_id=%s partial_stream=%s partial_text_chars=%d",
+                    thread_id,
+                    turn_id,
+                    stream_state.saw_stream_output,
+                    len(partial_text),
+                )
                 yield self._publish_event({
                     "type": "turn.interrupted",
                     "thread_id": thread_id,
@@ -1262,6 +1369,13 @@ class AgentEngine:
                 })
                 return
             except Exception as exc:
+                logger.exception(
+                    "Retry turn failed thread_id=%s turn_id=%s error_type=%s retryable=%s",
+                    thread_id,
+                    turn_id,
+                    exc.__class__.__name__,
+                    is_retryable_provider_error(exc),
+                )
                 error_event = self.thread_store.append(
                     thread_id,
                     "turn.error",
@@ -1284,6 +1398,13 @@ class AgentEngine:
                 return
 
             completed_event = self.thread_store.append(thread_id, "turn.completed", turn_id=turn_id, final_text=final_text)
+            logger.info(
+                "Retry turn completed thread_id=%s turn_id=%s duration_ms=%.1f final_text_chars=%d",
+                thread_id,
+                turn_id,
+                (monotonic() - retry_started_monotonic) * 1000,
+                len(final_text),
+            )
             yield self._publish_event({
                 "type": "turn.completed",
                 "thread_id": thread_id,
@@ -1341,10 +1462,12 @@ class AgentEngine:
         try:
             title = await self._generate_thread_title(thread_id, user_text, level=level)
         except Exception:
+            logger.debug("Title generation failed thread_id=%s", thread_id, exc_info=True)
             return None
         if not title or not self._thread_title_is_pending(self.thread_store.thread_metadata(thread_id)):
             return None
         self.thread_store.update_title(thread_id, title, source="generated")
+        logger.debug("Generated thread title thread_id=%s title_chars=%d", thread_id, len(title))
         return title
 
     async def _generate_thread_title(self, thread_id: str, user_text: str, *, level: str | None) -> str | None:
@@ -1549,12 +1672,25 @@ class AgentEngine:
         total_tokens = estimate_tokens(
             input_items + [user_item, *image_items, message_item("system", system_instructions)]
         )
+        logger.debug(
+            "Compaction judge gate thread_id=%s turn_id=%s total_tokens=%d threshold_ratio=%.3f",
+            thread_id,
+            turn_id,
+            total_tokens,
+            self.config.runtime.compression.judge_min_context_ratio,
+        )
         if total_tokens < int(ctx * self.config.runtime.compression.judge_min_context_ratio):
             self._record_judge({
                 "skipped": True,
                 "reason": "below_threshold",
                 "total_tokens": total_tokens,
             })
+            logger.debug(
+                "Compaction judge skipped thread_id=%s turn_id=%s reason=below_threshold total_tokens=%d",
+                thread_id,
+                turn_id,
+                total_tokens,
+            )
             _done()
             return
 
@@ -1569,6 +1705,12 @@ class AgentEngine:
                 "reason": "no_pricing",
                 "total_tokens": total_tokens,
             })
+            logger.debug(
+                "Compaction judge skipped thread_id=%s turn_id=%s reason=no_pricing level=%s",
+                thread_id,
+                turn_id,
+                pricing_level,
+            )
             _done()
             return
 
@@ -1581,6 +1723,13 @@ class AgentEngine:
             "thread_id": thread_id,
             "turn_id": turn_id,
         })
+        logger.info(
+            "Compaction judge started thread_id=%s turn_id=%s level=%s total_tokens=%d",
+            thread_id,
+            turn_id,
+            judge_level,
+            total_tokens,
+        )
 
         judge_responses: list[tuple[ModelResponse, list[dict[str, Any]]]] = []
         response: ModelResponse | None = None
@@ -1630,6 +1779,13 @@ class AgentEngine:
                 "reason": "judge_error",
                 "error_type": exc.__class__.__name__,
             })
+            logger.warning(
+                "Compaction judge failed thread_id=%s turn_id=%s error_type=%s",
+                thread_id,
+                turn_id,
+                exc.__class__.__name__,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
             yield self._publish_event({
                 "type": "judge.completed",
                 "thread_id": thread_id,
@@ -1657,6 +1813,7 @@ class AgentEngine:
         if judge is None:
             self._append_judge_history_to_input(turn_input, input_items, judge_history_items)
             self._record_judge({"skipped": True, "reason": "parse_failed"})
+            logger.debug("Compaction judge skipped thread_id=%s turn_id=%s reason=parse_failed", thread_id, turn_id)
             _done()
             return
 
@@ -1668,6 +1825,12 @@ class AgentEngine:
                 "reason": "dependency",
                 "dependency": dependency,
             })
+            logger.debug(
+                "Compaction judge skipped thread_id=%s turn_id=%s reason=dependency dependency=%s",
+                thread_id,
+                turn_id,
+                dependency,
+            )
             _done()
             return
 
@@ -1679,6 +1842,12 @@ class AgentEngine:
                 "reason": "unknown_bucket",
                 "bucket": str(judge.get("remaining_calls_bucket") or ""),
             })
+            logger.debug(
+                "Compaction judge skipped thread_id=%s turn_id=%s reason=unknown_bucket bucket=%s",
+                thread_id,
+                turn_id,
+                str(judge.get("remaining_calls_bucket") or ""),
+            )
             _done()
             return
 
@@ -1752,6 +1921,15 @@ class AgentEngine:
                 "N": N,
                 "dependency": dependency,
             })
+            logger.debug(
+                "Compaction judge skipped thread_id=%s turn_id=%s reason=no_valid_K dependency=%s D=%d U=%d N=%d",
+                thread_id,
+                turn_id,
+                dependency,
+                D,
+                U,
+                N,
+            )
             _done()
             return
 
@@ -1776,9 +1954,29 @@ class AgentEngine:
                 "net_gain": best_gain,
                 "threshold": threshold,
             })
+            logger.debug(
+                "Compaction judge declined thread_id=%s turn_id=%s dependency=%s net_gain=%.6f threshold=%.6f best_K=%s best_S=%s",
+                thread_id,
+                turn_id,
+                dependency,
+                best_gain,
+                threshold,
+                best_K,
+                best_S,
+            )
             _done()
             return
 
+        logger.info(
+            "Compaction judge triggered thread_id=%s turn_id=%s dependency=%s net_gain=%.6f threshold=%.6f best_K=%s best_S=%s",
+            thread_id,
+            turn_id,
+            dependency,
+            best_gain,
+            threshold,
+            best_K,
+            best_S,
+        )
         yield self._publish_event(self._compaction_started_event(thread_id, turn_id))
         compact_result = await self._compact_if_needed(
             thread_id,
@@ -1928,6 +2126,7 @@ class AgentEngine:
         force: bool = False,
     ) -> CompactionDecision:
         if not self.config.runtime.compression.enabled:
+            logger.debug("Compaction skipped thread_id=%s turn_id=%s reason=disabled", thread_id, turn_id)
             return CompactionDecision()
         active_model = self.config.model_for_level(level)
         compact_level = self.config.runtime.compression.model_level or level
@@ -1947,11 +2146,46 @@ class AgentEngine:
                 threshold_tokens=trigger_tokens,
                 context_window_tokens=active_model.context_window_tokens,
             )
+            logger.debug(
+                "Compaction token count is estimated thread_id=%s turn_id=%s tokens=%d threshold=%d",
+                thread_id,
+                turn_id,
+                token_count.tokens,
+                trigger_tokens,
+            )
         if not force:
             if token_count.tokens < self.config.runtime.compression.min_tokens:
+                logger.debug(
+                    "Compaction skipped thread_id=%s turn_id=%s reason=below_min tokens=%d min_tokens=%d source=%s",
+                    thread_id,
+                    turn_id,
+                    token_count.tokens,
+                    self.config.runtime.compression.min_tokens,
+                    token_count.source,
+                )
                 return CompactionDecision(token_warning_event=token_warning_event)
             if token_count.tokens < trigger_tokens:
+                logger.debug(
+                    "Compaction skipped thread_id=%s turn_id=%s reason=below_trigger tokens=%d trigger_tokens=%d source=%s",
+                    thread_id,
+                    turn_id,
+                    token_count.tokens,
+                    trigger_tokens,
+                    token_count.source,
+                )
                 return CompactionDecision(token_warning_event=token_warning_event)
+        logger.info(
+            "Compaction started thread_id=%s turn_id=%s level=%s compact_level=%s tokens=%d source=%s trigger_tokens=%d force=%s retain_K=%d",
+            thread_id,
+            turn_id,
+            level,
+            compact_level,
+            token_count.tokens,
+            token_count.source,
+            trigger_tokens,
+            force,
+            retain_K,
+        )
         if pre_compaction_event is not None:
             event_type = str(pre_compaction_event.get("type") or "")
             payload = {key: value for key, value in pre_compaction_event.items() if key != "type"}
@@ -1983,6 +2217,13 @@ class AgentEngine:
             tool_calls = [item for item in response.output if item.get("type") == "function_call"]
             if not tool_calls:
                 break
+            logger.warning(
+                "Compaction model emitted tool calls thread_id=%s turn_id=%s attempt=%d tool_calls=%d",
+                thread_id,
+                turn_id,
+                _compaction_attempt + 1,
+                len(tool_calls),
+            )
             compact_input.extend(response.output)
             for call in tool_calls:
                 compact_input.append(function_output(call, {
@@ -2019,6 +2260,14 @@ class AgentEngine:
             source="compaction",
         )
         self._reset_rule_epoch(thread_id)
+        logger.info(
+            "Compaction completed thread_id=%s turn_id=%s summary_chars=%d replacement_items=%d truncated_last_tool_output=%s",
+            thread_id,
+            turn_id,
+            len(summary_text),
+            len(replacement_input),
+            truncated_last_tool_output,
+        )
         return CompactionDecision(
             result=CompactionResult(
                 replacement_input=replacement_input,
@@ -2352,6 +2601,12 @@ class AgentEngine:
             }
 
         if call.get("name") != "run_python":
+            logger.warning(
+                "Unsupported tool call thread_id=%s turn_id=%s tool=%s",
+                thread_id,
+                turn_id,
+                call.get("name"),
+            )
             output = {"error": f"Unsupported tool: {call.get('name')}"}
             tool_output = function_output(call, output)
             result = ToolCallTurnResult(
@@ -2365,6 +2620,13 @@ class AgentEngine:
         try:
             args = json.loads(call.get("arguments") or "{}")
         except json.JSONDecodeError as exc:
+            logger.warning(
+                "Invalid tool arguments thread_id=%s turn_id=%s call_id=%s error=%s",
+                thread_id,
+                turn_id,
+                call.get("call_id"),
+                exc,
+            )
             output = {"error": f"Invalid tool arguments JSON: {exc}"}
             tool_output = function_output(call, output)
             result = ToolCallTurnResult(
@@ -2379,6 +2641,12 @@ class AgentEngine:
         thread_kind = str(self.thread_store.thread_metadata(thread_id).get("kind") or "thread")
         code = args.get("code")
         if not isinstance(code, str) or not code.strip():
+            logger.warning(
+                "run_python call missing code thread_id=%s turn_id=%s call_id=%s",
+                thread_id,
+                turn_id,
+                call.get("call_id"),
+            )
             output = {"error": "run_python requires code"}
             tool_output = function_output(call, output)
             result = ToolCallTurnResult(
@@ -2399,6 +2667,15 @@ class AgentEngine:
             thread_kind=thread_kind,
             turn_id=turn_id,
             cancel_event=cancel_event,
+        )
+        logger.info(
+            "run_python tool started thread_id=%s turn_id=%s call_id=%s cwd=%s timeout_s=%s code_chars=%d",
+            thread_id,
+            turn_id,
+            call.get("call_id"),
+            request.cwd,
+            request.timeout_s,
+            len(code),
         )
         stream_run = getattr(self.runner, "stream_run", None)
         if stream_run is None:
@@ -2434,6 +2711,13 @@ class AgentEngine:
                 continue
             result = runner_event.data["result"]
             if result.interrupted:
+                logger.info(
+                    "run_python tool interrupted thread_id=%s turn_id=%s call_id=%s run_id=%s",
+                    thread_id,
+                    turn_id,
+                    call.get("call_id"),
+                    result.run_id,
+                )
                 raise TurnInterrupted()
             rule_events, visible_events = self._process_runner_events(
                 result.events,
@@ -2457,6 +2741,20 @@ class AgentEngine:
             )
             if attachments:
                 payload["attachments"] = attachments
+            helper_calls = payload.get("helper_calls")
+            logger.info(
+                "run_python tool completed thread_id=%s turn_id=%s call_id=%s run_id=%s returncode=%s timed_out=%s truncated=%s visible_events=%d attachments=%d helper_calls=%d",
+                thread_id,
+                turn_id,
+                call.get("call_id"),
+                result.run_id,
+                result.returncode,
+                result.timed_out,
+                result.truncated,
+                len(visible_events),
+                len(attachments),
+                len(helper_calls) if isinstance(helper_calls, list) else 0,
+            )
             self.thread_store.append(
                 thread_id,
                 "item.runner_result",
@@ -2574,6 +2872,14 @@ class AgentEngine:
         cancel_event: asyncio.Event | None,
     ) -> AsyncIterator[dict[str, Any]]:
         stream_state.response = None
+        logger.debug(
+            "Streaming model response thread_id=%s turn_id=%s level=%s input_items=%d previous_response=%s",
+            thread_id,
+            turn_id,
+            level,
+            len(input_items),
+            bool(previous_response_id),
+        )
         async for stream_event in self._stream_response_until_cancelled(
             input_items=input_items,
             level=level,
@@ -2646,6 +2952,17 @@ class AgentEngine:
             level=level,
             source="model_response",
         )
+        tool_calls = sum(1 for item in response.output if item.get("type") == "function_call")
+        logger.debug(
+            "Model response persisted thread_id=%s turn_id=%s response_id=%s output_items=%d tool_calls=%d output_text_chars=%d usage_tokens=%s",
+            thread_id,
+            turn_id,
+            response.id,
+            len(response.output),
+            tool_calls,
+            len(response.output_text),
+            usage_token_count(response.usage or {}),
+        )
         yield self._publish_event({
             "type": "model.response",
             "thread_id": thread_id,
@@ -2698,6 +3015,15 @@ class AgentEngine:
         if total is not None:
             payload["total"] = decimal_to_string(total[0])
             payload["total_currency"] = total[1]
+        logger.debug(
+            "Billing charge recorded thread_id=%s turn_id=%s source=%s level=%s currency=%s amount=%s",
+            thread_id,
+            turn_id,
+            source,
+            level,
+            payload.get("currency"),
+            payload.get("amount"),
+        )
         return payload
 
     async def _stream_model_response_with_retries(
@@ -2745,6 +3071,16 @@ class AgentEngine:
                     delay_s=delay_s,
                     error_type=exc.__class__.__name__,
                     message=str(exc) or repr(exc),
+                )
+                logger.warning(
+                    "Model stream retry thread_id=%s turn_id=%s attempt=%d max_attempts=%d delay_s=%.3f error_type=%s",
+                    thread_id,
+                    turn_id,
+                    attempt,
+                    retry.max_retries,
+                    delay_s,
+                    exc.__class__.__name__,
+                    exc_info=logger.isEnabledFor(logging.DEBUG),
                 )
                 yield self._publish_event({
                     "type": "model.stream_retry",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import threading
 from http import HTTPStatus
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
     from uv_agent.host_events import HostEventBus
 
 DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 class _RuntimeRPCHTTPServer(ThreadingHTTPServer):
@@ -96,6 +99,7 @@ class RuntimeRPCServer:
                 daemon=True,
             )
             self._thread.start()
+            logger.info("Runtime RPC server started url=%s", self._url)
             return self._url
 
     def stop(self) -> None:
@@ -114,6 +118,8 @@ class RuntimeRPCServer:
             httpd.server_close()
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+        if httpd is not None or sessions:
+            logger.info("Runtime RPC server stopped closed_sessions=%d", len(sessions))
 
     close = stop
 
@@ -158,6 +164,7 @@ class RuntimeRPCServer:
         )
         with self._lock:
             self._sessions[token] = session
+        logger.debug("Runtime RPC session opened run_id=%s thread_id=%s turn_id=%s cwd=%s", run_id, thread_id, turn_id, cwd)
         return RuntimeRPCSessionHandle(self, token)
 
     def close_session(self, token: str) -> None:
@@ -165,6 +172,7 @@ class RuntimeRPCServer:
             session = self._sessions.pop(token, None)
         if session is not None:
             session.close()
+            logger.debug("Runtime RPC session closed run_id=%s", session.run_id)
 
     def session_for_token(self, token: str | None) -> RunSession | None:
         if not token:
@@ -191,6 +199,7 @@ class RuntimeRPCServer:
                 try:
                     self._do_POST()
                 except Exception as exc:
+                    logger.warning("Runtime RPC request failed error_type=%s", exc.__class__.__name__)
                     self._send_internal_error(exc)
 
             def _do_POST(self) -> None:

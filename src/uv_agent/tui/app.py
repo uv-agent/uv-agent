@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 import json
+import logging
 import re
 import sqlite3
 import subprocess
@@ -105,6 +106,8 @@ IGNORED_MENTION_DIRS = {
     "venv",
 }
 MAX_MENTION_ITEMS = 300
+
+logger = logging.getLogger(__name__)
 
 
 def create_engine(
@@ -436,6 +439,7 @@ class UvAgentApp:
         self._agent_view_join_pending_persist: set[str] = set()
         self._pager_code: str = ""
         self._pager_output: str = ""
+        logger.info("TUI initialized project_root=%s data_dir=%s", self.project_root, data_dir)
 
     def _run_state(self, thread_id: str | None = None) -> ThreadRunState | None:
         resolved = thread_id or self.state.thread_id
@@ -749,6 +753,7 @@ class UvAgentApp:
         asyncio.run(self.run_async())
 
     async def run_async(self) -> None:
+        logger.info("TUI starting")
         starter = getattr(self.engine, "start_plugins_background", None)
         if callable(starter):
             try:
@@ -757,6 +762,7 @@ class UvAgentApp:
                 # Plugin startup failures are surfaced through plugin status; the
                 # TUI should still open so users can inspect /status or continue
                 # with core commands.
+                logger.warning("TUI plugin startup failed", exc_info=True)
                 pass
         with Terminal() as terminal:
             self._ticker_task = asyncio.create_task(self._ticker())
@@ -792,6 +798,7 @@ class UvAgentApp:
                     if thread_id != "__draft__":
                         self._persist_thread_token_ratio(thread_id, ratio)
                 await self.engine.aclose()
+        logger.info("TUI stopped")
 
     async def _ticker(self) -> None:
         # 12Hz tick: matches the breath animation's target frequency (12
@@ -3239,6 +3246,12 @@ class UvAgentApp:
     async def _start_turn(self, text: str, *, image_paths: list[Path] | None = None) -> None:
         thread_id = self._ensure_active_thread()
         level = self._current_level_for_thread(thread_id)
+        logger.info(
+            "TUI starting turn thread_id=%s level=%s image_count=%d",
+            thread_id,
+            level,
+            len(image_paths or []),
+        )
         self.state.level = level
         self._persist_thread_level(thread_id, level)
         # Keep the user message in the live region so spacing between the user
@@ -3298,6 +3311,7 @@ class UvAgentApp:
         except Exception as exc:
             run_state.last_error = str(exc) or repr(exc)
             run_state.terminal_status = "failed"
+            logger.exception("TUI turn task failed thread_id=%s error_type=%s", thread_id, exc.__class__.__name__)
             run_state.engine_finished = False
             run_state.assistant_display_queue = ""
             run_state.pending_finish_after_drain = False
@@ -3380,6 +3394,12 @@ class UvAgentApp:
             elif event_type == "turn.error":
                 run_state.terminal_status = "failed"
                 run_state.last_error = str(event.get("message") or "turn error")
+                logger.warning(
+                    "TUI observed turn error thread_id=%s turn_id=%s error_type=%s",
+                    event.get("thread_id"),
+                    event.get("turn_id"),
+                    event.get("error_type"),
+                )
                 run_state.assistant_display_queue = ""
                 run_state.pending_finish_after_drain = False
                 run_state.engine_finished = False
@@ -3387,6 +3407,12 @@ class UvAgentApp:
             elif event_type == "turn.interrupted":
                 run_state.terminal_status = "interrupted"
                 run_state.status_message = self._text("interrupted")
+                logger.info(
+                    "TUI observed turn interruption thread_id=%s turn_id=%s reason=%s",
+                    event.get("thread_id"),
+                    event.get("turn_id"),
+                    event.get("reason"),
+                )
                 run_state.assistant_display_queue = ""
                 run_state.pending_finish_after_drain = False
                 run_state.engine_finished = False
@@ -3394,6 +3420,12 @@ class UvAgentApp:
             elif event_type == "turn.completed":
                 run_state.terminal_status = "completed"
                 run_state.status_message = "ready"
+                logger.info(
+                    "TUI observed turn completion thread_id=%s turn_id=%s final_text_chars=%d",
+                    event.get("thread_id"),
+                    event.get("turn_id"),
+                    len(str(event.get("final_text") or "")),
+                )
         if event_type == "thread.title":
             self.state.title = str(event.get("title") or self.state.title)
             self._refresh_window_title()
@@ -3927,3 +3959,4 @@ class UvAgentApp:
         except Exception as exc:
             self.state.last_error = f"tui render error: {exc}"
             self.state.status_message = "render error"
+            logger.exception("TUI render failed")

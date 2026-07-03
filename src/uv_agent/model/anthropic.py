@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from functools import lru_cache
@@ -44,6 +45,8 @@ ANTHROPIC_FALLBACK_BLOCK_FIELDS = (
 )
 
 _anthropic_client_cache: dict[tuple[Any, ...], Any] = {}
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -255,6 +258,7 @@ def anthropic_client(provider: ProviderConfig) -> Any:
     key = _anthropic_client_key(provider)
     cached = _anthropic_client_cache.get(key)
     if cached is not None:
+        logger.debug("Reusing Anthropic client provider=%s", provider.name)
         return cached
     kwargs = {
         "api_key": provider.resolved_api_key(),
@@ -267,6 +271,7 @@ def anthropic_client(provider: ProviderConfig) -> Any:
         kwargs["timeout"] = Timeout(provider.timeout_s, connect=5.0)
     client = AsyncAnthropic(**kwargs)
     _anthropic_client_cache[key] = client
+    logger.debug("Created Anthropic client provider=%s", provider.name)
     return client
 
 
@@ -276,6 +281,7 @@ async def close_all_anthropic_clients() -> None:
     clients: list[Any] = []
     clients.extend(_anthropic_client_cache.values())
     _anthropic_client_cache.clear()
+    logger.debug("Closing Anthropic clients count=%d", len(clients))
     for client in clients:
         await client.close()
 
