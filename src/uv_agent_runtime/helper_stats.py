@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .helper_tracking import helper_call_payload, tracked_helper
+from .helper_tracking import helper_call_payload
 
 DB_FILENAME = "helper-stats.sqlite3"
 SCHEMA_VERSION = 1

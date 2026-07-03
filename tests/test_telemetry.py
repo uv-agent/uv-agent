@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-
-import pytest
 
 from uv_agent.telemetry import TelemetryStore, _duration_ms, _summarize_helper_calls
 

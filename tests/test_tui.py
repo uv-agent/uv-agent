@@ -4419,7 +4419,6 @@ def test_terminal_preserves_processed_input_and_restores_mode(monkeypatch) -> No
     mode after the TUI exits.
     """
     import ctypes
-    from ctypes import wintypes
 
     original_input_mode = 0x1F7  # ENABLE_PROCESSED_INPUT and other defaults
     original_output_mode = 0x7

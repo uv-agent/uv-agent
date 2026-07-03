@@ -22,7 +22,6 @@ from .registry import (
     CommandSpec,
     PickerItem,
     PickerSource,
-    RuntimeFunctionSpec,
     RuntimeNamespaceRegistry,
     RuntimeNamespaceSpec,
     UiRegistry,

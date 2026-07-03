@@ -6,8 +6,7 @@ import inspect
 import logging
 import re
 import sqlite3
-import traceback
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path

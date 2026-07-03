@@ -61,7 +61,7 @@ from uv_agent.paths import uv_agent_home
 from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, UserInput
 from uv_agent.plugins.manager import RESERVED_RUNTIME_NAMESPACES
 from uv_agent.plugins.registry import RuntimeNamespaceRegistry
-from uv_agent.plugins.xml import render_update_envelope
+from uv_agent.plugins.xml import XmlContribution, render_update_envelope
 from uv_agent.turn_manager import TurnManager
 from uv_agent.prompts import (
     BRANCH_NAME_GENERATION_PROMPT,
@@ -977,7 +977,6 @@ class AgentEngine:
         system_instructions = self._system_instructions_for_turn(thread_id)
         turn_id = new_id("turn")
         should_generate_title = self._should_generate_title(thread_id)
-        metadata = dict(self.thread_store.thread_metadata(thread_id))
         normalized_user_inputs = list(user_inputs) if user_inputs is not None else [
             UserInput(text=user_text, image_paths=tuple(image_paths or ()))
         ]
@@ -3683,9 +3682,10 @@ class AgentEngine:
             discard_plugins = set(broker.plugins_with_pending_epoch(thread_id))
             self.plugins.refresh_epoch_context(thread_id, discard_plugins=discard_plugins)
             main_agent = self._is_main_agent_thread(thread_id)
-            include_contribution = (
-                lambda contribution: (contribution.attrs or {}).get("scope") != "main_agent" or main_agent
-            )
+
+            def include_contribution(contribution: XmlContribution) -> bool:
+                return (contribution.attrs or {}).get("scope") != "main_agent" or main_agent
+
             rendered_documents = broker.consume_epoch(thread_id, include_contribution=include_contribution)
             self._record_plugin_epoch_context_warnings(
                 thread_id,

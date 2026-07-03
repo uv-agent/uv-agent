@@ -13,16 +13,14 @@ from rich.table import Table
 from uv_agent.environment import UserLanguage, normalize_language
 from uv_agent.helper_calls import (
     extract_import_anchor_chains,
-    format_helper_call,
     format_import_anchor_chains,
 )
 from uv_agent.i18n import tr
 from uv_agent.tui.formatting import (
     format_elapsed,
-    renderable_plain,
     short_thread,
 )
-from uv_agent.tui.ansi import strip_ansi, truncate_visible, visible_len, wrap_plain
+from uv_agent.tui.ansi import truncate_visible, visible_len, wrap_plain
 from uv_agent.tui.events import (
     AGENT_VIEW_STATUS_ORDER,
     AgentViewRow,

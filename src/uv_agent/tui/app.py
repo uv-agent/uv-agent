@@ -6,7 +6,6 @@ import json
 import logging
 import re
 import sqlite3
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -682,7 +681,6 @@ class UvAgentApp:
             self.state.turn_token_rate = None
             self.state.turn_token_rate_frozen = False
             return
-        active = self._run_state_is_active(run_state)
         ui_busy = self._run_state_busy_for_ui(run_state)
         self.state.busy = ui_busy
         self.state.pending_turns = run_state.pending_turns
