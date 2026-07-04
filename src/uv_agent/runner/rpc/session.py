@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from typing import TYPE_CHECKING
 
+from uv_agent.blobs import BlobStore
 from uv_agent.runner.run_log import EventWriter
 from uv_agent.time import utc_now_iso
 from uv_agent_runtime.events import RUNTIME_EVENT_EVENT_ID_KEY
@@ -41,6 +42,7 @@ class RunSession:
         writer: EventWriter,
         on_helper_calls: Callable[[list[dict[str, Any]]], None] | None = None,
         host_events: "HostEventBus | None" = None,
+        blob_store: BlobStore | None = None,
     ) -> None:
         self.token = token
         self._host_events = host_events
@@ -53,6 +55,8 @@ class RunSession:
         self._on_structured_event = on_structured_event
         self._on_helper_calls = on_helper_calls or (lambda _calls: None)
         self._writer = writer
+        self._blob_store = blob_store
+        self._temporary_blob_ids: set[str] = set()
         self._lock = threading.RLock()
         self.closed = False
 
@@ -63,6 +67,19 @@ class RunSession:
     def close(self) -> None:
         with self._lock:
             self.closed = True
+            temporary_blob_ids = sorted(self._temporary_blob_ids)
+            self._temporary_blob_ids.clear()
+        if self._blob_store is not None and temporary_blob_ids:
+            try:
+                self._blob_store.gc_unreferenced(blob_ids=temporary_blob_ids)
+            except Exception:
+                pass
+
+    def note_temporary_blob(self, blob_id: str) -> None:
+        with self._lock:
+            if self.closed:
+                raise RuntimeError("Run session is closed")
+            self._temporary_blob_ids.add(str(blob_id))
 
     def emit_event(self, event: dict[str, Any]) -> None:
         """Append a structured runtime event and persist it in the run log."""

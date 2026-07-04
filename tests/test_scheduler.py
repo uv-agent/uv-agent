@@ -120,6 +120,7 @@ async def test_scheduler_subagent_prompt_action_uses_stable_schedule_thread(tmp_
     from uv_agent.plugins.events import EventBus
     from uv_agent.plugins.i18n import PluginI18nRegistry
     from uv_agent.plugins.registry import CommandRegistry, RuntimeNamespaceRegistry, UiRegistry
+    from uv_agent.plugins.resources import ResourceRegistry
     from uv_agent.plugins.storage import PluginStorage
     from uv_agent.session import ThreadStore
 
@@ -141,6 +142,7 @@ async def test_scheduler_subagent_prompt_action_uses_stable_schedule_thread(tmp_
         return Submitted(kwargs.get("thread_id"))
 
     actions = ActionRegistry()
+    resources = ResourceRegistry()
     thread_store = ThreadStore(tmp_path)
     plugin_context = PluginContext(
         manifest=PluginManifest("builtin.subagent", "0", "Subagent", "test"),
@@ -150,6 +152,7 @@ async def test_scheduler_subagent_prompt_action_uses_stable_schedule_thread(tmp_
         events=EventBus(),
         logger=__import__("logging").getLogger("test"),
         runtime_registry=RuntimeNamespaceRegistry(),
+        resource_registry=resources,
         action_registry=actions,
         command_registry=CommandRegistry(),
         ui_registry=UiRegistry(),
@@ -171,6 +174,7 @@ async def test_scheduler_subagent_prompt_action_uses_stable_schedule_thread(tmp_
         events=EventBus(),
         logger=__import__("logging").getLogger("test"),
         runtime_registry=RuntimeNamespaceRegistry(),
+        resource_registry=resources,
         action_registry=actions,
         command_registry=CommandRegistry(),
         ui_registry=UiRegistry(),

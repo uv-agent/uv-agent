@@ -35,6 +35,10 @@ class EventBus:
         self._lock = threading.RLock()
         self._subscriptions: list[_Subscription] = []
         self._tasks: set[asyncio.Task[None]] = set()
+        self._error_handler: Callable[[logging.Logger, BaseException], None] | None = None
+
+    def on_handler_error(self, handler: Callable[[logging.Logger, BaseException], None] | None) -> None:
+        self._error_handler = handler
 
     def subscribe(
         self,
@@ -118,16 +122,18 @@ class EventBus:
                     task = loop.create_task(self._await_handler(subscription, result, event))
                     self._tasks.add(task)
                     task.add_done_callback(self._tasks.discard)
-        except Exception:
+        except Exception as exc:
             subscription.logger.exception("Plugin event handler failed for %s", event.get("type"))
+            self._notify_handler_error(subscription.logger, exc)
         finally:
             _IN_EVENT_HANDLER.reset(token)
 
     async def _await_handler(self, subscription: _Subscription, awaitable: Awaitable[None], event: dict[str, Any]) -> None:
         try:
             await awaitable
-        except Exception:
+        except Exception as exc:
             subscription.logger.exception("Plugin event handler failed for %s", event.get("type"))
+            self._notify_handler_error(subscription.logger, exc)
 
     async def _run_handler(self, subscription: _Subscription, event: dict[str, Any]) -> None:
         token = _IN_EVENT_HANDLER.set(True)
@@ -135,10 +141,19 @@ class EventBus:
             result = subscription.handler(event)
             if result is not None and inspect.isawaitable(result):
                 await result
-        except Exception:
+        except Exception as exc:
             subscription.logger.exception("Plugin event handler failed for %s", event.get("type"))
+            self._notify_handler_error(subscription.logger, exc)
         finally:
             _IN_EVENT_HANDLER.reset(token)
+
+    def _notify_handler_error(self, logger: logging.Logger, exc: BaseException | None) -> None:
+        if self._error_handler is None:
+            return
+        try:
+            self._error_handler(logger, exc or RuntimeError("Plugin event handler failed"))
+        except Exception:
+            return
 
 
 def raise_if_reentrant_submit() -> None:

@@ -47,7 +47,7 @@ class Capture:
     def file(self):
         import uv_agent_runtime as rt
 
-        return rt.file(self.path)
+        return rt.get(self.path)
 
     def view(self, *, context: int = 8):
         from .textops import read_file
@@ -75,7 +75,7 @@ class Symbol:
     def file(self):
         import uv_agent_runtime as rt
 
-        return rt.file(self.path)
+        return rt.get(self.path)
 
     def view(self, *, context: int = 12):
         from .textops import read_file

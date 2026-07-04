@@ -9,6 +9,7 @@ from time import monotonic
 
 from typing import TYPE_CHECKING
 
+from uv_agent.blobs import BlobStore
 from uv_agent.config import RunnerConfig
 
 if TYPE_CHECKING:
@@ -52,13 +53,14 @@ class PythonRunner:
         self.scriptenv_dir = (scriptenv_dir or self.data_dir / "runner" / "scriptenv").resolve()
         self._host_events = host_events
         self.config = config
+        self.blobs = BlobStore(self.data_dir)
         self.run_logs = RunLogStore(
             self.data_dir,
             scripts_dir=self.runs_dir,
             max_run_logs=config.max_run_logs,
             host_events=host_events,
         )
-        self.rpc_server = RuntimeRPCServer(host_events=host_events)
+        self.rpc_server = RuntimeRPCServer(host_events=host_events, blob_store=self.blobs)
 
     @property
     def config(self) -> RunnerConfig:

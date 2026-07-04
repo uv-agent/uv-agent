@@ -6,12 +6,13 @@ import os
 import threading
 from itertools import count
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 RPC_URL_ENV = "UV_AGENT_RPC_URL"
 RPC_TOKEN_ENV = "UV_AGENT_RPC_TOKEN"
 JSONRPC_VERSION = "2.0"
 DEFAULT_TIMEOUT_S = 5.0
+BLOB_TIMEOUT_S = 300.0
 
 _request_counter = count(1)
 _counter_lock = threading.Lock()
@@ -106,6 +107,31 @@ def call_host(helper_name: str, *args: Any, **kwargs: Any) -> Any:
     return response.get("result")
 
 
+def upload_blob(data: bytes, *, mime_type: str = "application/octet-stream", filename: str = "") -> dict[str, Any]:
+    if not _rpc_configured():
+        raise RuntimeError("Host RPC is not configured; cannot upload blob")
+    return _request_blob("POST", "/blob", body=data, headers={
+        "Content-Type": mime_type or "application/octet-stream",
+        "X-Uv-Agent-Mime-Type": mime_type or "application/octet-stream",
+        "X-Uv-Agent-Filename": filename or "",
+    }, expect_json=True)
+
+
+def download_blob(blob_id: str) -> bytes:
+    if not _rpc_configured():
+        raise RuntimeError("Host RPC is not configured; cannot download blob")
+    return _request_blob("GET", f"/blob/{quote(blob_id, safe='')}", expect_json=False)
+
+
+def blob_info(blob_id: str) -> dict[str, Any]:
+    if not _rpc_configured():
+        raise RuntimeError("Host RPC is not configured; cannot inspect blob")
+    result = _request_blob("GET", f"/blob/{quote(blob_id, safe='')}/info", expect_json=True)
+    if not isinstance(result, dict):
+        raise HostCallError("Blob info returned an invalid response")
+    return result
+
+
 def _next_request_id() -> str:
     with _counter_lock:
         return str(next(_request_counter))
@@ -164,5 +190,44 @@ def _post_jsonrpc_once(payload: dict[str, Any], *, expect_response: bool) -> Any
             return json.loads(response_body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HostCallError(f"Host RPC returned invalid JSON: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def _request_blob(
+    method: str,
+    path: str,
+    *,
+    body: bytes = b"",
+    headers: dict[str, str] | None = None,
+    expect_json: bool,
+) -> Any:
+    url = os.environ.get(RPC_URL_ENV)
+    token = os.environ.get(RPC_TOKEN_ENV)
+    if not url or not token:
+        raise HostCallError("Host RPC is not configured")
+    parsed = urlparse(url)
+    if parsed.scheme != "http" or not parsed.hostname or not parsed.port:
+        raise HostCallError(f"Unsupported host RPC URL: {url!r}")
+    request_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Length": str(len(body)),
+        **(headers or {}),
+    }
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=BLOB_TIMEOUT_S)
+    try:
+        connection.request(method, path, body=body, headers=request_headers)
+        response = connection.getresponse()
+        response_body = response.read()
+        if response.status == 401:
+            raise HostCallError("Host RPC authorization failed")
+        if response.status >= 400:
+            raise HostCallError(f"Host blob HTTP {response.status}")
+        if expect_json:
+            try:
+                return json.loads(response_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise HostCallError(f"Host blob returned invalid JSON: {exc}") from exc
+        return response_body
     finally:
         connection.close()

@@ -3,7 +3,9 @@ from __future__ import annotations
 import http.client
 import json
 from pathlib import Path
+from urllib.parse import quote
 
+from uv_agent.blobs import BLOB_ID_PREFIX, BlobStore
 from uv_agent.host_events import HostEventBus
 from uv_agent.runner.run_log import RunLogStore
 from uv_agent.runner.rpc import RuntimeRPCServer
@@ -377,6 +379,94 @@ def test_runtime_rpc_server_supports_local_module_namespace(tmp_path: Path, monk
         server.close()
 
 
+def test_runtime_get_resolves_resource_uri_over_rpc(tmp_path: Path, monkeypatch) -> None:
+    import uv_agent_runtime as rt
+
+    server = RuntimeRPCServer()
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
+    server.register_method(
+        "resource.get",
+        lambda target, max_bytes=None, context=None: {
+            "uri": target,
+            "kind": "text",
+            "mime_type": "text/plain; charset=utf-8",
+            "text": f"hello {max_bytes}",
+            "metadata": {"source": "test"},
+        },
+    )
+    try:
+        handle = server.open_session(
+            run_id="run_rpc",
+            thread_id=None,
+            turn_id=None,
+            cwd=tmp_path,
+            structured_events=[],
+            writer=writer,
+        )
+        try:
+            monkeypatch.setenv("UV_AGENT_RPC_URL", server.url)
+            monkeypatch.setenv("UV_AGENT_RPC_TOKEN", handle.token)
+
+            resource = rt.get("skill://project/demo", max_bytes=123)
+            assert isinstance(resource, rt.Resource)
+            assert resource.uri == "skill://project/demo"
+            assert resource.text() == "hello 123"
+            assert resource.metadata["source"] == "test"
+            assert isinstance(rt.get(tmp_path / "local.txt"), rt.File)
+        finally:
+            handle.close()
+    finally:
+        server.close()
+
+
+def test_runtime_rpc_server_uploads_and_serves_blobs(tmp_path: Path) -> None:
+    blob_store = BlobStore(tmp_path)
+    server = RuntimeRPCServer(blob_store=blob_store, max_blob_bytes=16)
+    store = _run_store(tmp_path, "run_rpc")
+    writer = store.writer("run_rpc")
+    try:
+        handle = server.open_session(
+            run_id="run_rpc",
+            thread_id="thread_1",
+            turn_id="turn_1",
+            cwd=tmp_path,
+            structured_events=[],
+            writer=writer,
+        )
+        try:
+            status, body = _post_blob(
+                server.url,
+                handle.token,
+                b"abc",
+                headers={"X-Uv-Agent-Mime-Type": "image/png", "X-Uv-Agent-Filename": "demo.png"},
+            )
+            assert status == 200
+            payload = json.loads(body)
+            assert payload["blob_id"].startswith(BLOB_ID_PREFIX)
+            assert payload["mime_type"] == "image/png"
+            assert payload["filename"] == "demo.png"
+            assert Path(payload["path"]).read_bytes() == b"abc"
+
+            encoded = quote(payload["blob_id"], safe="")
+            status, body = _get(server.url, handle.token, f"/blob/{encoded}/info")
+            assert status == 200
+            info = json.loads(body)
+            assert info["blob_id"] == payload["blob_id"]
+            assert info["size_bytes"] == 3
+
+            status, body = _get(server.url, handle.token, f"/blob/{encoded}")
+            assert status == 200
+            assert body == b"abc"
+
+            status, _body = _post_blob(server.url, handle.token, b"x" * 17)
+            assert status == 413
+        finally:
+            handle.close()
+    finally:
+        server.close()
+
+
 def _run_store(tmp_path: Path, run_id: str) -> RunLogStore:
     store = RunLogStore(tmp_path)
     store.create_run_record(
@@ -407,6 +497,33 @@ def _post(url: str, token: str, payload: dict) -> tuple[int, bytes]:
                 "Content-Type": "application/json",
             },
         )
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
+
+
+def _post_blob(url: str, token: str, body: bytes, *, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+    host, port_text = url.removeprefix("http://").split(":", 1)
+    connection = http.client.HTTPConnection(host, int(port_text), timeout=5)
+    try:
+        merged_headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/octet-stream",
+            **(headers or {}),
+        }
+        connection.request("POST", "/blob", body=body, headers=merged_headers)
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
+
+
+def _get(url: str, token: str, path: str) -> tuple[int, bytes]:
+    host, port_text = url.removeprefix("http://").split(":", 1)
+    connection = http.client.HTTPConnection(host, int(port_text), timeout=5)
+    try:
+        connection.request("GET", path, headers={"Authorization": f"Bearer {token}"})
         response = connection.getresponse()
         return response.status, response.read()
     finally:

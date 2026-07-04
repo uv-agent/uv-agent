@@ -21,6 +21,7 @@ from .context import PluginActionAPI, PluginContext, PluginContextBroker, maybe_
 from .events import EventBus
 from .i18n import PluginI18nRegistry
 from .registry import ActionRegistry, CommandRegistry, RuntimeFunctionSpec, RuntimeNamespaceRegistry, UiRegistry
+from .resources import ResourceRegistry
 from .storage import PluginStorage, indexes_from_storage_schema
 
 PLUGIN_ENTRY_POINT_GROUP = "uv_agent.plugins"
@@ -28,6 +29,7 @@ CORE_COMMANDS = {"/help", "/quit", "/clear", "/cancel", "/status", "/threads", "
 RESERVED_RUNTIME_NAMESPACES = {
     "file", "files", "search", "symbols", "query", "patch", "apply_patch", "diff", "compare",
     "snapshot", "restore", "transaction", "run", "deps", "cd", "pwd", "path", "events", "look_at", "threads",
+    "get", "blob",
 }
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,9 @@ class PluginManager:
         self.project_root = project_root
         self.user_state_dir = user_state_dir or uv_agent_home()
         self.events = events
+        self.events.on_handler_error(self._mark_plugin_warning_from_event_logger)
         self.runtime = helper_registry
+        self.resources = ResourceRegistry()
         self.actions = ActionRegistry()
         self.commands = CommandRegistry(reserved=CORE_COMMANDS)
         self.ui = UiRegistry()
@@ -110,12 +114,19 @@ class PluginManager:
     def resolve_action(self, action_id: str) -> dict[str, Any]:
         return PluginActionAPI(plugin="host", registry=self.actions).resolve(action_id)
 
-    async def call_action(self, action_id: str, payload: dict[str, Any] | None = None, *, context: Any = None) -> Any:
+    async def call_action(
+        self,
+        action_id: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        context: Any = None,
+        missing: str = "error",
+    ) -> Any:
         return await PluginActionAPI(
             plugin="host",
             registry=self.actions,
             context_resolver=self.context_for,
-        ).call(action_id, payload, context=context)
+        ).call(action_id, payload, context=context, missing=missing)
 
     def command_suggestions(self):
         return self.commands.list()
@@ -354,6 +365,7 @@ class PluginManager:
             events=self.events,
             logger=plugin_logger,
             runtime_registry=self.runtime,
+            resource_registry=self.resources,
             action_registry=self.actions,
             command_registry=self.commands,
             ui_registry=self.ui,
@@ -469,6 +481,13 @@ class PluginManager:
             "error_type": exc.__class__.__name__,
             "message": str(exc) or repr(exc),
         })
+
+    def _mark_plugin_warning_from_event_logger(self, logger: logging.Logger, exc: BaseException) -> None:
+        prefix = "uv_agent.plugins."
+        if not logger.name.startswith(prefix):
+            return
+        plugin_id = logger.name[len(prefix):]
+        self._mark_plugin_warning(plugin_id, exc if isinstance(exc, Exception) else RuntimeError(str(exc)))
 
     async def _cancel_record_tasks(self, plugin: str, *, timeout_s: float = 5.0) -> None:
         tasks = list(self._tasks.get(plugin, set()))

@@ -18,6 +18,7 @@ from .facade import (
     CollectionResult,
     File,
     FileSet,
+    Resource,
     SearchResults,
     SelectionError,
     SymbolResults,
@@ -30,6 +31,7 @@ from .facade import (
     events,
     file,
     files,
+    get,
     look_at,
     normalize,
     patch,
@@ -45,6 +47,7 @@ from .facade import (
     threads,
     ui,
     transaction,
+    blob,
 )
 from .textops import (
     CommandTextResult,
@@ -91,6 +94,7 @@ __all__ = [
     "File",
     "FileSelectionError",
     "FileSet",
+    "Resource",
     "FileView",
     "FriendlyErrorMixin",
     "HeldFileLock",
@@ -130,6 +134,7 @@ __all__ = [
     "events",
     "file",
     "files",
+    "get",
     "look_at",
     "normalize",
     "patch",
@@ -145,6 +150,7 @@ __all__ = [
     "threads",
     "ui",
     "transaction",
+    "blob",
 ]
 
 

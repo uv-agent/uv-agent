@@ -20,6 +20,7 @@ from uv_agent.time import utc_now_iso
 
 if TYPE_CHECKING:
     from uv_agent.host_events import HostEventBus
+    from uv_agent.blobs import BlobStore
 
 
 VISIBLE_HISTORY_EVENT_TYPES = {
@@ -571,6 +572,42 @@ class ThreadStore:
             )
             for thread in self.list_threads()[:limit]
         ]
+
+    def delete_thread(self, thread_id: str, *, blobs: "BlobStore | None" = None) -> dict[str, Any]:
+        metadata = self._read_metadata(thread_id)
+        owner = self._read_lock_owner(thread_id)
+        if owner:
+            raise ThreadLockedError(thread_id, self.lock_path(thread_id, kind=str(metadata.get("kind") or "thread")), owner)
+        deleted_blob_refs = blobs.remove_thread_refs(thread_id) if blobs is not None else 0
+        with self._connect() as db:
+            run_rows = db.execute("SELECT run_id FROM runs WHERE thread_id = ?", (thread_id,)).fetchall()
+            run_ids = [str(row["run_id"]) for row in run_rows]
+            deleted_run_events = 0
+            if run_ids:
+                deleted_run_events = int(
+                    db.execute(
+                        f"DELETE FROM run_events WHERE run_id IN ({_placeholders(run_ids)})",
+                        run_ids,
+                    ).rowcount
+                    or 0
+                )
+            deleted_runs = int(db.execute("DELETE FROM runs WHERE thread_id = ?", (thread_id,)).rowcount or 0)
+            deleted_events = int(db.execute("DELETE FROM thread_events WHERE thread_id = ?", (thread_id,)).rowcount or 0)
+            deleted_threads = int(db.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,)).rowcount or 0)
+        self._history_segment_cache.clear()
+        gc = blobs.gc_unreferenced() if blobs is not None else {"deleted_blobs": 0, "freed_bytes": 0}
+        result = {
+            "ok": True,
+            "thread_id": thread_id,
+            "deleted_threads": deleted_threads,
+            "deleted_events": deleted_events,
+            "deleted_runs": deleted_runs,
+            "deleted_run_events": deleted_run_events,
+            "deleted_blob_refs": deleted_blob_refs,
+            **gc,
+        }
+        self._publish_host_event({"type": "thread.deleted", "thread_id": thread_id, "deleted": result})
+        return result
 
     def _connect(self) -> sqlite3.Connection:
         return connect_state_db(self.data_dir)

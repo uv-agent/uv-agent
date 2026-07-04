@@ -114,6 +114,7 @@ failure and emits plugin lifecycle events without taking down the host.
 | `context.logger` | Plugin log writer. |
 | `context.events` | Event bus subscription API. |
 | `context.runtime` | Runtime helper namespace registry. |
+| `context.resources` | URI resource prefix registry for read-only plugin resources. |
 | `context.actions` | Host action registry. |
 | `context.commands` | TUI command registry. |
 | `context.ui` | UI provider registry. |
@@ -217,12 +218,30 @@ by plugins:
 ```
 file, files, search, symbols, query, patch, apply_patch, diff, compare,
 snapshot, restore, transaction, run, deps, cd, pwd, path, events, look_at,
-threads
+threads, get, blob
 ```
 
 Builtin plugins also register the namespaces `goal`, `mcp`, `scheduler`,
 `skills`, `workflow`, and `worktree`. Third-party plugins should avoid all of
 these names to prevent conflicts.
+
+## Resources
+
+Plugins can register read-only URI resources without adding a model-visible
+runtime namespace:
+
+```python
+from uv_agent.plugins import ResourceData
+
+context.resources.register(
+    prefix="demo://",
+    read=lambda uri: ResourceData(uri=uri, kind="text", text="hello"),
+)
+```
+
+The core registry only routes by URI prefix; resource contents belong to the
+plugin. Readers may return `ResourceData`, `str`, `bytes`, `Path`, or a dict
+with exactly one of `text`, `data`, or `path`.
 
 ## Actions
 
@@ -248,8 +267,10 @@ context.actions.register(
 )
 ```
 
-Actions receive a single JSON payload and return JSON-compatible data. If the
-handler accepts `context`, uv-agent injects the plugin context.
+Actions receive a single payload object and return serializable data. In-process
+plugin callers may pass richer values such as bytes; runtime helper calls still
+cross JSON-RPC and must stay JSON-compatible. If the handler accepts `context`,
+uv-agent injects the plugin context.
 
 Plugins may also call registered actions through the same surface:
 
@@ -262,6 +283,9 @@ if info["found"]:
 Passing `context=...` to `call(...)` overrides the injected target plugin
 context. Scheduler uses this to pass a schedule execution context to actions
 without importing the target plugin.
+
+Pass `missing="ignore"` to `context.actions.call(...)` when an optional action
+should be skipped if its provider plugin is disabled.
 
 ## Commands And UI
 

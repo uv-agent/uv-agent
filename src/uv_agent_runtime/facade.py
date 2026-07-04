@@ -10,6 +10,7 @@ from typing import Any, Generic, Literal, TypeVar
 
 from . import codequery, codesearch, dependencies, events as _events, files as _files, patch as _patch, ui as _ui
 from .errors import HelperValueError
+from .resources import Resource, blob as blob
 from . import textops, threads as _threads, vision as _vision
 from .cwd import enter_dir as _enter_dir
 from .helper_tracking import tracked_helper
@@ -540,6 +541,9 @@ class _ThreadsNamespace:
             include_raw_events=include_raw_events,
         )
 
+    def delete(self, thread_id: str, *, confirm: bool = False) -> dict[str, Any]:
+        return _threads.delete_thread(thread_id, confirm=confirm)
+
 
 class _EventsNamespace:
     @_track("events.emit")
@@ -555,8 +559,8 @@ class _EventsNamespace:
         return _events.emit_result(**payload)
 
     @_track("events.look_at")
-    def look_at(self, path: str | Path, *, note: str = "") -> dict[str, Any]:
-        return _vision.look_at(path, note=note)
+    def look_at(self, target: str | Path | bytes | Resource, *, note: str = "", mime_type: str | None = None, filename: str | None = None) -> dict[str, Any]:
+        return _vision.look_at(target, note=note, mime_type=mime_type, filename=filename)
 
 
 class _UiNamespace:
@@ -747,8 +751,15 @@ def pwd() -> Path:
 
 
 @_track("look_at")
-def look_at(path: str | Path, *, note: str = "") -> dict[str, Any]:
-    return _vision.look_at(path, note=note)
+def look_at(target: str | Path | bytes | Resource, *, note: str = "", mime_type: str | None = None, filename: str | None = None) -> dict[str, Any]:
+    return _vision.look_at(target, note=note, mime_type=mime_type, filename=filename)
+
+
+@_track("get")
+def get(target: str | Path, *, max_bytes: int | None = None) -> File | Resource:
+    from .resources import get as _get
+
+    return _get(target, max_bytes=max_bytes)
 
 
 @_track("path")

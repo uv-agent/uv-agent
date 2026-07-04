@@ -7,7 +7,7 @@ from pathlib import Path
 from uv_agent.time import utc_now_iso
 
 DB_FILENAME = "uv-agent.sqlite3"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 SQLITE_TIMEOUT_SECONDS = 30.0
 SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
 
@@ -89,6 +89,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         "4": _migrate_v4_to_v5,
         "5": _migrate_v5_to_v6,
         "6": _migrate_v6_to_v7,
+        "7": _migrate_v7_to_v8,
     }
     version = existing_version
     while version != str(SCHEMA_VERSION):
@@ -226,6 +227,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         )
         _create_host_lease_schema(connection)
         _create_plugin_storage_schema(connection)
+        _create_blob_schema(connection)
         connection.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -309,6 +311,18 @@ def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v7_to_v8(connection: sqlite3.Connection) -> None:
+    """Add project blob storage tables."""
+
+    logger.info("Migrating state database schema version 7 -> 8")
+    with connection:
+        _create_blob_schema(connection)
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("8",),
+        )
+
+
 def _create_host_lease_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
@@ -363,6 +377,37 @@ def _create_plugin_storage_schema(connection: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_plugin_document_indexes_lookup
           ON plugin_document_indexes(plugin_id, scope, scope_id, collection, field, value);
+        """
+    )
+
+
+def _create_blob_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS blobs (
+          blob_id TEXT PRIMARY KEY,
+          sha256 TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          stored_path TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS blob_refs (
+          blob_id TEXT NOT NULL,
+          thread_id TEXT NOT NULL DEFAULT '',
+          owner_type TEXT NOT NULL,
+          owner_id TEXT NOT NULL,
+          mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+          filename TEXT NOT NULL DEFAULT '',
+          source_uri TEXT NOT NULL DEFAULT '',
+          note TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(blob_id, thread_id, owner_type, owner_id),
+          FOREIGN KEY(blob_id) REFERENCES blobs(blob_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_blob_refs_thread_id
+          ON blob_refs(thread_id);
         """
     )
 

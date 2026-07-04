@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from uv_agent.blobs import BlobStore
+from uv_agent.runner.run_log import RunLogStore
 from uv_agent.session.store import (
     HISTORY_SEGMENT_CACHE_MAX_ENTRIES,
     ThreadLockedError,
@@ -581,4 +583,42 @@ def test_update_thread_metadata_remover_edits_extra_metadata(tmp_path: Path) -> 
 
     assert "token_ratio" not in metadata
     assert metadata["custom_flag"] is True
+
+
+def test_delete_thread_hard_deletes_runs_events_and_blob_refs(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path)
+    blobs = BlobStore(tmp_path)
+    run_logs = RunLogStore(tmp_path)
+    thread_id = store.create_thread("Delete me")
+    store.append(thread_id, "item.user", turn_id="turn_1", item={"type": "message", "role": "user", "content": []})
+    run_logs.create_run_record(
+        run_id="run_delete",
+        code="print('bye')",
+        script_args=[],
+        cwd=tmp_path,
+        timeout_s=None,
+        started_at="test",
+        thread_id=thread_id,
+        turn_id="turn_1",
+        script_path=None,
+    )
+    run_logs.writer("run_delete").write({"type": "run.output", "created_at": "test", "text": "bye"})
+    blob = blobs.put_bytes(b"payload")
+    blobs.add_ref(blob.blob_id, thread_id=thread_id, owner_type="test", owner_id="owner")
+
+    deleted = store.delete_thread(thread_id, blobs=blobs)
+
+    assert deleted["ok"] is True
+    assert deleted["deleted_threads"] == 1
+    assert deleted["deleted_events"] >= 2
+    assert deleted["deleted_runs"] == 1
+    assert deleted["deleted_run_events"] == 1
+    assert deleted["deleted_blob_refs"] == 1
+    assert deleted["deleted_blobs"] == 1
+    assert not blob.path.exists()
+    assert store.list_threads() == []
+    assert run_logs.get_run("run_delete") is None
+    assert run_logs.read_events("run_delete") == []
+    with pytest.raises(FileNotFoundError):
+        blobs.info(blob.blob_id)
 

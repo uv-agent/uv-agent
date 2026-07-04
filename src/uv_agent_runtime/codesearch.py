@@ -60,7 +60,7 @@ class Match:
     def file(self):
         import uv_agent_runtime as rt
 
-        return rt.file(self.path)
+        return rt.get(self.path)
 
     def line_range(self, *, context: int = 0) -> tuple[int, int]:
         return (max(1, self.line - context), self.line + context)

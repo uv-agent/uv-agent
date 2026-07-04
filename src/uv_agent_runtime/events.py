@@ -39,7 +39,7 @@ emit = emit_event
 progress = emit_progress
 result = emit_result
 
-def look_at(path, *, note=""):
+def look_at(target, *, note="", mime_type=None, filename=None):
     from .vision import look_at as _look_at
 
-    return _look_at(path, note=note)
+    return _look_at(target, note=note, mime_type=mime_type, filename=filename)

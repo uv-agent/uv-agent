@@ -375,6 +375,14 @@ FileView.numbered() -> str
 FileView.summary() -> str
 FileView.print(*, numbered: bool = False) -> None</signature>
 </type>
+<type name="Resource">
+<signature>Resource(uri: str, kind: Literal["text", "bytes", "path"], mime_type: str, metadata: dict[str, Any])
+Resource.read(*, lines: tuple[int, int] | None = None, head: int | None = None, tail: int | None = None, around: str | None = None, context: int = 20, encoding: str = "utf-8") -> FileView
+Resource.text(*, encoding: str = "utf-8") -> str
+Resource.bytes() -> bytes
+Resource.path() -> Path
+Resource.data: bytes | None</signature>
+</type>
 <type name="TextFile">
 <signature>TextFile(path: str, text: str, encoding: str, newline: Literal["lf", "crlf", "cr", "mixed", "none"], final_newline: bool, bom: bool)</signature>
 </type>
@@ -447,9 +455,9 @@ BoundedText = {text: str, chars: int, truncated: bool, limit: int}</signature>
 </type>
 </common_types>
 
-<function name="file">
-<description>创建文件对象；文件对象负责读取、写入、JSON、替换、行编辑、插入、删除、metadata 和 diff。编辑方法立即写盘并返回结果对象。</description>
-<signature>rt.file(path: str | Path) -> File
+<function name="get">
+<description>获取本地文件或已注册 URI 资源；非 URI 返回 File，URI 返回 Resource。具体 URI scheme 由插件上下文说明。文件对象负责读取、写入、JSON、替换、行编辑、插入、删除、metadata 和 diff；资源对象负责读取只读文本、二进制或路径资源。</description>
+<signature>rt.get(target: str | Path, *, max_bytes: int | None = None) -> File | Resource
 File.read(*, lines: tuple[int, int] | None = None, head: int | None = None, tail: int | None = None, around: str | None = None, context: int = 20, encoding: str = "utf-8") -> FileView
 File.text(*, encoding: str = "utf-8") -> str
 File.json(*, encoding: str = "utf-8") -> Any
@@ -502,8 +510,13 @@ rt.threads.detail(*, state_dir: str | Path | None = None, thread_id: str | None 
 <signature>rt.events.emit(kind: str, **payload: Any) -> dict[str, Any]
 rt.events.progress(message: str, **payload: Any) -> dict[str, Any]
 rt.events.result(**payload: Any) -> dict[str, Any]
-rt.events.look_at(path: str | Path, *, note: str = "") -> dict[str, Any]
-rt.look_at(path: str | Path, *, note: str = "") -> dict[str, Any]</signature>
+rt.events.look_at(target: str | Path | bytes | Resource, *, note: str = "", mime_type: str | None = None, filename: str | None = None) -> dict[str, Any]
+rt.look_at(target: str | Path | bytes | Resource, *, note: str = "", mime_type: str | None = None, filename: str | None = None) -> dict[str, Any]</signature>
+</function>
+<function name="blob">
+<description>检查或取得 blob 逃生路径；普通资源读取和图片查看通常不需要直接使用。</description>
+<signature>rt.blob.info(blob_id: str) -> dict[str, Any]
+rt.blob.path(blob_id: str) -> Path</signature>
 </function>
 <function name="ui">
 <description>向用户界面发送运行中可见的 Markdown 消息；适合脚本等待用户授权、外部确认或需要展示链接时使用。消息会作为 UI 事件发布。</description>
@@ -568,7 +581,7 @@ for symbol in found["symbols"][:3]:
     print(view.text)
 
 for path in found["tests"][:4]:
-    view = rt.file(path).read(around="invoice", context=25)
+    view = rt.get(path).read(around="invoice", context=25)
     print(f"\n=== 相关测试 {Path(path).as_posix()}:{view.start_line}-{view.end_line} ===")
     print(view.text)
 ```
@@ -621,7 +634,7 @@ with rt.transaction(["src/billing", "tests"], root=".") as snapshot:
         calc_symbols = rt.symbols(language="python", name="calculate_total", limit=3)
         if len(calc_symbols) == 1:
             symbol = calc_symbols.one()
-            r3 = rt.file(symbol.path).insert_after(
+            r3 = rt.get(symbol.path).insert_after(
                 symbol.end_line,
                 "\n\ndef apply_discount(total, discount):\n    return max(0, total - discount)\n",
                 expect_line="    return apply_discount(",
@@ -673,13 +686,13 @@ print(hits)
 ---
 # **不推荐**：第二轮才读取文件。
 import uv_agent_runtime as rt
-print(rt.file("src/billing/invoice.py").read(around="render_invoice", context=30).text)
+print(rt.get("src/billing/invoice.py").read(around="render_invoice", context=30).text)
 ---
 # **不推荐**：第三轮才编辑，第四轮才验证，失败后又要重新搜索。
 import uv_agent_runtime as rt
 print(rt.run("uv", "run", "pytest", "tests/test_billing.py", "-q", timeout=60).tail(40))
 ---
-# **应改为**：在一次 run_python 脚本中导入并组合 rt.search/rt.file/rt.files/rt.symbols/rt.run 等 helpers，
+# **应改为**：在一次 run_python 脚本中导入并组合 rt.search/rt.get/rt.files/rt.symbols/rt.run 等 helpers，
 # 用循环、条件、事务快照和数据结构衔接结果；能预见的编辑、验证、失败摘要和回退都在脚本里完成。
 ```
 </example>

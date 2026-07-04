@@ -16,6 +16,7 @@ from time import monotonic
 from typing import Any, Callable
 
 from uv_agent.attachments import AttachmentStore, image_message_item
+from uv_agent.blobs import BlobStore, MAX_BLOB_BYTES
 from uv_agent.agent.compaction import (
     DEPENDENCY_PARAMS,
     K_CANDIDATE_PCTS,
@@ -60,6 +61,7 @@ from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
 from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, UserInput
 from uv_agent.plugins.manager import RESERVED_RUNTIME_NAMESPACES
+from uv_agent.plugins.resources import ResourceData, coerce_resource_data
 from uv_agent.plugins.registry import RuntimeNamespaceRegistry
 from uv_agent.plugins.xml import XmlContribution, render_update_envelope
 from uv_agent.turn_manager import TurnManager
@@ -364,7 +366,8 @@ class AgentEngine:
         if runner_rpc_server is not None and getattr(runner_rpc_server, "_host_events", None) is None:
             runner_rpc_server._host_events = self.host_events
         self.project_root = project_root
-        self.attachments = AttachmentStore(attachments_dir or thread_store.data_dir / "attachments")
+        self.blobs = getattr(self.runner, "blobs", None) or BlobStore(thread_store.data_dir)
+        self.attachments = AttachmentStore(self.blobs)
         self._last_config_refresh_at = 0.0
         self._config_loader = config_loader
         self._host_environment = host_environment()
@@ -387,6 +390,8 @@ class AgentEngine:
         if rpc_server is not None:
             rpc_server.register_method("helper.resolve", self.plugins.resolve_helper)
             rpc_server.register_method("helper.call", self._plugin_call_helper_from_rpc)
+            rpc_server.register_method("resource.get", self._runtime_get_resource)
+            rpc_server.register_method("threads.delete", self._runtime_delete_thread)
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._plugins_started = False
         self._plugins_start_task: asyncio.Task[None] | None = None
@@ -3215,6 +3220,21 @@ class AgentEngine:
         for event in events:
             if event.get("kind") != "look_at":
                 continue
+            note = str(event.get("note") or "")
+            mime_type = str(event.get("mime_type") or "") or None
+            filename = str(event.get("filename") or "")
+            blob_id = event.get("blob_id")
+            if isinstance(blob_id, str) and blob_id:
+                attachment = self.attachments.register_image_blob(
+                    blob_id,
+                    thread_id=thread_id,
+                    mime_type=mime_type or "application/octet-stream",
+                    filename=filename,
+                    source_uri=str(event.get("source_uri") or ""),
+                    note=note,
+                )
+                attachments.append(attachment.to_event_payload())
+                continue
             path = event.get("path")
             if not isinstance(path, str) or not path:
                 continue
@@ -3222,10 +3242,84 @@ class AgentEngine:
                 path,
                 cwd=cwd,
                 thread_id=thread_id,
-                note=str(event.get("note") or ""),
+                note=note,
+                mime_type=mime_type,
             )
             attachments.append(attachment.to_event_payload())
         return attachments
+
+    def _runtime_get_resource(self, target: str, *, max_bytes: int | None = None, context: Any = None) -> dict[str, Any]:
+        uri = str(target or "")
+        limit = MAX_BLOB_BYTES if max_bytes is None else int(max_bytes)
+        if limit < 0:
+            raise ValueError("max_bytes must be non-negative")
+        if limit > MAX_BLOB_BYTES:
+            raise ValueError(f"max_bytes={limit} exceeds hard limit {MAX_BLOB_BYTES}")
+        raw = self.plugins.resources.read(uri, max_bytes=limit, context=context)
+        resource = coerce_resource_data(raw, uri=uri)
+        payload: dict[str, Any] = {
+            "uri": resource.uri or uri,
+            "kind": resource.kind,
+            "mime_type": resource.mime_type,
+            "metadata": dict(resource.metadata),
+        }
+        if resource.filename:
+            payload["metadata"]["filename"] = resource.filename
+        if resource.kind == "text":
+            text = resource.text or ""
+            size = len(text.encode("utf-8"))
+            if size > limit:
+                raise ValueError(f"Resource {uri} is {size} bytes, above max_bytes={limit}{_resource_hint(resource)}")
+            payload["text"] = text
+            payload["metadata"]["size_bytes"] = size
+            return payload
+        if resource.kind == "path":
+            if resource.path is None:
+                raise ValueError(f"Resource {uri} did not provide a path")
+            path = Path(resource.path).resolve()
+            if not path.exists():
+                raise FileNotFoundError(f"Resource path does not exist for {uri}: {path}")
+            size = path.stat().st_size
+            if size > limit:
+                raise ValueError(f"Resource {uri} is {size} bytes, above max_bytes={limit}; path={path}{_resource_hint(resource)}")
+            payload["path"] = str(path)
+            payload["metadata"]["size_bytes"] = size
+            payload["metadata"].setdefault("filename", path.name)
+            return payload
+        if resource.kind == "bytes":
+            data = resource.data or b""
+            size = len(data)
+            if size > limit:
+                raise ValueError(f"Resource {uri} is {size} bytes, above max_bytes={limit}{_resource_hint(resource)}")
+            blob = self.blobs.put_bytes(data, max_bytes=limit)
+            run_id = str(getattr(context, "run_id", "") or "")
+            thread_id = str(getattr(context, "thread_id", "") or "")
+            if thread_id:
+                self.blobs.add_ref(
+                    blob.blob_id,
+                    thread_id=thread_id,
+                    owner_type="resource",
+                    owner_id=run_id or blob.blob_id,
+                    mime_type=resource.mime_type,
+                    filename=resource.filename,
+                    source_uri=uri,
+                )
+            payload["blob"] = blob.to_ref(mime_type=resource.mime_type, filename=resource.filename)
+            payload["metadata"].update({"blob_id": blob.blob_id, "size_bytes": size})
+            return payload
+        raise ValueError(f"Unsupported resource kind for {uri}: {resource.kind}")
+
+    def _runtime_delete_thread(self, thread_id: str, *, confirm: bool = False, context: Any = None) -> dict[str, Any]:
+        if not confirm:
+            raise ValueError("confirm=True is required to delete a thread")
+        current_thread_id = getattr(context, "thread_id", None)
+        if current_thread_id and str(current_thread_id) == str(thread_id):
+            raise ValueError("Cannot delete the current running thread")
+        metadata = self.thread_store.thread_metadata(str(thread_id))
+        self.events.publish({"type": "thread.deleting", "thread_id": str(thread_id), "metadata": metadata})
+        deleted = self.thread_store.delete_thread(str(thread_id), blobs=self.blobs)
+        self.events.publish({"type": "thread.deleted", "thread_id": str(thread_id), "deleted": deleted})
+        return deleted
 
     def _process_runner_events(
         self,
@@ -4169,6 +4263,16 @@ class AgentEngine:
 
     def _runtime_helpers_context(self) -> str:
         return runtime_helpers_context()
+
+
+def _resource_hint(resource: ResourceData) -> str:
+    parts: list[str] = []
+    blob_id = resource.metadata.get("blob_id")
+    if isinstance(blob_id, str) and blob_id:
+        parts.append(f"blob_id={blob_id}")
+    parts.append("use standard Python or third-party libraries to read a smaller slice of the resource")
+    return "; " + "; ".join(parts)
+
 
 def tool_attachment_context_items(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return a neutral assistant bridge followed by tool-produced image context."""

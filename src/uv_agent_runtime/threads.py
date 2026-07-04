@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
+from .transport import call_host
+
 DB_FILENAME = "uv-agent.sqlite3"
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 REQUIRED_RUN_COLUMNS = {
@@ -365,6 +367,10 @@ def thread_detail(
         "missing": missing,
         "truncated": any(_process_detail_truncated(detail) for detail in details),
     }
+
+
+def delete_thread(thread_id: str, *, confirm: bool = False) -> dict[str, Any]:
+    return call_host("threads.delete", thread_id, confirm=confirm)
 
 
 def thread_digest(

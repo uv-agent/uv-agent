@@ -8,7 +8,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote
 
+from uv_agent.blobs import BlobStore, MAX_BLOB_BYTES
 from uv_agent.runner.run_log import EventWriter
 
 from typing import TYPE_CHECKING
@@ -63,11 +65,15 @@ class RuntimeRPCServer:
         *,
         host: str = "127.0.0.1",
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+        max_blob_bytes: int = MAX_BLOB_BYTES,
         host_events: "HostEventBus | None" = None,
+        blob_store: BlobStore | None = None,
     ) -> None:
         self.host = host
         self.max_body_bytes = max_body_bytes
+        self.max_blob_bytes = max_blob_bytes
         self._host_events = host_events
+        self.blob_store = blob_store
         self.methods = MethodRegistry()
         self._dispatcher = JsonRpcDispatcher(self.methods)
         self._lock = threading.RLock()
@@ -161,6 +167,7 @@ class RuntimeRPCServer:
             on_helper_calls=on_helper_calls,
             writer=writer,
             host_events=self._host_events,
+            blob_store=self.blob_store,
         )
         with self._lock:
             self._sessions[token] = session
@@ -193,6 +200,9 @@ class RuntimeRPCServer:
                 if self.path == "/healthz":
                     self._send_bytes(HTTPStatus.OK, b"ok\n", content_type="text/plain; charset=utf-8")
                     return
+                if self.path.startswith("/blob/"):
+                    self._do_GET_blob()
+                    return
                 self.send_error(HTTPStatus.NOT_FOUND)
 
             def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
@@ -203,6 +213,9 @@ class RuntimeRPCServer:
                     self._send_internal_error(exc)
 
             def _do_POST(self) -> None:
+                if self.path == "/blob":
+                    self._do_POST_blob()
+                    return
                 if self.path != "/rpc":
                     self._discard_request_body()
                     self.send_error(HTTPStatus.NOT_FOUND)
@@ -245,6 +258,94 @@ class RuntimeRPCServer:
                     return
                 response = json.dumps(result.body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 self._send_bytes(result.status, response, content_type="application/json; charset=utf-8")
+
+            def _authorized_session(self) -> RunSession | None:
+                if not is_loopback_address(self.client_address[0]):
+                    return None
+                return rpc_server.session_for_token(bearer_token(self.headers.get("Authorization")))
+
+            def _do_GET_blob(self) -> None:
+                session = self._authorized_session()
+                if session is None:
+                    self.send_error(HTTPStatus.UNAUTHORIZED)
+                    return
+                if rpc_server.blob_store is None:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                suffix = self.path.removeprefix("/blob/")
+                if suffix.endswith("/info"):
+                    blob_id = unquote(suffix[: -len("/info")])
+                    try:
+                        info = rpc_server.blob_store.info(blob_id)
+                    except Exception:
+                        self.send_error(HTTPStatus.NOT_FOUND)
+                        return
+                    body = json.dumps(
+                        {
+                            "blob_id": info["blob_id"],
+                            "sha256": info["sha256"],
+                            "size_bytes": info["size_bytes"],
+                            "path": info["stored_path"],
+                            "created_at": info["created_at"],
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    self._send_bytes(HTTPStatus.OK, body, content_type="application/json; charset=utf-8")
+                    return
+                blob_id = unquote(suffix)
+                try:
+                    path = rpc_server.blob_store.path(blob_id)
+                except Exception:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                self._send_bytes(HTTPStatus.OK, path.read_bytes(), content_type="application/octet-stream")
+
+            def _do_POST_blob(self) -> None:
+                session = self._authorized_session()
+                if session is None:
+                    self._discard_request_body(max_bytes=0)
+                    self.send_error(HTTPStatus.UNAUTHORIZED)
+                    return
+                if rpc_server.blob_store is None:
+                    self._discard_request_body(max_bytes=0)
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                content_length = self.headers.get("Content-Length")
+                try:
+                    length = int(content_length or "0")
+                except ValueError:
+                    self._discard_request_body()
+                    self.send_error(HTTPStatus.LENGTH_REQUIRED)
+                    return
+                if length < 0:
+                    self._discard_request_body()
+                    self.send_error(HTTPStatus.BAD_REQUEST)
+                    return
+                if length > rpc_server.max_blob_bytes:
+                    self._discard_request_body(max_bytes=0)
+                    self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                    return
+                data = self.rfile.read(length)
+                blob = rpc_server.blob_store.put_bytes(data, max_bytes=rpc_server.max_blob_bytes)
+                session.note_temporary_blob(blob.blob_id)
+                mime_type = self.headers.get("X-Uv-Agent-Mime-Type") or "application/octet-stream"
+                filename = self.headers.get("X-Uv-Agent-Filename") or ""
+                if session.context.thread_id:
+                    rpc_server.blob_store.add_ref(
+                        blob.blob_id,
+                        thread_id=session.context.thread_id,
+                        owner_type="runtime_blob",
+                        owner_id=f"{session.run_id}:{blob.blob_id}",
+                        mime_type=mime_type,
+                        filename=filename,
+                    )
+                body = json.dumps(
+                    blob.to_ref(mime_type=mime_type, filename=filename),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                self._send_bytes(HTTPStatus.OK, body, content_type="application/json; charset=utf-8")
 
             def log_message(self, _format: str, *_args: object) -> None:
                 # Runtime RPC is an internal transport; request logs would add

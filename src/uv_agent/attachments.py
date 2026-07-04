@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import mimetypes
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from uv_agent.blobs import BlobRecord, BlobStore
 from uv_agent.ids import new_id
 from uv_agent.prompts import IMAGE_ATTACHMENT_NOTE_TEMPLATE, IMAGE_ATTACHMENT_TEXT_TEMPLATE
-
 
 SUPPORTED_IMAGE_MIME_TYPES = {
     "image/jpeg",
@@ -22,34 +20,38 @@ SUPPORTED_IMAGE_MIME_TYPES = {
 
 @dataclass(frozen=True)
 class ImageAttachment:
-    """A persisted image attachment that can be replayed into model context."""
+    """A persisted image attachment backed by the project blob store."""
 
     attachment_id: str
-    source_path: Path
-    stored_path: Path
+    blob: BlobRecord
     mime_type: str
-    sha256: str
-    size_bytes: int
+    filename: str
+    source_path: Path | None = None
+    source_uri: str = ""
     note: str = ""
 
     def to_event_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "attachment_id": self.attachment_id,
-            "source_path": str(self.source_path),
-            "stored_path": str(self.stored_path),
+            "blob_id": self.blob.blob_id,
+            "blob_path": str(self.blob.path),
             "mime_type": self.mime_type,
-            "sha256": self.sha256,
-            "size_bytes": self.size_bytes,
+            "sha256": self.blob.sha256,
+            "size_bytes": self.blob.size_bytes,
+            "filename": self.filename,
+            "source_uri": self.source_uri,
             "note": self.note,
         }
+        if self.source_path is not None:
+            payload["source_path"] = str(self.source_path)
+        return payload
 
 
 class AttachmentStore:
-    """Store binary context attachments outside SQLite history."""
+    """Store image attachments as references to project blobs."""
 
-    def __init__(self, attachments_dir: Path) -> None:
-        self.attachments_dir = attachments_dir
-        self.attachments_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, blobs: BlobStore) -> None:
+        self.blobs = blobs
 
     def register_image(
         self,
@@ -58,6 +60,8 @@ class AttachmentStore:
         cwd: Path,
         thread_id: str,
         note: str = "",
+        mime_type: str | None = None,
+        owner_id: str | None = None,
     ) -> ImageAttachment:
         source = Path(path)
         if not source.is_absolute():
@@ -67,41 +71,109 @@ class AttachmentStore:
             raise FileNotFoundError(f"Image does not exist: {source}")
         if not source.is_file():
             raise ValueError(f"Image path is not a file: {source}")
-
-        mime_type = mimetypes.guess_type(str(source))[0] or "application/octet-stream"
-        if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
-            raise ValueError(f"Unsupported image type: {mime_type}")
-
-        content = source.read_bytes()
-        digest = hashlib.sha256(content).hexdigest()
-        suffix = source.suffix.lower() or _suffix_for_mime(mime_type)
-        attachment_id = new_id("img")
-        target_dir = self.attachments_dir / thread_id
-        target_dir.mkdir(parents=True, exist_ok=True)
-        stored_path = target_dir / f"{attachment_id}-{digest[:12]}{suffix}"
-        if not stored_path.exists():
-            shutil.copyfile(source, stored_path)
-
-        return ImageAttachment(
-            attachment_id=attachment_id,
+        resolved_mime = mime_type or mimetypes.guess_type(str(source))[0] or "application/octet-stream"
+        return self.register_image_bytes(
+            source.read_bytes(),
+            thread_id=thread_id,
+            note=note,
+            mime_type=resolved_mime,
+            filename=source.name,
             source_path=source,
-            stored_path=stored_path,
-            mime_type=mime_type,
-            sha256=digest,
-            size_bytes=len(content),
+            owner_id=owner_id,
+        )
+
+    def register_image_bytes(
+        self,
+        data: bytes,
+        *,
+        thread_id: str,
+        mime_type: str,
+        note: str = "",
+        filename: str = "",
+        source_path: Path | None = None,
+        source_uri: str = "",
+        owner_id: str | None = None,
+    ) -> ImageAttachment:
+        resolved_mime = str(mime_type or "application/octet-stream")
+        if resolved_mime not in SUPPORTED_IMAGE_MIME_TYPES:
+            raise ValueError(f"Unsupported image type: {resolved_mime}")
+        blob = self.blobs.put_bytes(data)
+        attachment_id = owner_id or new_id("img")
+        attachment = ImageAttachment(
+            attachment_id=attachment_id,
+            blob=blob,
+            mime_type=resolved_mime,
+            filename=filename or f"{attachment_id}{_suffix_for_mime(resolved_mime)}",
+            source_path=source_path,
+            source_uri=source_uri,
             note=note,
         )
+        self.blobs.add_ref(
+            blob.blob_id,
+            thread_id=thread_id,
+            owner_type="image_attachment",
+            owner_id=attachment.attachment_id,
+            mime_type=resolved_mime,
+            filename=attachment.filename,
+            source_uri=source_uri,
+            note=note,
+        )
+        return attachment
+
+    def register_image_blob(
+        self,
+        blob_id: str,
+        *,
+        thread_id: str,
+        mime_type: str,
+        note: str = "",
+        filename: str = "",
+        source_uri: str = "",
+        owner_id: str | None = None,
+    ) -> ImageAttachment:
+        resolved_mime = str(mime_type or "application/octet-stream")
+        if resolved_mime not in SUPPORTED_IMAGE_MIME_TYPES:
+            raise ValueError(f"Unsupported image type: {resolved_mime}")
+        info = self.blobs.info(blob_id)
+        attachment_id = owner_id or new_id("img")
+        blob = BlobRecord(
+            blob_id=str(info["blob_id"]),
+            sha256=str(info["sha256"]),
+            size_bytes=int(info["size_bytes"]),
+            path=Path(str(info["stored_path"])),
+            created_at=str(info["created_at"]),
+        )
+        attachment = ImageAttachment(
+            attachment_id=attachment_id,
+            blob=blob,
+            mime_type=resolved_mime,
+            filename=filename or f"{attachment_id}{_suffix_for_mime(resolved_mime)}",
+            source_uri=source_uri,
+            note=note,
+        )
+        self.blobs.add_ref(
+            blob.blob_id,
+            thread_id=thread_id,
+            owner_type="image_attachment",
+            owner_id=attachment.attachment_id,
+            mime_type=resolved_mime,
+            filename=attachment.filename,
+            source_uri=source_uri,
+            note=note,
+        )
+        return attachment
 
 
 def image_message_item(attachment: dict[str, Any]) -> dict[str, Any]:
     """Build a Responses-style user item containing an image attachment."""
+
     note = str(attachment.get("note") or "").strip()
-    path = Path(str(attachment["stored_path"]))
+    path = Path(str(attachment["blob_path"]))
     mime_type = str(attachment["mime_type"])
     data_url = image_data_url(path, mime_type)
     text = IMAGE_ATTACHMENT_TEXT_TEMPLATE.format(
         attachment_id=attachment.get("attachment_id"),
-        filename=path.name,
+        filename=attachment.get("filename") or path.name,
     )
     if note:
         text += "\n" + IMAGE_ATTACHMENT_NOTE_TEMPLATE.format(note=note)

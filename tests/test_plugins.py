@@ -11,9 +11,10 @@ import pytest
 
 from uv_agent.config import LoggingConfig, PluginConfigBlock, PluginsConfig
 from uv_agent.session import ThreadStore
-from uv_agent.plugins import EventBus, PluginManager, PluginManifest, SetupPlugin
+from uv_agent.plugins import EventBus, PluginManager, PluginManifest, ResourceData, SetupPlugin
 from uv_agent.plugins.context import PluginContextBroker
-from uv_agent.plugins.registry import PickerSource, RuntimeFunctionSpec, RuntimeNamespaceRegistry, UiRegistry
+from uv_agent.plugins.registry import ActionRegistry, PickerSource, RuntimeFunctionSpec, RuntimeNamespaceRegistry, UiRegistry
+from uv_agent.plugins.resources import ResourceRegistry, coerce_resource_data
 from uv_agent.plugins.storage import PluginStorage
 from uv_agent.plugins.xml import XmlContribution, render_contribution, render_update_envelope
 
@@ -608,6 +609,53 @@ def test_runtime_namespace_registry_validates_names_schemas_and_reserved_names()
         )
     with pytest.raises(ValueError):
         registry.register_namespace(plugin="p", namespace="demo", functions={"x": None})  # type: ignore[arg-type]
+
+
+def test_resource_registry_routes_longest_prefix_and_validates_payloads() -> None:
+    registry = ResourceRegistry()
+    registry.register(plugin="root", prefix="skill://", read=lambda uri: ResourceData(uri=uri, kind="text", text="root"))
+
+    async def read_plugin_resource(uri: str, *, max_bytes: int | None = None) -> dict[str, object]:
+        assert max_bytes == 10
+        return {"data": b"image-bytes", "mime_type": "image/png", "filename": "demo.png"}
+
+    registry.register(plugin="plugin", prefix="skill://plugin/demo/", read=read_plugin_resource)
+
+    assert registry.provider_for("skill://plugin/demo/image.png").plugin == "plugin"
+    assert registry.read("skill://project/demo").text == "root"
+    payload = coerce_resource_data(registry.read("skill://plugin/demo/image.png", max_bytes=10), uri="skill://plugin/demo/image.png")
+    assert payload.kind == "bytes"
+    assert payload.data == b"image-bytes"
+    assert payload.mime_type == "image/png"
+
+    with pytest.raises(ValueError):
+        registry.provider_for("Skill://project/demo")
+    with pytest.raises(ValueError):
+        ResourceData(uri="skill://bad", kind="text", text="x", data=b"y")
+    with pytest.raises(ValueError):
+        coerce_resource_data({"text": "x", "data": b"y"}, uri="skill://bad")
+
+
+@pytest.mark.asyncio
+async def test_action_registry_supports_optional_missing_and_rich_payload() -> None:
+    registry = ActionRegistry()
+
+    def handler(payload: dict[str, object], *, caller_plugin: str | None = None) -> dict[str, object]:
+        data = payload["data"]
+        assert isinstance(data, bytes)
+        return {"caller": caller_plugin, "size": len(data)}
+
+    registry.register(plugin="target", action_id="demo.bytes", handler=handler)
+
+    assert await registry.call("missing.action", missing="ignore") == {
+        "ok": False,
+        "missing": True,
+        "action_id": "missing.action",
+    }
+    assert await registry.call("demo.bytes", {"data": b"abc"}, caller_plugin="caller.plugin") == {
+        "caller": "caller.plugin",
+        "size": 3,
+    }
 
 
 def test_plugin_registry_accepts_localized_text_and_normalizes_picker_items() -> None:

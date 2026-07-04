@@ -68,7 +68,7 @@ Import the runtime facade inside managed scripts:
 ```python
 import uv_agent_runtime as rt
 
-content = rt.file("README.md").text()
+content = rt.get("README.md").text()
 result = rt.run("python3", "--version", check=True)
 rt.events.result(readme_bytes=len(content.encode()), python=result.stdout.strip())
 ```
@@ -78,12 +78,12 @@ Available helper groups:
 | Helper | Purpose |
 | --- | --- |
 | **File I/O** | |
-| `rt.file(path).read()` / `.text()` / `.json()` | Read text views, raw text, or JSON. |
-| `rt.file(path).write()` / `.write_json()` | Write full text or JSON while preserving file metadata when requested. |
-| `rt.file(path).info()` / `rt.path(path)` | Inspect a resolved path (existence, kind, size, relative-to-base check). |
+| `rt.get(path).read()` / `.text()` / `.json()` | Read text views, raw text, or JSON. |
+| `rt.get(path).write()` / `.write_json()` | Write full text or JSON while preserving file metadata when requested. |
+| `rt.get(path).info()` / `rt.path(path)` | Inspect a resolved path (existence, kind, size, relative-to-base check). |
 | **Text editing** | |
-| `rt.file(path).replace()` | Perform small targeted text replacements in an existing file. |
-| `rt.file(path).edit()` / `.insert_before()` / `.insert_after()` / `.delete_lines()` | Apply anchored line edits while preserving newline/BOM/final-newline metadata. |
+| `rt.get(path).replace()` | Perform small targeted text replacements in an existing file. |
+| `rt.get(path).edit()` / `.insert_before()` / `.insert_after()` / `.delete_lines()` | Apply anchored line edits while preserving newline/BOM/final-newline metadata. |
 | `rt.patch()` / `rt.apply_patch()` / `rt.dry_run_patch()` | Apply or validate patch-envelope / unified-diff edits. |
 | `rt.convert_patch()` / `rt.diff()` | Convert patch formats or generate unified diffs. |
 | **File snapshots & transactions** | |

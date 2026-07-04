@@ -3691,8 +3691,10 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "SearchResults(CollectionResult[Match])" in turn_context
     assert "ThreadDetailResult" in turn_context
     assert "McpClient.initialize()" not in turn_context
-    assert '<function name="file">' in turn_context
-    assert "rt.file(path: str | Path) -> File" in turn_context
+    assert '<function name="file">' not in turn_context
+    assert '<function name="get">' in turn_context
+    assert "rt.get(target: str | Path, *, max_bytes: int | None = None) -> File | Resource" in turn_context
+    assert "Resource.bytes() -> bytes" in turn_context
     assert "File.read(" in turn_context
     assert "File.write(" in turn_context
     assert "File.replace(" in turn_context
@@ -3778,7 +3780,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'rt.symbols(language="python", name="calculate_total"' in turn_context
     assert "rt.restore(snapshot)" in turn_context
     assert "验证失败：已恢复事务快照" in turn_context
-    assert "rt.file(symbol.path).insert_after" in turn_context
+    assert "rt.get(symbol.path).insert_after" in turn_context
     assert '<example name="anti-pattern-one-helper-per-call">' in turn_context
     assert "不要把一个清晰的工作单元拆成多次 run_python" in turn_context
     assert "每次只调用一个 helper" in turn_context
@@ -4817,7 +4819,7 @@ def test_turn_context_text_has_stable_order_and_prefix(tmp_path: Path) -> None:
     assert "<agent_context_update" not in text
     assert text.index("<agent_runtime_environment>") < text.index("<agent_runtime_helpers>")
     assert "<agent_model_levels>" not in text
-    assert text.index('name="file"') < text.index('name="search"')
+    assert text.index('name="get"') < text.index('name="search"')
     assert text.index('name="search"') < text.index('name="files"')
     assert text.index('name="files"') < text.index('name="symbols"')
     assert text.index('name="symbols"') < text.index('name="query"')
@@ -4825,7 +4827,9 @@ def test_turn_context_text_has_stable_order_and_prefix(tmp_path: Path) -> None:
     assert text.index('name="run"') < text.index('name="deps"')
     assert text.index('name="deps"') < text.index('name="threads"')
     assert text.index('name="threads"') < text.index('name="events"')
-    assert text.index('name="events"') < text.index('name="misc"')
+    assert text.index('name="events"') < text.index('name="blob"')
+    assert text.index('name="blob"') < text.index('name="ui"')
+    assert text.index('name="ui"') < text.index('name="misc"')
     assert 'name="mcp"' not in text
     assert 'name="workflow"' not in text
     assert 'name="scheduler"' not in text

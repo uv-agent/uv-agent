@@ -3,21 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape as xml_escape
 from pathlib import Path
+from urllib.parse import quote
 
 SKILL_DEFAULT_DESCRIPTION = "无描述"
-SKILL_ENTRY_TEMPLATE = '<skill name="{name}" scope="{scope}" path="{path}">{description}</skill>'
+SKILL_ENTRY_TEMPLATE = '<skill name="{name}" uri="{uri}">{description}</skill>'
 SKILLS_NONE_DISCOVERED = "未发现。"
+
 
 @dataclass(frozen=True)
 class SkillSummary:
     name: str
-    path: Path
+    uri: str
     description: str
-    scope: str
+    path: Path | None = None
 
     @property
-    def key(self) -> tuple[str, str, str]:
-        return (self.scope, self.name, str(self.path))
+    def key(self) -> tuple[str, str]:
+        return (self.uri, self.name)
 
 
 def discover_skills(project_root: Path, *, home: Path | None = None) -> list[SkillSummary]:
@@ -36,29 +38,31 @@ def discover_skills(project_root: Path, *, home: Path | None = None) -> list[Ski
             if resolved in seen:
                 continue
             seen.add(resolved)
+            name = skill_file.parent.name
             skills.append(
                 SkillSummary(
-                    name=skill_file.parent.name,
+                    name=name,
+                    uri=skill_uri(scope, name),
                     path=resolved,
                     description=extract_description(skill_file),
-                    scope=scope,
                 )
             )
     return skills
 
 
-def extract_description(path: Path) -> str:
-    """Extract a compact description from a SKILL.md file.
+def skill_uri(scope: str, *segments: str) -> str:
+    encoded = "/".join(quote(str(segment), safe="") for segment in segments if str(segment))
+    return f"skill://{scope}/{encoded}" if encoded else f"skill://{scope}"
 
-    SKILL.md may carry a YAML frontmatter block (Anthropic agent skills style)
-    whose ``description`` field is the authoritative summary; if present, it
-    wins. Otherwise we fall back to the first non-heading prose line so plain
-    SKILL.md files without frontmatter still surface a useful description.
-    """
-    text = path.read_text(encoding="utf-8")
+
+def extract_description(path: Path) -> str:
+    return extract_description_text(path.read_text(encoding="utf-8"))
+
+
+def extract_description_text(text: str) -> str:
+    """Extract a compact description from SKILL.md text."""
     lines = text.splitlines()
     if lines and lines[0].strip() == "---":
-        # Walk to the closing fence to scope the frontmatter parse.
         end = next(
             (idx for idx in range(1, len(lines)) if lines[idx].strip() == "---"),
             None,
@@ -81,15 +85,8 @@ def extract_description(path: Path) -> str:
 
 
 def _read_frontmatter_description(lines: list[str]) -> str:
-    """Return the ``description`` field from a YAML-like frontmatter block.
-
-    We deliberately implement a tiny ad-hoc reader instead of pulling in PyYAML:
-    skill frontmatter is plain ``key: value`` plus optional multi-line block
-    scalars (``description: |`` / ``>``), which is trivial to parse and keeps
-    the project dependency-free.
-    """
     iterator = iter(enumerate(lines))
-    for idx, raw in iterator:
+    for _idx, raw in iterator:
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -98,15 +95,12 @@ def _read_frontmatter_description(lines: list[str]) -> str:
             continue
         value = value.strip()
         if value in {"|", ">", "|-", ">-", "|+", ">+"}:
-            # Block scalar: collect subsequent indented lines.
             block: list[str] = []
             for _, follow in iterator:
                 if follow and not follow[:1].isspace():
                     break
                 block.append(follow.strip())
-            joined = " ".join(part for part in block if part).strip()
-            return joined
-        # Plain scalar; trim surrounding quotes if any.
+            return " ".join(part for part in block if part).strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
             value = value[1:-1]
         return value
@@ -114,20 +108,15 @@ def _read_frontmatter_description(lines: list[str]) -> str:
 
 
 def render_skill_summary(skills: list[SkillSummary]) -> str:
-    """Render discovered skills for the system prompt."""
     if not skills:
         return SKILLS_NONE_DISCOVERED
-    lines = []
-    for skill in skills:
-        lines.append(render_skill_entry(skill))
-    return "\n".join(lines)
+    return "\n".join(render_skill_entry(skill) for skill in skills)
 
 
 def render_skill_entry(skill: SkillSummary) -> str:
     return SKILL_ENTRY_TEMPLATE.format(
         name=_xml_attr(skill.name),
-        scope=_xml_attr(skill.scope),
-        path=_xml_attr(skill.path),
+        uri=_xml_attr(skill.uri),
         description=_xml_text(skill.description),
     )
 

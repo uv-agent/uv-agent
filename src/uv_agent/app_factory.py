@@ -11,7 +11,7 @@ from uv_agent.telemetry import TelemetryStore
 from uv_agent.model import UnifiedModelClient
 from uv_agent.paths import (
     ensure_project_local_dir,
-    project_attachments_dir,
+    project_blobs_dir,
     project_run_scripts_dir,
     project_scriptenv_dir,
     project_state_dir,
@@ -60,17 +60,16 @@ def create_engine(
     thread_store = ThreadStore(state_dir, host_events=host_events)
     model_client = UnifiedModelClient(config)
     logger.debug(
-        "Engine components initialized runner_scripts=%s scriptenv=%s attachments=%s",
+        "Engine components initialized runner_scripts=%s scriptenv=%s blobs=%s",
         project_run_scripts_dir(root) if data_dir is None else state_dir / "runner" / "scripts",
         project_scriptenv_dir(root) if data_dir is None else state_dir / "runner" / "scriptenv",
-        project_attachments_dir(root) if data_dir is None else state_dir / "attachments",
+        project_blobs_dir(root) if data_dir is None else state_dir / "blobs",
     )
     return AgentEngine(
         config=config,
         model_client=model_client,
         runner=runner,
         thread_store=thread_store,
-        attachments_dir=project_attachments_dir(root) if data_dir is None else state_dir / "attachments",
         project_root=root,
         config_loader=lambda: load_config(root),
         host_events=host_events,

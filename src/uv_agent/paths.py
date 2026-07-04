@@ -65,8 +65,8 @@ def project_state_dir(project_root: Path) -> Path:
     return uv_agent_home() / "projects" / project_id(project_root)
 
 
-def project_attachments_dir(project_root: Path) -> Path:
-    return project_state_dir(project_root) / "attachments"
+def project_blobs_dir(project_root: Path) -> Path:
+    return project_state_dir(project_root) / "blobs"
 
 
 def project_runner_dir(project_root: Path) -> Path:

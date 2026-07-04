@@ -26,6 +26,7 @@ from .registry import (
     RuntimeNamespaceSpec,
     UiRegistry,
 )
+from .resources import ResourceRegistry
 from .storage import PluginStorage
 from .xml import XmlContribution, render_contribution
 
@@ -367,6 +368,20 @@ class PluginRuntimeAPI:
         return self._registry.register_namespace(plugin=self._plugin, namespace=namespace, **kwargs)
 
 
+class PluginResourceAPI:
+    def __init__(self, *, plugin: str, registry: ResourceRegistry) -> None:
+        self._plugin = plugin
+        self._registry = registry
+
+    def register(self, *, prefix: str, read: Callable[..., Any]) -> PluginRegistration:
+        provider = self._registry.register(plugin=self._plugin, prefix=prefix, read=read)
+
+        def dispose() -> None:
+            self._registry.unregister(provider.prefix)
+
+        return PluginRegistration(dispose)
+
+
 class PluginActionAPI:
     def __init__(
         self,
@@ -394,12 +409,27 @@ class PluginActionAPI:
             "schema": spec.schema,
         }
 
-    async def call(self, action_id: str, payload: dict[str, Any] | None = None, *, context: Any = None) -> Any:
+    async def call(
+        self,
+        action_id: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        context: Any = None,
+        missing: str = "error",
+    ) -> Any:
         spec = self._registry.get(action_id)
         if spec is None:
+            if missing == "ignore":
+                return {"ok": False, "missing": True, "action_id": action_id}
             raise LookupError(f"Unknown action: {action_id}")
         action_context = context if context is not None else self._context_resolver(spec.plugin)
-        return await self._registry.call(action_id, payload or {}, context=action_context)
+        return await self._registry.call(
+            action_id,
+            payload or {},
+            context=action_context,
+            missing=missing,  # type: ignore[arg-type]
+            caller_plugin=self._plugin,
+        )
 
 
 class PluginCommandAPI:
@@ -532,6 +562,7 @@ class PluginContext:
         events: EventBus,
         logger: logging.Logger,
         runtime_registry: RuntimeNamespaceRegistry,
+        resource_registry: ResourceRegistry,
         action_registry: ActionRegistry,
         command_registry: CommandRegistry,
         ui_registry: UiRegistry,
@@ -554,6 +585,7 @@ class PluginContext:
         self.events = events
         self.logger = logger
         self.runtime = PluginRuntimeAPI(plugin=manifest.id, registry=runtime_registry)
+        self.resources = PluginResourceAPI(plugin=manifest.id, registry=resource_registry)
         self.actions = PluginActionAPI(plugin=manifest.id, registry=action_registry, context_resolver=action_context_resolver)
         self.commands = PluginCommandAPI(plugin=manifest.id, registry=command_registry)
         self.ui = PluginUiAPI(plugin=manifest.id, registry=ui_registry)

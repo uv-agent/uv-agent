@@ -28,7 +28,7 @@ The composer is multi-line.
 | `@` | Open file mention search. |
 | `@@` | Open thread mention search. |
 | `@mcp:` followed by text | Insert an MCP server mention from configured declarations. |
-| `@skill:` followed by text | Insert a skill mention from discovered skills. |
+| `@skill://` followed by text | Insert a skill mention from discovered skills. |
 
 Editing text that already starts with `/` does not reopen the command palette.
 Use `Ctrl+O` when you want to open the command palette explicitly.

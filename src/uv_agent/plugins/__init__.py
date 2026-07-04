@@ -22,6 +22,7 @@ from .registry import (
     TranscriptEventSpec,
     UiRegistry,
 )
+from .resources import ResourceData, ResourceNotFoundError, UnknownResourceProviderError
 
 __all__ = [
     "ActionRegistry",
@@ -48,10 +49,13 @@ __all__ = [
     "RuntimeFunctionSpec",
     "RuntimeNamespaceRegistry",
     "RuntimeNamespaceSpec",
+    "ResourceData",
+    "ResourceNotFoundError",
     "SetupPlugin",
     "SubmittedTurn",
     "TranscriptEventSpec",
     "UiRegistry",
+    "UnknownResourceProviderError",
     "UserInput",
     "localize_text",
 ]
