@@ -30,6 +30,9 @@ MANIFEST = PluginManifest(
     display_name={"zh": "MCP", "en": "MCP"},
     description={"zh": "发现声明的 MCP servers，并暴露 rt.mcp runtime namespace。", "en": "Discover declared MCP servers and expose the rt.mcp runtime namespace."},
     builtin=True,
+    default_enabled=False,
+    deprecated=True,
+    deprecation_message="builtin.mcp is deprecated and will be removed in a future uv-agent release; use installable MCP skills instead.",
     priority=200,
     capabilities=("runtime_namespace", "context", "ui"),
 )

@@ -114,7 +114,7 @@ async def test_builtin_plugins_publish_context_and_runtime_namespaces(monkeypatc
         encoding="utf-8",
     )
     manager = PluginManager(
-        config=PluginsConfig(),
+        config=PluginsConfig(entries={"builtin.mcp": PluginConfigBlock(enabled=True)}),
         project_root=tmp_path,
         events=EventBus(),
         helper_registry=RuntimeNamespaceRegistry(),
@@ -130,7 +130,7 @@ async def test_builtin_plugins_publish_context_and_runtime_namespaces(monkeypatc
         assert states["builtin.goal"] == "started"
         assert states["builtin.worktree"] == "started"
         assert states["builtin.skills"] == "started"
-        assert states["builtin.mcp"] == "started"
+        assert states["builtin.mcp"] == "warning"
         assert states["builtin.subagent"] == "started"
         assert states["builtin.workflow"] == "disabled"
         assert states["builtin.scheduler"] == "started"
@@ -172,6 +172,56 @@ async def test_builtin_plugins_publish_context_and_runtime_namespaces(monkeypatc
     finally:
         await manager.stop()
 
+
+@pytest.mark.asyncio
+async def test_builtin_mcp_is_disabled_by_default_and_warns_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from uv_agent.builtin.mcp import plugin as mcp_plugin
+
+    monkeypatch.setattr(
+        "uv_agent.plugins.manager.importlib.metadata.entry_points",
+        lambda group: [EntryPoint("builtin_mcp", mcp_plugin)] if group == "uv_agent.plugins" else [],
+    )
+
+    manager = PluginManager(
+        config=PluginsConfig(),
+        project_root=tmp_path,
+        events=EventBus(),
+        helper_registry=RuntimeNamespaceRegistry(),
+        submitter=None,
+        thread_store=None,
+        user_state_dir=tmp_path / "state",
+    )
+    await manager.start()
+    try:
+        status = {record.id: record for record in manager.records}["builtin.mcp"]
+        assert status.state == "disabled"
+        assert status.deprecated is True
+    finally:
+        await manager.stop()
+
+    warnings: list[dict[str, object]] = []
+    enabled_manager = PluginManager(
+        config=PluginsConfig(entries={"builtin.mcp": PluginConfigBlock(enabled=True)}),
+        project_root=tmp_path,
+        events=EventBus(),
+        helper_registry=RuntimeNamespaceRegistry(),
+        submitter=None,
+        thread_store=None,
+        user_state_dir=tmp_path / "state-enabled",
+    )
+    enabled_manager.events.subscribe("plugin.warning", lambda event: warnings.append(event))
+    await enabled_manager.start()
+    try:
+        status = {record.id: record for record in enabled_manager.records}["builtin.mcp"]
+        assert status.state == "warning"
+        assert status.error_type == "DeprecatedPlugin"
+        assert "deprecated" in status.message.lower()
+        assert warnings and any(warning.get("deprecated") for warning in warnings)
+    finally:
+        await enabled_manager.stop()
 
 @pytest.mark.asyncio
 async def test_builtin_subagent_runtime_helper_creates_child_thread(
