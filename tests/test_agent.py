@@ -3800,21 +3800,21 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "与标准库代码和控制流组合使用" in turn_context
     assert "适合时优先使用 helpers" in turn_context
     assert "newline style、BOM、final newline" in turn_context
-    assert "按任务选择：" in turn_context
-    assert "discovery=rt.files/rt.search/rt.symbols/rt.query" in turn_context
+    assert "找文件、搜索内容、定位符号" in turn_context
+    assert "rt.files、rt.search、rt.symbols、rt.query" in turn_context
     assert "rt.search 默认精确文本" in turn_context
     assert '正则用 mode="regex"' in turn_context
     assert "语言/扩展名别名用 types" in turn_context
-    assert "edit=用 File.replace 替换唯一小段文本" in turn_context
-    assert "完整文件或生成的内容用 File.write" in turn_context
+    assert "替换唯一小段文本用 File.replace" in turn_context
+    assert "写入完整文件或生成内容用 File.write" in turn_context
     assert "普通外部命令（包括" in turn_context
     assert "包括 docs 或插件上下文中展示的 shell commands" in turn_context
     assert "优先用 `rt.run(...)` 而不是 raw subprocess" in turn_context
     assert "自定义进程控制" in turn_context
-    assert "thread history=rt.threads.list/view/detail" in turn_context
+    assert "查看线程历史用 rt.threads.list/view/detail" in turn_context
     assert "数据量较大时，优先提取字段、行范围、head/tail 或生成摘要" in turn_context
     assert "不要猜测 helper signatures" in turn_context
-    assert "Search、symbol 和 capture 结果可直接 `.view()`" in turn_context
+    assert "搜索结果、symbol 结果和 capture 结果可直接调用 `.view()`" in turn_context
     assert '默认 mode="text"' in turn_context
     assert "Prefer the smallest helper that directly matches the task" not in turn_context
     assert "uv-agent patch envelope shown below" not in turn_context

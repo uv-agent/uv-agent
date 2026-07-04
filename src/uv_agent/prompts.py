@@ -363,12 +363,14 @@ import uv_agent_runtime as rt
 <helper_selection>
 <rule>列出的 helpers 是普通 Python 对象，可在同一脚本中与标准库代码和控制流组合使用；在脚本内用标准库（os、json等模块）做衔接逻辑；场景适合时优先使用 helpers，尤其是处理仓库文本的 `rt.file(...)`，因为它会保留 newline style、BOM、final newline、line counts 和行范围视图等元数据。</rule>
 <rule>修改文件时优先使用 rt.file(...) 提供的 File 方法（read/write/replace/edit/insert_after/insert_before/delete_lines 等），避免在脚本里手写 open()/os.write 等原始文件操作，降低误写风险。</rule>
-<rule>按任务选择：discovery=rt.files/rt.search/rt.symbols/rt.query（rt.search 默认精确文本；正则用 mode="regex"；容错行搜索用 mode="fuzzy"；路径 pattern 用 globs；语言/扩展名别名用 types）；reading=rt.file(path).read；edit=用 File.replace 替换唯一小段文本，用 File.edit/insert_after/insert_before/delete_lines 处理 anchored ranges/inserts；完整文件或生成的内容用 File.write；thread history=rt.threads.list/view/detail；dependencies=import 前使用 rt.deps.add。</rule>
+<rule>找文件、搜索内容、定位符号或运行自定义 tree-sitter 查询时，使用 rt.files、rt.search、rt.symbols、rt.query。rt.search 默认精确文本搜索，正则用 mode="regex"，容错行搜索用 mode="fuzzy"，路径过滤用 globs，语言/扩展名别名用 types。搜索结果、symbol 结果和 capture 结果可直接调用 `.view()` 查看上下文。</rule>
+<rule>读取文件内容用 rt.file(path).read，写入完整文件或生成内容用 File.write。helpers 返回的路径是绝对路径，rel_path 仅用于显示。</rule>
+<rule>替换唯一小段文本用 File.replace，处理 anchored ranges 或插入/删除用 File.edit/insert_after/insert_before/delete_lines。</rule>
+<rule>查看线程历史用 rt.threads.list/view/detail，添加第三方依赖在 import 前使用 rt.deps.add。</rule>
 <rule>普通外部命令（包括 docs 或插件上下文中展示的 shell commands），优先用 `rt.run(...)` 而不是 raw subprocess；只有需要自定义进程控制时才使用 raw subprocess。</rule>
 <rule>脚本需要用户在外部完成授权、确认或等待时，用 `rt.ui.message(...)` 发送 Markdown 提示到用户界面。</rule>
 <rule>数据量较大时，优先提取字段、行范围、head/tail 或生成摘要。</rule>
 <rule>不要猜测 helper signatures；当精确签名重要时，检查 uv_agent_runtime 实现。</rule>
-<rule>Search、symbol 和 capture 结果可直接 `.view()`；路径结果返回绝对路径，rel_path 只用于显示。</rule>
 </helper_selection>
 
 <common_types>
