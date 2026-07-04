@@ -531,21 +531,6 @@ rt.restore(snapshot: Snapshot) -> list[str]
 rt.transaction(paths: Sequence[str | Path] | None = None, *, root: str | Path = ".") -> Iterator[Snapshot]</signature>
 </function>
 
-<usage_pattern>
-<rule>runtime helpers 是脚本中使用的普通 Python 对象，不是独立的工具调用；不要仅因为下一步要用另一个 helper 就停止当前脚本。</rule>
-<rule>对方向已经明确的后续步骤，用 Python 编排搜索、读取、编辑、命令、验证和回退；根据 helper 结果分支，用 Python libraries 解析结构化输出，并在最后收集一份摘要。</rule>
-<rule>用 Python 方式替代 shell 习惯：用 `rt.file(path).read()` 代替 cat，用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find，用 `rt.run(...)` 代替 raw subprocess。</rule>
-</usage_pattern>
-
-<helper_selection>
-<rule>列出的 helpers 是普通 Python 对象，可以与标准库代码和控制流组合使用；适合时优先使用 helpers，尤其是需要保留 newline style、BOM、final newline 的文件读写。</rule>
-<rule>找文件、搜索内容、定位符号优先用 rt.files、rt.search、rt.symbols、rt.query；rt.search 默认精确文本，默认 mode="text"，正则用 mode="regex"，语言/扩展名别名用 types。</rule>
-<rule>替换唯一小段文本用 File.replace；按行改已确认范围用 File.edit/insert_before/insert_after/delete_lines；写入完整文件或生成内容用 File.write。</rule>
-<rule>普通外部命令（包括 docs 或插件上下文中展示的 shell commands）优先用 `rt.run(...)` 而不是 raw subprocess；只有需要自定义进程控制时才直接用 subprocess。</rule>
-<rule>查看线程历史用 rt.threads.list/view/detail；数据量较大时，优先提取字段、行范围、head/tail 或生成摘要；不要猜测 helper signatures，以上签名就是可用接口。</rule>
-<rule>搜索结果、symbol 结果和 capture 结果可直接调用 `.view()` 读取附近上下文。</rule>
-</helper_selection>
-
 <example name="round-1-find">
 阶段 1 — 查找并理解。并行搜索多个 pattern、一次读取多个相关文件，在决定修改前收集上下文。（参考示例；根据实际任务调整 searches、globs 和 reads。）
 ```python
