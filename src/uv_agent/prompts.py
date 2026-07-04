@@ -354,11 +354,6 @@ RUNTIME_HELPERS_CONTEXT = """<agent_runtime_helpers>
 import uv_agent_runtime as rt
 </imports>
 
-<instructions>
-以下是内置的runtime helpers，查看例子，理解以下函数、类是如何使用的，在脚本中优先使用它们并组合使用来完成任务
-一些插件提供的 helper 可能在某些场景下更加便利，注意搭配使用内置和不同插件 helper
-</instructions>
-
 <common_types>
 <type name="CollectionResult[T]">
 <signature>class CollectionResult[T]:
@@ -530,6 +525,11 @@ rt.snapshot(paths: Sequence[str | Path] | None = None, *, root: str | Path = "."
 rt.restore(snapshot: Snapshot) -> list[str]
 rt.transaction(paths: Sequence[str | Path] | None = None, *, root: str | Path = ".") -> Iterator[Snapshot]</signature>
 </function>
+
+<instructions>
+以上是内置的runtime helpers，现在查看例子，理解函数、类是如何使用的，在脚本中优先使用它们并组合使用来完成任务
+一些插件提供的 helper 可能在某些场景下更加便利，注意搭配使用内置和不同插件 helper
+</instructions>
 
 <example name="round-1-find">
 阶段 1 — 查找并理解。并行搜索多个 pattern、一次读取多个相关文件，在决定修改前收集上下文。（参考示例；根据实际任务调整 searches、globs 和 reads。）
