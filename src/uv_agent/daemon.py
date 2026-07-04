@@ -14,14 +14,37 @@ from typing import Any
 from uv_agent.app_factory import create_engine
 from uv_agent.ids import new_id
 from uv_agent.logging_config import active_log_file
+from uv_agent.paths import default_daemon_workspace_dir
 from uv_agent.state_db import connect_state_db
 
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_DAEMON_AGENTS_MD = """# uv-agent Daemon Workspace
+
+This is the default persistent workspace for `uv-agent daemon`.
+
+- Keep durable notes, plans, downloaded references, and generated artifacts organized in named subdirectories.
+- Before creating a new top-level file or directory, check the existing layout and reuse a suitable location.
+- Do not put throwaway scratch files, temporary scripts, build caches, command output dumps, or intermediate downloads in this workspace.
+- For temporary work, use the operating system temp directory, the run_python state directory, or another explicit temporary location, and clean it up when done.
+- Keep this `AGENTS.md` updated when the workspace organization policy changes.
+"""
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def ensure_daemon_workspace(project_root: Path | None = None) -> Path:
+    """Prepare the daemon workspace and seed its default instructions."""
+
+    workspace = (project_root or default_daemon_workspace_dir()).expanduser().resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    agents_path = workspace / "AGENTS.md"
+    if not agents_path.exists():
+        agents_path.write_text(DEFAULT_DAEMON_AGENTS_MD, encoding="utf-8")
+    return workspace
 
 
 @dataclass

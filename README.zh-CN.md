@@ -276,6 +276,10 @@ uv-agent 会把运行日志写到 project state 的日志目录，通常是
 daemon 会在 project state 中获取 lease 并定期 heartbeat，确保同一工作区只有一个活跃
 host 负责这些集成。需要替换旧实例或清理 stale lease 时使用 `--replace`。
 
+daemon 模式默认使用 `~/.uv-agent/workspace` 作为持久工作区；如果其中还没有
+`AGENTS.md`，启动时会创建一份默认说明。可以用 `--workspace <path>` 指定其他
+daemon 工作区。
+
 ```powershell
 uv-agent daemon --replace
 ```

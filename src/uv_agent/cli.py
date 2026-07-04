@@ -38,6 +38,11 @@ def main() -> None:
     parser.add_argument("--no-stream", action="store_true", help="Only print the final answer in workflow-node mode.")
     parser.add_argument("--replace", action="store_true", help="Replace an existing daemon for this project state.")
     parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Workspace directory for daemon mode (default: ~/.uv-agent/workspace).",
+    )
+    parser.add_argument(
         "--log-level",
         default=None,
         help="Override uv-agent log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
@@ -50,11 +55,13 @@ def main() -> None:
         UvAgentApp(project_root=Path.cwd(), log_level=args.log_level).run()
         return
     if args.command == "daemon":
-        from uv_agent.daemon import run_daemon
+        from uv_agent.daemon import ensure_daemon_workspace, run_daemon
+
+        project_root = ensure_daemon_workspace(Path(args.workspace) if args.workspace else None)
 
         asyncio.run(
             run_daemon(
-                project_root=Path.cwd(),
+                project_root=project_root,
                 data_dir=Path(args.project_state_dir) if args.project_state_dir else None,
                 replace=args.replace,
                 log_level=args.log_level,

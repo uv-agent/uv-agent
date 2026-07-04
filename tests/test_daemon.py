@@ -1,12 +1,52 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
-from uv_agent.daemon import DaemonLease, _pid_alive
+from uv_agent.cli import main
+from uv_agent.daemon import DEFAULT_DAEMON_AGENTS_MD, DaemonLease, _pid_alive, ensure_daemon_workspace
 from uv_agent.state_db import connect_state_db
+
+
+def test_daemon_workspace_defaults_to_user_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+
+    workspace = ensure_daemon_workspace()
+
+    assert workspace == (tmp_path / "home" / "workspace").resolve()
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == DEFAULT_DAEMON_AGENTS_MD
+
+
+def test_daemon_workspace_does_not_overwrite_existing_agents(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    agents = workspace / "AGENTS.md"
+    agents.parent.mkdir(parents=True)
+    agents.write_text("custom\n", encoding="utf-8")
+
+    assert ensure_daemon_workspace(workspace) == workspace.resolve()
+    assert agents.read_text(encoding="utf-8") == "custom\n"
+
+
+def test_cli_daemon_uses_default_workspace(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+
+    async def fake_run_daemon(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("uv_agent.daemon.run_daemon", fake_run_daemon)
+    monkeypatch.setattr(sys, "argv", ["uv-agent", "daemon", "--replace"])
+
+    main()
+
+    workspace = (tmp_path / "home" / "workspace").resolve()
+    assert captured["project_root"] == workspace
+    assert captured["replace"] is True
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == DEFAULT_DAEMON_AGENTS_MD
 
 
 def test_daemon_lease_rejects_fresh_owner(tmp_path):

@@ -17,6 +17,12 @@ def uv_agent_home() -> Path:
     return (Path.home() / ".uv-agent").resolve()
 
 
+def default_daemon_workspace_dir() -> Path:
+    """Return the default persistent workspace used by daemon mode."""
+
+    return uv_agent_home() / "workspace"
+
+
 def project_local_dir(project_root: Path) -> Path:
     """Return the project-local uv-agent directory used for overrides only."""
     return project_root.resolve() / ".uv-agent"
