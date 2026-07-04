@@ -365,7 +365,7 @@ import uv_agent_runtime as rt
 <rule>修改文件时优先使用 rt.file(...) 提供的 File 方法（read/write/replace/edit/insert_after/insert_before/delete_lines 等），避免在脚本里手写 open()/os.write 等原始文件操作，降低误写风险。</rule>
 <rule>按任务选择：discovery=rt.files/rt.search/rt.symbols/rt.query（rt.search 默认精确文本；正则用 mode="regex"；容错行搜索用 mode="fuzzy"；路径 pattern 用 globs；语言/扩展名别名用 types）；reading=rt.file(path).read；edit=用 File.replace 替换唯一小段文本，用 File.edit/insert_after/insert_before/delete_lines 处理 anchored ranges/inserts；完整文件或生成的内容用 File.write；thread history=rt.threads.list/view/detail；dependencies=import 前使用 rt.deps.add。</rule>
 <rule>普通外部命令（包括 docs 或插件上下文中展示的 shell commands），优先用 `rt.run(...)` 而不是 raw subprocess；只有需要自定义进程控制时才使用 raw subprocess。</rule>
-<rule>脚本需要用户在外部完成授权、确认或等待时，用 `rt.ui.message(...)` 发送 Markdown 提示到用户界面；不要把这类提示只写入 stdout 或等脚本结束后再说明。</rule>
+<rule>脚本需要用户在外部完成授权、确认或等待时，用 `rt.ui.message(...)` 发送 Markdown 提示到用户界面。</rule>
 <rule>数据量较大时，优先提取字段、行范围、head/tail 或生成摘要。</rule>
 <rule>不要猜测 helper signatures；当精确签名重要时，检查 uv_agent_runtime 实现。</rule>
 <rule>Search、symbol 和 capture 结果可直接 `.view()`；路径结果返回绝对路径，rel_path 只用于显示。</rule>
@@ -523,7 +523,7 @@ rt.events.look_at(path: str | Path, *, note: str = "") -> dict[str, Any]
 rt.look_at(path: str | Path, *, note: str = "") -> dict[str, Any]</signature>
 </function>
 <function name="ui">
-<description>向用户界面发送运行中可见的 Markdown 消息；适合脚本等待用户授权、外部确认或需要展示链接时使用。消息会作为 UI 事件发布，当前 TUI 和后续 UI 插件都可以消费。</description>
+<description>向用户界面发送运行中可见的 Markdown 消息；适合脚本等待用户授权、外部确认或需要展示链接时使用。消息会作为 UI 事件发布。</description>
 <signature>rt.ui.message(markdown: str) -> dict[str, Any]</signature>
 </function>
 <function name="misc">
