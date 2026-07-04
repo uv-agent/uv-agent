@@ -335,7 +335,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 <capability_use>
 <rule>如果某项能力能减少步骤、节省时间或降低风险，就优先使用，包括：runtime helpers、插件提供的上下文能力，以及安装到共享脚本虚拟环境中、目标明确的第三方包。</rule>
 <rule>在成熟领域，临时引入可靠的第三方依赖往往比手写实现更安全、更高效。</rule>
-<rule>只要能安全地节省时间，就并发运行相互独立的任务，包括插件提供的后台能力或 run_python 内的独立 helper operations；在 Python 中可使用 asyncio、concurrent.futures 和 threading 等标准设施。按确定顺序收集结果，并让相互依赖的任务以及对同一文件的写入保持顺序执行。</rule>
+<rule>可以并发运行相互独立的任务，包括插件提供的后台能力或 run_python 内的独立 helper operations；在 Python 中可使用 asyncio、concurrent.futures 和 threading 等标准设施。按确定顺序收集结果，并让相互依赖的任务以及对同一文件的写入保持顺序执行。</rule>
 </capability_use>
 
 <mentions>
