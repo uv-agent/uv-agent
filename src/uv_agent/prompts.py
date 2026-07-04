@@ -531,40 +531,61 @@ rt.restore(snapshot: Snapshot) -> list[str]
 rt.transaction(paths: Sequence[str | Path] | None = None, *, root: str | Path = ".") -> Iterator[Snapshot]</signature>
 </function>
 
+<usage_pattern>
+<rule>runtime helpers 是脚本中使用的普通 Python 对象，不是独立的工具调用；不要仅因为下一步要用另一个 helper 就停止当前脚本。</rule>
+<rule>对方向已经明确的后续步骤，用 Python 编排搜索、读取、编辑、命令、验证和回退；根据 helper 结果分支，用 Python libraries 解析结构化输出，并在最后收集一份摘要。</rule>
+<rule>用 Python 方式替代 shell 习惯：用 `rt.file(path).read()` 代替 cat，用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find，用 `rt.run(...)` 代替 raw subprocess。</rule>
+</usage_pattern>
+
+<helper_selection>
+<rule>列出的 helpers 是普通 Python 对象，可以与标准库代码和控制流组合使用；适合时优先使用 helpers，尤其是需要保留 newline style、BOM、final newline 的文件读写。</rule>
+<rule>找文件、搜索内容、定位符号优先用 rt.files、rt.search、rt.symbols、rt.query；rt.search 默认精确文本，默认 mode="text"，正则用 mode="regex"，语言/扩展名别名用 types。</rule>
+<rule>替换唯一小段文本用 File.replace；按行改已确认范围用 File.edit/insert_before/insert_after/delete_lines；写入完整文件或生成内容用 File.write。</rule>
+<rule>普通外部命令（包括 docs 或插件上下文中展示的 shell commands）优先用 `rt.run(...)` 而不是 raw subprocess；只有需要自定义进程控制时才直接用 subprocess。</rule>
+<rule>查看线程历史用 rt.threads.list/view/detail；数据量较大时，优先提取字段、行范围、head/tail 或生成摘要；不要猜测 helper signatures，以上签名就是可用接口。</rule>
+<rule>搜索结果、symbol 结果和 capture 结果可直接调用 `.view()` 读取附近上下文。</rule>
+</helper_selection>
+
 <example name="round-1-find">
 阶段 1 — 查找并理解。并行搜索多个 pattern、一次读取多个相关文件，在决定修改前收集上下文。（参考示例；根据实际任务调整 searches、globs 和 reads。）
 ```python
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import uv_agent_runtime as rt
 
-# --- 定位目标函数 ---
-fn_hits = rt.search("def handle_login", types="py", limit=5)
-if not fn_hits:
-    print("未定义 handle_login – 请检查函数名")
-    exit(0)
+# --- 一次性发起相互独立的定位任务 ---
+jobs = {
+    "definitions": lambda: rt.search("def render_invoice", types="py", limit=8),
+    "call_sites": lambda: rt.search("render_invoice(", types="py", limit=20),
+    "tests": lambda: rt.files(query="invoice render test", types="py", limit=12),
+    "symbols": lambda: rt.symbols(language="python", name="InvoiceRenderer", limit=8),
+}
+with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+    futures = {name: pool.submit(fn) for name, fn in jobs.items()}
+    found = {name: future.result() for name, future in futures.items()}
 
-# --- 同时查找调用点 ---
-call_hits = rt.search("handle_login(", types="py", limit=10)
-print(f"定义: {len(fn_hits)} 处，调用: {len(call_hits)} 处")
+summary = {name: len(result) for name, result in found.items()}
+print(f"定位摘要: {summary}")
+if not found["definitions"] and not found["symbols"]:
+    print("未找到 render_invoice / InvoiceRenderer；请检查命名或扩大搜索范围")
+    raise SystemExit(0)
 
-# --- 带上下文读取完整定义 ---
-view = fn_hits[0].view(context=40)
-print(f"\n=== {Path(fn_hits[0].path).name} 行 {view.start_line}-{view.end_line} ===")
-print(view.text)
+# --- 根据搜索结果继续读取上下文，不把读取推迟到下一轮 ---
+for label, result in [("定义", found["definitions"]), ("调用点", found["call_sites"])]:
+    for hit in result[:4]:
+        view = hit.view(context=12)
+        print(f"\n=== {label} {Path(hit.path).as_posix()}:{view.start_line}-{view.end_line} ===")
+        print(view.text)
 
-# --- 读取几个调用点，理解使用方式 ---
-for hit in call_hits[:3]:
-    site = hit.view(context=8)
-    print(f"\n=== 调用点 {Path(hit.path).name}:{hit.line} ===")
-    print(site.text)
+for symbol in found["symbols"][:3]:
+    view = symbol.view(context=18)
+    print(f"\n=== symbol {symbol.kind} {symbol.name} {Path(symbol.path).as_posix()} ===")
+    print(view.text)
 
-# --- 发现相关 config / test / middleware 文件 ---
-related = rt.files(query="auth login middleware", types="py", limit=12)
-print(f"\n相关文件: {len(related)}")
-for p in related[:5]:
-    head = rt.file(p).read(head=50)
-    print(f"\n--- {Path(p).name} 行 {head.start_line}-{head.end_line} ---")
-    print(head.text)
+for path in found["tests"][:4]:
+    view = rt.file(path).read(around="invoice", context=25)
+    print(f"\n=== 相关测试 {Path(path).as_posix()}:{view.start_line}-{view.end_line} ===")
+    print(view.text)
 ```
 </example>
 <example name="round-2-act">
@@ -573,61 +594,79 @@ for p in related[:5]:
 import uv_agent_runtime as rt
 
 changes: list[str] = []
+failed = False
 
-# --- 确认目标存在，然后修复硬编码 redirect ---
-hits = rt.search('redirect("/old-dashboard")', types="py", limit=1)
-if hits:
-    r1 = hits.one().file().replace(
-        old='redirect("/old-dashboard")',
-        new='redirect(url_for("dashboard"))',
-    )
-    changes.append(f"handlers.py redirect: {r1.replacements} 次替换")
-else:
-    changes.append("handlers.py redirect: 未找到目标 – 可能已经修复")
+# --- 确认目标仍然存在，然后在事务中完成多文件编辑 ---
+with rt.transaction(["src/billing", "tests"], root=".") as snapshot:
+    formula_hits = rt.search("subtotal + tax", roots=["src/billing", "tests"], types="py", limit=5)
+    test_hits = rt.search("expected_total = 110", roots="tests", types="py", limit=5)
 
-# --- 确认 config 常量存在，然后更新 ---
-hits = rt.search("MAX_LOGIN_ATTEMPTS = 3", types="py", limit=1)
-if hits:
-    r2 = hits.one().file().replace(
-        old="MAX_LOGIN_ATTEMPTS = 3",
-        new="MAX_LOGIN_ATTEMPTS = 5",
-    )
-    changes.append(f"config/auth.py: {r2.replacements} 次替换")
-else:
-    changes.append("config/auth.py: 未找到常量 – 文件可能已变化")
+    if len(formula_hits) == 1:
+        r1 = formula_hits.one().file().replace(
+            old="subtotal + tax",
+            new="subtotal + tax - discount",
+        )
+        changes.append(f"total formula: {r1.replacements} 次替换")
+    elif formula_hits:
+        failed = True
+        changes.append(f"total formula: 命中 {len(formula_hits)} 处，请先消歧")
+        for view in formula_hits.views(context=6, limit=3):
+            print(view.header())
+            print(view.text)
+    else:
+        changes.append("total formula: 未找到目标，可能已经修复")
 
-# --- 用首尾 anchor guard 替换一段行范围 ---
-r3 = rt.file("src/config/auth.py").edit(
-    start=12, end=14,
-    new_text="MAX_LOGIN_ATTEMPTS = 5\nDEFAULT_ROLE = 'user'\n",
-    expect_first="MAX_LOGIN_ATTEMPTS",
-    expect_last="DEFAULT_ROLE",
-    expect_mode="startswith",
-)
-if r3.changed:
-    changes.append(f"config/auth.py: 替换行数 {r3.line_count_before}→{r3.line_count_after}")
-else:
-    changes.append("config/auth.py: anchor 不匹配 – 文件可能已变化，请重读后重试")
+    if len(test_hits) == 1:
+        r2 = test_hits.one().file().replace(
+            old="expected_total = 110",
+            new="expected_total = 95",
+        )
+        changes.append(f"expected total: {r2.replacements} 次替换")
+    elif test_hits:
+        failed = True
+        changes.append(f"expected total: 命中 {len(test_hits)} 处，请先消歧")
+        for view in test_hits.views(context=6, limit=3):
+            print(view.header())
+            print(view.text)
+    else:
+        changes.append("expected total: 未找到旧断言，请重读测试")
 
-# --- 在 handlers.py 顶部插入 import 行 ---
-r4 = rt.file("src/auth/handlers.py").insert_before(
-    1,
-    "from urllib.parse import url_for",
-    expect_line="import os",
-)
-changes.append(f"handlers.py import: changed={r4.changed}")
+    if not failed:
+        view = rt.file("src/billing/invoice.py").read(around="def calculate_total", context=20)
+        r3 = rt.file("src/billing/invoice.py").insert_after(
+            view.end_line,
+            "\n\ndef apply_discount(total, discount):\n    return max(0, total - discount)\n",
+            expect_line=view.text.splitlines()[-1],
+        )
+        changes.append(f"apply_discount helper: changed={r3.changed}")
 
-print("已应用变更:")
+        for suite in ["tests/test_billing.py", "tests/test_invoice.py"]:
+            test = rt.run("uv", "run", "pytest", suite, "-x", "-q", timeout=60)
+            print(f"\n{suite}: {test.summary()}")
+            if not test.ok:
+                failed = True
+                print(test.tail(40))
+                break
+
+    if failed:
+        rt.restore(snapshot)
+        changes.append("验证失败：已恢复事务快照，请根据输出重新判断")
+
+print("\n已应用变更:")
 for c in changes:
     print(f"  {c}")
 
-# --- 验证：运行受影响测试套件 ---
-for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py"]:
-    test = rt.run("uv", "run", "pytest", suite, "-x", "-q", timeout=60)
-    print(f"\n{suite}: {test.summary()}")
-    if not test.ok:
-        print(test.tail(40))
-        print("!!! 测试失败 – 请检查上述变更")
+if not failed:
+    # --- 验证通过后继续收尾：跑格式/更宽测试，不另开一轮 ---
+    for cmd in [
+        ("uv", "run", "ruff", "check", "src/billing", "tests/test_billing.py"),
+        ("uv", "run", "pytest", "tests/test_billing.py", "tests/test_invoice.py", "-q"),
+    ]:
+        result = rt.run(*cmd, timeout=120)
+        print(f"\n{' '.join(cmd)}: {result.summary()}")
+        if not result.ok:
+            print(result.tail(60))
+            break
 ```
 </example>
 <example name="anti-pattern-one-helper-per-call">
@@ -635,19 +674,19 @@ for suite in ["tests/test_auth.py", "tests/test_login.py", "tests/test_config.py
 ```python
 # **不推荐**：第一轮只搜索，然后停下来等下一轮。
 import uv_agent_runtime as rt
-hits = rt.search("handle_login", types="py", limit=10)
+hits = rt.search("render_invoice", types="py", limit=10)
 print(hits)
 ---
 # **不推荐**：第二轮才读取文件。
 import uv_agent_runtime as rt
-print(rt.file("src/auth/handlers.py").read(around="handle_login", context=30).text)
+print(rt.file("src/billing/invoice.py").read(around="render_invoice", context=30).text)
 ---
-# **不推荐**：第三轮才验证或继续搜索。
+# **不推荐**：第三轮才编辑，第四轮才验证，失败后又要重新搜索。
 import uv_agent_runtime as rt
-print(rt.run("uv", "run", "pytest", "tests/test_auth.py", "-q", timeout=60).stdout)
+print(rt.run("uv", "run", "pytest", "tests/test_billing.py", "-q", timeout=60).tail(40))
 ---
-# **应改为**：在一次 run_python 脚本中导入并组合 rt.search/rt.file/rt.files/rt.run 等 helpers，
-# 用循环、条件和数据结构衔接结果，最后输出摘要。
+# **应改为**：在一次 run_python 脚本中导入并组合 rt.search/rt.file/rt.files/rt.symbols/rt.run 等 helpers，
+# 用循环、条件、事务快照和数据结构衔接结果；能预见的编辑、验证、失败摘要和回退都在脚本里完成。
 ```
 </example>
 </agent_runtime_helpers>"""

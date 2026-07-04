@@ -457,7 +457,7 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert "Python 原生控制流和 import" in PYTHON_TOOL["description"]
     assert "不是 shell 风格片段" in PYTHON_TOOL["description"]
     assert "完整、独立的 Python 脚本" in PYTHON_TOOL["description"]
-    assert "优先使用 runtime helpers" in PYTHON_TOOL["description"]
+    assert "优先使用上下文中载入的 helper 函数" in PYTHON_TOOL["description"]
     assert "普通外部命令" in PYTHON_TOOL["description"] and "rt.run" in PYTHON_TOOL["description"]
     assert "call subprocesses" not in PYTHON_TOOL["description"]
     assert set(PYTHON_TOOL["parameters"]["properties"]) == {"code", "timeout_s"}
@@ -467,7 +467,7 @@ def test_agent_exposes_only_python_runner_tool() -> None:
     assert "不要使用 shell 风格伪代码" in code_description
     assert "小型 Python 程序" in code_description
     assert "变量、函数、循环、条件、try/except" in code_description
-    assert "runtime helper 调用" in code_description
+    assert "上下文中载入的 helper 函数调用" in code_description
     assert "script_args" not in PYTHON_TOOL["parameters"]["properties"]
     assert PYTHON_TOOL["parameters"]["required"] == ["code"]
 
@@ -3625,7 +3625,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "搜索、读取、计算、编辑、验证和条件回退都在同一个脚本内用 Python 原生控制流编排" in prompt
     assert "应尽量在同一个脚本内完成" not in prompt
     assert "在脚本内使用常规 Python 语法" in prompt
-    assert "借助 Python 强大的特性、runtime helpers 以及其他能力" in prompt
+    assert "借助 Python 强大的特性、上下文中载入的 helper 函数以及其他能力" in prompt
     assert "同时处理多文件、多步骤、可预见的分支或失败" in prompt
     assert "在探索阶段，在单脚本中一次性收集足够信息" in prompt
     assert "Call enter_dir proactively whenever the task clearly belongs" not in prompt
@@ -3717,7 +3717,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "rt.threads.detail" in turn_context
     assert '<function name="ui">' in turn_context
     assert "rt.ui.message(markdown: str" in turn_context
-    assert "外部完成授权、确认或等待" in turn_context
+    assert "脚本等待用户授权、外部确认或需要展示链接" in turn_context
     assert '<function name="mcp">' not in turn_context
     assert "rt.mcp.connect" not in turn_context
     assert '<function name="workflow">' not in turn_context
@@ -3770,25 +3770,29 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert "先快速搜索确认目标，再一起应用变更并验证" in turn_context
     assert "不要把已知编辑推迟到下一轮" in turn_context
     assert "import uv_agent_runtime as rt" in turn_context
-    assert 'rt.search("def handle_login"' in turn_context
-    assert "未定义 handle_login" in turn_context
-    assert 'rt.search("handle_login("' in turn_context
-    assert "call_hits" in turn_context
-    assert "rt.files(query=" in turn_context
+    assert 'rt.search("def render_invoice"' in turn_context
+    assert "未找到 render_invoice / InvoiceRenderer" in turn_context
+    assert 'rt.search("render_invoice("' in turn_context
+    assert "ThreadPoolExecutor" in turn_context
+    assert "futures = {name: pool.submit(fn)" in turn_context
+    assert 'rt.files(query="invoice render test"' in turn_context
+    assert 'rt.symbols(language="python", name="InvoiceRenderer"' in turn_context
     assert "hits.one().file().replace" in turn_context
-    assert 'redirect("/old-dashboard")' in turn_context
-    assert 'redirect(url_for("dashboard"))' in turn_context
-    assert "MAX_LOGIN_ATTEMPTS" in turn_context
+    assert "rt.transaction" in turn_context
+    assert "subtotal + tax" in turn_context
+    assert "expected_total = 110" in turn_context
     assert "未找到目标" in turn_context
-    assert "anchor 不匹配" in turn_context
-    assert 'rt.file("src/config/auth.py").edit' in turn_context
-    assert "insert_before" in turn_context
+    assert "apply_discount" in turn_context
+    assert "rt.restore(snapshot)" in turn_context
+    assert "验证失败：已恢复事务快照" in turn_context
+    assert 'rt.file("src/billing/invoice.py").insert_after' in turn_context
     assert '<example name="anti-pattern-one-helper-per-call">' in turn_context
     assert "不要把一个清晰的工作单元拆成多次 run_python" in turn_context
     assert "每次只调用一个 helper" in turn_context
     assert "偷懒式串行" in turn_context
     assert "浪费往返、丢失前一次的返回值" in turn_context
     assert "在一次 run_python 脚本中导入并组合" in turn_context
+    assert "事务快照" in turn_context
     assert "已应用变更" in turn_context
     assert '"uv", "run", "pytest"' in turn_context
     assert "def section" not in turn_context
@@ -3834,7 +3838,7 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'level="small"' not in prompt
     assert "pathlib" in turn_context
     assert "这些 mentions 只是纯文本提示" in prompt
-    assert "在 run_python 中使用对应 runtime helper 读取并检查它" in prompt
+    assert "在 run_python 中使用对应上下文中载入的 helper 函数读取并检查它" in prompt
     assert "@mcp:name" not in prompt
     assert "@skill:name" not in prompt
     assert "available skills context" not in prompt
