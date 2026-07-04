@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import UTC, datetime, timedelta
@@ -8,17 +9,39 @@ from pathlib import Path
 import pytest
 
 from uv_agent.cli import main
-from uv_agent.daemon import DEFAULT_DAEMON_AGENTS_MD, DaemonLease, _pid_alive, ensure_daemon_workspace
+from uv_agent.daemon import (
+    DEFAULT_DAEMON_AGENTS_MD,
+    DEFAULT_DAEMON_AGENTS_MD_ZH,
+    DaemonLease,
+    _pid_alive,
+    ensure_daemon_workspace,
+)
 from uv_agent.state_db import connect_state_db
 
 
 def test_daemon_workspace_defaults_to_user_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("UV_AGENT_LANGUAGE", "en")
 
     workspace = ensure_daemon_workspace()
 
     assert workspace == (tmp_path / "home" / "workspace").resolve()
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == DEFAULT_DAEMON_AGENTS_MD
+
+
+def test_daemon_workspace_uses_chinese_template_from_config(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("UV_AGENT_LANGUAGE", "en")
+    workspace = tmp_path / "workspace"
+    project_config = workspace / ".uv-agent" / "config.json"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text(json.dumps({"ui": {"language": "zh-CN"}}), encoding="utf-8")
+
+    ensure_daemon_workspace(workspace)
+
+    text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+    assert text == DEFAULT_DAEMON_AGENTS_MD_ZH
+    assert "## 目录说明" in text
+    assert "## 更新本说明" in text
 
 
 def test_daemon_workspace_does_not_overwrite_existing_agents(tmp_path: Path) -> None:
@@ -38,6 +61,7 @@ def test_cli_daemon_uses_default_workspace(monkeypatch, tmp_path: Path) -> None:
         captured.update(kwargs)
 
     monkeypatch.setenv("UV_AGENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("UV_AGENT_LANGUAGE", "en")
     monkeypatch.setattr("uv_agent.daemon.run_daemon", fake_run_daemon)
     monkeypatch.setattr(sys, "argv", ["uv-agent", "daemon", "--replace"])
 

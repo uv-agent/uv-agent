@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from uv_agent.app_factory import create_engine
+from uv_agent.config import load_config
+from uv_agent.environment import UserLanguage, detect_user_language
 from uv_agent.ids import new_id
 from uv_agent.logging_config import active_log_file
 from uv_agent.paths import default_daemon_workspace_dir
@@ -20,30 +22,90 @@ from uv_agent.state_db import connect_state_db
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DAEMON_AGENTS_MD = """# uv-agent Daemon Workspace
+DEFAULT_DAEMON_AGENTS_MD_EN = """# uv-agent Daemon Workspace
 
-This is the default persistent workspace for `uv-agent daemon`.
+## Purpose
 
-- Keep durable notes, plans, downloaded references, and generated artifacts organized in named subdirectories.
-- Before creating a new top-level file or directory, check the existing layout and reuse a suitable location.
+This is the default persistent workspace for `uv-agent daemon`. Use it for durable notes, plans, references, and generated artifacts that should remain useful across daemon sessions.
+
+## Directory Map
+
+- `AGENTS.md`: Workspace policy, directory map, and maintenance rules.
+- Add entries here when durable top-level directories are created.
+
+## Workspace Maintenance
+
+- Before creating a new top-level file or directory, inspect the existing layout and reuse a suitable location.
+- Keep related material together in clearly named subdirectories.
+- Prefer short README or index files inside long-lived directories so future agents can understand what belongs there.
+- Remove or archive stale outputs when they no longer help future work.
+
+## Temporary Files
+
 - Do not put throwaway scratch files, temporary scripts, build caches, command output dumps, or intermediate downloads in this workspace.
-- For temporary work, use the operating system temp directory, the run_python state directory, or another explicit temporary location, and clean it up when done.
-- Keep this `AGENTS.md` updated when the workspace organization policy changes.
+- For temporary work, use the operating system temp directory, the run_python state directory, or another explicit temporary location.
+- Clean temporary locations when the task is done.
+
+## Updating These Instructions
+
+- Update this `AGENTS.md` whenever you add a durable top-level directory, establish a new naming convention, or change how this workspace should be organized.
+- When you update this file, keep the structure clear: purpose, directory map, maintenance rules, and temporary-file policy.
+- Do not delete user-authored instructions unless the user asks you to.
 """
+
+DEFAULT_DAEMON_AGENTS_MD_ZH = """# uv-agent Daemon 工作区
+
+## 用途
+
+这是 `uv-agent daemon` 的默认持久工作区。这里用于保存跨 daemon 会话仍然有价值的长期笔记、计划、参考资料和生成产物。
+
+## 目录说明
+
+- `AGENTS.md`：工作区策略、目录说明和维护规则。
+- 当创建长期顶层目录时，在这里补充该目录的用途说明。
+
+## 工作区维护
+
+- 创建新的顶层文件或目录前，先检查现有结构，并优先复用合适的位置。
+- 将相关资料放在命名清晰的子目录中，避免把文件散落在工作区根目录。
+- 对长期保留的目录，优先补充简短的 README 或索引文件，说明该目录存放什么、如何维护。
+- 对已经没有长期价值的旧输出，及时清理或归档。
+
+## 临时文件
+
+- 不要把一次性草稿、临时脚本、构建缓存、命令输出 dump、中间下载产物放进这个工作区。
+- 临时工作应使用操作系统临时目录、run_python 状态目录，或其他明确标记的临时位置。
+- 任务完成后清理临时位置，除非用户明确要求保留。
+
+## 更新本说明
+
+- 当你新增长期顶层目录、建立新的命名约定，或改变工作区整理方式时，必须更新这个 `AGENTS.md`。
+- 更新时保持结构清晰：用途、目录说明、维护规则、临时文件策略。
+- 不要删除用户写下的说明，除非用户明确要求。
+"""
+
+DEFAULT_DAEMON_AGENTS_MD = DEFAULT_DAEMON_AGENTS_MD_EN
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def ensure_daemon_workspace(project_root: Path | None = None) -> Path:
+def daemon_agents_template(language: UserLanguage | str | None = None) -> str:
+    lang = language if isinstance(language, UserLanguage) else detect_user_language(str(language or "auto"))
+    return DEFAULT_DAEMON_AGENTS_MD_ZH if lang.is_chinese else DEFAULT_DAEMON_AGENTS_MD_EN
+
+
+def ensure_daemon_workspace(project_root: Path | None = None, *, language: UserLanguage | str | None = None) -> Path:
     """Prepare the daemon workspace and seed its default instructions."""
 
     workspace = (project_root or default_daemon_workspace_dir()).expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     agents_path = workspace / "AGENTS.md"
     if not agents_path.exists():
-        agents_path.write_text(DEFAULT_DAEMON_AGENTS_MD, encoding="utf-8")
+        if language is None:
+            language = detect_user_language(load_config(workspace).ui.language)
+        agents_path.write_text(daemon_agents_template(language), encoding="utf-8")
     return workspace
 
 

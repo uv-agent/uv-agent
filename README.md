@@ -305,8 +305,8 @@ integrations for that workspace. Use `--replace` to stop a stale or older daemon
 for the same state.
 
 By default, daemon mode uses `~/.uv-agent/workspace` as its persistent workspace
-and creates an `AGENTS.md` there when one does not already exist. Use
-`--workspace <path>` to choose a different daemon workspace.
+and creates a structured English or Chinese `AGENTS.md` there when one does not
+already exist. Use `--workspace <path>` to choose a different daemon workspace.
 
 ```powershell
 uv-agent daemon --replace
