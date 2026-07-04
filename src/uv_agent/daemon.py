@@ -31,12 +31,14 @@ This is the default persistent workspace for `uv-agent daemon`. Use it for durab
 ## Directory Map
 
 - `AGENTS.md`: Workspace policy, directory map, and maintenance rules.
+- `notes/`: User-facing durable notes, TODO lists, reminders, decisions, and references. Use this by default for "remember this" requests unless the user names another path.
 - Add entries here when durable top-level directories are created.
 
 ## Workspace Maintenance
 
 - Before creating a new top-level file or directory, inspect the existing layout and reuse a suitable location.
 - Keep related material together in clearly named subdirectories.
+- Prefer `notes/index.md` as the notes map and `notes/inbox.md` for unsorted captures when the notes area grows.
 - Prefer short README or index files inside long-lived directories so future agents can understand what belongs there.
 - Remove or archive stale outputs when they no longer help future work.
 
@@ -49,7 +51,7 @@ This is the default persistent workspace for `uv-agent daemon`. Use it for durab
 ## Updating These Instructions
 
 - Update this `AGENTS.md` whenever you add a durable top-level directory, establish a new naming convention, or change how this workspace should be organized.
-- When you update this file, keep the structure clear: purpose, directory map, maintenance rules, and temporary-file policy.
+- When you update this file, keep the structure clear: purpose, directory map, notes convention, maintenance rules, and temporary-file policy.
 - Do not delete user-authored instructions unless the user asks you to.
 """
 
@@ -62,12 +64,14 @@ DEFAULT_DAEMON_AGENTS_MD_ZH = """# uv-agent Daemon 工作区
 ## 目录说明
 
 - `AGENTS.md`：工作区策略、目录说明和维护规则。
+- `notes/`：面向用户的长期笔记、待办、提醒、决策和参考资料。除非用户指定其他路径，默认把“记一下”之类的请求放在这里。
 - 当创建长期顶层目录时，在这里补充该目录的用途说明。
 
 ## 工作区维护
 
 - 创建新的顶层文件或目录前，先检查现有结构，并优先复用合适的位置。
 - 将相关资料放在命名清晰的子目录中，避免把文件散落在工作区根目录。
+- 当笔记区内容增多时，优先用 `notes/index.md` 做索引，用 `notes/inbox.md` 暂存未分类记录。
 - 对长期保留的目录，优先补充简短的 README 或索引文件，说明该目录存放什么、如何维护。
 - 对已经没有长期价值的旧输出，及时清理或归档。
 
@@ -80,7 +84,7 @@ DEFAULT_DAEMON_AGENTS_MD_ZH = """# uv-agent Daemon 工作区
 ## 更新本说明
 
 - 当你新增长期顶层目录、建立新的命名约定，或改变工作区整理方式时，必须更新这个 `AGENTS.md`。
-- 更新时保持结构清晰：用途、目录说明、维护规则、临时文件策略。
+- 更新时保持结构清晰：用途、目录说明、笔记约定、维护规则、临时文件策略。
 - 不要删除用户写下的说明，除非用户明确要求。
 """
 

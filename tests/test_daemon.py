@@ -26,7 +26,10 @@ def test_daemon_workspace_defaults_to_user_home(monkeypatch, tmp_path: Path) -> 
     workspace = ensure_daemon_workspace()
 
     assert workspace == (tmp_path / "home" / "workspace").resolve()
-    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == DEFAULT_DAEMON_AGENTS_MD
+    text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+    assert text == DEFAULT_DAEMON_AGENTS_MD
+    assert "`notes/`" in text
+    assert "`notes/inbox.md`" in text
 
 
 def test_daemon_workspace_uses_chinese_template_from_config(monkeypatch, tmp_path: Path) -> None:
@@ -41,6 +44,8 @@ def test_daemon_workspace_uses_chinese_template_from_config(monkeypatch, tmp_pat
     text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
     assert text == DEFAULT_DAEMON_AGENTS_MD_ZH
     assert "## 目录说明" in text
+    assert "`notes/`" in text
+    assert "`notes/inbox.md`" in text
     assert "## 更新本说明" in text
 
 
