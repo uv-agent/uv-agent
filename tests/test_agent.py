@@ -3766,17 +3766,19 @@ def test_agent_prompt_keeps_dynamic_capabilities_in_turn_context(tmp_path: Path,
     assert 'rt.search("render_invoice("' in turn_context
     assert "ThreadPoolExecutor" in turn_context
     assert "futures = {name: pool.submit(fn)" in turn_context
-    assert 'rt.files(query="invoice render test"' in turn_context
+    assert 'rt.files(roots="tests", query="invoice"' in turn_context
     assert 'rt.symbols(language="python", name="InvoiceRenderer"' in turn_context
     assert "hits.one().file().replace" in turn_context
     assert "rt.transaction" in turn_context
-    assert "subtotal + tax" in turn_context
+    assert "return subtotal + tax" in turn_context
+    assert "return apply_discount(subtotal + tax, discount)" in turn_context
     assert "expected_total = 110" in turn_context
     assert "未找到目标" in turn_context
     assert "apply_discount" in turn_context
+    assert 'rt.symbols(language="python", name="calculate_total"' in turn_context
     assert "rt.restore(snapshot)" in turn_context
     assert "验证失败：已恢复事务快照" in turn_context
-    assert 'rt.file("src/billing/invoice.py").insert_after' in turn_context
+    assert "rt.file(symbol.path).insert_after" in turn_context
     assert '<example name="anti-pattern-one-helper-per-call">' in turn_context
     assert "不要把一个清晰的工作单元拆成多次 run_python" in turn_context
     assert "每次只调用一个 helper" in turn_context

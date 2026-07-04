@@ -542,7 +542,7 @@ import uv_agent_runtime as rt
 jobs = {
     "definitions": lambda: rt.search("def render_invoice", types="py", limit=8),
     "call_sites": lambda: rt.search("render_invoice(", types="py", limit=20),
-    "tests": lambda: rt.files(query="invoice render test", types="py", limit=12),
+    "tests": lambda: rt.files(roots="tests", query="invoice", types="py", limit=12),
     "symbols": lambda: rt.symbols(language="python", name="InvoiceRenderer", limit=8),
 }
 with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
@@ -583,13 +583,14 @@ failed = False
 
 # --- 确认目标仍然存在，然后在事务中完成多文件编辑 ---
 with rt.transaction(["src/billing", "tests"], root=".") as snapshot:
-    formula_hits = rt.search("subtotal + tax", roots=["src/billing", "tests"], types="py", limit=5)
+    formula_hits = rt.search("return subtotal + tax", roots="src/billing", types="py", limit=5)
     test_hits = rt.search("expected_total = 110", roots="tests", types="py", limit=5)
+    helper_hits = rt.search("def apply_discount", roots="src/billing", types="py", limit=3)
 
     if len(formula_hits) == 1:
         r1 = formula_hits.one().file().replace(
-            old="subtotal + tax",
-            new="subtotal + tax - discount",
+            old="return subtotal + tax",
+            new="return apply_discount(subtotal + tax, discount)",
         )
         changes.append(f"total formula: {r1.replacements} 次替换")
     elif formula_hits:
@@ -616,15 +617,23 @@ with rt.transaction(["src/billing", "tests"], root=".") as snapshot:
     else:
         changes.append("expected total: 未找到旧断言，请重读测试")
 
-    if not failed:
-        view = rt.file("src/billing/invoice.py").read(around="def calculate_total", context=20)
-        r3 = rt.file("src/billing/invoice.py").insert_after(
-            view.end_line,
-            "\n\ndef apply_discount(total, discount):\n    return max(0, total - discount)\n",
-            expect_line=view.text.splitlines()[-1],
-        )
-        changes.append(f"apply_discount helper: changed={r3.changed}")
+    if not failed and not helper_hits:
+        calc_symbols = rt.symbols(language="python", name="calculate_total", limit=3)
+        if len(calc_symbols) == 1:
+            symbol = calc_symbols.one()
+            r3 = rt.file(symbol.path).insert_after(
+                symbol.end_line,
+                "\n\ndef apply_discount(total, discount):\n    return max(0, total - discount)\n",
+                expect_line="    return apply_discount(",
+            )
+            changes.append(f"apply_discount helper: changed={r3.changed}")
+        else:
+            failed = True
+            changes.append(f"calculate_total symbol: 命中 {len(calc_symbols)} 处，请先消歧")
+    elif helper_hits:
+        changes.append("apply_discount helper: 已存在")
 
+    if not failed:
         for suite in ["tests/test_billing.py", "tests/test_invoice.py"]:
             test = rt.run("uv", "run", "pytest", suite, "-x", "-q", timeout=60)
             print(f"\n{suite}: {test.summary()}")
