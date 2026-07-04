@@ -27,7 +27,7 @@ PYTHON_TOOL = {
         "它在该线程的活动 cwd 中运行，并使用项目共享的脚本虚拟环境。"
         "与外部世界交互时，使用 Python 原生控制流和 import，"
         "而不是 shell 风格片段。"
-        "优先使用 runtime helpers，对于普通外部命令，尤其优先使用 rt.run。"
+        "优先使用上下文中载入的 helper 函数，对于普通外部命令，尤其优先使用 rt.run。"
     ),
     "parameters": {
         "type": "object",
@@ -39,7 +39,7 @@ PYTHON_TOOL = {
                     "使用常规 Python 语法，不要使用 shell 风格伪代码；"
                     "包含 import 和必要设置。编写一个小型 Python 程序，"
                     "通过变量、函数、循环、条件、try/except、数据结构、依赖项以及 "
-                    "runtime helper 调用来协调相关步骤。"
+                    "上下文中载入的 helper 函数调用来协调相关步骤。"
                 ),
             },
             "timeout_s": {
@@ -328,7 +328,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 
 <run_python_workflow>
 <rule>在单次的脚本编写中，编写尽可能多的步骤：搜索、读取、计算、编辑、验证和条件回退都在同一个脚本内用 Python 原生控制流编排。</rule>
-<rule>在脚本内使用常规 Python 语法，借助 Python 强大的特性、runtime helpers 以及其他能力，来同时处理多文件、多步骤、可预见的分支或失败。</rule>
+<rule>在脚本内使用常规 Python 语法，借助 Python 强大的特性、上下文中载入的 helper 函数以及其他能力，来同时处理多文件、多步骤、可预见的分支或失败。</rule>
 <rule>在探索阶段，在单脚本中一次性收集足够信息：并行搜索、查找多个 pattern，同时借助搜索的返回值来读取多个相关文件、运行多条命令获取信息，最后再解析结构化输出，然后返回摘要；同样，执行和验证可以一并完成，无须拆成多轮。</rule>
 </run_python_workflow>
 
@@ -340,7 +340,7 @@ SYSTEM_INSTRUCTIONS_TEMPLATE = """<uv_agent_system_prompt>
 
 <mentions>
 <rule>用户文本可能包含 @file、@thread:id 或插件提供的其他 mentions。这些 mentions 只是纯文本提示，不会自动加载任何东西。</rule>
-<rule>当文件或者 thread 被提及时，在 run_python 中使用对应 runtime helper 读取并检查它。</rule>
+<rule>当文件或者 thread 被提及时，在 run_python 中使用对应上下文中载入的 helper 函数读取并检查它。</rule>
 </mentions>
 </uv_agent_system_prompt>
 """
@@ -354,24 +354,10 @@ RUNTIME_HELPERS_CONTEXT = """<agent_runtime_helpers>
 import uv_agent_runtime as rt
 </imports>
 
-<usage_pattern>
-<rule>runtime helpers 是脚本中使用的普通 Python 对象，不是独立的工具调用；当多个 helpers 服务同一工作单元时，在同一个脚本中导入一次 `uv_agent_runtime as rt` 后组合使用。</rule>
-<rule>不要仅因为下一步要用另一个 helper、读文件、搜索或运行外部命令，就发起新的 run_python 调用。对方向已经明确的后续步骤，用 Python 编排：根据 helper 结果分支、遍历文件或命令、用 Python libraries 解析结构化输出，并收集一份摘要。只有当结果会改变整体方向、需要用户确认或涉及破坏性操作时，才先返回摘要并拆成下一次调用。</rule>
-<rule>用 Python 方式替代 shell 习惯，一些常见场景为：适合时用 `rt.file(path).read()` 代替 cat，用 `rt.search(...)`/`rt.files(...)` 代替临时 grep/find，用 `rt.run("cmd", "arg")` 代替 raw subprocess 或 shell pipelines 来运行普通命令。</rule>
-</usage_pattern>
-
-<helper_selection>
-<rule>列出的 helpers 是普通 Python 对象，可在同一脚本中与标准库代码和控制流组合使用；在脚本内用标准库（os、json等模块）做衔接逻辑；场景适合时优先使用 helpers，尤其是处理仓库文本的 `rt.file(...)`，因为它会保留 newline style、BOM、final newline、line counts 和行范围视图等元数据。</rule>
-<rule>修改文件时优先使用 rt.file(...) 提供的 File 方法（read/write/replace/edit/insert_after/insert_before/delete_lines 等），避免在脚本里手写 open()/os.write 等原始文件操作，降低误写风险。</rule>
-<rule>找文件、搜索内容、定位符号或运行自定义 tree-sitter 查询时，使用 rt.files、rt.search、rt.symbols、rt.query。rt.search 默认精确文本搜索，正则用 mode="regex"，容错行搜索用 mode="fuzzy"，路径过滤用 globs，语言/扩展名别名用 types。搜索结果、symbol 结果和 capture 结果可直接调用 `.view()` 查看上下文。</rule>
-<rule>读取文件内容用 rt.file(path).read，写入完整文件或生成内容用 File.write。helpers 返回的路径是绝对路径，rel_path 仅用于显示。</rule>
-<rule>替换唯一小段文本用 File.replace，处理 anchored ranges 或插入/删除用 File.edit/insert_after/insert_before/delete_lines。</rule>
-<rule>查看线程历史用 rt.threads.list/view/detail，添加第三方依赖在 import 前使用 rt.deps.add。</rule>
-<rule>普通外部命令（包括 docs 或插件上下文中展示的 shell commands），优先用 `rt.run(...)` 而不是 raw subprocess；只有需要自定义进程控制时才使用 raw subprocess。</rule>
-<rule>脚本需要用户在外部完成授权、确认或等待时，用 `rt.ui.message(...)` 发送 Markdown 提示到用户界面。</rule>
-<rule>数据量较大时，优先提取字段、行范围、head/tail 或生成摘要。</rule>
-<rule>不要猜测 helper signatures；当精确签名重要时，检查 uv_agent_runtime 实现。</rule>
-</helper_selection>
+<instructions>
+以下是内置的runtime helpers，查看例子，理解以下函数、类是如何使用的，在脚本中优先使用它们并组合使用来完成任务
+一些插件提供的 helper 可能在某些场景下更加便利，注意搭配使用内置和不同插件 helper
+</instructions>
 
 <common_types>
 <type name="CollectionResult[T]">
