@@ -36,7 +36,8 @@ may change.
   can add runtime namespaces (`rt.mcp`, `rt.workflow`, custom helpers), actions,
   slash commands, UI providers, model context, event subscriptions, durable
   storage, and programmatic turn submission while preserving the single
-  `run_python` model boundary.
+  `run_python` model boundary. Plugins can declare whether they run in any host,
+  only in a persistent daemon host, or only in a short interactive session host.
 - **Headless service mode** — `uv-agent daemon` starts the host and plugins
   without opening the TUI, so schedulers, chat bridges, webhooks, and other
   long-running integrations can keep working for a project state.
@@ -304,6 +305,13 @@ The daemon acquires a project-state lease and heartbeat so one active host owns
 integrations for that workspace. Use `--replace` to stop a stale or older daemon
 for the same state.
 
+The normal TUI still creates a local session host for interactive work. Plugins
+whose manifests declare `activation="persistent_only"` are skipped in that
+session host and show as `skipped` in `/status`; they start in daemon mode
+instead. Plugins that can safely degrade, such as by using an ephemeral port, can
+keep the default `activation="always"` and inspect `context.host.is_persistent`
+inside `setup(context)`.
+
 By default, daemon mode uses `~/.uv-agent/workspace` as its persistent workspace
 and creates a structured English or Chinese `AGENTS.md` there when one does not
 already exist. Use `--workspace <path>` to choose a different daemon workspace.
@@ -327,7 +335,9 @@ Plugins can:
 - register actions for schedulers and other automation;
 - add slash commands, picker/UI providers, and localized text;
 - subscribe to host events, keep private storage, and submit turns from external
-  systems.
+  systems;
+- declare host activation policy and inspect read-only host lifecycle metadata
+  through `context.host`.
 
 Built-in Goal, Worktree, Skills, MCP, Workflow, and Scheduler capabilities use
 this same plugin surface. Install only plugins you trust.

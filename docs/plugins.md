@@ -100,6 +100,16 @@ sense in an interactive session. The default, `always`, preserves compatibility
 and lets the plugin inspect `context.host` to choose its own degraded or
 ephemeral behavior.
 
+```python
+MANIFEST = PluginManifest(
+    id="my.server",
+    version="0.1.0",
+    display_name="Server",
+    description="Long-running local server.",
+    activation="persistent_only",
+)
+```
+
 ## Lifecycle
 
 `SetupPlugin.setup(context)` is called once when the plugin starts. It may be a
@@ -147,6 +157,14 @@ daemon mode. `context.host.is_persistent` is the preferred check for plugins
 that need to decide whether to start long-running resources. Host mode is not
 automatically added to model context; publish plugin context only for the
 capabilities the model should actually use.
+
+Plugins that keep `activation="always"` can still branch on host lifetime:
+
+```python
+def setup(context) -> None:
+    port = configured_port() if context.host.is_persistent else 0
+    start_server(port=port)
+```
 
 ## Minimal Plugin
 
