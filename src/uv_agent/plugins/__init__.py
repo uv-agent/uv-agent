@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from .api import PluginConfig, PluginManifest, PluginStatus, SetupPlugin
+from .api import (
+    PluginActivation,
+    PluginConfig,
+    PluginHostInfo,
+    PluginHostInvocation,
+    PluginHostLifetime,
+    PluginManifest,
+    PluginStatus,
+    SetupPlugin,
+)
 from .context import PluginContext, PluginContextBroker, PluginRegistration, SubmittedTurn, UserInput
 from .events import EventBus
 from .i18n import I18nTextSpec, LocalizedText, PluginI18nRegistry, localize_text
@@ -36,9 +45,13 @@ __all__ = [
     "CommandSpec",
     "EventBus",
     "PickerSource",
+    "PluginActivation",
     "PluginConfig",
     "PluginContext",
     "PluginContextBroker",
+    "PluginHostInfo",
+    "PluginHostInvocation",
+    "PluginHostLifetime",
     "PluginRegistration",
     "PluginManager",
     "PluginManifest",

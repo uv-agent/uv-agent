@@ -315,6 +315,8 @@ are edited in JSON.
 
 Plugins are installed Python packages discovered through the `uv_agent.plugins`
 entry point group. They are enabled by default unless explicitly disabled.
+Enabled plugins may still be skipped when their manifest activation policy does
+not match the current host lifecycle.
 
 ```json
 {

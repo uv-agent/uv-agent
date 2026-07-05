@@ -243,7 +243,13 @@ async def run_daemon(
     replace: bool = False,
     log_level: str | int | None = None,
 ) -> None:
-    engine = create_engine(project_root, data_dir=data_dir, log_level=log_level)
+    engine = create_engine(
+        project_root,
+        data_dir=data_dir,
+        log_level=log_level,
+        host_invocation="daemon",
+        host_lifetime="persistent",
+    )
     lease = DaemonLease(engine.thread_store.data_dir)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

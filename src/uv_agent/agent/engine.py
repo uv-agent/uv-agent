@@ -60,6 +60,7 @@ from uv_agent.agent.messages import assistant_output_item, message_item, message
 from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
 from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, UserInput
+from uv_agent.plugins.api import PluginHostInfo
 from uv_agent.plugins.manager import RESERVED_RUNTIME_NAMESPACES
 from uv_agent.plugins.resources import ResourceData, coerce_resource_data
 from uv_agent.plugins.registry import RuntimeNamespaceRegistry
@@ -348,6 +349,7 @@ class AgentEngine:
         project_root: Path,
         config_loader: Callable[[], AppConfig] | None = None,
         host_events: HostEventBus | None = None,
+        plugin_host: PluginHostInfo | None = None,
     ) -> None:
         self.config = config
         self.model_client = model_client
@@ -385,6 +387,7 @@ class AgentEngine:
             submitter=self._plugin_submit_turn,
             thread_store=self.thread_store,
             logging_config=self.config.logging,
+            host=plugin_host,
         )
         rpc_server = getattr(self.runner, "rpc_server", None)
         if rpc_server is not None:

@@ -15,7 +15,9 @@ from uv_agent.paths import (
     project_run_scripts_dir,
     project_scriptenv_dir,
     project_state_dir,
+    uv_agent_home,
 )
+from uv_agent.plugins.api import PluginHostInfo, PluginHostInvocation, PluginHostLifetime
 from uv_agent.runner import PythonRunner
 from uv_agent.session import ThreadStore
 
@@ -29,6 +31,8 @@ def create_engine(
     data_dir: Path | None = None,
     log_level: str | int | None = None,
     log_to_console: bool | None = None,
+    host_invocation: PluginHostInvocation = "tui",
+    host_lifetime: PluginHostLifetime = "session",
 ) -> AgentEngine:
     root = (project_root or Path.cwd()).resolve()
     ensure_project_local_dir(root)
@@ -59,6 +63,13 @@ def create_engine(
     )
     thread_store = ThreadStore(state_dir, host_events=host_events)
     model_client = UnifiedModelClient(config)
+    plugin_host = PluginHostInfo(
+        invocation=host_invocation,
+        lifetime=host_lifetime,
+        project_root=root,
+        project_state_dir=state_dir,
+        user_state_dir=uv_agent_home(),
+    )
     logger.debug(
         "Engine components initialized runner_scripts=%s scriptenv=%s blobs=%s",
         project_run_scripts_dir(root) if data_dir is None else state_dir / "runner" / "scripts",
@@ -73,4 +84,5 @@ def create_engine(
         project_root=root,
         config_loader=lambda: load_config(root),
         host_events=host_events,
+        plugin_host=plugin_host,
     )

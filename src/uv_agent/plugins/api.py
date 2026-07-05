@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from .i18n import LocalizedText
 
+PluginActivation = Literal[
+    "always",
+    "persistent_only",
+    "session_only",
+]
 PluginCapability = Literal[
     "runtime_namespace",
     "context",
@@ -17,12 +23,36 @@ PluginCapability = Literal[
 PluginState = Literal[
     "discovered",
     "disabled",
+    "skipped",
     "starting",
     "started",
     "warning",
     "failed",
     "stopped",
 ]
+PluginHostInvocation = Literal[
+    "tui",
+    "daemon",
+]
+PluginHostLifetime = Literal[
+    "session",
+    "persistent",
+]
+
+
+@dataclass(frozen=True)
+class PluginHostInfo:
+    """Read-only host runtime information exposed to plugin setup code."""
+
+    invocation: PluginHostInvocation
+    lifetime: PluginHostLifetime
+    project_root: Path
+    project_state_dir: Path
+    user_state_dir: Path
+
+    @property
+    def is_persistent(self) -> bool:
+        return self.lifetime == "persistent"
 
 
 @dataclass(frozen=True)
@@ -44,6 +74,7 @@ class PluginManifest:
     dependencies: tuple[str, ...] = ()
     optional_dependencies: tuple[str, ...] = ()
     capabilities: tuple[PluginCapability | str, ...] = ()
+    activation: PluginActivation = "always"
     config_schema: dict[str, Any] = field(default_factory=dict)
     storage_schema: dict[str, Any] = field(default_factory=dict)
     deprecated: bool = False

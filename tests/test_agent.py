@@ -70,7 +70,7 @@ from uv_agent.model import (
 from uv_agent.runner import PythonRunner
 from uv_agent.runner.models import PythonRunRequest, PythonRunResult
 from uv_agent.session import ThreadLockedError, ThreadStore
-from uv_agent.plugins import PluginContextBroker
+from uv_agent.plugins import PluginContextBroker, PluginHostInfo
 
 
 class BlockingModelClient(FakeModelClient):
@@ -5148,6 +5148,13 @@ def test_compaction_summary_appends_plugin_sections(tmp_path: Path, monkeypatch:
         runner=PythonRunner(project_root=project_root, data_dir=state_dir, config=config.runner),
         thread_store=ThreadStore(state_dir),
         project_root=project_root,
+        plugin_host=PluginHostInfo(
+            invocation="daemon",
+            lifetime="persistent",
+            project_root=project_root,
+            project_state_dir=state_dir,
+            user_state_dir=tmp_path / "user",
+        ),
     )
     thread_id = engine.thread_store.create_thread()
     monkeypatch.setenv("UV_AGENT_RUNTIME_THREAD_ID", thread_id)

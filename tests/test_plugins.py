@@ -11,7 +11,7 @@ import pytest
 
 from uv_agent.config import LoggingConfig, PluginConfigBlock, PluginsConfig
 from uv_agent.session import ThreadStore
-from uv_agent.plugins import EventBus, PluginManager, PluginManifest, ResourceData, SetupPlugin
+from uv_agent.plugins import EventBus, PluginHostInfo, PluginManager, PluginManifest, ResourceData, SetupPlugin
 from uv_agent.plugins.context import PluginContextBroker
 from uv_agent.plugins.registry import ActionRegistry, PickerSource, RuntimeFunctionSpec, RuntimeNamespaceRegistry, UiRegistry
 from uv_agent.plugins.resources import ResourceRegistry, coerce_resource_data
@@ -28,7 +28,24 @@ class EntryPoint:
         return self._value
 
 
-def _plugin(plugin_id: str, setup, *, priority: int = 100, dependencies: tuple[str, ...] = ()) -> SetupPlugin:
+def _host_info(tmp_path: Path, *, invocation: str = "tui", lifetime: str = "session") -> PluginHostInfo:
+    return PluginHostInfo(
+        invocation=invocation,  # type: ignore[arg-type]
+        lifetime=lifetime,  # type: ignore[arg-type]
+        project_root=tmp_path,
+        project_state_dir=tmp_path / "project-state",
+        user_state_dir=tmp_path / "user-state",
+    )
+
+
+def _plugin(
+    plugin_id: str,
+    setup,
+    *,
+    priority: int = 100,
+    dependencies: tuple[str, ...] = (),
+    activation: str = "always",
+) -> SetupPlugin:
     return SetupPlugin(
         manifest=PluginManifest(
             id=plugin_id,
@@ -37,6 +54,7 @@ def _plugin(plugin_id: str, setup, *, priority: int = 100, dependencies: tuple[s
             description="Test plugin",
             priority=priority,
             dependencies=dependencies,
+            activation=activation,  # type: ignore[arg-type]
         ),
         setup=setup,
     )
@@ -78,6 +96,7 @@ def _manager(
     *,
     config: PluginsConfig | None = None,
     logging_config: LoggingConfig | None = None,
+    host: PluginHostInfo | None = None,
 ) -> PluginManager:
     _install_entry_points(monkeypatch, plugins)
     return PluginManager(
@@ -89,6 +108,7 @@ def _manager(
         thread_store=None,
         logging_config=logging_config,
         user_state_dir=tmp_path / "state",
+        host=host,
     )
 
 
@@ -121,6 +141,7 @@ async def test_builtin_plugins_publish_context_and_runtime_namespaces(monkeypatc
         submitter=None,
         thread_store=None,
         user_state_dir=tmp_path / "state",
+        host=_host_info(tmp_path, invocation="daemon", lifetime="persistent"),
     )
 
     try:
@@ -169,6 +190,37 @@ async def test_builtin_plugins_publish_context_and_runtime_namespaces(monkeypatc
         assert manager.text("worktree_delete", "en") == "Delete worktree and branch"
         assert manager.text("mention_mcp_hint", "zh-CN") == "搜索后按 Enter 插入 MCP 引用"
         assert manager.text("mention_skills_hint", "en") == "Search and Enter to insert a skill mention"
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_builtin_persistent_plugins_skip_session_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "uv_agent.plugins.manager.importlib.metadata.entry_points",
+        lambda group: _builtin_entry_points() if group == "uv_agent.plugins" else [],
+    )
+    manager = PluginManager(
+        config=PluginsConfig(entries={"builtin.workflow": PluginConfigBlock(enabled=True)}),
+        project_root=tmp_path,
+        events=EventBus(),
+        helper_registry=RuntimeNamespaceRegistry(),
+        submitter=None,
+        thread_store=None,
+        user_state_dir=tmp_path / "state",
+        host=_host_info(tmp_path, invocation="tui", lifetime="session"),
+    )
+
+    try:
+        await manager.start()
+
+        statuses = {record.id: record for record in manager.records}
+        assert statuses["builtin.scheduler"].state == "skipped"
+        assert statuses["builtin.scheduler"].message == "requires persistent host"
+        assert statuses["builtin.workflow"].state == "skipped"
+        assert statuses["builtin.workflow"].message == "requires persistent host"
+        assert manager.resolve_helper("scheduler")["found"] is False
+        assert manager.resolve_helper("workflow")["found"] is False
     finally:
         await manager.stop()
 
@@ -411,6 +463,102 @@ async def test_plugin_manager_starts_setup_plugin_and_registers_capabilities(mon
     assert _epoch_text(manager.contexts, "thread", core_texts=["<core />"]).endswith(
         "<agent_demo_status>\n<state>ready</state>\n</agent_demo_status>"
     )
+
+
+@pytest.mark.asyncio
+async def test_plugin_context_exposes_host_info(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[tuple[str, str, bool, Path, Path, Path]] = []
+
+    def setup(context) -> None:
+        seen.append(
+            (
+                context.host.invocation,
+                context.host.lifetime,
+                context.host.is_persistent,
+                context.host.project_root,
+                context.host.project_state_dir,
+                context.host.user_state_dir,
+            )
+        )
+
+    host = _host_info(tmp_path, invocation="daemon", lifetime="persistent")
+    manager = _manager(tmp_path, monkeypatch, [_plugin("host-aware", setup)], host=host)
+
+    await manager.start()
+
+    assert seen == [
+        (
+            "daemon",
+            "persistent",
+            True,
+            tmp_path,
+            tmp_path / "project-state",
+            tmp_path / "user-state",
+        )
+    ]
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_plugin_activation_skips_persistent_only_in_session_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    started = False
+    skipped_events: list[dict[str, Any]] = []
+
+    def setup(context) -> None:
+        nonlocal started
+        started = True
+
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        [_plugin("server-plugin", setup, activation="persistent_only")],
+        host=_host_info(tmp_path, invocation="tui", lifetime="session"),
+    )
+    manager.events.subscribe("plugin.skipped", lambda event: skipped_events.append(event))
+
+    await manager.start()
+
+    status = manager.records[0]
+    assert status.state == "skipped"
+    assert status.message == "requires persistent host"
+    assert started is False
+    assert skipped_events == [
+        {
+            "type": "plugin.skipped",
+            "plugin": "server-plugin",
+            "message": "requires persistent host",
+            "activation": "persistent_only",
+            "host_lifetime": "session",
+        }
+    ]
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_plugin_activation_allows_matching_host_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    started: list[str] = []
+
+    def setup(context) -> None:
+        started.append(context.host.lifetime)
+
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        [_plugin("server-plugin", setup, activation="persistent_only")],
+        host=_host_info(tmp_path, invocation="daemon", lifetime="persistent"),
+    )
+
+    await manager.start()
+
+    assert started == ["persistent"]
+    assert manager.records[0].state == "started"
+    await manager.stop()
 
 
 @pytest.mark.asyncio

@@ -71,6 +71,7 @@ MANIFEST = PluginManifest(
     dependencies=(),
     optional_dependencies=(),
     capabilities=("runtime_namespace", "context", "command", "action", "ui", "storage"),
+    activation="always",
     config_schema={},
     storage_schema={"collections": {"messages": {"indexes": ["channel"]}}},
 )
@@ -88,8 +89,16 @@ MANIFEST = PluginManifest(
 | `dependencies` | Other plugin ids that must start first. |
 | `optional_dependencies` | Optional ids used for load-order hints only. |
 | `capabilities` | Self-declared capability strings for documentation. |
+| `activation` | Host lifecycle policy: `always`, `persistent_only`, or `session_only`. |
 | `config_schema` | Optional JSON schema for validating `context.config`. |
 | `storage_schema` | Declares document collections and indexed fields. |
+
+`activation` is a coarse host-side startup policy. Use `persistent_only` for
+long-lived services such as schedulers or fixed-port servers that should not run
+inside a short TUI session host. Use `session_only` for plugins that only make
+sense in an interactive session. The default, `always`, preserves compatibility
+and lets the plugin inspect `context.host` to choose its own degraded or
+ephemeral behavior.
 
 ## Lifecycle
 
@@ -108,6 +117,7 @@ failure and emits plugin lifecycle events without taking down the host.
 | Surface | Purpose |
 | --- | --- |
 | `context.manifest` | The plugin manifest. |
+| `context.host` | Read-only host invocation, lifecycle, and state directory information. |
 | `context.project_root` | Active workspace root. |
 | `context.user_state_dir` | User state directory, normally `~/.uv-agent`. |
 | `context.config` | Plugin config from `plugins.<id>.config`. |
@@ -130,6 +140,13 @@ failure and emits plugin lifecycle events without taking down the host.
 `context.logger` writes to `~/.uv-agent/plugins/<plugin-id>/logs/plugin.log`.
 Plugin logs use the top-level `logging.max_bytes` and `logging.backup_count`
 rotation settings; see [Configuration](configuration.md#logging-options).
+
+`context.host.invocation` is currently `tui` or `daemon`.
+`context.host.lifetime` is `session` for the local TUI host and `persistent` for
+daemon mode. `context.host.is_persistent` is the preferred check for plugins
+that need to decide whether to start long-running resources. Host mode is not
+automatically added to model context; publish plugin context only for the
+capabilities the model should actually use.
 
 ## Minimal Plugin
 
@@ -506,6 +523,7 @@ Plugin lifecycle events published by the plugin manager:
 
 - `plugin.discovered`
 - `plugin.first_load`
+- `plugin.skipped`
 - `plugin.starting`
 - `plugin.started`
 - `plugin.stopped`

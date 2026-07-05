@@ -386,11 +386,15 @@ class UvAgentApp:
         log_level: str | int | None = None,
     ) -> None:
         self.project_root = (project_root or Path.cwd()).resolve()
+        # TODO: Let the TUI attach to a compatible daemon engine instead of
+        # starting a local session host when daemon IPC is available.
         self.engine = create_engine(
             self.project_root,
             data_dir=data_dir,
             log_level=log_level,
             log_to_console=False,
+            host_invocation="tui",
+            host_lifetime="session",
         )
         ui_config = getattr(self.engine.config, "ui", None)
         self.language = detect_user_language(getattr(ui_config, "language", None))
@@ -2734,6 +2738,17 @@ class UvAgentApp:
                 summary[state] = summary.get(state, 0) + 1
             rendered = ", ".join(f"{state}={summary[state]}" for state in sorted(summary))
             lines.append(f"plugins: {rendered}")
+            skipped = [
+                record
+                for record in iterable
+                if str(getattr(record, "state", "") or "") == "skipped"
+            ]
+            if skipped:
+                details = []
+                for record in skipped:
+                    reason = str(getattr(record, "message", "") or "skipped")
+                    details.append(f"{record.id} ({reason})")
+                lines.append(f"skipped plugins: {', '.join(details)}")
         return lines
 
     def _show_status(self) -> None:

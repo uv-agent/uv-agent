@@ -12,7 +12,7 @@ from typing import Any
 
 from uv_agent.paths import uv_agent_home
 
-from .api import PluginManifest
+from .api import PluginHostInfo, PluginManifest
 from .events import EventBus, raise_if_reentrant_submit
 from .i18n import LocalizedText, PluginI18nRegistry
 from .registry import (
@@ -575,12 +575,20 @@ class PluginContext:
         epoch_context_refreshers: list[tuple[str, Callable[..., Any]]],
         thread_store,
         action_context_resolver: Callable[[str], Any] | None = None,
+        host: PluginHostInfo | None = None,
     ) -> None:
         self.manifest = manifest
         self.plugin_id = manifest.id
         self.name = manifest.id
         self.project_root = project_root
         self.user_state_dir = user_state_dir or uv_agent_home()
+        self.host = host or PluginHostInfo(
+            invocation="tui",
+            lifetime="session",
+            project_root=project_root,
+            project_state_dir=storage.project_data_dir,
+            user_state_dir=self.user_state_dir,
+        )
         self.config = config
         self.events = events
         self.logger = logger

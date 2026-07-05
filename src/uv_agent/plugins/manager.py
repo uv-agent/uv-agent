@@ -16,7 +16,7 @@ from uv_agent.config import LoggingConfig, PluginsConfig
 from uv_agent.paths import uv_agent_home
 from uv_agent.state_db import SQLITE_BUSY_TIMEOUT_MS, SQLITE_TIMEOUT_SECONDS
 
-from .api import PluginManifest, PluginStatus, SetupPlugin
+from .api import PluginHostInfo, PluginManifest, PluginStatus, SetupPlugin
 from .context import PluginActionAPI, PluginContext, PluginContextBroker, maybe_await
 from .events import EventBus
 from .i18n import PluginI18nRegistry
@@ -55,11 +55,20 @@ class PluginManager:
         thread_store=None,
         logging_config: LoggingConfig | None = None,
         user_state_dir: Path | None = None,
+        host: PluginHostInfo | None = None,
     ) -> None:
         self.config = config
         self.logging_config = logging_config or LoggingConfig()
         self.project_root = project_root
         self.user_state_dir = user_state_dir or uv_agent_home()
+        project_state_dir = thread_store.data_dir if thread_store is not None else self.project_root / ".uv-agent"
+        self.host = host or PluginHostInfo(
+            invocation="tui",
+            lifetime="session",
+            project_root=self.project_root,
+            project_state_dir=project_state_dir,
+            user_state_dir=self.user_state_dir,
+        )
         self.events = events
         self.events.on_handler_error(self._mark_plugin_warning_from_event_logger)
         self.runtime = helper_registry
@@ -289,13 +298,15 @@ class PluginManager:
             return
         first_load = self._mark_first_load(manifest.id)
         enabled = self.config.enabled(manifest.id, default=manifest.default_enabled)
-        state = "discovered" if enabled else "disabled"
+        skip_message = _activation_skip_message(manifest, self.host) if enabled else ""
+        state = "skipped" if skip_message else "discovered" if enabled else "disabled"
         status = PluginStatus(
             id=manifest.id,
             display_name=manifest.display_name,
             state=state,
             builtin=manifest.builtin,
             first_load=first_load,
+            message=skip_message,
             deprecated=manifest.deprecated,
             deprecation_message=manifest.deprecation_message,
         )
@@ -310,9 +321,23 @@ class PluginManager:
         self._publish({"type": "plugin.discovered", "plugin": manifest.id, "first_load": first_load, "builtin": manifest.builtin})
         if first_load:
             self._publish({"type": "plugin.first_load", "plugin": manifest.id})
+        if skip_message:
+            self._publish(
+                {
+                    "type": "plugin.skipped",
+                    "plugin": manifest.id,
+                    "message": skip_message,
+                    "activation": manifest.activation,
+                    "host_lifetime": self.host.lifetime,
+                }
+            )
 
     def _load_order(self) -> list[str]:
-        pending = [plugin_id for plugin_id, record in self._records.items() if record.status.state != "disabled"]
+        pending = [
+            plugin_id
+            for plugin_id, record in self._records.items()
+            if record.status.state not in {"disabled", "skipped"}
+        ]
         pending.sort(key=lambda plugin_id: (self._records[plugin_id].plugin.manifest.priority, plugin_id))
         resolved: list[str] = []
         seen: set[str] = set()
@@ -333,7 +358,7 @@ class PluginManager:
 
     async def _start_record(self, record: _PluginRecord) -> None:
         manifest = record.plugin.manifest
-        if record.status.state in {"disabled", "failed"}:
+        if record.status.state in {"disabled", "skipped", "failed"}:
             return
         missing = [
             dep
@@ -359,6 +384,7 @@ class PluginManager:
         )
         context = PluginContext(
             manifest=manifest,
+            host=self.host,
             project_root=self.project_root,
             user_state_dir=self.user_state_dir,
             config=self.config.plugin_config(manifest.id),
@@ -582,6 +608,21 @@ def _normalize_plugin_object(value: Any) -> SetupPlugin:
 def _safe_plugin_name(name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-_.")
     return safe or "plugin"
+
+
+def _activation_skip_message(manifest: PluginManifest, host: PluginHostInfo) -> str:
+    activation = manifest.activation
+    if activation == "always":
+        return ""
+    if activation == "persistent_only":
+        if host.is_persistent:
+            return ""
+        return "requires persistent host"
+    if activation == "session_only":
+        if not host.is_persistent:
+            return ""
+        return "requires session host"
+    return f"unsupported activation {activation!r}"
 
 
 def _deprecation_message(manifest: PluginManifest) -> str:

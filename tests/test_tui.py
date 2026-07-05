@@ -2579,6 +2579,20 @@ def test_status_command_flushes_context_summary(monkeypatch) -> None:
     assert "42%" in last.text
 
 
+def test_status_command_lists_skipped_plugins(monkeypatch) -> None:
+    app = _make_app(monkeypatch)
+    app.engine.plugins.records = [
+        SimpleNamespace(id="builtin.scheduler", state="skipped", message="requires persistent host"),
+        SimpleNamespace(id="builtin.goal", state="started", message=""),
+    ]
+
+    app._handle_command("/status")
+
+    last = app.state.flushed[-1]
+    assert "plugins: skipped=1, started=1" in last.text
+    assert "skipped plugins: builtin.scheduler (requires persistent host)" in last.text
+
+
 def test_streamed_reasoning_is_not_flushed_again_on_model_response(monkeypatch) -> None:
     app = _make_app(monkeypatch)
 

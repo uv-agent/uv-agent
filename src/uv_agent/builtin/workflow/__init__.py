@@ -25,6 +25,7 @@ MANIFEST = PluginManifest(
     ),
     priority=300,
     capabilities=("runtime_namespace", "action", "context"),
+    activation="persistent_only",
 )
 
 

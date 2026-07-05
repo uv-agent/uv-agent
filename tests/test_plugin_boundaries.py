@@ -62,7 +62,7 @@ def test_engine_no_longer_owns_builtin_plugin_services() -> None:
         assert needle not in engine
 
     plugin_context = _source("src/uv_agent/plugins/context.py")
-    assert "self.host" not in plugin_context
+    assert "host=self" not in plugin_context
 
 
 def test_app_entrypoints_do_not_start_scheduler_or_workflow_services_directly() -> None:
