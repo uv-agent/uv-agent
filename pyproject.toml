@@ -44,3 +44,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/uv_agent", "src/uv_agent_runtime"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

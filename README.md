@@ -346,6 +346,18 @@ this same plugin surface. Install only plugins you trust.
 uvx --with your-uv-agent-plugin uv-agent@latest
 ```
 
+For plugin-heavy launches, `uv-agentx` is a small companion launcher that keeps
+the runtime ephemeral while shortening the command line:
+
+```powershell
+uvx uv-agentx@latest --latest -p auth-code -p remote-control -- daemon --replace
+```
+
+`-p auth-code` first tries the official PyPI package `uv-agent-auth-code`, then
+falls back to `auth-code` if the prefixed package does not exist. Use
+`--raw-plugin` to pass a package requirement without this name expansion. See
+[uv-agentx](packages/uv-agentx/README.md) for the full launcher syntax.
+
 See [Plugin system](docs/plugins.md) for details.
 
 ## Runtime & Context
@@ -373,6 +385,7 @@ Every model turn = stable system prompt + on-demand structured context.
 - [TUI and slash commands](docs/tui.md)
 - [Runtime and managed scripts](docs/runtime.md)
 - [Plugin system](docs/plugins.md)
+- [uv-agentx plugin launcher](packages/uv-agentx/README.md)
 
 ## Development
 
@@ -381,6 +394,7 @@ editing, testing, and iterating.
 
 ```powershell
 uv run pytest
+uv run --project packages/uv-agentx pytest packages/uv-agentx/tests
 ```
 
 Local debug state, screenshots, config, and run data belong in `.uv-agent/` and

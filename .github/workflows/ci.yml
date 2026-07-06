@@ -40,3 +40,12 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+      - name: Install uv-agentx dependencies
+        run: uv sync --project packages/uv-agentx --locked --dev
+
+      - name: Run uv-agentx tests
+        run: uv run --project packages/uv-agentx pytest packages/uv-agentx/tests
+
+      - name: Build uv-agentx
+        run: uv build packages/uv-agentx --out-dir dist/uv-agentx
