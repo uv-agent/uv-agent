@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from uv_agent.blobs import BlobStore
 from uv_agent.paths import uv_agent_home
 
 from .api import PluginHostInfo, PluginManifest
@@ -61,11 +62,50 @@ class SubmittedTurn:
 
 
 @dataclass(frozen=True)
+class TurnAttachment:
+    """One structured attachment reference submitted with a user message."""
+
+    kind: str
+    token: str
+    blob_id: str
+    filename: str = ""
+    mime_type: str = "application/octet-stream"
+    slot: int | None = None
+
+
+def coerce_turn_attachment(value: TurnAttachment | Mapping[str, Any]) -> TurnAttachment:
+    if isinstance(value, TurnAttachment):
+        return value
+    if not isinstance(value, Mapping):
+        raise TypeError(f"Unsupported turn attachment value: {value!r}")
+    kind = str(value.get("kind") or "").strip()
+    token = str(value.get("token") or "")
+    blob_id = str(value.get("blob_id") or "").strip()
+    if not kind:
+        raise ValueError("Attachment kind is required")
+    if not token:
+        raise ValueError("Attachment token is required")
+    if not blob_id:
+        raise ValueError("Attachment blob_id is required")
+    raw_slot = value.get("slot")
+    slot = int(raw_slot) if raw_slot is not None and raw_slot != "" else None
+    return TurnAttachment(
+        kind=kind,
+        token=token,
+        blob_id=blob_id,
+        filename=str(value.get("filename") or ""),
+        mime_type=str(value.get("mime_type") or "application/octet-stream"),
+        slot=slot,
+    )
+
+
+@dataclass(frozen=True)
 class UserInput:
     """One external user message that may be coalesced into a supervised turn."""
 
     text: str
     image_paths: tuple[str | Path, ...] = ()
+    attachments: tuple[TurnAttachment, ...] = ()
     request_id: str | None = None
 
 
@@ -348,6 +388,9 @@ class PluginThreadAPI:
     def update_metadata(self, thread_id: str, metadata: dict[str, Any]) -> None:
         self._thread_store.update_thread_metadata(thread_id, updates=dict(metadata))
 
+    def update_title(self, thread_id: str, title: str, *, source: str = "plugin") -> None:
+        self._thread_store.update_title(thread_id, title, source=source)
+
     def record_event(self, thread_id: str, event_type: str, **data: Any) -> dict[str, Any]:
         return self._thread_store.append(thread_id, event_type, **data)
 
@@ -357,6 +400,34 @@ class PluginThreadAPI:
     def recent_events(self, thread_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
         events, _ = self._thread_store.read_recent_events(thread_id, limit=limit)
         return events
+
+    def event_page(
+        self,
+        thread_id: str,
+        *,
+        after_event_id: int | None = None,
+        before_event_id: int | None = None,
+        limit: int = 200,
+        event_types: set[str] | list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        if after_event_id is not None and before_event_id is not None:
+            raise ValueError("Use either after_event_id or before_event_id, not both")
+        normalized_types = set(event_types) if event_types is not None else None
+        if before_event_id is not None:
+            events, has_more = self._thread_store.read_recent_events(
+                thread_id,
+                limit=limit,
+                before_event_id=before_event_id,
+                event_types=normalized_types,
+            )
+            return {"events": events, "has_more": has_more}
+        events, has_more = self._thread_store.read_events_after(
+            thread_id,
+            after_event_id=after_event_id or 0,
+            limit=limit,
+            event_types=normalized_types,
+        )
+        return {"events": events, "has_more": has_more}
 
 
 class PluginRuntimeAPI:
@@ -380,6 +451,35 @@ class PluginResourceAPI:
             self._registry.unregister(provider.prefix)
 
         return PluginRegistration(dispose)
+
+
+class PluginBlobAPI:
+    """Narrow project blob API exposed to plugins."""
+
+    def __init__(self, *, blob_store: BlobStore | None) -> None:
+        self._blob_store = blob_store
+
+    @property
+    def available(self) -> bool:
+        return self._blob_store is not None
+
+    def put_bytes(
+        self,
+        data: bytes,
+        *,
+        mime_type: str = "application/octet-stream",
+        filename: str = "",
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        if self._blob_store is None:
+            raise RuntimeError("Plugin blob storage is not available")
+        blob = self._blob_store.put_bytes(data, **({"max_bytes": max_bytes} if max_bytes is not None else {}))
+        return blob.to_ref(mime_type=mime_type, filename=filename)
+
+    def info(self, blob_id: str) -> dict[str, Any]:
+        if self._blob_store is None:
+            raise RuntimeError("Plugin blob storage is not available")
+        return self._blob_store.info(blob_id)
 
 
 class PluginActionAPI:
@@ -529,6 +629,105 @@ class PluginUiAPI:
         return self._registry.picker_items(picker_id, query=query)
 
 
+class PluginAgentAPI:
+    """Read-only host summaries intended for plugin-built user interfaces."""
+
+    def __init__(self, *, config_getter: Callable[[], Any] | None, ui_registry: UiRegistry) -> None:
+        self._config_getter = config_getter
+        self._ui_registry = ui_registry
+
+    def model_levels(self) -> dict[str, Any]:
+        config = self._config() if self._config_getter is not None else None
+        if config is None:
+            return {"available": False, "default_level": "", "levels": []}
+        public_levels = getattr(config, "public_levels", lambda: {})()
+        default_level = str(getattr(getattr(config, "runtime", None), "default_level", "") or "")
+        levels: list[dict[str, Any]] = []
+        for name, level in public_levels.items():
+            item: dict[str, Any] = {
+                "id": str(name),
+                "label": str(name),
+                "model_key": str(getattr(level, "model", "") or ""),
+                "is_default": str(name) == default_level,
+            }
+            try:
+                model = config.model_for_level(name)
+                provider = config.provider_for_model(model)
+            except Exception as exc:
+                item["status"] = "error"
+                item["error_type"] = exc.__class__.__name__
+                item["message"] = str(exc) or repr(exc)
+            else:
+                item.update(
+                    {
+                        "status": "available",
+                        "model": str(getattr(model, "model", "") or ""),
+                        "model_name": str(getattr(model, "name", "") or ""),
+                        "provider": str(getattr(model, "provider", "") or ""),
+                        "api": str(getattr(model, "api", "") or ""),
+                        "context_window_tokens": int(getattr(model, "context_window_tokens", 0) or 0),
+                        "supports_images": getattr(model, "supports_images", None),
+                        "provider_configured": bool(getattr(provider, "resolved_api_key", lambda: None)()),
+                    }
+                )
+            levels.append(item)
+        return {
+            "available": True,
+            "default_level": default_level,
+            "levels": levels,
+        }
+
+    def picker_summary(self, picker_ids: Iterable[str] | None = None, *, query: str = "", limit: int = 30) -> dict[str, Any]:
+        ids = [str(item) for item in (picker_ids or []) if str(item)]
+        if not ids:
+            ids = [picker.id for picker in self._ui_registry.pickers()]
+        pickers = {picker.id: picker for picker in self._ui_registry.pickers()}
+        result: dict[str, Any] = {}
+        for picker_id in ids:
+            picker = pickers.get(picker_id)
+            if picker is None:
+                result[picker_id] = {"available": False, "items": []}
+                continue
+            items = self._ui_registry.picker_items(picker_id, query=query)
+            result[picker_id] = {
+                "available": True,
+                "plugin": picker.plugin,
+                "id": picker.id,
+                "title": _localized_payload(picker.title),
+                "trigger": picker.trigger,
+                "items": [_picker_item_summary(item) for item in items[: max(0, int(limit))]],
+                "total": len(items),
+            }
+        return result
+
+    def _config(self) -> Any:
+        return self._config_getter() if self._config_getter is not None else None
+
+
+def _picker_item_summary(item: PickerItem | Mapping[str, Any]) -> dict[str, str]:
+    if isinstance(item, Mapping):
+        return {
+            "id": str(item.get("id") or ""),
+            "value": str(item.get("value") or ""),
+            "description": str(item.get("description") or ""),
+            "kind": str(item.get("kind") or ""),
+            "meta": str(item.get("meta") or ""),
+        }
+    return {
+        "id": str(getattr(item, "id", "") or ""),
+        "value": str(getattr(item, "value", "") or ""),
+        "description": str(getattr(item, "description", "") or ""),
+        "kind": str(getattr(item, "kind", "") or ""),
+        "meta": str(getattr(item, "meta", "") or ""),
+    }
+
+
+def _localized_payload(value: LocalizedText) -> str | dict[str, str]:
+    if isinstance(value, Mapping):
+        return {str(key): str(text) for key, text in value.items()}
+    return str(value or "")
+
+
 class PluginI18nAPI:
     def __init__(self, *, plugin: str, registry: PluginI18nRegistry) -> None:
         self._plugin = plugin
@@ -574,7 +773,9 @@ class PluginContext:
         compaction_section_providers: list[tuple[str, Callable[..., str]]],
         epoch_context_refreshers: list[tuple[str, Callable[..., Any]]],
         thread_store,
+        blob_store: BlobStore | None = None,
         action_context_resolver: Callable[[str], Any] | None = None,
+        agent_config: Callable[[], Any] | None = None,
         host: PluginHostInfo | None = None,
     ) -> None:
         self.manifest = manifest
@@ -594,9 +795,11 @@ class PluginContext:
         self.logger = logger
         self.runtime = PluginRuntimeAPI(plugin=manifest.id, registry=runtime_registry)
         self.resources = PluginResourceAPI(plugin=manifest.id, registry=resource_registry)
+        self.blobs = PluginBlobAPI(blob_store=blob_store)
         self.actions = PluginActionAPI(plugin=manifest.id, registry=action_registry, context_resolver=action_context_resolver)
         self.commands = PluginCommandAPI(plugin=manifest.id, registry=command_registry)
         self.ui = PluginUiAPI(plugin=manifest.id, registry=ui_registry)
+        self.agent = PluginAgentAPI(config_getter=agent_config, ui_registry=ui_registry)
         self.i18n = PluginI18nAPI(plugin=manifest.id, registry=i18n_registry)
         self.compaction = PluginCompactionAPI(plugin=manifest.id, providers=compaction_section_providers)
         self.epoch = PluginEpochContextAPI(plugin=manifest.id, broker=context_broker, refreshers=epoch_context_refreshers)
@@ -616,12 +819,43 @@ class PluginContext:
         thread_id: str | None = None,
         level: str | None = None,
         image_paths: list[Path] | None = None,
+        attachments: list[TurnAttachment | Mapping[str, Any]] | None = None,
         conflict: str = "queue",
     ) -> SubmittedTurn:
         if self._submitter is None:
             raise RuntimeError("Plugin turn submission is not available")
         raise_if_reentrant_submit()
-        return await self._submitter(text=text, thread_id=thread_id, level=level, image_paths=image_paths, conflict=conflict)
+        return await self._submitter(
+            text=text,
+            thread_id=thread_id,
+            level=level,
+            image_paths=image_paths,
+            attachments=attachments,
+            conflict=conflict,
+        )
+
+    async def start_turn(
+        self,
+        *,
+        text: str,
+        thread_id: str | None = None,
+        level: str | None = None,
+        image_paths: list[Path] | None = None,
+        attachments: list[TurnAttachment | Mapping[str, Any]] | None = None,
+        conflict: str = "queue",
+    ) -> Any:
+        if self._submitter is None:
+            raise RuntimeError("Plugin turn submission is not available")
+        raise_if_reentrant_submit()
+        return await self._submitter(
+            text=text,
+            thread_id=thread_id,
+            level=level,
+            image_paths=image_paths,
+            attachments=attachments,
+            conflict=conflict,
+            wait=False,
+        )
 
     @property
     def can_submit_turn(self) -> bool:

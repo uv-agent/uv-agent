@@ -10,7 +10,7 @@ from .api import (
     PluginStatus,
     SetupPlugin,
 )
-from .context import PluginContext, PluginContextBroker, PluginRegistration, SubmittedTurn, UserInput
+from .context import PluginAgentAPI, PluginContext, PluginContextBroker, PluginRegistration, SubmittedTurn, TurnAttachment, UserInput
 from .events import EventBus
 from .i18n import I18nTextSpec, LocalizedText, PluginI18nRegistry, localize_text
 from .manager import PluginManager
@@ -46,6 +46,7 @@ __all__ = [
     "EventBus",
     "PickerSource",
     "PluginActivation",
+    "PluginAgentAPI",
     "PluginConfig",
     "PluginContext",
     "PluginContextBroker",
@@ -67,6 +68,7 @@ __all__ = [
     "SetupPlugin",
     "SubmittedTurn",
     "TranscriptEventSpec",
+    "TurnAttachment",
     "UiRegistry",
     "UnknownResourceProviderError",
     "UserInput",

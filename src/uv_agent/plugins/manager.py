@@ -53,9 +53,11 @@ class PluginManager:
         helper_registry: RuntimeNamespaceRegistry,
         submitter,
         thread_store=None,
+        blob_store=None,
         logging_config: LoggingConfig | None = None,
         user_state_dir: Path | None = None,
         host: PluginHostInfo | None = None,
+        agent_config: Callable[[], Any] | None = None,
     ) -> None:
         self.config = config
         self.logging_config = logging_config or LoggingConfig()
@@ -69,6 +71,7 @@ class PluginManager:
             project_state_dir=project_state_dir,
             user_state_dir=self.user_state_dir,
         )
+        self._agent_config = agent_config
         self.events = events
         self.events.on_handler_error(self._mark_plugin_warning_from_event_logger)
         self.runtime = helper_registry
@@ -82,6 +85,7 @@ class PluginManager:
         self._epoch_context_refreshers: list[tuple[str, Callable[..., Any]]] = []
         self._submitter = submitter
         self._thread_store = thread_store
+        self._blob_store = blob_store
         self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._records: dict[str, _PluginRecord] = {}
         self._task: asyncio.Task[None] | None = None
@@ -398,12 +402,14 @@ class PluginManager:
             i18n_registry=self.i18n,
             context_broker=self.contexts,
             storage=storage,
+            blob_store=self._blob_store,
             submitter=self._submitter,
             task_factory=self._create_task,
             compaction_section_providers=self._compaction_section_providers,
             epoch_context_refreshers=self._epoch_context_refreshers,
             thread_store=self._thread_store,
             action_context_resolver=self.context_for,
+            agent_config=self._agent_config,
         )
         record.context = context
         try:

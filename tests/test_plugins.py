@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-from uv_agent.config import LoggingConfig, PluginConfigBlock, PluginsConfig
+from uv_agent.blobs import BlobStore
+from uv_agent.config import LoggingConfig, PluginConfigBlock, PluginsConfig, parse_config
 from uv_agent.session import ThreadStore
 from uv_agent.plugins import EventBus, PluginHostInfo, PluginManager, PluginManifest, ResourceData, SetupPlugin
 from uv_agent.plugins.context import PluginContextBroker
@@ -97,6 +98,8 @@ def _manager(
     config: PluginsConfig | None = None,
     logging_config: LoggingConfig | None = None,
     host: PluginHostInfo | None = None,
+    blob_store: BlobStore | None = None,
+    agent_config=None,
 ) -> PluginManager:
     _install_entry_points(monkeypatch, plugins)
     return PluginManager(
@@ -106,9 +109,11 @@ def _manager(
         helper_registry=RuntimeNamespaceRegistry(),
         submitter=None,
         thread_store=None,
+        blob_store=blob_store,
         logging_config=logging_config,
         user_state_dir=tmp_path / "state",
         host=host,
+        agent_config=agent_config,
     )
 
 
@@ -116,6 +121,60 @@ def _epoch_text(broker: PluginContextBroker, thread_id: str, *, core_texts: list
     parts = [text for text in (core_texts or []) if text]
     parts.extend(item.text for item in broker.consume_epoch(thread_id))
     return "\n\n".join(parts)
+
+
+@pytest.mark.asyncio
+async def test_plugin_agent_api_summarizes_models_and_pickers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    def setup(context) -> None:
+        seen["context"] = context
+        context.ui.picker(
+            id="skills",
+            title={"zh": "技能", "en": "Skills"},
+            trigger="@skill",
+            provider=lambda query="": [
+                {
+                    "id": "skill://user/demo",
+                    "value": "@skill://user/demo",
+                    "description": "Demo skill",
+                    "kind": "skill-mention",
+                    "meta": "user",
+                }
+            ],
+        )
+
+    config = parse_config(
+        {
+            "providers": {"p": {"base_url": "https://example.com", "api_key": "secret"}},
+            "models": {"m": {"provider": "p", "model": "remote", "context_window_tokens": 64000, "supports_images": True}},
+            "levels": {"fast": {"model": "m"}, "hidden": {"model": "m", "hidden": True}},
+            "runtime": {"default_level": "fast"},
+        },
+        tmp_path,
+    )
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        [_plugin("demo", setup)],
+        agent_config=lambda: config,
+    )
+
+    await manager.start()
+
+    context = seen["context"]
+    model_summary = context.agent.model_levels()
+    assert model_summary["available"] is True
+    assert model_summary["default_level"] == "fast"
+    assert [item["id"] for item in model_summary["levels"]] == ["fast"]
+    assert model_summary["levels"][0]["model"] == "remote"
+    assert model_summary["levels"][0]["provider_configured"] is True
+
+    picker_summary = context.agent.picker_summary(["skills", "mcp"])
+    assert picker_summary["skills"]["available"] is True
+    assert picker_summary["skills"]["title"]["zh"] == "技能"
+    assert picker_summary["skills"]["items"][0]["value"] == "@skill://user/demo"
+    assert picker_summary["mcp"]["available"] is False
 
 
 @pytest.mark.asyncio
@@ -333,6 +392,7 @@ async def test_builtin_subagent_runtime_helper_creates_child_thread(
                 "thread_id": result["thread_id"],
                 "level": "small",
                 "image_paths": None,
+                "attachments": None,
                 "conflict": "queue",
             }
         ]
@@ -342,6 +402,77 @@ async def test_builtin_subagent_runtime_helper_creates_child_thread(
         assert metadata["parent_turn_id"] == "turn_parent"
         assert metadata["parent_run_id"] == "run_parent"
         assert metadata["owner_plugin"] == "builtin.subagent"
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_plugin_context_blobs_and_submit_attachments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class Submitted:
+        thread_id = "thr"
+        turn_id = "turn"
+        status = "completed"
+        final_text = ""
+        error = None
+
+        async def wait(self):
+            return self
+
+    submit_calls: list[dict[str, Any]] = []
+
+    async def submitter(**kwargs):
+        submit_calls.append(dict(kwargs))
+        return Submitted()
+
+    async def setup(context) -> None:
+        ref = context.blobs.put_bytes(
+            b"hello",
+            mime_type="text/plain",
+            filename="report.txt",
+            max_bytes=1024,
+        )
+        await context.submit_turn(
+            text="read [File report.txt]",
+            thread_id="thr",
+            attachments=[
+                {
+                    "kind": "file",
+                    "token": "[File report.txt]",
+                    "blob_id": ref["blob_id"],
+                    "filename": ref["filename"],
+                    "mime_type": ref["mime_type"],
+                }
+            ],
+        )
+
+    blob_store = BlobStore(tmp_path / "project-state")
+    _install_entry_points(monkeypatch, [_plugin("blob-plugin", setup)])
+    manager = PluginManager(
+        config=PluginsConfig(),
+        project_root=tmp_path,
+        events=EventBus(),
+        helper_registry=RuntimeNamespaceRegistry(),
+        submitter=submitter,
+        thread_store=None,
+        blob_store=blob_store,
+        user_state_dir=tmp_path / "state",
+    )
+
+    await manager.start()
+    try:
+        assert len(submit_calls) == 1
+        call = submit_calls[0]
+        assert call["text"] == "read [File report.txt]"
+        assert call["thread_id"] == "thr"
+        assert call["image_paths"] is None
+        attachment = call["attachments"][0]
+        assert attachment["kind"] == "file"
+        assert attachment["token"] == "[File report.txt]"
+        assert attachment["filename"] == "report.txt"
+        assert blob_store.info(attachment["blob_id"])["size_bytes"] == 5
     finally:
         await manager.stop()
 
@@ -1114,10 +1245,62 @@ def test_plugin_thread_api_creates_threads_and_records_events(tmp_path: Path) ->
     parent = api.create_thread("Parent")
     child = api.create_thread("Child", kind="plugin_worker", parent_thread_id=parent)
     stored = api.record_event(child, "thread.demo_updated", status="active")
+    later = api.record_event(child, "thread.demo_updated", status="later")
+    last = api.record_event(child, "thread.demo_updated", status="last")
 
     assert store.thread_metadata(child)["kind"] == "plugin_worker"
     assert store.thread_metadata(child)["parent_thread_id"] == parent
     assert stored["type"] == "thread.demo_updated"
+    after_page = api.event_page(child, after_event_id=stored["_event_id"], limit=1)
+    assert [event["status"] for event in after_page["events"]] == ["later"]
+    assert after_page["has_more"] is True
+    before_page = api.event_page(child, before_event_id=last["_event_id"], limit=1)
+    assert [event["status"] for event in before_page["events"]] == ["later"]
+    assert before_page["has_more"] is True
+
+
+@pytest.mark.asyncio
+async def test_plugin_context_start_turn_does_not_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    submit_calls: list[dict[str, Any]] = []
+    handles: list[Any] = []
+
+    async def submitter(**kwargs):
+        submit_calls.append(dict(kwargs))
+        return SimpleNamespace(request_id="req_1", thread_id=kwargs.get("thread_id"), status="queued")
+
+    async def setup(context) -> None:
+        handles.append(await context.start_turn(text="go", thread_id="thr"))
+
+    _install_entry_points(monkeypatch, [_plugin("starter-plugin", setup)])
+    manager = PluginManager(
+        config=PluginsConfig(),
+        project_root=tmp_path,
+        events=EventBus(),
+        helper_registry=RuntimeNamespaceRegistry(),
+        submitter=submitter,
+        thread_store=None,
+        user_state_dir=tmp_path / "state",
+    )
+
+    await manager.start()
+    try:
+        assert handles[0].request_id == "req_1"
+        assert submit_calls == [
+            {
+                "text": "go",
+                "thread_id": "thr",
+                "level": None,
+                "image_paths": None,
+                "attachments": None,
+                "conflict": "queue",
+                "wait": False,
+            }
+        ]
+    finally:
+        await manager.stop()
 
 
 @pytest.mark.asyncio

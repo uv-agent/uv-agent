@@ -15,7 +15,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
-from uv_agent.attachments import AttachmentStore, image_message_item
+from uv_agent.attachments import SUPPORTED_IMAGE_MIME_TYPES, AttachmentStore, image_message_item
 from uv_agent.blobs import BlobStore, MAX_BLOB_BYTES
 from uv_agent.agent.compaction import (
     DEPENDENCY_PARAMS,
@@ -59,8 +59,9 @@ from uv_agent.ids import new_id
 from uv_agent.agent.messages import assistant_output_item, message_item, message_item_text
 from uv_agent.model.types import ModelClient, ModelResponse
 from uv_agent.paths import uv_agent_home
-from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, UserInput
+from uv_agent.plugins import EventBus, PluginManager, SubmittedTurn, TurnAttachment, UserInput
 from uv_agent.plugins.api import PluginHostInfo
+from uv_agent.plugins.context import coerce_turn_attachment
 from uv_agent.plugins.manager import RESERVED_RUNTIME_NAMESPACES
 from uv_agent.plugins.resources import ResourceData, coerce_resource_data
 from uv_agent.plugins.registry import RuntimeNamespaceRegistry
@@ -317,6 +318,7 @@ class RunTurnPrelude:
     turn_started_event: dict[str, Any]
     user_items: list[dict[str, Any]]
     image_events_by_user: list[list[dict[str, Any]]]
+    file_events_by_user: list[list[dict[str, Any]]]
     context_warning_events: list[dict[str, Any]]
 
     @property
@@ -326,6 +328,10 @@ class RunTurnPrelude:
     @property
     def image_events(self) -> list[dict[str, Any]]:
         return [event for events in self.image_events_by_user for event in events]
+
+    @property
+    def file_events(self) -> list[dict[str, Any]]:
+        return [event for events in self.file_events_by_user for event in events]
 
 
 @dataclass(frozen=True)
@@ -386,8 +392,10 @@ class AgentEngine:
             helper_registry=self.runtime_helpers,
             submitter=self._plugin_submit_turn,
             thread_store=self.thread_store,
+            blob_store=self.blobs,
             logging_config=self.config.logging,
             host=plugin_host,
+            agent_config=lambda: self.config,
         )
         rpc_server = getattr(self.runner, "rpc_server", None)
         if rpc_server is not None:
@@ -513,6 +521,7 @@ class AgentEngine:
         thread_id: str | None = None,
         level: str | None = None,
         image_paths: list[str | Path] | None = None,
+        attachments: list[TurnAttachment | dict[str, Any]] | None = None,
         conflict: str = "queue",
     ):
         return await self.turn_manager.submit_turn(
@@ -520,6 +529,7 @@ class AgentEngine:
             thread_id=thread_id,
             level=level,
             image_paths=image_paths,
+            attachments=attachments,
             conflict=conflict,  # type: ignore[arg-type]
         )
 
@@ -530,15 +540,20 @@ class AgentEngine:
         thread_id: str | None = None,
         level: str | None = None,
         image_paths: list[Path] | None = None,
+        attachments: list[TurnAttachment | dict[str, Any]] | None = None,
         conflict: str = "queue",
-    ) -> SubmittedTurn:
+        wait: bool = True,
+    ) -> Any:
         handle = await self.turn_manager.submit_turn(
             user_text=text,
             thread_id=thread_id,
             level=level,
             image_paths=image_paths,
+            attachments=attachments,
             conflict=conflict,  # type: ignore[arg-type]
         )
+        if not wait:
+            return handle
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         started: asyncio.Future[tuple[str, str]] = asyncio.get_running_loop().create_future()
 
@@ -592,6 +607,91 @@ class AgentEngine:
         """Return the most recent cache-aware judge calculation, if any."""
         return self._last_judge
 
+    def _canonicalize_user_input_attachments(
+        self,
+        user_inputs: list[UserInput],
+        *,
+        thread_id: str,
+        turn_id: str,
+    ) -> tuple[list[UserInput], list[list[dict[str, Any]]], list[list[dict[str, Any]]]]:
+        canonical_inputs: list[UserInput] = []
+        image_attachments_by_user: list[list[dict[str, Any]]] = []
+        file_attachments_by_user: list[list[dict[str, Any]]] = []
+        for user_input in user_inputs:
+            text = str(user_input.text)
+            image_attachments: list[dict[str, Any]] = []
+            file_attachments: list[dict[str, Any]] = []
+            for attachment in user_input.attachments:
+                attachment_kind = str(attachment.kind or "").lower()
+                token = str(attachment.token or "")
+                spans = self._unquoted_token_spans(text, token)
+                if len(spans) != 1:
+                    raise ValueError(
+                        f"Attachment token must appear exactly once outside quotes: {token!r}"
+                    )
+                blob_info = self.blobs.info(str(attachment.blob_id))
+                if attachment_kind == "image":
+                    expected = f"[Image #{attachment.slot}]" if attachment.slot is not None else token
+                    if token != expected or not re.fullmatch(r"\[Image #\d+\]", token):
+                        raise ValueError(f"Invalid image attachment token: {token!r}")
+                    mime_type = str(attachment.mime_type or "application/octet-stream")
+                    if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+                        raise ValueError(f"Unsupported image attachment type: {mime_type}")
+                    image_attachments.append({"attachment": attachment, "blob_info": blob_info})
+                    continue
+                if attachment_kind != "file":
+                    raise ValueError(f"Unsupported attachment kind: {attachment.kind!r}")
+                if not re.fullmatch(r"\[File [^\]\r\n]+\]", token) or " id=" in token:
+                    raise ValueError(f"Invalid file attachment token: {token!r}")
+                start, end = spans[0]
+                canonical_token = f"{token[:-1]} id={attachment.blob_id}]"
+                text = text[:start] + canonical_token + text[end:]
+                file_attachments.append(
+                    {
+                        "attachment": attachment,
+                        "blob_info": blob_info,
+                        "canonical_token": canonical_token,
+                        "attachment_id": new_id("file"),
+                    }
+                )
+            canonical_inputs.append(
+                UserInput(
+                    text=text,
+                    image_paths=user_input.image_paths,
+                    attachments=user_input.attachments,
+                    request_id=user_input.request_id,
+                )
+            )
+            image_attachments_by_user.append(image_attachments)
+            file_attachments_by_user.append(file_attachments)
+        return canonical_inputs, image_attachments_by_user, file_attachments_by_user
+
+    @staticmethod
+    def _unquoted_token_spans(text: str, token: str) -> list[tuple[int, int]]:
+        if not token:
+            return []
+        spans: list[tuple[int, int]] = []
+        start = 0
+        while True:
+            index = text.find(token, start)
+            if index < 0:
+                return spans
+            end = index + len(token)
+            if not AgentEngine._is_immediately_quoted(text, index, end):
+                spans.append((index, end))
+            start = end
+
+    @staticmethod
+    def _is_immediately_quoted(text: str, start: int, end: int) -> bool:
+        if start <= 0 or end >= len(text):
+            return False
+        return (text[start - 1], text[end]) in {
+            ('"', '"'),
+            ("'", "'"),
+            ("“", "”"),
+            ("‘", "’"),
+        }
+
     async def run_turn(
         self,
         *,
@@ -600,6 +700,7 @@ class AgentEngine:
         thread_id: str | None = None,
         level: str | None = None,
         image_paths: list[str | Path] | None = None,
+        attachments: list[TurnAttachment | dict[str, Any]] | None = None,
         cancel_event: asyncio.Event | None = None,
         guide_event: asyncio.Event | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -617,6 +718,7 @@ class AgentEngine:
                 level=level,
                 image_paths=image_paths,
                 cancel_event=cancel_event,
+                attachments=attachments,
                 is_new_thread=is_new_thread,
             )
             turn_id = prelude.turn_id
@@ -683,9 +785,10 @@ class AgentEngine:
                 turn_input=turn_input,
                 user_items=prelude.user_items,
                 image_events_by_user=prelude.image_events_by_user,
+                file_events_by_user=prelude.file_events_by_user,
             )
             request_input_items = turn_input.request_input_items()
-            for event in prelude.image_events:
+            for event in [*prelude.image_events, *prelude.file_events]:
                 yield self._publish_event(event)
             title_task = self._start_title_generation_task(
                 thread_id,
@@ -980,6 +1083,7 @@ class AgentEngine:
         level: str | None,
         image_paths: list[str | Path] | None,
         cancel_event: asyncio.Event | None,
+        attachments: list[TurnAttachment | dict[str, Any]] | None = None,
         user_inputs: list[UserInput] | None = None,
         is_new_thread: bool = False,
     ) -> RunTurnPrelude:
@@ -991,10 +1095,29 @@ class AgentEngine:
         turn_id = new_id("turn")
         should_generate_title = self._should_generate_title(thread_id)
         normalized_user_inputs = list(user_inputs) if user_inputs is not None else [
-            UserInput(text=user_text, image_paths=tuple(image_paths or ()))
+            UserInput(
+                text=user_text,
+                image_paths=tuple(image_paths or ()),
+                attachments=tuple(coerce_turn_attachment(item) for item in (attachments or ())),
+            )
         ]
         if not normalized_user_inputs:
-            normalized_user_inputs = [UserInput(text=user_text, image_paths=tuple(image_paths or ())) ]
+            normalized_user_inputs = [
+                UserInput(
+                    text=user_text,
+                    image_paths=tuple(image_paths or ()),
+                    attachments=tuple(coerce_turn_attachment(item) for item in (attachments or ())),
+                )
+            ]
+        (
+            normalized_user_inputs,
+            prepared_image_attachments_by_user,
+            prepared_file_attachments_by_user,
+        ) = self._canonicalize_user_input_attachments(
+            normalized_user_inputs,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
         turn_input = self._prepare_turn_input(thread_id, level=level)
         input_items = turn_input.input_items
         request_input_items = turn_input.request_input_items()
@@ -1022,7 +1145,8 @@ class AgentEngine:
             request_input_items.extend(pre_user_items)
         turn_input.pending_items.extend(pre_user_items)
         image_events_by_user: list[list[dict[str, Any]]] = []
-        for user_input in normalized_user_inputs:
+        file_events_by_user: list[list[dict[str, Any]]] = []
+        for user_index, user_input in enumerate(normalized_user_inputs):
             events: list[dict[str, Any]] = []
             for image_path in user_input.image_paths:
                 attachment = self.attachments.register_image(
@@ -1040,7 +1164,63 @@ class AgentEngine:
                         "attachment": payload,
                     }
                 )
+            for prepared in prepared_image_attachments_by_user[user_index]:
+                attachment_input = prepared["attachment"]
+                attachment = self.attachments.register_image_blob(
+                    str(attachment_input.blob_id),
+                    thread_id=thread_id,
+                    mime_type=str(attachment_input.mime_type or "application/octet-stream"),
+                    filename=str(attachment_input.filename or ""),
+                    source_uri="remote-control",
+                    note="uploaded by user",
+                )
+                payload = attachment.to_event_payload()
+                payload["token"] = attachment_input.token
+                if attachment_input.slot is not None:
+                    payload["slot"] = attachment_input.slot
+                events.append(
+                    {
+                        "type": "image.attachment",
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "attachment": payload,
+                    }
+                )
             image_events_by_user.append(events)
+            file_events: list[dict[str, Any]] = []
+            for prepared in prepared_file_attachments_by_user[user_index]:
+                attachment_input = prepared["attachment"]
+                info = prepared["blob_info"]
+                attachment_id = str(prepared["attachment_id"])
+                self.blobs.add_ref(
+                    str(attachment_input.blob_id),
+                    thread_id=thread_id,
+                    owner_type="file_attachment",
+                    owner_id=attachment_id,
+                    mime_type=str(attachment_input.mime_type or "application/octet-stream"),
+                    filename=str(attachment_input.filename or ""),
+                    source_uri="remote-control",
+                    note="uploaded by user",
+                )
+                file_events.append(
+                    {
+                        "type": "file.attachment",
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "attachment": {
+                            "attachment_id": attachment_id,
+                            "blob_id": str(info["blob_id"]),
+                            "blob_path": str(info["stored_path"]),
+                            "sha256": str(info["sha256"]),
+                            "size_bytes": int(info["size_bytes"]),
+                            "filename": str(attachment_input.filename or ""),
+                            "mime_type": str(attachment_input.mime_type or "application/octet-stream"),
+                            "token": str(attachment_input.token),
+                            "canonical_token": str(prepared["canonical_token"]),
+                        },
+                    }
+                )
+            file_events_by_user.append(file_events)
 
         self._warm_model_backend_for_level(level)
         if should_generate_title:
@@ -1058,6 +1238,7 @@ class AgentEngine:
             turn_started_event=turn_started_event,
             user_items=user_items,
             image_events_by_user=image_events_by_user,
+            file_events_by_user=file_events_by_user,
             context_warning_events=context_warning_events,
         )
 
@@ -1092,6 +1273,7 @@ class AgentEngine:
         turn_input: TurnInputState,
         user_items: list[dict[str, Any]],
         image_events_by_user: list[list[dict[str, Any]]],
+        file_events_by_user: list[list[dict[str, Any]]],
     ) -> None:
         """Persist and append all external user messages after optional pre-turn work."""
 
@@ -1113,6 +1295,17 @@ class AgentEngine:
                 image_item = image_message_item(attachment)
                 turn_input.input_items.append(image_item)
                 turn_input.pending_items.append(copy.deepcopy(image_item))
+            file_events = file_events_by_user[index] if index < len(file_events_by_user) else []
+            for event in file_events:
+                attachment = event.get("attachment") if isinstance(event, dict) else None
+                if not isinstance(attachment, dict):
+                    continue
+                self.thread_store.append(
+                    thread_id,
+                    "item.file_attachment",
+                    turn_id=turn_id,
+                    attachment=attachment,
+                )
 
     def _warm_model_backend_for_level(self, level: str | None) -> None:
         if not self._model_client_uses_builtin_lazy_provider_imports():

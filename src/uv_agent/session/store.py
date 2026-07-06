@@ -353,6 +353,35 @@ class ThreadStore:
         events = [_event_from_row(row) for row in reversed(selected)]
         return events, has_more
 
+    def read_events_after(
+        self,
+        thread_id: str,
+        *,
+        after_event_id: int = 0,
+        limit: int = 200,
+        event_types: set[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        if limit <= 0:
+            return [], False
+        with self._connect() as db:
+            clauses = ["thread_id = ?", "event_id > ?"]
+            params: list[Any] = [thread_id, max(0, int(after_event_id or 0))]
+            if event_types:
+                clauses.append(f"type IN ({_placeholders(event_types)})")
+                params.extend(sorted(event_types))
+            rows = db.execute(
+                f"""
+                SELECT event_id, payload_json
+                FROM thread_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY event_id ASC
+                LIMIT ?
+                """,
+                (*params, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        return [_event_from_row(row) for row in rows[:limit]], has_more
+
     def read_history_segment(
         self,
         thread_id: str,

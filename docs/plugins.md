@@ -138,12 +138,15 @@ failure and emits plugin lifecycle events without taking down the host.
 | `context.actions` | Host action registry. |
 | `context.commands` | TUI command registry. |
 | `context.ui` | UI provider registry. |
+| `context.agent` | Read-only host summaries for plugin-built UI, such as model levels and picker items. |
 | `context.epoch` | Model-visible epoch context API. |
 | `context.turn` | Model-visible turn context API. |
 | `context.i18n` | Plugin-owned localization registry. |
 | `context.storage` | SQLite-backed KV and document stores. |
+| `context.blobs` | Project blob storage for plugin-provided binary payloads. |
 | `context.threads` | Narrow thread creation, metadata, and event API, when available. |
 | `context.submit_turn` | Programmatic turn submission, when configured. Returns a waitable `SubmittedTurn`. |
+| `context.start_turn` | Programmatic turn submission that returns the live handle without waiting for start. |
 | `context.create_task` | Launch a plugin-owned background `asyncio.Task`. |
 | `context.compaction` | Add compact handoff sections after compaction. |
 
@@ -447,11 +450,12 @@ context.threads.record_event(
 )
 ```
 
-Plugins can read metadata with `metadata(thread_id)` and update narrow metadata
-patches with `update_metadata(thread_id, {...})`. Plugins own the meaning of
-their metadata; the host persists and exposes it without interpreting plugin
-event types. Do not import or depend on the host `ThreadStore` implementation
-directly.
+Plugins can read metadata with `metadata(thread_id)`, update narrow metadata
+patches with `update_metadata(thread_id, {...})`, update titles with
+`update_title(thread_id, title)`, and page events with `event_page(...)`.
+Plugins own the meaning of their metadata and custom events; the host persists
+and exposes them without interpreting plugin event types. Do not import or
+depend on the host `ThreadStore` implementation directly.
 
 Plugins that need to ask the agent to do work can submit a turn and await it:
 
@@ -466,9 +470,42 @@ if submitted.status == "completed":
     context.logger.info("turn result: %s", submitted.final_text)
 ```
 
+For UI-style integrations that need to display progress immediately, use
+`context.start_turn(...)` to receive the live turn handle without waiting for
+the host to create the durable turn id.
+
 `submit_turn` is async and cannot be called from inside a plugin event handler;
 doing so raises `ReentrantSubmitError`. Use event handlers to react to state
 changes and schedule work through `context.create_task` instead.
+
+Plugins can attach blob-backed uploads to submitted user messages. Store the
+bytes first, include exactly one matching token in the submitted text, and pass
+a structured attachment:
+
+```python
+blob = context.blobs.put_bytes(
+    b"hello",
+    mime_type="text/plain",
+    filename="report.txt",
+)
+submitted = await context.submit_turn(
+    text="Read [File report.txt]",
+    thread_id=child_id,
+    attachments=[
+        {
+            "kind": "file",
+            "token": "[File report.txt]",
+            "blob_id": blob["blob_id"],
+            "filename": blob["filename"],
+            "mime_type": blob["mime_type"],
+        }
+    ],
+)
+```
+
+File attachment tokens are canonicalized into the stored user message with the
+blob id, for example `[File report.txt id=blob:sha256:...]`. Image attachments
+use `[Image #N]` tokens and supported image MIME types.
 
 ## Storage
 

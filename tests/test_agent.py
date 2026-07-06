@@ -2269,6 +2269,168 @@ async def test_agent_attaches_user_turn_images(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_attaches_user_turn_image_blobs(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_image_blob",
+                "output_text": "seen",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "seen"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    blob = engine.blobs.put_bytes(b"\x89PNG\r\n\x1a\n")
+
+    events = [
+        event
+        async for event in engine.run_turn(
+            user_text="look [Image #1]",
+            attachments=[
+                {
+                    "kind": "image",
+                    "token": "[Image #1]",
+                    "slot": 1,
+                    "blob_id": blob.blob_id,
+                    "filename": "clip.png",
+                    "mime_type": "image/png",
+                }
+            ],
+        )
+    ]
+    thread_id = str(events[-1]["thread_id"])
+    image_event = next(event for event in events if event["type"] == "image.attachment")
+
+    assert image_event["attachment"]["token"] == "[Image #1]"
+    assert image_event["attachment"]["slot"] == 1
+    stored = engine.thread_store.read(thread_id)
+    stored_user = next(event for event in stored if event["type"] == "item.user")
+    assert message_item_text(stored_user["item"]) == "look [Image #1]"
+    assert blob.blob_id not in message_item_text(stored_user["item"])
+    assert any(event["type"] == "item.image_attachment" for event in stored)
+    assert any(
+        content.get("type") == "input_image"
+        for item in client.requests[0]["input"]
+        for content in item.get("content", [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_persists_file_attachment_canonical_token(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    client = FakeModelClient(
+        [
+            {
+                "id": "resp_file_blob",
+                "output_text": "noted",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "noted"}],
+                    }
+                ],
+            }
+        ]
+    )
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    blob = engine.blobs.put_bytes(b"hello")
+    canonical = f"[File report.txt id={blob.blob_id}]"
+
+    events = [
+        event
+        async for event in engine.run_turn(
+            user_text="read [File report.txt]",
+            attachments=[
+                {
+                    "kind": "file",
+                    "token": "[File report.txt]",
+                    "blob_id": blob.blob_id,
+                    "filename": "report.txt",
+                    "mime_type": "text/plain",
+                }
+            ],
+        )
+    ]
+    thread_id = str(events[-1]["thread_id"])
+    file_event = next(event for event in events if event["type"] == "file.attachment")
+
+    assert file_event["attachment"]["canonical_token"] == canonical
+    assert file_event["attachment"]["blob_id"] == blob.blob_id
+    stored = engine.thread_store.read(thread_id)
+    stored_user = next(event for event in stored if event["type"] == "item.user")
+    assert message_item_text(stored_user["item"]) == f"read {canonical}"
+    stored_file = next(event for event in stored if event["type"] == "item.file_attachment")
+    assert stored_file["attachment"]["canonical_token"] == canonical
+    assert any(message_item_text(item) == f"read {canonical}" for item in client.requests[0]["input"])
+    assert not any(
+        content.get("type") == "input_image"
+        for item in client.requests[0]["input"]
+        for content in item.get("content", [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_rejects_attachment_without_unquoted_token(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config = make_test_config(project_root)
+    client = FakeModelClient([])
+    engine = AgentEngine(
+        config=config,
+        model_client=client,
+        runner=PythonRunner(project_root=project_root, data_dir=tmp_path / "state", config=config.runner),
+        thread_store=ThreadStore(tmp_path / "state"),
+        project_root=project_root,
+    )
+    thread_id = engine.thread_store.create_thread("Quoted token")
+    blob = engine.blobs.put_bytes(b"hello")
+
+    with pytest.raises(ValueError, match="Attachment token must appear exactly once outside quotes"):
+        [
+            event
+            async for event in engine.run_turn(
+                user_text='literal "[File report.txt]"',
+                thread_id=thread_id,
+                attachments=[
+                    {
+                        "kind": "file",
+                        "token": "[File report.txt]",
+                        "blob_id": blob.blob_id,
+                        "filename": "report.txt",
+                        "mime_type": "text/plain",
+                    }
+                ],
+            )
+        ]
+
+    assert not any(event["type"] == "turn.started" for event in engine.thread_store.read(thread_id))
+
+
+@pytest.mark.asyncio
 async def test_agent_runs_python_tool_boundary(tmp_path: Path) -> None:
     project_root = Path.cwd()
     config = make_test_config(project_root)

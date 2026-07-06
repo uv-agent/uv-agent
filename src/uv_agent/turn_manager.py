@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, TYPE_CHECKING
 
 from uv_agent.ids import new_id
-from uv_agent.plugins.context import UserInput
+from uv_agent.plugins.context import TurnAttachment, UserInput, coerce_turn_attachment
 
 if TYPE_CHECKING:
     from uv_agent.agent.engine import AgentEngine
@@ -58,6 +58,13 @@ class TurnHandle:
         for item in self.user_inputs:
             paths.extend(item.image_paths)
         return paths
+
+    @property
+    def attachments(self) -> list[TurnAttachment]:
+        attachments: list[TurnAttachment] = []
+        for item in self.user_inputs:
+            attachments.extend(item.attachments)
+        return attachments
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         while True:
@@ -110,13 +117,20 @@ class TurnManager:
         thread_id: str | None = None,
         level: str | None = None,
         image_paths: list[str | Path] | None = None,
+        attachments: list[TurnAttachment | dict[str, Any]] | None = None,
         conflict: TurnConflict = "queue",
     ) -> TurnHandle:
         if conflict not in {"queue", "reject", "interrupt", "guide"}:
             raise ValueError(f"Unsupported turn conflict policy: {conflict!r}")
         handle = TurnHandle(
             request_id=new_id("req"),
-            user_inputs=[UserInput(text=str(user_text), image_paths=tuple(image_paths or []))],
+            user_inputs=[
+                UserInput(
+                    text=str(user_text),
+                    image_paths=tuple(image_paths or []),
+                    attachments=tuple(coerce_turn_attachment(item) for item in (attachments or [])),
+                )
+            ],
             thread_id=thread_id,
             level=level,
             conflict=conflict,
@@ -125,7 +139,13 @@ class TurnManager:
             task = asyncio.create_task(self._run_detached(handle), name=f"uv-agent-turn-{handle.request_id}")
             self._detached_tasks.add(task)
             task.add_done_callback(self._detached_tasks.discard)
-            logger.info("Turn submitted detached request_id=%s level=%s images=%d", handle.request_id, level, len(handle.image_paths))
+            logger.info(
+                "Turn submitted detached request_id=%s level=%s images=%d attachments=%d",
+                handle.request_id,
+                level,
+                len(handle.image_paths),
+                len(handle.attachments),
+            )
             return handle
 
         async with self._lock:

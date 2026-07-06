@@ -18,9 +18,16 @@ class FakeEngine:
         turn_id = f"turn_{len(self.calls) + 1}"
         texts = [item.text for item in user_inputs] if user_inputs is not None else [user_text]
         images = [path for item in (user_inputs or []) for path in item.image_paths]
+        attachments = [attachment for item in (user_inputs or []) for attachment in item.attachments]
         if user_inputs is None:
             images = list(image_paths or [])
-        self.calls.append({"user_text": user_text, "user_texts": texts, "thread_id": thread_id, "image_paths": images})
+        self.calls.append({
+            "user_text": user_text,
+            "user_texts": texts,
+            "thread_id": thread_id,
+            "image_paths": images,
+            "attachments": attachments,
+        })
         key = "|".join(texts)
         self.started.append(key)
         self.release[key] = asyncio.Event()
@@ -83,9 +90,21 @@ async def test_turn_manager_takeover_absorbs_queued_messages_in_order() -> None:
     running = await manager.submit_turn(user_text="running", thread_id="thr")
     queued_a = await manager.submit_turn(user_text="queued a", thread_id="thr")
     queued_b = await manager.submit_turn(user_text="queued b", thread_id="thr")
-    takeover = await manager.submit_turn(user_text="guide c", thread_id="thr", conflict="guide", image_paths=["c.png"])
+    takeover = await manager.submit_turn(
+        user_text="guide c",
+        thread_id="thr",
+        conflict="guide",
+        image_paths=["c.png"],
+        attachments=[{"kind": "file", "token": "[File c.txt]", "blob_id": "blob:sha256:c"}],
+    )
     merged_queue = await manager.submit_turn(user_text="queue d", thread_id="thr")
-    interrupt = await manager.submit_turn(user_text="interrupt e", thread_id="thr", conflict="interrupt", image_paths=["e.png"])
+    interrupt = await manager.submit_turn(
+        user_text="interrupt e",
+        thread_id="thr",
+        conflict="interrupt",
+        image_paths=["e.png"],
+        attachments=[{"kind": "file", "token": "[File e.txt]", "blob_id": "blob:sha256:e"}],
+    )
 
     assert queued_a.status == "merged"
     assert queued_b.status == "merged"
@@ -94,6 +113,7 @@ async def test_turn_manager_takeover_absorbs_queued_messages_in_order() -> None:
     assert queued_a.merged_into == takeover.request_id
     assert [item.text for item in takeover.user_inputs] == ["queued a", "queued b", "guide c", "queue d", "interrupt e"]
     assert takeover.image_paths == ["c.png", "e.png"]
+    assert [attachment.token for attachment in takeover.attachments] == ["[File c.txt]", "[File e.txt]"]
 
     await wait_until(lambda: engine.started and engine.started[0] == "running")
     # interrupt upgrades the takeover and cancels the active turn immediately.
@@ -101,6 +121,7 @@ async def test_turn_manager_takeover_absorbs_queued_messages_in_order() -> None:
     await wait_until(lambda: len(engine.started) == 2)
     assert engine.started[1] == "queued a|queued b|guide c|queue d|interrupt e"
     assert engine.calls[-1]["user_texts"] == ["queued a", "queued b", "guide c", "queue d", "interrupt e"]
+    assert [attachment.token for attachment in engine.calls[-1]["attachments"]] == ["[File c.txt]", "[File e.txt]"]
     engine.release[engine.started[1]].set()
     await takeover.wait()
     assert takeover.status == "completed"
