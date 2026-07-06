@@ -17,6 +17,7 @@ from uv_agent.environment import UserLanguage, detect_user_language
 from uv_agent.ids import new_id
 from uv_agent.logging_config import active_log_file
 from uv_agent.paths import default_daemon_workspace_dir
+from uv_agent.plugins.summary import format_plugin_detail_lines, format_plugin_status_counts
 from uv_agent.state_db import connect_state_db
 
 
@@ -266,9 +267,46 @@ async def run_daemon(
         if log_path is not None:
             started_message = f"{started_message} log={log_path}"
         print(started_message, flush=True)
+        for line in _daemon_startup_lines(
+            project_root=engine.project_root,
+            state_dir=engine.thread_store.data_dir,
+            log_path=log_path,
+            log_level=log_level or engine.config.logging.level,
+            plugin_records=engine.plugins.records,
+            plugin_log_root=engine.plugins.user_state_dir / "plugins",
+        ):
+            logger.info("Daemon startup %s", line)
+            print(f"  {line}", flush=True)
         await stop.wait()
     finally:
         await engine.aclose()
         await lease.release()
         logger.info("uv-agent daemon stopped")
         print("uv-agent daemon stopped", flush=True)
+
+
+def _daemon_startup_lines(
+    *,
+    project_root: Path,
+    state_dir: Path,
+    log_path: Path | None,
+    log_level: str | int | None,
+    plugin_records,
+    plugin_log_root: Path,
+) -> list[str]:
+    lines = [
+        f"workspace={project_root}",
+        f"state={state_dir}",
+        f"log={log_path}" if log_path is not None else "log=disabled",
+        f"log_level={log_level or 'INFO'}",
+        f"plugin_logs={plugin_log_root}",
+        format_plugin_status_counts(plugin_records),
+    ]
+    lines.extend(
+        format_plugin_detail_lines(
+            plugin_records,
+            include_started_external=True,
+            include_first_load_external=True,
+        )
+    )
+    return lines

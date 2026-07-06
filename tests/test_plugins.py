@@ -12,11 +12,12 @@ import pytest
 from uv_agent.blobs import BlobStore
 from uv_agent.config import LoggingConfig, PluginConfigBlock, PluginsConfig, parse_config
 from uv_agent.session import ThreadStore
-from uv_agent.plugins import EventBus, PluginHostInfo, PluginManager, PluginManifest, ResourceData, SetupPlugin
+from uv_agent.plugins import EventBus, PluginHostInfo, PluginManager, PluginManifest, PluginStatus, ResourceData, SetupPlugin
 from uv_agent.plugins.context import PluginContextBroker
 from uv_agent.plugins.registry import ActionRegistry, PickerSource, RuntimeFunctionSpec, RuntimeNamespaceRegistry, UiRegistry
 from uv_agent.plugins.resources import ResourceRegistry, coerce_resource_data
 from uv_agent.plugins.storage import PluginStorage
+from uv_agent.plugins.summary import format_plugin_detail_lines, format_plugin_status_counts
 from uv_agent.plugins.xml import XmlContribution, render_contribution, render_update_envelope
 
 
@@ -754,8 +755,35 @@ async def test_plugin_config_can_disable_plugin(monkeypatch: pytest.MonkeyPatch,
     assert manager.records[0].state == "disabled"
 
 
+def test_plugin_status_summary_formats_counts_and_details() -> None:
+    records = [
+        PluginStatus(id="builtin.goal", state="started", builtin=True),
+        PluginStatus(id="remote-control", state="started", first_load=True),
+        PluginStatus(id="auth-code", state="failed", message="missing token", error_type="ValueError"),
+        PluginStatus(id="server-plugin", state="skipped", message="requires persistent host"),
+        PluginStatus(id="legacy-plugin", state="warning", message="deprecated", error_type="DeprecatedPlugin"),
+        PluginStatus(id="off-plugin", state="disabled"),
+    ]
+
+    assert (
+        format_plugin_status_counts(records)
+        == "plugins: total=6 started=2 warning=1 failed=1 skipped=1 disabled=1"
+    )
+    assert format_plugin_detail_lines(records, include_started_external=True, include_first_load_external=True) == [
+        "plugin started: remote-control",
+        "plugin first load: remote-control",
+        "plugin failed: auth-code (ValueError: missing token)",
+        "plugin warning: legacy-plugin (DeprecatedPlugin: deprecated)",
+        "plugin skipped: server-plugin (requires persistent host)",
+        "plugin disabled: off-plugin",
+    ]
+
+
 @pytest.mark.asyncio
-async def test_plugin_manager_rejects_non_setup_plugin_entry_points(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_plugin_manager_rejects_non_setup_plugin_entry_points(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setattr(
         "uv_agent.plugins.manager.importlib.metadata.entry_points",
         lambda group: [EntryPoint("dict-plugin", {"manifest": {}, "setup": lambda _ctx: None})]

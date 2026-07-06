@@ -6,6 +6,7 @@ import inspect
 import logging
 import re
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
@@ -23,6 +24,7 @@ from .i18n import PluginI18nRegistry
 from .registry import ActionRegistry, CommandRegistry, RuntimeFunctionSpec, RuntimeNamespaceRegistry, UiRegistry
 from .resources import ResourceRegistry
 from .storage import PluginStorage, indexes_from_storage_schema
+from .summary import format_plugin_detail_lines, format_plugin_status_counts
 
 PLUGIN_ENTRY_POINT_GROUP = "uv_agent.plugins"
 CORE_COMMANDS = {"/help", "/quit", "/clear", "/cancel", "/status", "/threads", "/show", "/image", "/level", "/model", "/title"}
@@ -252,11 +254,20 @@ class PluginManager:
             if self._started:
                 return
             self._started = True
+            started_at = time.perf_counter()
             self._discover()
             load_order = self._load_order()
             logger.info("Plugin manager starting plugins=%d enabled=%d", len(self._records), len(load_order))
             for plugin_id in load_order:
                 await self._start_record(self._records[plugin_id])
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.info(
+                "Plugin manager started %s duration_ms=%d",
+                format_plugin_status_counts(self.records),
+                duration_ms,
+            )
+            for line in format_plugin_detail_lines(self.records):
+                logger.info("Plugin manager startup %s", line)
 
     async def stop(self) -> None:
         if self._task is not None and not self._task.done():
@@ -275,6 +286,13 @@ class PluginManager:
                 setup_plugin = _normalize_plugin_object(entry_point.load())
             except Exception as exc:
                 plugin_id = str(getattr(entry_point, "name", "entry-point"))
+                logger.warning(
+                    "Plugin entry point load failed entry_point=%s error_type=%s message=%s",
+                    plugin_id,
+                    exc.__class__.__name__,
+                    str(exc) or repr(exc),
+                    exc_info=logger.isEnabledFor(logging.DEBUG),
+                )
                 self._records[plugin_id] = _PluginRecord(
                     plugin=SetupPlugin(
                         manifest=PluginManifest(plugin_id, "0", plugin_id, "invalid plugin"),

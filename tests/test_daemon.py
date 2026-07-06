@@ -13,9 +13,11 @@ from uv_agent.daemon import (
     DEFAULT_DAEMON_AGENTS_MD,
     DEFAULT_DAEMON_AGENTS_MD_ZH,
     DaemonLease,
+    _daemon_startup_lines,
     _pid_alive,
     ensure_daemon_workspace,
 )
+from uv_agent.plugins import PluginStatus
 from uv_agent.state_db import connect_state_db
 
 
@@ -76,6 +78,31 @@ def test_cli_daemon_uses_default_workspace(monkeypatch, tmp_path: Path) -> None:
     assert captured["project_root"] == workspace
     assert captured["replace"] is True
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == DEFAULT_DAEMON_AGENTS_MD
+
+
+def test_daemon_startup_lines_include_operational_context(tmp_path: Path) -> None:
+    records = [
+        PluginStatus(id="builtin.goal", state="started", builtin=True),
+        PluginStatus(id="remote-control", state="started", first_load=True),
+        PluginStatus(id="auth-code", state="failed", message="missing token", error_type="ValueError"),
+    ]
+
+    lines = _daemon_startup_lines(
+        project_root=tmp_path / "workspace",
+        state_dir=tmp_path / "state",
+        log_path=tmp_path / "state" / "log" / "uv-agent.log",
+        log_level="INFO",
+        plugin_records=records,
+        plugin_log_root=tmp_path / "home" / "plugins",
+    )
+
+    assert f"workspace={tmp_path / 'workspace'}" in lines
+    assert f"state={tmp_path / 'state'}" in lines
+    assert f"plugin_logs={tmp_path / 'home' / 'plugins'}" in lines
+    assert "plugins: total=3 started=2 warning=0 failed=1 skipped=0 disabled=0" in lines
+    assert "plugin started: remote-control" in lines
+    assert "plugin first load: remote-control" in lines
+    assert "plugin failed: auth-code (ValueError: missing token)" in lines
 
 
 def test_daemon_lease_rejects_fresh_owner(tmp_path):
