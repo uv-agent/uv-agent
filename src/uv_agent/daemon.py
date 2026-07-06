@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -237,6 +238,75 @@ def _pid_alive_windows(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+@dataclass
+class _DaemonStopController:
+    stop: asyncio.Event
+    requested: bool = False
+
+    def request(self, signum: int | signal.Signals | None = None) -> None:
+        if self.requested:
+            return
+        self.requested = True
+        signal_name = _signal_name(signum)
+        logger.info("uv-agent daemon stopping signal=%s", signal_name)
+        print(f"uv-agent daemon stopping signal={signal_name}", flush=True)
+        self.stop.set()
+
+
+def _install_daemon_signal_handlers(
+    controller: _DaemonStopController,
+    loop: asyncio.AbstractEventLoop,
+) -> Callable[[], None]:
+    loop_handlers: list[int] = []
+    signal_handlers: list[tuple[int, Any]] = []
+
+    def schedule_stop(signum: int, _frame: Any = None) -> None:
+        try:
+            loop.call_soon_threadsafe(controller.request, signum)
+        except RuntimeError:
+            return
+
+    for signum in _daemon_stop_signals():
+        try:
+            loop.add_signal_handler(signum, controller.request, signum)
+        except (NotImplementedError, RuntimeError, ValueError):
+            try:
+                previous = signal.getsignal(signum)
+                signal.signal(signum, schedule_stop)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            signal_handlers.append((signum, previous))
+        else:
+            loop_handlers.append(signum)
+
+    def restore() -> None:
+        for signum in loop_handlers:
+            with suppress(RuntimeError, ValueError):
+                loop.remove_signal_handler(signum)
+        for signum, previous in reversed(signal_handlers):
+            with suppress(OSError, RuntimeError, ValueError):
+                signal.signal(signum, previous)
+
+    return restore
+
+
+def _daemon_stop_signals() -> list[int]:
+    signals = [int(signal.SIGINT), int(signal.SIGTERM)]
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None:
+        signals.append(int(sigbreak))
+    return list(dict.fromkeys(signals))
+
+
+def _signal_name(signum: int | signal.Signals | None) -> str:
+    if signum is None:
+        return "unknown"
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return str(signum)
+
+
 async def run_daemon(
     *,
     project_root: Path,
@@ -254,35 +324,40 @@ async def run_daemon(
     lease = DaemonLease(engine.thread_store.data_dir)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop.set)
+    stop_controller = _DaemonStopController(stop)
+    restore_signal_handlers = _install_daemon_signal_handlers(stop_controller, loop)
     try:
-        lease.acquire(replace=replace)
-        lease.start_heartbeat()
-        await engine.plugins.start()
-        log_path = active_log_file()
-        started_message = f"uv-agent daemon started pid={os.getpid()} state={engine.thread_store.data_dir}"
-        logger.info("%s log=%s", started_message, log_path)
-        if log_path is not None:
-            started_message = f"{started_message} log={log_path}"
-        print(started_message, flush=True)
-        for line in _daemon_startup_lines(
-            project_root=engine.project_root,
-            state_dir=engine.thread_store.data_dir,
-            log_path=log_path,
-            log_level=log_level or engine.config.logging.level,
-            plugin_records=engine.plugins.records,
-            plugin_log_root=engine.plugins.user_state_dir / "plugins",
-        ):
-            logger.info("Daemon startup %s", line)
-            print(f"  {line}", flush=True)
-        await stop.wait()
+        try:
+            lease.acquire(replace=replace)
+            lease.start_heartbeat()
+            await engine.plugins.start()
+            log_path = active_log_file()
+            started_message = f"uv-agent daemon started pid={os.getpid()} state={engine.thread_store.data_dir}"
+            logger.info("%s log=%s", started_message, log_path)
+            if log_path is not None:
+                started_message = f"{started_message} log={log_path}"
+            print(started_message, flush=True)
+            for line in _daemon_startup_lines(
+                project_root=engine.project_root,
+                state_dir=engine.thread_store.data_dir,
+                log_path=log_path,
+                log_level=log_level or engine.config.logging.level,
+                plugin_records=engine.plugins.records,
+                plugin_log_root=engine.plugins.user_state_dir / "plugins",
+            ):
+                logger.info("Daemon startup %s", line)
+                print(f"  {line}", flush=True)
+            await stop.wait()
+        except KeyboardInterrupt:
+            stop_controller.request(signal.SIGINT)
     finally:
-        await engine.aclose()
-        await lease.release()
-        logger.info("uv-agent daemon stopped")
-        print("uv-agent daemon stopped", flush=True)
+        try:
+            await engine.aclose()
+            await lease.release()
+        finally:
+            restore_signal_handlers()
+            logger.info("uv-agent daemon stopped")
+            print("uv-agent daemon stopped", flush=True)
 
 
 def _daemon_startup_lines(
