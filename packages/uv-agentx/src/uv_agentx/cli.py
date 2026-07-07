@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -27,6 +28,7 @@ DIRECT_PREFIXES = (
     "file:",
 )
 VERSION_TOKENS = ("===", "==", "~=", "!=", ">=", "<=", ">", "<")
+INTERRUPTED_RETURN_CODE = 128 + int(signal.SIGINT)
 
 
 class UserError(Exception):
@@ -280,6 +282,20 @@ def offline_requested() -> bool:
     return os.environ.get("UV_OFFLINE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def run_child_process(command: list[str]) -> int:
+    try:
+        process = subprocess.Popen(command)
+    except KeyboardInterrupt:
+        return INTERRUPTED_RETURN_CODE
+    try:
+        return int(process.wait())
+    except KeyboardInterrupt:
+        try:
+            return int(process.wait())
+        except KeyboardInterrupt:
+            return INTERRUPTED_RETURN_CODE
+
+
 def run(argv: list[str], *, stdout: TextIO = sys.stdout, stderr: TextIO = sys.stderr) -> int:
     try:
         args, agent_args = parse_args(argv)
@@ -300,8 +316,7 @@ def run(argv: list[str], *, stdout: TextIO = sys.stdout, stderr: TextIO = sys.st
         if args.dry_run:
             print(format_command(command), file=stdout)
             return 0
-        completed = subprocess.run(command)
-        return int(completed.returncode)
+        return run_child_process(command)
     except UserError as exc:
         print(f"uv-agentx: {exc}", file=stderr)
         return 2

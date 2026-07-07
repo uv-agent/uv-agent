@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from uv_agentx.cli import PypiProjectResolver, UserError, build_command, parse_args, resolve_plugin, resolve_raw_plugin
+from uv_agentx.cli import PypiProjectResolver, UserError, build_command, parse_args, resolve_plugin, resolve_raw_plugin, run
 
 
 class FakeResolver(PypiProjectResolver):
@@ -142,3 +142,38 @@ def test_parse_without_separator_passes_unknown_args_to_uv_agent() -> None:
 
     assert args.plugin == ["auth-code"]
     assert agent_args == ["--log-level", "DEBUG"]
+
+
+def test_run_waits_for_child_after_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        def wait(self) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise KeyboardInterrupt
+            return 0
+
+    commands: list[list[str]] = []
+
+    def fake_popen(command: list[str]) -> FakeProcess:
+        commands.append(command)
+        return FakeProcess()
+
+    monkeypatch.setattr("uv_agentx.cli.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr("uv_agentx.cli.subprocess.Popen", fake_popen)
+
+    assert run(["daemon"], stderr=io.StringIO()) == 0
+    assert commands == [["uv", "tool", "run", "uv-agent", "daemon"]]
+
+
+def test_run_returns_interrupt_code_after_repeated_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeProcess:
+        def wait(self) -> int:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("uv_agentx.cli.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr("uv_agentx.cli.subprocess.Popen", lambda _command: FakeProcess())
+
+    assert run(["daemon"], stderr=io.StringIO()) == 130
