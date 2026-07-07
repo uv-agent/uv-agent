@@ -116,6 +116,8 @@ def create_engine(
     data_dir: Path | None = None,
     log_level: str | int | None = None,
     log_to_console: bool | None = False,
+    host_invocation: str = "tui",
+    host_lifetime: str = "session",
 ):
     """Create the shared uv-agent engine lazily for the raw ANSI TUI."""
 
@@ -126,6 +128,8 @@ def create_engine(
         data_dir=data_dir,
         log_level=log_level,
         log_to_console=log_to_console,
+        host_invocation=host_invocation,
+        host_lifetime=host_lifetime,
     )
 
 
